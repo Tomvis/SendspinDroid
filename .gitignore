@@ -4,7 +4,7 @@ android/app/build/
 android/shared/build/
 android/.gradle/
 android/local.properties
-android/*.iml
+*.iml
 android/.idea/
 android/captures/
 android/player/player.aar
@@ -39,6 +39,9 @@ android/app/release/
 # Claude temp files
 tmpclaude-*
 sendspin_debug_*.txt
+
+# Claude Code per-machine settings (shared settings.json is tracked)
+.claude/settings.local.json
 
 # Debug artifacts
 *.logcat

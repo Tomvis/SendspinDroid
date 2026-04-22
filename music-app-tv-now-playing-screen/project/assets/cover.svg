@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" width="800" height="800">
+  <defs>
+    <radialGradient id="g1" cx="30%" cy="28%" r="90%">
+      <stop offset="0%" stop-color="#F5C06A"></stop>
+      <stop offset="35%" stop-color="#D86A3C"></stop>
+      <stop offset="72%" stop-color="#5A1E2E"></stop>
+      <stop offset="100%" stop-color="#0B0410"></stop>
+    </radialGradient>
+    <linearGradient id="g2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity=".18"></stop>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"></stop>
+    </linearGradient>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="4"></feTurbulence>
+      <feColorMatrix values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 .18 0"></feColorMatrix>
+      <feComposite in2="SourceGraphic" operator="in"></feComposite>
+    </filter>
+  </defs>
+  <rect width="800" height="800" fill="url(#g1)"></rect>
+  
+  <g fill="none" stroke="#F5EDE0" stroke-opacity=".12" stroke-width="1">
+    <circle cx="400" cy="400" r="120"></circle>
+    <circle cx="400" cy="400" r="180"></circle>
+    <circle cx="400" cy="400" r="250"></circle>
+    <circle cx="400" cy="400" r="330"></circle>
+  </g>
+  <g stroke="#F5EDE0" stroke-opacity=".22" stroke-width="1.2" fill="none">
+    <circle cx="400" cy="400" r="70"></circle>
+    <circle cx="400" cy="400" r="90"></circle>
+  </g>
+  
+  <g transform="translate(400 400)" fill="#F5EDE0" fill-opacity=".85">
+    <circle r="6"></circle>
+    <circle r="22" fill="none" stroke="#F5EDE0" stroke-opacity=".7" stroke-width="1.5"></circle>
+    <g stroke="#F5EDE0" stroke-opacity=".6" stroke-width="1">
+      <line x1="-40" y1="0" x2="-24" y2="0"></line>
+      <line x1="40" y1="0" x2="24" y2="0"></line>
+      <line x1="0" y1="-40" x2="0" y2="-24"></line>
+      <line x1="0" y1="40" x2="0" y2="24"></line>
+    </g>
+  </g>
+  <rect width="800" height="800" fill="url(#g2)"></rect>
+  <rect width="800" height="800" filter="url(#grain)"></rect>
+</svg>

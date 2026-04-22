@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git remote:*)",
+      "Bash(git fetch:*)",
+      "Bash(git config --get:*)",
+      "Bash(rtk:*)",
+      "Bash(./gradlew test:*)",
+      "Bash(./gradlew assembleDebug:*)",
+      "Bash(./gradlew installDebug:*)",
+      "Bash(./gradlew lintDebug:*)",
+      "Bash(./gradlew check:*)",
+      "Bash(./gradlew tasks:*)",
+      "Bash(adb devices:*)",
+      "Bash(adb connect:*)",
+      "Bash(adb disconnect:*)"
+    ]
+  }
+}

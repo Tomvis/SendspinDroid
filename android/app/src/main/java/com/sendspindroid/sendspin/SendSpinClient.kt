@@ -128,8 +128,13 @@ class SendSpinClient(
         fun onMetadataUpdate(
             title: String,
             artist: String,
+            albumArtist: String,
             album: String,
             artworkUrl: String,
+            year: Int,
+            albumTrack: Int,
+            queueTrack: Int,
+            totalTracks: Int,
             durationMs: Long,
             positionMs: Long,
             playbackSpeed: Int = 1000
@@ -386,8 +391,13 @@ class SendSpinClient(
         callback.onMetadataUpdate(
             metadata.title,
             metadata.artist,
+            metadata.albumArtist,
             metadata.album,
             metadata.artworkUrl,
+            metadata.year,
+            metadata.albumTrack,
+            metadata.queueTrack,
+            metadata.totalTracks,
             metadata.durationMs,
             metadata.positionMs,
             metadata.progress.playbackSpeed

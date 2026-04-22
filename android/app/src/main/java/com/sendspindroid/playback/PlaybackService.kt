@@ -590,8 +590,13 @@ class PlaybackService : MediaLibraryService() {
         // Session extras keys for metadata (service → controller)
         const val EXTRA_TITLE = "title"
         const val EXTRA_ARTIST = "artist"
+        const val EXTRA_ALBUM_ARTIST = "album_artist"
         const val EXTRA_ALBUM = "album"
         const val EXTRA_ARTWORK_URL = "artwork_url"
+        const val EXTRA_YEAR = "year"
+        const val EXTRA_ALBUM_TRACK = "album_track"
+        const val EXTRA_QUEUE_TRACK = "queue_track"
+        const val EXTRA_TOTAL_TRACKS = "total_tracks"
         const val EXTRA_DURATION_MS = "duration_ms"
         const val EXTRA_POSITION_MS = "position_ms"
         const val EXTRA_POSITION_UPDATED_AT = "position_updated_at"
@@ -1184,14 +1189,20 @@ class PlaybackService : MediaLibraryService() {
         override fun onMetadataUpdate(
             title: String,
             artist: String,
+            albumArtist: String,
             album: String,
             artworkUrl: String,
+            year: Int,
+            albumTrack: Int,
+            queueTrack: Int,
+            totalTracks: Int,
             durationMs: Long,
             positionMs: Long,
             playbackSpeed: Int
         ) {
             mainHandler.post {
                 Log.d(TAG, "Metadata update: $title / $artist / $album")
+                Log.d(TAG, "  extra fields: albumArtist=$albumArtist year=$year albumTrack=$albumTrack queueTrack=$queueTrack totalTracks=$totalTracks")
 
                 // In REMOTE mode, the server sends artwork URLs pointing to its own
                 // address (e.g., https://music.example.com/imageproxy?...) which aren't
@@ -1202,8 +1213,13 @@ class PlaybackService : MediaLibraryService() {
                 _playbackState.value = _playbackState.value.withMetadata(
                     title = title.ifEmpty { null },
                     artist = artist.ifEmpty { null },
+                    albumArtist = albumArtist.ifEmpty { null },
                     album = album.ifEmpty { null },
                     artworkUrl = effectiveArtworkUrl.ifEmpty { null },
+                    year = year,
+                    albumTrack = albumTrack,
+                    queueTrack = queueTrack,
+                    totalTracks = totalTracks,
                     durationMs = durationMs,
                     positionMs = positionMs,
                     playbackSpeed = playbackSpeed
@@ -1214,7 +1230,10 @@ class PlaybackService : MediaLibraryService() {
                     title = title.ifEmpty { null },
                     artist = artist.ifEmpty { null },
                     album = album.ifEmpty { null },
-                    durationMs = durationMs
+                    durationMs = durationMs,
+                    albumArtist = albumArtist.ifEmpty { null },
+                    year = year.takeIf { it > 0 },
+                    albumTrack = albumTrack.takeIf { it > 0 }
                 )
 
                 // Update the player's position so MediaSession reports it
@@ -1629,7 +1648,10 @@ class PlaybackService : MediaLibraryService() {
             artist = state.artist,
             album = state.album,
             artwork = bitmap,
-            artworkUri = state.artworkUrl?.let { Uri.parse(it) }
+            artworkUri = state.artworkUrl?.let { Uri.parse(it) },
+            albumArtist = state.albumArtist,
+            year = state.year,
+            albumTrack = state.albumTrack
         )
 
         broadcastMetadataToControllers(
@@ -1651,7 +1673,10 @@ class PlaybackService : MediaLibraryService() {
             artist = state.artist,
             album = state.album,
             artwork = currentArtwork,
-            artworkUri = state.artworkUrl?.let { Uri.parse(it) }
+            artworkUri = state.artworkUrl?.let { Uri.parse(it) },
+            albumArtist = state.albumArtist,
+            year = state.year,
+            albumTrack = state.albumTrack
         )
 
         broadcastMetadataToControllers(
@@ -1720,8 +1745,13 @@ class PlaybackService : MediaLibraryService() {
             // Metadata
             putString(EXTRA_TITLE, playbackState.title ?: "")
             putString(EXTRA_ARTIST, playbackState.artist ?: "")
+            putString(EXTRA_ALBUM_ARTIST, playbackState.albumArtist ?: "")
             putString(EXTRA_ALBUM, playbackState.album ?: "")
             putString(EXTRA_ARTWORK_URL, playbackState.artworkUrl ?: "")
+            putInt(EXTRA_YEAR, playbackState.year ?: 0)
+            putInt(EXTRA_ALBUM_TRACK, playbackState.albumTrack ?: 0)
+            putInt(EXTRA_QUEUE_TRACK, playbackState.queueTrack ?: 0)
+            putInt(EXTRA_TOTAL_TRACKS, playbackState.totalTracks ?: 0)
             putLong(EXTRA_DURATION_MS, playbackState.durationMs)
             putLong(EXTRA_POSITION_MS, playbackState.positionMs)
             putLong(EXTRA_POSITION_UPDATED_AT, playbackState.positionUpdatedAt)

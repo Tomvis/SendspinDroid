@@ -48,8 +48,8 @@ class DiscoverConnectPlayDisconnectTest : E2ETestBase() {
         )
         verify {
             mockCallback.onMetadataUpdate(
-                "Test Song", "Test Artist", "Test Album",
-                "", 180000, 5000, 1000
+                "Test Song", "Test Artist", "", "Test Album",
+                "", 0, 0, 0, 0, 180000, 5000, 1000
             )
         }
         verify { mockCallback.onStateChanged("playing") }

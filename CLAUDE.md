@@ -4,6 +4,41 @@
 
 SendSpinDroid is a native Kotlin Android client for SendSpin. It acts as a **Player**-role client: it connects to a SendSpin server over WebSocket, synchronizes its local clock to the server, and renders timestamped PCM audio with continuous sync correction.
 
+## Fork Context
+
+This is a personal fork of `chrisuthe/SendspinDroid`, used on a single device for a single use case:
+
+- **Device**: NVIDIA Shield Pro 2019
+- **OS**: Android TV 11 (API 30)
+- **Display**: 77" TV, 10-foot viewing distance
+- **Input**: D-pad remote only
+- **Mode**: SendSpin Player only — Music Assistant features are not used
+
+The `upstream` git remote points at `https://github.com/chrisuthe/SendspinDroid.git`. `origin` is this fork.
+
+### Fork Policy: Music Assistant code is inert
+
+Music Assistant (MA) code sits in the tree but is unused on this fork. It compiles, it ships in the APK, we ignore it.
+
+- Do not enhance MA features, screens, or protocols.
+- Do not clean up or refactor MA code.
+- Do not touch MA strings in `strings.xml`.
+- When merging from upstream, accept MA-touching changes as-is.
+- Pure MA code lives under `android/app/src/main/java/com/sendspindroid/musicassistant/` and `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/`.
+- Files that mix SendSpin + MA logic (review carefully on upstream merges): `MainActivity.kt`, `AppShell.kt`, `NowPlayingScreen.kt`, `NowPlayingHeadUnit.kt`, `UserSettings.kt`.
+
+### Fork Policy: Android TV is the only target
+
+`FormFactor.TV` in `ui/adaptive/FormFactor.kt` is the only layout that matters for correctness. Phone, tablet, and head-unit layouts are kept in the tree (deleting them would churn upstream merges) but do not need to be hand-tested or enhanced.
+
+Any new or modified UI must:
+
+- Use `.tvFocusable()` from `ui/adaptive/TvFocusHelpers.kt` on every interactive element.
+- Apply `.overscanSafe()` at screen roots so nothing critical sits within ~48dp of the edge.
+- Scale typography and sizing via `ui/adaptive/AdaptiveDefaults.kt` rather than hardcoded dp/sp values.
+- Land `TvInitialFocus` on a sensible default element on first composition.
+- Keep hit targets >=~48dp and TV-layout text >=~18sp.
+
 ## Application Architecture
 
 SendSpinDroid is a **synchronized audio player** that connects to SendSpin servers:
@@ -76,31 +111,51 @@ AAudio/Oboe would provide callback-precise hardware latency and lower-latency wr
 
 ## Development Environment
 
-- **Platform**: Windows
-- **IDE**: Android Studio
-- **JAVA_HOME**: `C:\Program Files\Android\Android Studio\jbr`
-- **ADB**: `$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe` (not in PATH)
+- **Host OS**: Linux (Arch)
+- **IDE**: Android Studio (Linux build), or any editor + command-line Gradle
+- **JDK**: Gradle manages a JVM 21 toolchain automatically — no `JAVA_HOME` export required
+- **Android SDK**: standard install, typically under `$HOME/Android/Sdk/`
+- **ADB**: use the SDK's platform-tools (`$HOME/Android/Sdk/platform-tools/adb`) or a distro package (`pacman -S android-tools` on Arch)
 
-## Build Notes
+### Connecting to the Shield
 
-Standard Android Gradle build:
+Shield Pro over USB is awkward; use ADB over network:
+
+```bash
+# On the Shield: Developer options -> "Network debugging" (or similar). Note the IP.
+adb connect <shield-ip>:5555
+adb devices                  # confirm "device" (not "unauthorized")
+```
+
+A dialog on the Shield prompts to accept the host key the first time.
+
+## Build, Install, Test
+
+All Gradle work happens inside the `android/` subdirectory.
+
 ```bash
 cd android
-./gradlew assembleDebug
+./gradlew assembleDebug       # build debug APK
+./gradlew installDebug        # install to connected Shield
+./gradlew test                # JVM unit tests (fast)
+./gradlew lintDebug           # Android lint
+./gradlew check               # tests + lint
 ```
 
-## Debugging Utilities
+The first build downloads the JDK toolchain and Android dependencies (a few hundred MB, one-time).
 
-### ZTE Logging Toggle (`android/zte-logging.bat`)
-Nubia/ZTE devices have verbose system logging disabled by default. Use this script to toggle it:
+## Upstream Merge Workflow
 
-```batch
-zte-logging.bat on      # Enable logging (for debugging)
-zte-logging.bat off     # Disable logging (saves battery)
-zte-logging.bat status  # Show log buffer sizes
+```bash
+git fetch upstream
+git merge upstream/main       # or: git rebase upstream/main
 ```
 
-**Note**: Always disable logging when done debugging - it impacts battery and performance.
+Expected conflicts: usually none. When they happen:
+
+- **Pure MA file** (under `musicassistant/` on either module): take upstream as-is.
+- **SendSpin core file** (`sendspin/`, `playback/`, `SyncAudioPlayer.kt`, non-MA parts of `shared/`): resolve carefully — these are the files that matter.
+- **Mixed file** (`MainActivity.kt`, `AppShell.kt`, `NowPlayingScreen.kt`, `NowPlayingHeadUnit.kt`, `UserSettings.kt`): review both sides, keep SendSpin semantics intact, accept MA changes as data.
 
 ## Code Style
 
@@ -136,11 +191,9 @@ MIT License (see `LICENSE` in repo root).
 
 ## Reference Implementation
 
-Python CLI player location: `C:\Users\chris\Downloads\sendspin-cli-main\sendspin-cli-main`
+The Python CLI (`sendspin-cli`) is the canonical reference for SendSpin protocol behavior and the audio sync algorithm. All features work as expected; use it to verify correct behavior when debugging. Obtain a copy from upstream if you need it.
 
-This is a fully working reference implementation. All features work as expected - use it to verify correct behavior when debugging.
-
-Key files to study:
+Key files to study (wherever you have the CLI checked out):
 - `audio.py` - Main audio playback with time sync (~1500 lines)
 - `protocol.py` - WebSocket protocol handling
 - `clocksync.py` - Clock synchronization algorithm

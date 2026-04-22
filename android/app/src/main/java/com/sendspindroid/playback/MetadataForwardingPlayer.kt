@@ -43,7 +43,16 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     private var currentArtist: String? = null
 
     @Volatile
+    private var currentAlbumArtist: String? = null
+
+    @Volatile
     private var currentAlbum: String? = null
+
+    @Volatile
+    private var currentYear: Int? = null
+
+    @Volatile
+    private var currentAlbumTrack: Int? = null
 
     @Volatile
     private var currentArtworkData: ByteArray? = null
@@ -88,7 +97,10 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         album: String?,
         artwork: Bitmap? = null,
         artworkUri: Uri? = null,
-        clearArtwork: Boolean = false
+        clearArtwork: Boolean = false,
+        albumArtist: String? = null,
+        year: Int? = null,
+        albumTrack: Int? = null
     ) {
         // null = preserve, empty = clear, value = update
         if (title != null) {
@@ -97,8 +109,17 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         if (artist != null) {
             currentArtist = artist.ifEmpty { null }
         }
+        if (albumArtist != null) {
+            currentAlbumArtist = albumArtist.ifEmpty { null }
+        }
         if (album != null) {
             currentAlbum = album.ifEmpty { null }
+        }
+        if (year != null) {
+            currentYear = year.takeIf { it > 0 }
+        }
+        if (albumTrack != null) {
+            currentAlbumTrack = albumTrack.takeIf { it > 0 }
         }
         if (artworkUri != null) {
             currentArtworkUri = if (artworkUri.toString().isEmpty()) null else artworkUri
@@ -153,13 +174,15 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
             .setSubtitle(subtitle)  // Android Auto uses DISPLAY_SUBTITLE for second line
             .setArtist(currentArtist)
             .setAlbumTitle(currentAlbum)
-            .setAlbumArtist(currentArtist)
+            .setAlbumArtist(currentAlbumArtist ?: currentArtist)
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
             .setIsPlayable(true)
             .apply {
                 // Set both artworkData (for notifications) and artworkUri (for Android Auto)
                 currentArtworkData?.let { setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) }
                 currentArtworkUri?.let { setArtworkUri(it) }
+                currentYear?.let { setReleaseYear(it) }
+                currentAlbumTrack?.let { setTrackNumber(it) }
             }
             .build()
     }
@@ -210,7 +233,10 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     fun clearMetadata() {
         currentTitle = null
         currentArtist = null
+        currentAlbumArtist = null
         currentAlbum = null
+        currentYear = null
+        currentAlbumTrack = null
         currentArtworkData = null
         currentArtworkUri = null
         cachedMetadata = MediaMetadata.EMPTY

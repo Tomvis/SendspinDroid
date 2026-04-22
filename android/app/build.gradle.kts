@@ -118,10 +118,10 @@ android {
             }
         }
 
-        // Debug build type is implicit with default settings
-        // Consider adding custom debug config for:
-        // - applicationIdSuffix = ".debug" (install alongside release)
-        // - debuggable = true (default, allows debugger attachment)
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
     }
 
     // Java bytecode version compatibility

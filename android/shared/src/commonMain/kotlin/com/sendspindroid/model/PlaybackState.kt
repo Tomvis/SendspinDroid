@@ -8,8 +8,13 @@ data class PlaybackState(
     val playbackState: PlaybackStateType = PlaybackStateType.IDLE,
     val title: String? = null,
     val artist: String? = null,
+    val albumArtist: String? = null,
     val album: String? = null,
     val artworkUrl: String? = null,
+    val year: Int? = null,
+    val albumTrack: Int? = null,
+    val queueTrack: Int? = null,
+    val totalTracks: Int? = null,
     val durationMs: Long = 0,
     val positionMs: Long = 0,
     val positionUpdatedAt: Long = 0,
@@ -45,8 +50,13 @@ data class PlaybackState(
     fun withMetadata(
         title: String?,
         artist: String?,
+        albumArtist: String?,
         album: String?,
         artworkUrl: String?,
+        year: Int?,
+        albumTrack: Int?,
+        queueTrack: Int?,
+        totalTracks: Int?,
         durationMs: Long,
         positionMs: Long,
         playbackSpeed: Int = this.playbackSpeed
@@ -61,6 +71,11 @@ data class PlaybackState(
             artist.isEmpty() -> null
             else -> artist
         },
+        albumArtist = when {
+            albumArtist == null -> this.albumArtist
+            albumArtist.isEmpty() -> null
+            else -> albumArtist
+        },
         album = when {
             album == null -> this.album
             album.isEmpty() -> null
@@ -70,6 +85,26 @@ data class PlaybackState(
             artworkUrl == null -> this.artworkUrl
             artworkUrl.isEmpty() -> null
             else -> artworkUrl
+        },
+        year = when {
+            year == null -> this.year
+            year <= 0 -> null
+            else -> year
+        },
+        albumTrack = when {
+            albumTrack == null -> this.albumTrack
+            albumTrack <= 0 -> null
+            else -> albumTrack
+        },
+        queueTrack = when {
+            queueTrack == null -> this.queueTrack
+            queueTrack <= 0 -> null
+            else -> queueTrack
+        },
+        totalTracks = when {
+            totalTracks == null -> this.totalTracks
+            totalTracks <= 0 -> null
+            else -> totalTracks
         },
         durationMs = if (durationMs > 0) durationMs else this.durationMs,
         positionMs = positionMs,
@@ -83,8 +118,13 @@ data class PlaybackState(
     fun withClearedMetadata(): PlaybackState = copy(
         title = null,
         artist = null,
+        albumArtist = null,
         album = null,
         artworkUrl = null,
+        year = null,
+        albumTrack = null,
+        queueTrack = null,
+        totalTracks = null,
         durationMs = 0,
         positionMs = 0,
         positionUpdatedAt = 0,

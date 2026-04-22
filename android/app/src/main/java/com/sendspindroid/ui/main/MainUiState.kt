@@ -4,11 +4,18 @@ import android.graphics.Bitmap
 
 /**
  * Track metadata for display in player UI.
+ *
+ * Integer fields use 0 to indicate "not set" / absent.
  */
 data class TrackMetadata(
     val title: String,
     val artist: String,
-    val album: String
+    val album: String,
+    val albumArtist: String = "",
+    val year: Int = 0,
+    val albumTrack: Int = 0,
+    val queueTrack: Int = 0,
+    val totalTracks: Int = 0
 ) {
     companion object {
         val EMPTY = TrackMetadata("", "", "")

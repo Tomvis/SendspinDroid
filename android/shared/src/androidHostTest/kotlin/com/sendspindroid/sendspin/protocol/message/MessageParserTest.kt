@@ -180,7 +180,9 @@ class MessageParserTest {
                 put("album", "Test Album")
                 put("artwork_url", "https://example.com/art.jpg")
                 put("year", 2024)
-                put("track", 5)
+                put("album_track", 3)
+                put("queue_track", 5)
+                put("total_tracks", 12)
                 put("progress", buildJsonObject {
                     put("track_progress", 45000L)
                     put("track_duration", 180000L)
@@ -196,9 +198,32 @@ class MessageParserTest {
         assertEquals("Test Song", metadata!!.title)
         assertEquals("Test Artist", metadata.artist)
         assertEquals("Album Artist", metadata.albumArtist)
+        assertEquals(2024, metadata.year)
+        assertEquals(3, metadata.albumTrack)
+        assertEquals(5, metadata.queueTrack)
+        assertEquals(12, metadata.totalTracks)
         assertEquals(45000L, metadata.progress.trackProgress)
         assertEquals(180000L, metadata.progress.trackDuration)
         assertEquals("playing", state)
+    }
+
+    @Test
+    fun parseServerState_missingIntFields_defaultToZero() {
+        // When album_track / queue_track / total_tracks / year are omitted, parser returns 0.
+        val payload = buildJsonObject {
+            put("metadata", buildJsonObject {
+                put("title", "Stream")
+                put("artist", "Radio")
+            })
+        }
+
+        val (metadata, _) = MessageParser.parseServerState(payload)
+
+        assertNotNull(metadata)
+        assertEquals(0, metadata!!.year)
+        assertEquals(0, metadata.albumTrack)
+        assertEquals(0, metadata.queueTrack)
+        assertEquals(0, metadata.totalTracks)
     }
 
     @Test

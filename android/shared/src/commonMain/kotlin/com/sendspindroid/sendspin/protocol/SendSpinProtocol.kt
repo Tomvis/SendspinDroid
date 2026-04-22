@@ -125,6 +125,8 @@ data class TrackProgress(
  * Track metadata from server/state messages.
  * Per spec: includes timestamp, nested progress, and optional fields.
  *
+ * Integer fields use 0 to indicate "not set" / absent.
+ *
  * @param timestamp Server timestamp when metadata was captured (microseconds)
  * @param title Track title
  * @param artist Track artist
@@ -132,7 +134,9 @@ data class TrackProgress(
  * @param album Album name
  * @param artworkUrl URL to album artwork
  * @param year Release year
- * @param track Track number (1-indexed)
+ * @param albumTrack Track number within album (1-indexed)
+ * @param queueTrack Position of the current track within the queue (1-indexed)
+ * @param totalTracks Total number of tracks in the queue
  * @param progress Progress information (position, duration, speed)
  */
 data class TrackMetadata(
@@ -143,7 +147,9 @@ data class TrackMetadata(
     val album: String,
     val artworkUrl: String,
     val year: Int,
-    val track: Int,
+    val albumTrack: Int,
+    val queueTrack: Int,
+    val totalTracks: Int,
     val progress: TrackProgress
 ) {
     // Convenience properties for backwards compatibility

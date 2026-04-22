@@ -606,9 +606,12 @@ class MainActivity : AppCompatActivity() {
                 mediaController?.let { controller ->
                     val metadata = controller.mediaMetadata
                     updateMetadata(
-                        metadata.title?.toString() ?: "",
-                        metadata.artist?.toString() ?: "",
-                        metadata.albumTitle?.toString() ?: ""
+                        title = metadata.title?.toString() ?: "",
+                        artist = metadata.artist?.toString() ?: "",
+                        album = metadata.albumTitle?.toString() ?: "",
+                        albumArtist = metadata.albumArtist?.toString(),
+                        year = metadata.releaseYear,
+                        albumTrack = metadata.trackNumber
                     )
                     updateAlbumArt(metadata)
                     // Restore play/pause button state
@@ -1881,12 +1884,18 @@ class MainActivity : AppCompatActivity() {
         // Handle metadata updates
         val title = extras.getString(PlaybackService.EXTRA_TITLE, "")
         val artist = extras.getString(PlaybackService.EXTRA_ARTIST, "")
+        val albumArtist = extras.getString(PlaybackService.EXTRA_ALBUM_ARTIST, "")
         val album = extras.getString(PlaybackService.EXTRA_ALBUM, "")
         val artworkUrl = extras.getString(PlaybackService.EXTRA_ARTWORK_URL, "")
+        val year = extras.getInt(PlaybackService.EXTRA_YEAR, 0)
+        val albumTrack = extras.getInt(PlaybackService.EXTRA_ALBUM_TRACK, 0)
+        val queueTrack = extras.getInt(PlaybackService.EXTRA_QUEUE_TRACK, 0)
+        val totalTracks = extras.getInt(PlaybackService.EXTRA_TOTAL_TRACKS, 0)
 
         if (title.isNotEmpty() || artist.isNotEmpty() || album.isNotEmpty()) {
             Log.d(TAG, "Metadata changed: $title / $artist (artwork: $artworkUrl)")
-            updateMetadata(title, artist, album)
+            Log.d(TAG, "  extras: albumArtist=$albumArtist year=$year albumTrack=$albumTrack queueTrack=$queueTrack totalTracks=$totalTracks")
+            updateMetadata(title, artist, album, albumArtist, year, albumTrack, queueTrack, totalTracks)
 
             // Load artwork from URL if available
             if (artworkUrl.isNotEmpty()) {
@@ -2198,7 +2207,14 @@ class MainActivity : AppCompatActivity() {
                 val artist = mediaMetadata.artist?.toString() ?: ""
                 val album = mediaMetadata.albumTitle?.toString() ?: ""
                 Log.d(TAG, "Metadata from service: $title / $artist / $album")
-                updateMetadata(title, artist, album)
+                updateMetadata(
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    albumArtist = mediaMetadata.albumArtist?.toString(),
+                    year = mediaMetadata.releaseYear,
+                    albumTrack = mediaMetadata.trackNumber
+                )
 
                 // Load album art from MediaMetadata
                 updateAlbumArt(mediaMetadata)
@@ -2271,9 +2287,12 @@ class MainActivity : AppCompatActivity() {
                 // Sync metadata and artwork
                 val metadata = controller.mediaMetadata
                 updateMetadata(
-                    metadata.title?.toString() ?: "",
-                    metadata.artist?.toString() ?: "",
-                    metadata.albumTitle?.toString() ?: ""
+                    title = metadata.title?.toString() ?: "",
+                    artist = metadata.artist?.toString() ?: "",
+                    album = metadata.albumTitle?.toString() ?: "",
+                    albumArtist = metadata.albumArtist?.toString(),
+                    year = metadata.releaseYear,
+                    albumTrack = metadata.trackNumber
                 )
                 updateAlbumArt(metadata)
             }
@@ -3020,9 +3039,20 @@ class MainActivity : AppCompatActivity() {
         // Mini player updates automatically via Compose/ViewModel state observation
     }
 
-    private fun updateMetadata(title: String, artist: String, album: String) {
-        // Sync state to ViewModel for Compose UI
-        viewModel.updateMetadata(title, artist, album)
+    private fun updateMetadata(
+        title: String,
+        artist: String,
+        album: String,
+        albumArtist: String? = null,
+        year: Int? = null,
+        albumTrack: Int? = null,
+        queueTrack: Int? = null,
+        totalTracks: Int? = null
+    ) {
+        // Sync state to ViewModel for Compose UI. Nullable fields preserve
+        // prior values when the caller doesn't have them (e.g., Media3
+        // MediaMetadata paths carry year/track but not queue position).
+        viewModel.updateMetadata(title, artist, album, albumArtist, year, albumTrack, queueTrack, totalTracks)
 
         // Song title goes in the large text field
         binding.nowPlayingText.text = if (title.isNotEmpty()) title else getString(R.string.not_playing)

@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Now Playing · Android TV</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin:0; padding:0; background:#000; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; height: 100vh; }
+  * { box-sizing: border-box; }
+
+  #stage { position: fixed; inset: 0; display: grid; place-items: center; background: #000; }
+  #screen {
+    width: 1920px; height: 1080px;
+    transform-origin: center center;
+    position: relative;
+    box-shadow: 0 30px 120px rgba(0,0,0,.6);
+  }
+
+  /* Tweaks panel */
+  .tweaks-panel {
+    position: fixed; right: 20px; bottom: 20px; z-index: 1000;
+    width: 320px; background: #1a1611; color: #f5ede0; border-radius: 14px;
+    box-shadow: 0 18px 60px rgba(0,0,0,.35), 0 2px 8px rgba(0,0,0,.2);
+    padding: 20px; font-size: 14px; display: none;
+    border: 1px solid rgba(255,255,255,.08);
+  }
+  .tweaks-panel.on { display: block; }
+  .tweaks-panel h3 { margin: 0 0 14px; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; font-weight: 600; color: rgba(245,237,224,.55); }
+  .tweaks-group { margin-bottom: 18px; }
+  .tweaks-group:last-child { margin-bottom: 0; }
+  .tweaks-group > label { display: block; font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: rgba(245,237,224,.55); margin-bottom: 8px; font-weight: 600; }
+  .tw-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tw-chip {
+    padding: 7px 11px; border-radius: 8px; background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.08); color: #f5ede0; font-size: 13px; cursor: pointer;
+    font-family: inherit; transition: all .15s;
+  }
+  .tw-chip:hover { background: rgba(255,255,255,.08); }
+  .tw-chip.on { background: #f5ede0; color: #1a1611; border-color: #f5ede0; font-weight: 600; }
+  .tw-swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tw-swatch {
+    width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
+    border: 2px solid transparent; transition: transform .15s;
+  }
+  .tw-swatch:hover { transform: scale(1.08); }
+  .tw-swatch.on { border-color: #fff; box-shadow: 0 0 0 2px #1a1611, 0 0 0 4px rgba(255,255,255,.3); }
+</style>
+</head>
+<body>
+<div id="stage"><div id="screen"><div id="root"></div></div></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script>
+  // Scale 1920×1080 to fit the viewport
+  function fit() {
+    const s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+    const el = document.getElementById('screen');
+    if (el) el.style.transform = 'scale(' + s + ')';
+  }
+  window.addEventListener('resize', fit);
+  window.addEventListener('load', fit);
+  fit();
+</script>
+
+<script type="text/babel" src="nowplaying.jsx"></script>
+
+<script type="text/babel">
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "trackId": "obscura",
+  "theme": "dark",
+  "accent": "#F5A524",
+  "playback": "playing"
+}/*EDITMODE-END*/;
+
+const TRACKS = {
+  obscura: {
+    title: "The Anticosmic Overload",
+    artist: "Obscura",
+    album: "Cosmogenesis",
+    year: 2009,
+    duration: 257,
+    elapsed: 104,
+    format: "FLAC",
+    bitDepth: 24,
+    sampleRate: 96,
+    bitrate: "2304 kbps",
+    trackNum: 3,
+    trackTotal: 9,
+    upNext: "Desolate Spheres",
+    upNextDur: "5:32",
+    cover: "assets/cover.svg",
+  },
+  aurora: {
+    title: "Paper Constellations",
+    artist: "Meridian Sound",
+    album: "Slow Weather",
+    year: 2023,
+    duration: 342,
+    elapsed: 187,
+    format: "ALAC",
+    bitDepth: 24,
+    sampleRate: 48,
+    bitrate: "1536 kbps",
+    trackNum: 5,
+    trackTotal: 11,
+    upNext: "Northern Drift",
+    upNextDur: "4:08",
+    cover: "assets/cover.svg",
+  },
+  velvet: {
+    title: "Telegraph Hill",
+    artist: "The Velvet Arc",
+    album: "Amber Hour",
+    year: 2021,
+    duration: 218,
+    elapsed: 72,
+    format: "FLAC",
+    bitDepth: 16,
+    sampleRate: 44.1,
+    bitrate: "1058 kbps",
+    trackNum: 2,
+    trackTotal: 10,
+    upNext: "Seven Miles East",
+    upNextDur: "3:44",
+    cover: "assets/cover.svg",
+  },
+};
+
+const ACCENTS = [
+  { id: "#E8567A", name: "Crimson" },
+  { id: "#F5A524", name: "Amber" },
+  { id: "#64D9A3", name: "Mint" },
+  { id: "#6AA9FF", name: "Sky" },
+  { id: "#C490FF", name: "Iris" },
+  { id: "#F07156", name: "Ember" },
+];
+
+function App() {
+  const [tweaks, setTweaks] = React.useState(TWEAK_DEFAULTS);
+  const [tweaksOn, setTweaksOn] = React.useState(false);
+
+  React.useEffect(() => {
+    const onMsg = (e) => {
+      const d = e.data;
+      if (!d || typeof d !== "object") return;
+      if (d.type === "__activate_edit_mode") setTweaksOn(true);
+      if (d.type === "__deactivate_edit_mode") setTweaksOn(false);
+    };
+    window.addEventListener("message", onMsg);
+    window.parent.postMessage({ type: "__edit_mode_available" }, "*");
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
+
+  const update = (patch) => {
+    const next = { ...tweaks, ...patch };
+    setTweaks(next);
+    window.parent.postMessage({ type: "__edit_mode_set_keys", edits: patch }, "*");
+  };
+
+  const track = TRACKS[tweaks.trackId] || TRACKS.obscura;
+
+  return (
+    <>
+      <NowPlaying variant="focus" track={track} theme={tweaks.theme} accent={tweaks.accent} paused={tweaks.playback === "paused"} idle={tweaks.playback === "idle"} />
+
+      <div className={"tweaks-panel" + (tweaksOn ? " on" : "")}>
+        <h3>Tweaks</h3>
+        <div className="tweaks-group">
+          <label>Playback</label>
+          <div className="tw-chips">
+            {[["playing","▶ Playing"],["paused","❚❚ Paused"],["idle","◌ Idle"]].map(([id,lbl]) => (
+              <button key={id} className={"tw-chip" + (tweaks.playback === id ? " on" : "")}
+                onClick={() => update({ playback: id })}>{lbl}</button>
+            ))}
+          </div>
+        </div>
+
+        <div className="tweaks-group">
+          <label>Track</label>
+          <div className="tw-chips">
+            {Object.keys(TRACKS).map((id) => (
+              <button key={id} className={"tw-chip" + (tweaks.trackId === id ? " on" : "")}
+                onClick={() => update({ trackId: id })}>
+                {TRACKS[id].artist.split(" ")[0]}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="tweaks-group">
+          <label>Theme</label>
+          <div className="tw-chips">
+            {["dark", "light"].map((t) => (
+              <button key={t} className={"tw-chip" + (tweaks.theme === t ? " on" : "")}
+                onClick={() => update({ theme: t })}>
+                {t[0].toUpperCase() + t.slice(1)}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="tweaks-group">
+          <label>Accent</label>
+          <div className="tw-swatches">
+            {ACCENTS.map((a) => (
+              <button key={a.id} className={"tw-swatch" + (tweaks.accent === a.id ? " on" : "")}
+                style={{ background: a.id }} title={a.name}
+                onClick={() => update({ accent: a.id })} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

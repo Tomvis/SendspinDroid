@@ -78,7 +78,9 @@ object MessageParser {
             val album = optStringClean("album")
             val artworkUrl = optStringClean("artwork_url")
             val year = metadataObj.intOrDefault("year", 0)
-            val track = metadataObj.intOrDefault("track", 0)
+            val albumTrack = metadataObj.intOrDefault("album_track", 0)
+            val queueTrack = metadataObj.intOrDefault("queue_track", 0)
+            val totalTracks = metadataObj.intOrDefault("total_tracks", 0)
 
             val progress = metadataObj["progress"]?.jsonObject?.let { progressObj ->
                 TrackProgress(
@@ -102,7 +104,9 @@ object MessageParser {
                 album = album,
                 artworkUrl = artworkUrl,
                 year = year,
-                track = track,
+                albumTrack = albumTrack,
+                queueTrack = queueTrack,
+                totalTracks = totalTracks,
                 progress = progress
             )
         }

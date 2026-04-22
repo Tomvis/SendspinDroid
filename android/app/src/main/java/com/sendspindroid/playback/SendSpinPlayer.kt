@@ -243,13 +243,26 @@ class SendSpinPlayer : Player {
      * the multi-item timeline to maintain Media3's invariant that
      * getCurrentMediaItemIndex() < timeline.getWindowCount() at all times.
      */
-    fun updateMediaItem(title: String?, artist: String?, album: String?, durationMs: Long) {
+    fun updateMediaItem(
+        title: String?,
+        artist: String?,
+        album: String?,
+        durationMs: Long,
+        albumArtist: String? = null,
+        year: Int? = null,
+        albumTrack: Int? = null
+    ) {
         android.util.Log.d(TAG, "updateMediaItem: $title / $artist / $album")
 
         val metadata = MediaMetadata.Builder()
             .setTitle(title)
             .setArtist(artist)
             .setAlbumTitle(album)
+            .apply {
+                if (!albumArtist.isNullOrEmpty()) setAlbumArtist(albumArtist)
+                if (year != null && year > 0) setReleaseYear(year)
+                if (albumTrack != null && albumTrack > 0) setTrackNumber(albumTrack)
+            }
             .build()
 
         val newItem = MediaItem.Builder()

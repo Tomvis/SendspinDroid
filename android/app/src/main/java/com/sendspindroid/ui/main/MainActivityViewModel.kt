@@ -172,8 +172,31 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         _isBuffering.value = state == PlaybackState.BUFFERING
     }
 
-    fun updateMetadata(title: String, artist: String, album: String) {
-        _metadata.value = TrackMetadata(title, artist, album)
+    /**
+     * Update metadata. Pass `null` for any optional field to keep the prior value.
+     * title/artist/album are always written through (caller always knows them).
+     */
+    fun updateMetadata(
+        title: String,
+        artist: String,
+        album: String,
+        albumArtist: String? = null,
+        year: Int? = null,
+        albumTrack: Int? = null,
+        queueTrack: Int? = null,
+        totalTracks: Int? = null
+    ) {
+        val prev = _metadata.value
+        _metadata.value = TrackMetadata(
+            title = title,
+            artist = artist,
+            album = album,
+            albumArtist = albumArtist ?: prev.albumArtist,
+            year = year ?: prev.year,
+            albumTrack = albumTrack ?: prev.albumTrack,
+            queueTrack = queueTrack ?: prev.queueTrack,
+            totalTracks = totalTracks ?: prev.totalTracks
+        )
     }
 
     fun updateGroupName(name: String) {

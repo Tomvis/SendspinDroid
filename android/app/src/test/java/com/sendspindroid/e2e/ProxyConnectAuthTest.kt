@@ -224,8 +224,8 @@ class ProxyConnectAuthTest : E2ETestBase() {
 
         verify {
             mockCallback.onMetadataUpdate(
-                "Proxy Track", "Remote Artist", "Cloud Album",
-                "", 200000, 0, 1000
+                "Proxy Track", "Remote Artist", "", "Cloud Album",
+                "", 0, 0, 0, 0, 200000, 0, 1000
             )
         }
     }
