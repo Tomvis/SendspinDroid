@@ -212,6 +212,10 @@ dependencies {
     // Material Design 3 for Compose - modern theming and components
     implementation("androidx.compose.material3:material3")
 
+    // Jetpack Compose for TV - focus-aware IconButton/Surface for D-pad UIs.
+    // Not part of Compose BOM; pin explicitly. Used by the TV Now Playing surface.
+    implementation("androidx.tv:tv-material:1.1.0-rc01")
+
     // Material3 Adaptive - WindowSizeClass detection and NavigationSuiteScaffold
     // (auto-switches between BottomNav, NavigationRail, and NavigationDrawer)
     implementation("androidx.compose.material3:material3-window-size-class")
