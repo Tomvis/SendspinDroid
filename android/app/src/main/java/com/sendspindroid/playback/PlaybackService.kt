@@ -66,6 +66,7 @@ import com.sendspindroid.musicassistant.MaQueueItem
 import com.sendspindroid.musicassistant.MaRadio
 import com.sendspindroid.musicassistant.MaTrack
 import com.sendspindroid.musicassistant.MusicAssistantManager
+import com.sendspindroid.musicassistant.QueueUpdate
 import com.sendspindroid.sendspin.SendSpinClient
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.UnifiedServerRepository
@@ -93,10 +94,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 
 /**
  * Background playback service for SendSpinDroid.
@@ -127,18 +124,7 @@ class PlaybackService : MediaLibraryService() {
     private var forwardingPlayer: MetadataForwardingPlayer? = null
     private var sendSpinClient: SendSpinClient? = null
     @Volatile private var syncAudioPlayer: SyncAudioPlayer? = null
-    // Decoder is owned exclusively by [decodeExecutor]. Every mutation -- release,
-    // create, flush -- is submitted as a task so only one thread touches the
-    // native resource. Reads inside decode tasks are safe because the single-
-    // threaded executor serializes all work. No @Volatile: there are no
-    // cross-thread readers.
     private var audioDecoder: AudioDecoder? = null
-
-    // Single-threaded executor that owns the decoder and performs PCM decode
-    // off the WebSocket IO thread. Bounded queue with drop-oldest semantics:
-    // audio is real-time, so a stale chunk is useless. Initialized in onCreate,
-    // shut down in onDestroy.
-    private lateinit var decodeExecutor: ExecutorService
 
     // When true, the next state/group message should call exitDraining() AFTER processing.
     // This ensures the DRAINING check in onStateChanged/onGroupUpdate fires while still
@@ -231,7 +217,7 @@ class PlaybackService : MediaLibraryService() {
         override fun onReceive(context: Context, intent: Intent) {
             val offsetMs = intent.getIntExtra(SyncOffsetPreference.EXTRA_OFFSET_MS, 0)
             sendSpinClient?.getTimeFilter()?.let { timeFilter ->
-                timeFilter.staticDelayMs = offsetMs.toDouble()
+                timeFilter.setUserSyncOffsetMs(offsetMs.toDouble())
                 Log.i(TAG, "Applied sync offset from settings change: ${offsetMs}ms")
             }
         }
@@ -285,9 +271,23 @@ class PlaybackService : MediaLibraryService() {
     private var lastSyncOffsetMs: Double = 0.0
     private var lastSyncOffsetSource: String = ""
 
-    // Artwork state
+    // Artwork state. Two independent sources are maintained so the lock-screen
+    // widget and app UI don't diverge when the SendSpin server sends a binary
+    // artwork payload whose contents don't match the `artwork_url` in the
+    // accompanying `server/state` metadata (observed with MA in playlist
+    // contexts; see docs/architecture/sendspin-ma-metadata-flow.md §7 Q4/Q5).
+    //
+    // Policy: URL artwork is authoritative when available. Binary artwork is
+    // used only as a bridge before the URL fetch completes, matching what the
+    // app's own mini-player already does via Coil on the `artworkUrl` state.
+    //
+    // effectiveArtwork is recomputed on every write and passed to MediaSession.
     private var lastArtworkUrl: String? = null
-    private var currentArtwork: Bitmap? = null
+    private var lastTrackTitle: String? = null
+    private var urlArtwork: Bitmap? = null
+    private var binaryArtwork: Bitmap? = null
+    private val effectiveArtwork: Bitmap?
+        get() = urlArtwork ?: binaryArtwork
     // ImageLoader is null when low memory mode is enabled
     private var imageLoader: ImageLoader? = null
 
@@ -548,18 +548,6 @@ class PlaybackService : MediaLibraryService() {
         // Debug logging interval (1 sample per second)
         private const val DEBUG_LOG_INTERVAL_MS = 1000L
 
-        // Bounded backlog for the decode executor. At 48 kHz / 20 ms chunks
-        // (~50 chunks/sec), 100 tasks is roughly 2 seconds of runway before
-        // drop-oldest kicks in. Sized large enough to absorb brief GC pauses
-        // or codec hiccups, small enough that sustained backlog doesn't pile
-        // up perceptible staleness.
-        private const val DECODE_QUEUE_CAPACITY = 100
-
-        // Max time to wait for in-flight decode tasks to finish during
-        // onDestroy. After this the executor is forcibly shut down -- any
-        // outstanding decoder release is lost, which is fine during teardown.
-        private const val DECODE_EXECUTOR_SHUTDOWN_TIMEOUT_MS = 500L
-
         // Debounce before acting on NET_CAPABILITY_VALIDATED loss. Android's
         // validation probe can flicker briefly during WiFi roaming or captive-portal
         // probes; 3s rides through those while still firing well before the ~30s
@@ -700,25 +688,6 @@ class PlaybackService : MediaLibraryService() {
         super.onCreate()
         Log.i(TAG, "PlaybackService.onCreate() started")
 
-        // Build the decode executor before anything else that may rely on it.
-        // Bounded queue (DECODE_QUEUE_CAPACITY) with drop-oldest rejection so
-        // sustained decode underruns cannot grow the queue without limit.
-        // Audio is real-time, so the oldest queued chunk is the least useful
-        // to keep.
-        decodeExecutor = ThreadPoolExecutor(
-            1, 1,
-            0L, TimeUnit.MILLISECONDS,
-            LinkedBlockingQueue(DECODE_QUEUE_CAPACITY),
-            java.util.concurrent.ThreadFactory { r ->
-                Thread(r, "SendSpinDecode").apply { isDaemon = true }
-            },
-            { r, executor ->
-                executor.queue.poll()
-                executor.execute(r)
-                Log.w(TAG, "Decode queue full, dropping oldest chunk")
-            }
-        )
-
         // Create notification channel for foreground service
         NotificationHelper.createNotificationChannel(this)
 
@@ -734,6 +703,16 @@ class PlaybackService : MediaLibraryService() {
 
         // Initialize MusicAssistantManager for MA API integration
         MusicAssistantManager.initialize(this)
+
+        // Fast metadata path: subscribe to MA command-channel queue_updated events
+        // to update title/artist/album as soon as the server's queue advances,
+        // roughly 1 second before the SendSpin server/state broadcast arrives.
+        // See docs/architecture/sendspin-ma-metadata-flow.md section 8a.
+        serviceScope.launch {
+            MusicAssistantManager.queueUpdates.collect { update ->
+                applyFastQueueUpdate(update)
+            }
+        }
 
         // Initialize UnifiedServerRepository for server lookups
         UnifiedServerRepository.initialize(this)
@@ -1062,7 +1041,9 @@ class PlaybackService : MediaLibraryService() {
                 // Clear playback state on disconnect
                 _playbackState.value = PlaybackState()
                 lastArtworkUrl = null
-                currentArtwork = null
+                lastTrackTitle = null
+                urlArtwork = null
+                binaryArtwork = null
 
                 // Clear lock screen metadata
                 forwardingPlayer?.clearMetadata()
@@ -1261,10 +1242,27 @@ class PlaybackService : MediaLibraryService() {
                 // Populate the player's timeline with queue items for native queue UI
                 populatePlayerQueue()
 
-                // Handle artwork URL changes
+                // Handle artwork URL changes + track changes.
+                //
+                // On title change we invalidate urlArtwork and re-fetch the URL
+                // even when the URL string itself is unchanged. MA reuses the
+                // album URL across tracks on the same album, so without this
+                // invalidation the MediaSession keeps whatever bitmap was set at
+                // the first track of the album (commonly the binary artwork,
+                // which MA may have populated with a playlist-context image
+                // rather than the actual album cover -- see
+                // docs/architecture/sendspin-ma-metadata-flow.md §7 Q4).
+                // Coil caches the URL so re-fetching is essentially free.
+                val newTitle = title.ifEmpty { null }
+                val titleChanged = newTitle != lastTrackTitle
+                if (titleChanged) {
+                    lastTrackTitle = newTitle
+                    urlArtwork = null
+                }
+
                 if (effectiveArtworkUrl.isEmpty()) {
                     lastArtworkUrl = null
-                } else if (effectiveArtworkUrl != lastArtworkUrl) {
+                } else if (effectiveArtworkUrl != lastArtworkUrl || titleChanged) {
                     lastArtworkUrl = effectiveArtworkUrl
                     fetchArtwork(effectiveArtworkUrl)
                 }
@@ -1292,8 +1290,12 @@ class PlaybackService : MediaLibraryService() {
                         bitmap?.let { scaleArtwork(it) }
                     }
                     if (scaled != null) {
-                        currentArtwork = scaled
-                        updateMediaSessionArtwork(scaled)
+                        binaryArtwork = scaled
+                        // Only push to MediaSession if we don't already have URL-based
+                        // artwork; URL is preferred (see urlArtwork field comment).
+                        if (urlArtwork == null) {
+                            updateMediaSessionArtwork(scaled)
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to decode artwork", e)
@@ -1304,7 +1306,7 @@ class PlaybackService : MediaLibraryService() {
         override fun onArtworkCleared() {
             mainHandler.post {
                 Log.d(TAG, "Artwork cleared by server (empty payload)")
-                currentArtwork = null
+                binaryArtwork = null
                 updateMediaMetadata(
                     _playbackState.value.title ?: "",
                     _playbackState.value.artist ?: "",
@@ -1331,8 +1333,7 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
             // Mark decoder as not ready IMMEDIATELY (on WebSocket thread) before posting.
-            // This prevents onAudioChunk from submitting further decode tasks until
-            // the new decoder is ready on the decode thread.
+            // This prevents onAudioChunk from using the old (about-to-be-released) decoder.
             decoderReady = false
             mainHandler.post {
                 Log.d(TAG, "Stream started: codec=$codec, rate=$sampleRate, channels=$channels, bits=$bitDepth, header=${codecHeader?.size ?: 0} bytes")
@@ -1345,34 +1346,26 @@ class PlaybackService : MediaLibraryService() {
                 currentBitDepth = bitDepth
                 broadcastSessionExtras()
 
-                // Release + recreate the decoder on the decode thread so this
-                // submission is ordered after any in-flight decode tasks for
-                // the previous stream (they finish with the old decoder first,
-                // then this task releases and creates the new one).
-                decodeExecutor.execute {
-                    audioDecoder?.release()
-                    audioDecoder = null
+                // Release existing decoder and create new one for this stream
+                audioDecoder?.release()
+                audioDecoder = null
+                try {
+                    audioDecoder = AudioDecoderFactory.create(codec)
+                    audioDecoder?.configure(sampleRate, channels, bitDepth, codecHeader)
+                    Log.i(TAG, "Audio decoder created: $codec")
+                    decoderReady = true
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to create decoder for $codec, falling back to PCM", e)
                     try {
-                        val created = AudioDecoderFactory.create(codec).also {
-                            it.configure(sampleRate, channels, bitDepth, codecHeader)
-                        }
-                        audioDecoder = created
-                        Log.i(TAG, "Audio decoder created: $codec")
+                        val fallback = AudioDecoderFactory.create("pcm")
+                        fallback.configure(sampleRate, channels, bitDepth)
+                        audioDecoder = fallback
+                        Log.i(TAG, "PCM fallback decoder configured")
                         decoderReady = true
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to create decoder for $codec, falling back to PCM", e)
-                        try {
-                            val fallback = AudioDecoderFactory.create("pcm").also {
-                                it.configure(sampleRate, channels, bitDepth)
-                            }
-                            audioDecoder = fallback
-                            Log.i(TAG, "PCM fallback decoder configured")
-                            decoderReady = true
-                        } catch (fallbackEx: Exception) {
-                            Log.e(TAG, "PCM fallback decoder also failed", fallbackEx)
-                            audioDecoder = null
-                            // decoderReady stays false -- onAudioChunk will drop chunks
-                        }
+                    } catch (fallbackEx: Exception) {
+                        Log.e(TAG, "PCM fallback decoder also failed", fallbackEx)
+                        audioDecoder = null
+                        // decoderReady stays false -- onAudioChunk will drop chunks
                     }
                 }
 
@@ -1409,7 +1402,10 @@ class PlaybackService : MediaLibraryService() {
                         sampleRate = sampleRate,
                         channels = channels,
                         bitDepth = bitDepth,
-                        maxQueueSamples = maxSamples
+                        maxQueueSamples = maxSamples,
+                        requestClientStateSnapshot = {
+                            sendSpinClient?.sendClientStateSnapshot()
+                        },
                     ).apply {
                         // Set callback to update SendSpinPlayer when playback state changes
                         setStateCallback(SyncAudioPlayerStateCallback())
@@ -1427,10 +1423,7 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.i(TAG, "[cmd-trace] T3 onStreamClear.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
                 Log.d(TAG, "Stream clear - flushing audio and decoder buffers")
-                // Flush on the decode thread so it is ordered relative to any
-                // in-flight decode tasks: chunks queued before the flush decode
-                // with pre-flush state, subsequent chunks with post-flush state.
-                decodeExecutor.execute { audioDecoder?.flush() }
+                audioDecoder?.flush()
                 syncAudioPlayer?.clearBuffer()
             }
         }
@@ -1451,37 +1444,32 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onAudioChunk(serverTimeMicros: Long, audioData: ByteArray) {
-            // WS-IO thread fast path: gate on decoderReady (flipped false by
-            // onStreamStart so chunks from the old stream don't get submitted
-            // after a reconfigure), and capture the player reference cheaply.
-            // Actual decode + queue happens on [decodeExecutor] so the WS-IO
-            // thread stays responsive for other frames (notably time-sync
-            // replies whose latency feeds back into the Kalman filter).
+            // Guard: don't try to decode if the decoder is being replaced (race with onStreamStart)
             if (!decoderReady) return
-            val player = syncAudioPlayer ?: return
 
-            decodeExecutor.execute {
-                // Read audioDecoder inside the task. The single-threaded
-                // executor serializes all decoder mutations with all decode
-                // tasks, so there is no TOCTOU: this read sees the decoder
-                // that was current when this task was submitted, not a newer
-                // (possibly released) one.
-                val decoder = audioDecoder
-                val pcmData = try {
-                    if (decoder != null) {
-                        decoder.decode(audioData)
-                    } else if (currentCodec == "pcm") {
-                        audioData
-                    } else {
-                        return@execute // compressed codec with no decoder -- drop
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Decode error, dropping chunk", e)
-                    return@execute
+            // Capture local references to avoid TOCTOU race: the main thread can null
+            // and release these between a null-check and method call.
+            val player = syncAudioPlayer ?: return
+            val decoder = audioDecoder
+
+            // Decode compressed data to PCM, or pass through for PCM codec.
+            // If decoder is null mid-reconfiguration, only PCM raw data is safe
+            // to forward -- compressed bytes (Opus/FLAC) would be garbled.
+            val pcmData = try {
+                if (decoder != null) {
+                    decoder.decode(audioData)
+                } else if (currentCodec == "pcm") {
+                    audioData
+                } else {
+                    return // compressed codec with no decoder -- drop chunk
                 }
-                if (pcmData == null) return@execute
-                player.queueChunk(serverTimeMicros, pcmData)
+            } catch (e: Exception) {
+                Log.e(TAG, "Decode error, dropping chunk", e)
+                return
             }
+            if (pcmData == null) return
+            // Queue decoded PCM - SyncAudioPlayer handles threading internally
+            player.queueChunk(serverTimeMicros, pcmData)
         }
 
         override fun onVolumeChanged(volume: Int) {
@@ -1575,6 +1563,63 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
+    // ========================================================================
+    // Fast metadata path: queue_updated event from MA command channel (fix 8a)
+    // ========================================================================
+
+    /**
+     * Apply title/artist/album from a Music Assistant `queue_updated` event.
+     *
+     * Called from [MusicAssistantManager.queueUpdates] roughly 1 second before
+     * the SendSpin `server/state` broadcast with the same metadata. Updates
+     * [_playbackState] and [sendSpinPlayer]'s MediaItem so the lock screen,
+     * Android Auto, and Bluetooth AVRCP reflect the new track immediately.
+     *
+     * Artwork is intentionally NOT updated here; the SendSpin `server/state`
+     * that follows will carry a fully-resolved artwork_url and is the
+     * authoritative source for imagery. See fix 8b for URL-preferred artwork.
+     *
+     * Must run on the Main thread (serviceScope dispatcher is Main).
+     */
+    @OptIn(UnstableApi::class)
+    private fun applyFastQueueUpdate(update: QueueUpdate) {
+        // Skip if there is no new title information.
+        if (update.title == null && update.artist == null && update.album == null) return
+
+        val current = _playbackState.value
+
+        // Skip if the title is already up to date to avoid redundant writes.
+        // When SendSpin server/state arrives ~1s later with the same title,
+        // the withMetadata call below is a no-op (null-preserves semantics ensure
+        // no visible flicker). But we skip early here to avoid the sendSpinPlayer
+        // round-trip when nothing has changed.
+        if (update.title != null && update.title == current.title) return
+
+        Log.d(TAG, "Fast metadata via queue_updated: ${update.title} / ${update.artist} / ${update.album}")
+
+        _playbackState.value = current.withMetadata(
+            title = update.title,
+            artist = update.artist,
+            albumArtist = null,
+            album = update.album,
+            artworkUrl = null,  // preserve existing; server/state will update this
+            year = null,
+            albumTrack = null,
+            queueTrack = null,
+            totalTracks = null,
+            durationMs = update.durationMs ?: current.durationMs,
+            positionMs = current.positionMs,
+            playbackSpeed = current.playbackSpeed
+        )
+
+        sendSpinPlayer?.updateMediaItem(
+            title = update.title,
+            artist = update.artist,
+            album = update.album,
+            durationMs = update.durationMs ?: 0L
+        )
+    }
+
     /**
      * Fetches artwork from a URL using Coil.
      * Skipped in low memory mode.
@@ -1602,7 +1647,9 @@ class PlaybackService : MediaLibraryService() {
                     val bitmap = result.drawable.toBitmap()
                     val scaled = scaleArtwork(bitmap)
                     mainHandler.post {
-                        currentArtwork = scaled
+                        urlArtwork = scaled
+                        // URL is preferred over binary; push this to MediaSession
+                        // unconditionally.
                         updateMediaSessionArtwork(scaled)
                     }
                 }
@@ -1694,7 +1741,7 @@ class PlaybackService : MediaLibraryService() {
             title = state.title,
             artist = state.artist,
             album = state.album,
-            artwork = currentArtwork,
+            artwork = effectiveArtwork,
             artworkUri = state.artworkUrl?.let { Uri.parse(it) },
             albumArtist = state.albumArtist,
             year = state.year,
@@ -2954,6 +3001,9 @@ class PlaybackService : MediaLibraryService() {
             bundle.putInt("reconnect_attempts", client.getReconnectAttempts())
             bundle.putBoolean("clock_frozen", timeFilter.isFrozen)
             bundle.putDouble("static_delay_ms", timeFilter.staticDelayMs)
+            bundle.putDouble("auto_measured_delay_ms", timeFilter.autoMeasuredDelayMs)
+            bundle.putDouble("user_sync_offset_ms", timeFilter.userSyncOffsetMs)
+            bundle.putString("static_delay_source", timeFilter.staticDelaySource.name)
 
             // Connection health telemetry (issue #128). Keys left absent when
             // the underlying value is null so StatsViewModel can distinguish
@@ -2991,7 +3041,7 @@ class PlaybackService : MediaLibraryService() {
         val offsetMs = com.sendspindroid.UserSettings.getSyncOffsetMs()
         if (offsetMs != 0) {
             sendSpinClient?.getTimeFilter()?.let { timeFilter ->
-                timeFilter.staticDelayMs = offsetMs.toDouble()
+                timeFilter.setUserSyncOffsetMs(offsetMs.toDouble())
                 Log.i(TAG, "Applied manual sync offset from settings: ${offsetMs}ms")
             }
         }
@@ -3004,7 +3054,7 @@ class PlaybackService : MediaLibraryService() {
     fun updateSyncOffset(offsetMs: Int) {
         com.sendspindroid.UserSettings.setSyncOffsetMs(offsetMs)
         sendSpinClient?.getTimeFilter()?.let { timeFilter ->
-            timeFilter.staticDelayMs = offsetMs.toDouble()
+            timeFilter.setUserSyncOffsetMs(offsetMs.toDouble())
             Log.i(TAG, "Updated sync offset to: ${offsetMs}ms")
         }
     }
@@ -3872,25 +3922,9 @@ class PlaybackService : MediaLibraryService() {
         serviceScope.cancel()
         imageLoader?.shutdown()
 
-        // Submit final decoder release on the decode thread, then shut down
-        // the executor. Any tasks still queued here are for a connection that
-        // is already tearing down -- dropping them is fine.
-        decoderReady = false
-        decodeExecutor.execute {
-            audioDecoder?.release()
-            audioDecoder = null
-        }
-        decodeExecutor.shutdown()
-        try {
-            if (!decodeExecutor.awaitTermination(DECODE_EXECUTOR_SHUTDOWN_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                Log.w(TAG, "Decode executor did not terminate within ${DECODE_EXECUTOR_SHUTDOWN_TIMEOUT_MS}ms; forcing shutdown")
-                decodeExecutor.shutdownNow()
-            }
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            decodeExecutor.shutdownNow()
-        }
-
+        // Release audio decoder and player, then playback locks and foreground notification
+        audioDecoder?.release()
+        audioDecoder = null
         syncAudioPlayer?.release()
         syncAudioPlayer = null
         releasePlaybackLocks()
