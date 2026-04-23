@@ -26,6 +26,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -39,7 +40,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sendspindroid.ui.theme.NpMonoFamily
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.util.Locale
 
@@ -78,7 +78,7 @@ fun ProgressRail(
             return@LaunchedEffect
         }
         while (isActive) {
-            delay(250L)
+            withFrameMillis { }
             val elapsed = SystemClock.elapsedRealtime() - anchorTime
             displayPositionMs = (anchorPositionMs + elapsed).coerceIn(0L, durationMs)
         }

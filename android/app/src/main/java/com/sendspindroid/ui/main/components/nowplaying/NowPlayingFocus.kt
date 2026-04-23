@@ -191,12 +191,12 @@ private fun AlbumArt(
             contentDescription = null,
             modifier = Modifier
                 .size(620.dp)
-                .graphicsLayer { alpha = imageAlpha }
                 .shadow(
-                    elevation = if (paused) 40.dp else 60.dp,
+                    elevation = 60.dp,
                     shape = RoundedCornerShape(8.dp),
                     clip = false,
                 )
+                .graphicsLayer { alpha = imageAlpha }
                 .clip(RoundedCornerShape(8.dp)),
             contentScale = ContentScale.Crop,
             placeholder = painterResource(R.drawable.placeholder_album_simple),

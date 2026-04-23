@@ -99,6 +99,15 @@ fun NowPlayingScreen(
     val durationMs by viewModel.durationMs.collectAsStateWithLifecycle()
     val positionUpdatedAt by viewModel.positionUpdatedAt.collectAsStateWithLifecycle()
     val audioStreamSpec by viewModel.audioStreamSpec.collectAsStateWithLifecycle()
+    // SendSpin fires stream/end on pause, which zeroes the audio spec. Keep the
+    // last non-null value so the codec/bit-depth/sample-rate chips stay up while
+    // paused, and reset only when the track itself changes.
+    var stickyAudioSpec by remember(metadata.title, metadata.artist, metadata.album) {
+        mutableStateOf(audioStreamSpec)
+    }
+    LaunchedEffect(audioStreamSpec) {
+        if (audioStreamSpec != null) stickyAudioSpec = audioStreamSpec
+    }
     // Optimistic metadata update: when a queue item is tapped, update the UI
     // immediately with the item's metadata instead of waiting for the server round-trip.
     LaunchedEffect(queueViewModel) {
@@ -189,7 +198,7 @@ fun NowPlayingScreen(
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
-                    audioSpec = audioStreamSpec,
+                    audioSpec = stickyAudioSpec,
                     onPreviousClick = onPreviousClick,
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
