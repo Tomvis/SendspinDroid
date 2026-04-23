@@ -26,6 +26,7 @@ Music Assistant (MA) code sits in the tree but is unused on this fork. It compil
 - When merging from upstream, accept MA-touching changes as-is.
 - Pure MA code lives under `android/app/src/main/java/com/sendspindroid/musicassistant/` and `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/`.
 - Files that mix SendSpin + MA logic (review carefully on upstream merges): `MainActivity.kt`, `AppShell.kt`, `NowPlayingScreen.kt`, `NowPlayingHeadUnit.kt`, `UserSettings.kt`.
+- `AppShell.kt` has **two Scaffolds** branched on `isMaConnected`: the `if (!isMaConnected)` branch is the LIVE path on this fork; the `else` branch (MA-connected NavigationSuiteScaffold) is effectively dead code. Any shell-level UI work (topBar, padding, rail) must land on the non-MA path first. Mirror into the MA branch only when required to keep both compiling.
 
 ### Fork Policy: Android TV is the only target
 

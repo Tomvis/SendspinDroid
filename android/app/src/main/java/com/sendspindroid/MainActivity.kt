@@ -1934,6 +1934,21 @@ class MainActivity : AppCompatActivity() {
             Log.d(TAG, "Group name update received: $groupName")
             updateGroupName(groupName)
         }
+
+        // Handle audio stream spec updates (sample rate == 0 means no active stream)
+        val audioSampleRate = extras.getInt(PlaybackService.EXTRA_AUDIO_SAMPLE_RATE, 0)
+        val audioChannels = extras.getInt(PlaybackService.EXTRA_AUDIO_CHANNELS, 0)
+        val audioBitDepth = extras.getInt(PlaybackService.EXTRA_AUDIO_BIT_DEPTH, 0)
+        val audioCodec = extras.getString(PlaybackService.EXTRA_AUDIO_CODEC, "")
+        val spec = if (audioSampleRate > 0 && audioChannels > 0 && audioBitDepth > 0) {
+            com.sendspindroid.ui.main.AudioStreamSpec(
+                codec = audioCodec,
+                sampleRate = audioSampleRate,
+                channels = audioChannels,
+                bitDepth = audioBitDepth,
+            )
+        } else null
+        viewModel.updateAudioStreamSpec(spec)
     }
 
     /**

@@ -25,6 +25,21 @@ data class TrackMetadata(
 }
 
 /**
+ * Active audio stream specs, derived from the SendSpin stream/start config.
+ * Bitrate is computed from the raw PCM rate (sampleRate * channels * bitDepth)
+ * regardless of the wire codec, since that's the uncompressed bandwidth the
+ * device renders.
+ */
+data class AudioStreamSpec(
+    val codec: String,
+    val sampleRate: Int,
+    val channels: Int,
+    val bitDepth: Int,
+) {
+    val bitrateKbps: Int get() = sampleRate * channels * bitDepth / 1000
+}
+
+/**
  * Source for album artwork - can be binary data, URI, or URL.
  */
 sealed class ArtworkSource {

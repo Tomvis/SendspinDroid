@@ -98,6 +98,7 @@ fun NowPlayingScreen(
     val positionMs by viewModel.positionMs.collectAsStateWithLifecycle()
     val durationMs by viewModel.durationMs.collectAsStateWithLifecycle()
     val positionUpdatedAt by viewModel.positionUpdatedAt.collectAsStateWithLifecycle()
+    val audioStreamSpec by viewModel.audioStreamSpec.collectAsStateWithLifecycle()
     // Optimistic metadata update: when a queue item is tapped, update the UI
     // immediately with the item's metadata instead of waiting for the server round-trip.
     LaunchedEffect(queueViewModel) {
@@ -188,6 +189,7 @@ fun NowPlayingScreen(
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
+                    audioSpec = audioStreamSpec,
                     onPreviousClick = onPreviousClick,
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,

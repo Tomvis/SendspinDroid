@@ -636,10 +636,15 @@ private fun ConnectedShell(
     }
 
     if (!isMaConnected) {
-        // No MA -> just Scaffold with top bar, no bottom nav
+        // FORK POLICY: this is the LIVE path on this fork (MA features are inert;
+        // see CLAUDE.md). Any shell-level UI work (topBar, scaffold, padding) must
+        // land here. The `else` branch below is effectively dead on this fork.
+        val hideTopBar = formFactor == FormFactor.TV &&
+            selectedNavTab == null &&
+            currentDetail == null
         Scaffold(
             modifier = modifier,
-            topBar = topBar,
+            topBar = if (hideTopBar) ({}) else topBar,
             content = contentArea
         )
     } else {
@@ -708,8 +713,14 @@ private fun ConnectedShell(
                 }
             }
         ) {
+            // FORK POLICY: MA-connected branch. Inert on this fork — isMaConnected
+            // is never true in production. Any visible UI changes should be mirrored
+            // in the `if (!isMaConnected)` branch ABOVE, which is the live path.
+            val hideTopBar = formFactor == FormFactor.TV &&
+                selectedNavTab == null &&
+                currentDetail == null
             Scaffold(
-                topBar = topBar,
+                topBar = if (hideTopBar) ({}) else topBar,
                 content = contentArea
             )
         }

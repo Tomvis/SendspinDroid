@@ -85,6 +85,13 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     val playerColors: StateFlow<PlayerColors?> = _playerColors.asStateFlow()
 
     // ========================================================================
+    // Audio Stream Spec (codec, sample rate, bit depth, channels)
+    // ========================================================================
+
+    private val _audioStreamSpec = MutableStateFlow<AudioStreamSpec?>(null)
+    val audioStreamSpec: StateFlow<AudioStreamSpec?> = _audioStreamSpec.asStateFlow()
+
+    // ========================================================================
     // Volume State
     // ========================================================================
 
@@ -224,6 +231,14 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     fun clearArtwork() {
         _artworkSource.value = null
         _playerColors.value = null
+    }
+
+    // ========================================================================
+    // Audio Stream Spec Updates
+    // ========================================================================
+
+    fun updateAudioStreamSpec(spec: AudioStreamSpec?) {
+        _audioStreamSpec.value = spec
     }
 
     // ========================================================================

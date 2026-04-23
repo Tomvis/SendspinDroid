@@ -145,6 +145,9 @@ class PlaybackService : MediaLibraryService() {
     // in DRAINING state, before transitioning back to PLAYING.
     @Volatile private var pendingExitDraining = false
     private var currentCodec: String = "pcm"  // Track current stream codec for stats
+    private var currentSampleRate: Int = 0
+    private var currentChannels: Int = 0
+    private var currentBitDepth: Int = 0
 
     // Current server connection info (for MA integration)
     private var currentServerId: String? = null
@@ -611,6 +614,12 @@ class PlaybackService : MediaLibraryService() {
 
         // Session extras keys for volume (server → controller)
         const val EXTRA_VOLUME = "volume"
+
+        // Audio stream spec (populated on stream/start, cleared on stream/end)
+        const val EXTRA_AUDIO_CODEC = "audio_codec"
+        const val EXTRA_AUDIO_SAMPLE_RATE = "audio_sample_rate"
+        const val EXTRA_AUDIO_CHANNELS = "audio_channels"
+        const val EXTRA_AUDIO_BIT_DEPTH = "audio_bit_depth"
 
         // Session extras keys for group info
         const val EXTRA_GROUP_NAME = "group_name"
@@ -1210,16 +1219,21 @@ class PlaybackService : MediaLibraryService() {
                 // Coil's MaProxyImageFetcher can fetch via the WebRTC DataChannel.
                 val effectiveArtworkUrl = rewriteArtworkUrlForRemote(artworkUrl)
 
+                // Int fields: treat 0 / absent as "preserve prior" (matches how
+                // empty strings preserve prior via ifEmpty{null}). Follow-up
+                // metadata for the same track sometimes omits queue_track /
+                // total_tracks; without this guard withMetadata's `<= 0 -> null`
+                // branch silently clears them.
                 _playbackState.value = _playbackState.value.withMetadata(
                     title = title.ifEmpty { null },
                     artist = artist.ifEmpty { null },
                     albumArtist = albumArtist.ifEmpty { null },
                     album = album.ifEmpty { null },
                     artworkUrl = effectiveArtworkUrl.ifEmpty { null },
-                    year = year,
-                    albumTrack = albumTrack,
-                    queueTrack = queueTrack,
-                    totalTracks = totalTracks,
+                    year = year.takeIf { it > 0 },
+                    albumTrack = albumTrack.takeIf { it > 0 },
+                    queueTrack = queueTrack.takeIf { it > 0 },
+                    totalTracks = totalTracks.takeIf { it > 0 },
                     durationMs = durationMs,
                     positionMs = positionMs,
                     playbackSpeed = playbackSpeed
@@ -1326,6 +1340,10 @@ class PlaybackService : MediaLibraryService() {
                 // Safety net: if stream/start arrives before state/group, complete deferred exit
                 completePendingExitDraining()
                 currentCodec = codec
+                currentSampleRate = sampleRate
+                currentChannels = channels
+                currentBitDepth = bitDepth
+                broadcastSessionExtras()
 
                 // Release + recreate the decoder on the decode thread so this
                 // submission is ordered after any in-flight decode tasks for
@@ -1425,6 +1443,10 @@ class PlaybackService : MediaLibraryService() {
                 // Enter idle mode: keep AudioTrack alive and writing silence
                 // so DAC timestamps stay warm for the next stream start
                 syncAudioPlayer?.enterIdle()
+                currentSampleRate = 0
+                currentChannels = 0
+                currentBitDepth = 0
+                broadcastSessionExtras()
             }
         }
 
@@ -1761,6 +1783,12 @@ class PlaybackService : MediaLibraryService() {
 
             // Volume
             putInt(EXTRA_VOLUME, playbackState.volume)
+
+            // Audio stream spec (0 = not currently streaming)
+            putString(EXTRA_AUDIO_CODEC, currentCodec)
+            putInt(EXTRA_AUDIO_SAMPLE_RATE, currentSampleRate)
+            putInt(EXTRA_AUDIO_CHANNELS, currentChannels)
+            putInt(EXTRA_AUDIO_BIT_DEPTH, currentBitDepth)
 
             // Sync offset (included here to avoid bare-bundle overwrites that
             // would clobber volume, metadata, and connection state)
