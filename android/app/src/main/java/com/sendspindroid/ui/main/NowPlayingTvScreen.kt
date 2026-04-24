@@ -1,6 +1,7 @@
 package com.sendspindroid.ui.main
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -49,30 +50,40 @@ internal fun NowPlayingTv(
 ) {
     val accent = AccentColor
     SendSpinTvTheme {
-        // Design is authored in pixels at 1920x1080. On Android TV the platform
-        // reports xhdpi (density=2.0) at 1080p, which would double every dp/sp
-        // away from the spec. Pin density to 1.0 here so 1dp = 1px = 1sp, keeping
-        // the user's fontScale preference intact.
-        val platformDensity = LocalDensity.current
-        CompositionLocalProvider(
-            LocalDensity provides Density(density = 1f, fontScale = platformDensity.fontScale),
-        ) {
-            Box(modifier = modifier.fillMaxSize()) {
-                if (metadata.isEmpty) {
-                    NowPlayingIdleScreen(accent = accent, groupLabel = groupName)
-                } else {
-                    NowPlayingFocus(
-                        metadata = metadata,
-                        artworkSource = artworkSource,
-                        positionMs = positionMs,
-                        durationMs = durationMs,
-                        positionUpdatedAt = positionUpdatedAt,
-                        isPlaying = isPlaying,
-                        accent = accent,
-                        groupLabel = groupName,
-                        audioSpec = audioSpec,
-                        onSourceBadgeClick = onSwitchGroupClick,
-                    )
+        // Design is authored at 1920x1080 in pixel units. Instead of pinning
+        // density to 1.0 (which assumed a 1080p window), scale density so that
+        // our dp values map to the "1920x1080 design canvas" regardless of the
+        // actual surface size Android hands us. On a 1080p window this
+        // resolves to density=1.0 (identical to before). On a 4K window it
+        // becomes density=2.0, keeping every element's on-screen proportion
+        // identical while taking advantage of the extra pixels. fontScale is
+        // preserved from the platform so user accessibility settings apply.
+        BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+            val designScale = minOf(
+                constraints.maxWidth.toFloat() / 1920f,
+                constraints.maxHeight.toFloat() / 1080f,
+            ).coerceAtLeast(0.1f)
+            val platformFontScale = LocalDensity.current.fontScale
+            CompositionLocalProvider(
+                LocalDensity provides Density(density = designScale, fontScale = platformFontScale),
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    if (metadata.isEmpty) {
+                        NowPlayingIdleScreen(accent = accent, groupLabel = groupName)
+                    } else {
+                        NowPlayingFocus(
+                            metadata = metadata,
+                            artworkSource = artworkSource,
+                            positionMs = positionMs,
+                            durationMs = durationMs,
+                            positionUpdatedAt = positionUpdatedAt,
+                            isPlaying = isPlaying,
+                            accent = accent,
+                            groupLabel = groupName,
+                            audioSpec = audioSpec,
+                            onSourceBadgeClick = onSwitchGroupClick,
+                        )
+                    }
                 }
             }
         }

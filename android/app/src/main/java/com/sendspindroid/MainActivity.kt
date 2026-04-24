@@ -33,6 +33,7 @@ import android.app.UiModeManager
 import android.annotation.TargetApi
 import android.graphics.RenderEffect
 import android.graphics.Shader
+import android.view.Display
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.LayoutInflater
@@ -525,6 +526,7 @@ class MainActivity : AppCompatActivity() {
         // Handle window insets for edge-to-edge display
         setupWindowInsets()
         applyFullScreenMode()
+        requestLargestDisplayMode()
 
         // Set up the toolbar as the action bar
         setSupportActionBar(binding.toolbar)
@@ -698,6 +700,45 @@ class MainActivity : AppCompatActivity() {
 
     /** Convert dp to pixels */
     private fun Int.dpToPx(): Int = (this * resources.displayMetrics.density).toInt()
+
+    /**
+     * Ask the WindowManager to pick the highest-resolution display mode the
+     * attached display supports at (or near) the current refresh rate. On a
+     * 4K Android TV this can promote the app window from 1080p to 2160p;
+     * combined with the resolution-independent Compose layout, the Now
+     * Playing surface then renders natively at 4K instead of being upscaled
+     * by the TV's hardware scaler. No-op if a larger mode isn't available or
+     * the platform refuses the switch.
+     */
+    private fun requestLargestDisplayMode() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val display = display ?: return
+        val modes = display.supportedModes
+        if (modes.isEmpty()) return
+        val current = display.mode
+        val sameRefresh = modes.filter {
+            kotlin.math.abs(it.refreshRate - current.refreshRate) < 1f
+        }
+        val pool = if (sameRefresh.isNotEmpty()) sameRefresh else modes.toList()
+        val best = pool.maxByOrNull { it.physicalWidth.toLong() * it.physicalHeight } ?: return
+        val bestPixels = best.physicalWidth.toLong() * best.physicalHeight
+        val currentPixels = current.physicalWidth.toLong() * current.physicalHeight
+        if (bestPixels <= currentPixels) {
+            AppLog.App.i(
+                "Display mode: keeping ${current.physicalWidth}x${current.physicalHeight}@" +
+                        "${current.refreshRate}Hz (already largest available at this rate)"
+            )
+            return
+        }
+        AppLog.App.i(
+            "Requesting display mode ${best.physicalWidth}x${best.physicalHeight}@" +
+                    "${best.refreshRate}Hz (was ${current.physicalWidth}x${current.physicalHeight}@" +
+                    "${current.refreshRate}Hz)"
+        )
+        val params = window.attributes
+        params.preferredDisplayModeId = best.modeId
+        window.attributes = params
+    }
 
     /**
      * Apply full screen (immersive) mode based on user setting.

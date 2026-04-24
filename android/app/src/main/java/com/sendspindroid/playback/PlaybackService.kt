@@ -1044,6 +1044,11 @@ class PlaybackService : MediaLibraryService() {
                 lastTrackTitle = null
                 urlArtwork = null
                 binaryArtwork = null
+                // Reset stream spec here (rather than on every stream/end, which
+                // fires on pause and would blank the UI chips mid-session).
+                currentSampleRate = 0
+                currentChannels = 0
+                currentBitDepth = 0
 
                 // Clear lock screen metadata
                 forwardingPlayer?.clearMetadata()
@@ -1434,11 +1439,14 @@ class PlaybackService : MediaLibraryService() {
                 Log.i(TAG, "[cmd-trace] T3 onStreamEnd.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
                 Log.i(TAG, "Stream end - server terminated playback")
                 // Enter idle mode: keep AudioTrack alive and writing silence
-                // so DAC timestamps stay warm for the next stream start
+                // so DAC timestamps stay warm for the next stream start.
+                //
+                // Deliberately do NOT zero currentSampleRate/Channels/BitDepth here.
+                // SendSpin fires stream/end whenever playback pauses, and the Now
+                // Playing UI wants the codec/bit-depth/sample-rate chips to remain
+                // visible through a pause. The spec is cleared only on disconnect
+                // (see ConnectionState.Disconnected handler).
                 syncAudioPlayer?.enterIdle()
-                currentSampleRate = 0
-                currentChannels = 0
-                currentBitDepth = 0
                 broadcastSessionExtras()
             }
         }
