@@ -4,7 +4,6 @@ import com.sendspindroid.sendspin.SendspinTimeFilter
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.TimeMeasurement
 import com.sendspindroid.shared.log.Log
-import kotlin.math.sqrt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -12,13 +11,31 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+/**
+ * Drives the NTP-style time-sync burst loop and feeds its filter.
+ *
+ * Threading: [start] launches the burst-send loop on the supplied scope
+ * (in production a dedicated single-thread dispatcher). [onServerTime]
+ * is called from the WebSocket transport's receive thread:
+ *   - During a burst window, replies are queued under
+ *     `pendingBurstMeasurements` and processed later on the burst-loop
+ *     thread.
+ *   - Outside a burst window, the reply is fed straight to the filter
+ *     on the receive thread.
+ *
+ * The two paths can therefore both call `timeFilter.addMeasurement` on
+ * different threads. That is safe by design: the filter's internal
+ * mutex serialises both paths, and out-of-burst replies are not in
+ * competition with any burst's best-of-RTT selection (no burst is
+ * active by definition).
+ */
 class TimeSyncManager(
     private val timeFilter: SendspinTimeFilter,
     private val sendClientTime: () -> Unit,
+    private val onMeasurementApplied: () -> Unit = {},
     private val tag: String = "TimeSyncManager"
 ) {
     companion object {
-        private const val BASE_MEASUREMENT_VARIANCE = 1_000_000.0
         private const val MAX_ACCEPTABLE_RTT_US = 10_000_000L
         private const val RTT_HISTORY_SIZE = 15
         private const val BURST_COUNT_HIGH_JITTER = 15
@@ -84,6 +101,15 @@ class TimeSyncManager(
         }
     }
 
+    /**
+     * Feed a `server/time` measurement to the manager.
+     *
+     * @return `true` if the measurement was buffered for the in-progress
+     *   burst's best-of-RTT selection. `false` if it was processed
+     *   immediately (out-of-burst path), dropped as stale, or arrived
+     *   while the manager is stopped. Callers that just want to forward
+     *   the measurement can ignore the return value.
+     */
     fun onServerTime(measurement: TimeMeasurement): Boolean {
         if (!running) return false
 
@@ -106,6 +132,7 @@ class TimeSyncManager(
             Log.v(tag, "Time sync: offset=${timeFilter.offsetMicros}μs, error=${timeFilter.errorMicros}μs")
         }
 
+        onMeasurementApplied()
         return false
     }
 
@@ -170,12 +197,10 @@ class TimeSyncManager(
 
             pendingBurstMeasurements.clear()
         }
+        onMeasurementApplied()
     }
 
-    private fun computeMaxError(rtt: Long): Long {
-        val rttHalf = rtt.toDouble() / 2.0
-        return sqrt(BASE_MEASUREMENT_VARIANCE + rttHalf * rttHalf).toLong().coerceAtLeast(1L)
-    }
+    private fun computeMaxError(rtt: Long): Long = (rtt / 2L).coerceAtLeast(1L)
 
     private fun recordRtt(rtt: Long) {
         rttHistory[rttHistoryIndex] = rtt

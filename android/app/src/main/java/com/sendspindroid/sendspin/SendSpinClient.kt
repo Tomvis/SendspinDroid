@@ -89,6 +89,13 @@ class SendSpinClient(
         private const val MAX_RECONNECT_DELAY_MS = 10000L // 10 seconds (was 30s)
         private const val HIGH_POWER_RECONNECT_DELAY_MS = 30_000L // 30s steady-state for high power mode
 
+        // Hard ceiling on reconnect attempts per cycle. At the current schedule
+        // (exp backoff for 5, then 30s each) this caps the total try-window at
+        // about 7m45s. Beyond that we surface the failure to the UI via
+        // onDisconnected(wasReconnectExhausted=true) and stop scheduling attempts.
+        // Reset to 0 on every successful handshake.
+        private const val MAX_TOTAL_RECONNECT_ATTEMPTS = 20
+
         // Stall watchdog: while connected+handshake-complete, if no bytes arrive for
         // this long, force-close the transport so the existing reconnect path kicks in.
         // Shorter than Ktor's 30s ping-timeout to beat buffer drain.
@@ -152,6 +159,15 @@ class SendSpinClient(
         fun onNetworkChanged()
         fun onReconnecting(attempt: Int, serverName: String)
         fun onReconnected()
+
+        /**
+         * Called when audio output should be silenced or unsilenced because
+         * the client cannot maintain sync. Per Sendspin spec, "error" state
+         * mutes audio while continuing to drain the buffer. Implementations
+         * should forward this to the audio sink. Default no-op for callers
+         * that don't render audio.
+         */
+        fun onSyncMuteChanged(muted: Boolean) {}
     }
 
     /**
@@ -201,6 +217,7 @@ class SendSpinClient(
     private var serverPath: String? = null
     private var remoteId: String? = null
     private var serverName: String? = null
+    private var serverId: String? = null
 
     // Proxy authentication state
     private var authToken: String? = null
@@ -340,14 +357,23 @@ class SendSpinClient(
 
     override fun onHandshakeComplete(serverName: String, serverId: String) {
         this.serverName = serverName
+        this.serverId = serverId
 
         // Check if this is a reconnection
         val wasReconnecting = timeFilter.isFrozen || reconnecting.get()
 
         if (timeFilter.isFrozen) {
-            timeFilter.thaw()
-            Log.i(TAG, "Time filter thawed after reconnection - re-syncing with increased covariance")
+            val thawed = timeFilter.thaw(serverName, serverId)
+            if (thawed) {
+                Log.i(TAG, "Time filter thawed after reconnection - re-syncing with increased covariance")
+            } else {
+                timeFilter.resetAndDiscard()
+                resetSyncStateTracking()
+                Log.i(TAG, "Server identity changed during reconnect; discarded frozen sync state")
+            }
         }
+
+        evaluateAndPublishSyncState()
 
         // Capture telemetry for the structured [reconnect-ok] line before resetting
         // current-cycle counters. Issue #128.
@@ -461,6 +487,10 @@ class SendSpinClient(
 
     override fun onSyncOffsetApplied(offsetMs: Double, source: String) {
         callback.onSyncOffsetApplied(offsetMs, source)
+    }
+
+    override fun onSyncMuteChanged(muted: Boolean) {
+        callback.onSyncMuteChanged(muted)
     }
 
     // ========== Public API ==========
@@ -685,6 +715,7 @@ class SendSpinClient(
         handshakeComplete = false
         awaitingAuthResponse = false
         timeFilter.reset()
+        resetSyncStateTracking()
 
         // Cancel any pending reconnect from previous connection attempt
         reconnectJob?.cancel()
@@ -1044,6 +1075,26 @@ class SendSpinClient(
             return
         }
 
+        // Hard cap (L-5 fix): after MAX_TOTAL_RECONNECT_ATTEMPTS, stop scheduling
+        // attempts and surface failure to the UI. The user can manually reconnect
+        // (which clears reconnectAttempts and restarts the cycle).
+        val prior = reconnectAttempts.get()
+        if (prior >= MAX_TOTAL_RECONNECT_ATTEMPTS) {
+            Log.w(TAG, "Reconnect cap reached ($prior >= $MAX_TOTAL_RECONNECT_ATTEMPTS) - giving up")
+            AppLog.Network.w(
+                "[reconnect-exhausted] cap=$MAX_TOTAL_RECONNECT_ATTEMPTS " +
+                    "attempts_total=${reconnectAttemptsTotal.get()} mode=$connectionMode"
+            )
+            reconnecting.set(false)
+            reconnectJob?.cancel()
+            reconnectJob = null
+            _connectionState.value = ConnectionState.Error(
+                "Couldn't reconnect to $savedServerName after $MAX_TOTAL_RECONNECT_ATTEMPTS attempts"
+            )
+            callback.onDisconnected(wasUserInitiated = false, wasReconnectExhausted = true)
+            return
+        }
+
         val attempts = reconnectAttempts.incrementAndGet()
         // Lifetime counter survives across reconnect cycles. Issue #128.
         reconnectAttemptsTotal.incrementAndGet()
@@ -1078,9 +1129,10 @@ class SendSpinClient(
             return
         }
 
-        // On first reconnection attempt, freeze the time filter
+        // On first reconnection attempt, freeze the time filter so a
+        // successful reconnect to the same server can restore sync.
         if (attempts == 1) {
-            timeFilter.freeze()
+            timeFilter.freeze(serverName, serverId)
             Log.i(TAG, "Time filter frozen for reconnection (had ${timeFilter.measurementCountValue} measurements)")
         }
         stopStallWatchdog()  // watchdog restarts on next successful handshake via onHandshakeComplete
@@ -1173,7 +1225,12 @@ class SendSpinClient(
             cause is UnknownHostException -> false
             cause is SSLHandshakeException -> false
             message.contains("refused") -> false
-            else -> true
+            else -> {
+                // Default to NOT recoverable. A leaked programming bug (NPE, parser
+                // RuntimeException, etc.) must not trigger endless reconnect loops.
+                Log.d(TAG, "isRecoverableError: unrecognized throwable ${cause::class.simpleName} msg='$message' -> unrecoverable")
+                false
+            }
         }
     }
 

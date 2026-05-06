@@ -362,7 +362,6 @@ class SyncAudioPlayer(
      */
     private data class AudioChunk(
         val serverTimeMicros: Long,
-        val clientPlayTimeMicros: Long,
         val pcmData: ByteArray,
         val sampleCount: Int
     )
@@ -430,6 +429,14 @@ class SyncAudioPlayer(
     private var consecutiveValidTimestamps = 0       // counts consecutive valid getTimestamp() reads
     private var dacTimestampsStable = false           // true once TIMESTAMP_STABLE_READS reached
 
+    // DAC-aware alignment wait: rate-limit the per-iteration "waiting for alignment"
+    // log so a 2-12s wait emits ~3-13 lines instead of 200-1200. Entry log fires once
+    // when we first enter alignment wait; progress logs fire at 1s intervals while
+    // still waiting; exit log fires when alignment completes. Both fields reset to 0L
+    // on successful transition to PLAYING so the next alignment wait emits fresh logs.
+    @Volatile private var alignmentWaitStartedAtUs: Long = 0L
+    @Volatile private var alignmentWaitLastLoggedUs: Long = 0L
+
     // DRAINING state tracking - for seamless reconnection
     private var drainingStartTimeUs: Long = 0            // When we entered DRAINING state
     private var lastBufferWarningTimeUs: Long = 0        // Rate limiting for buffer warnings
@@ -481,6 +488,8 @@ class SyncAudioPlayer(
     private var lastBaselineRefreshUs = 0L        // When baseline was last refreshed
     private var samplesReadSinceStart = 0L        // Total samples consumed since playback started
     @Volatile private var syncErrorUs = 0L        // Current sync error (for display)
+
+    @Volatile private var syncMuted: Boolean = false
 
     // 2D Kalman filter for sync error smoothing (tracks offset + drift)
     // Based on Python reference implementation for optimal noise filtering
@@ -832,6 +841,21 @@ class SyncAudioPlayer(
         // AudioTrack plays at full volume; device media stream handles attenuation.
         // This follows Spotify/Plexamp best practices for hardware volume button support.
         AppLog.Audio.d("setVolume called (ignored - using device volume): $volume")
+    }
+
+    /**
+     * Silence audio output without disturbing buffer drain rate or DAC
+     * timing. Used by the protocol layer when reporting `state="error"`
+     * to the server: per Sendspin spec, the client must mute its output
+     * and continue buffering until it can resume synchronized playback.
+     *
+     * Calling with `false` resumes pass-through audio on the next chunk.
+     * Idempotent.
+     */
+    fun setSyncMuted(muted: Boolean) {
+        if (syncMuted == muted) return
+        syncMuted = muted
+        AppLog.Audio.i("Sync mute=$muted")
     }
 
     /**
@@ -1339,13 +1363,8 @@ class SyncAudioPlayer(
                     val silenceBytes = gapFrames * bytesPerFrame
                     val silenceData = ByteArray(silenceBytes)  // Zeros = silence
 
-                    // Convert the silence's server time to client time
-                    val silenceClientPlayTime = timeFilter.serverToClient(expectedNext)
-
-                    // Queue the silence chunk BEFORE the current chunk
                     val silenceChunk = AudioChunk(
                         serverTimeMicros = expectedNext,
-                        clientPlayTimeMicros = silenceClientPlayTime,
                         pcmData = silenceData,
                         sampleCount = gapFrames
                     )
@@ -1407,13 +1426,10 @@ class SyncAudioPlayer(
             return
         }
 
-        // Convert server time to client time
         val clientPlayTime = timeFilter.serverToClient(workingServerTimeMicros)
 
-        // Create and queue the chunk
         val chunk = AudioChunk(
             serverTimeMicros = workingServerTimeMicros,
-            clientPlayTimeMicros = clientPlayTime,
             pcmData = workingPcmData,
             sampleCount = sampleCount
         )
@@ -1601,7 +1617,19 @@ class SyncAudioPlayer(
             // Queue head is too far ahead of where the DAC needs it -- wait for
             // the DAC to catch up by playing through existing silence. Without
             // this gate, starting with startErr=200ms bakes in a permanent offset.
-            AppLog.Sync.d("DAC-aware start: waiting for alignment, startErr=${startErrUs/1000}ms > ${START_ALIGN_TOL_US/1000}ms")
+            //
+            // This branch runs every playback-loop iteration (~10ms) while we wait.
+            // Rate-limit the log: first-time entry, then once per second progress,
+            // then an exit log on transition to PLAYING. See alignmentWait* fields.
+            if (alignmentWaitStartedAtUs == 0L) {
+                alignmentWaitStartedAtUs = nowMicros
+                alignmentWaitLastLoggedUs = nowMicros
+                AppLog.Sync.d("DAC-aware start: waiting for alignment, startErr=${startErrUs/1000}ms > ${START_ALIGN_TOL_US/1000}ms")
+            } else if (nowMicros - alignmentWaitLastLoggedUs > 1_000_000L) {
+                alignmentWaitLastLoggedUs = nowMicros
+                val elapsedMs = (nowMicros - alignmentWaitStartedAtUs) / 1000
+                AppLog.Sync.d("DAC-aware start: still waiting, startErr=${startErrUs/1000}ms, elapsed=${elapsedMs}ms")
+            }
             return true
         }
 
@@ -1649,6 +1677,16 @@ class SyncAudioPlayer(
             "kalmanOffset=${timeFilter.offsetMicros/1000}ms, " +
             "kalmanMeasurements=${timeFilter.measurementCountValue}, " +
             "bufferedChunks=${chunkQueue.size}, bufferedMs=$bufferedMs")
+
+        // Exit log for the rate-limited alignment-wait path: emit total elapsed
+        // so ops can see how long the DAC took to catch up. Reset both fields
+        // so the next alignment cycle (e.g. after a track change) starts fresh.
+        if (alignmentWaitStartedAtUs != 0L) {
+            val waitElapsedMs = (nowMicros - alignmentWaitStartedAtUs) / 1000
+            AppLog.Sync.i("DAC-aware start: alignment complete after ${waitElapsedMs}ms wait")
+            alignmentWaitStartedAtUs = 0L
+            alignmentWaitLastLoggedUs = 0L
+        }
 
         setPlaybackState(PlaybackState.PLAYING)
         AppLog.Sync.i("DAC-aware start gating complete: now PLAYING")
@@ -2342,6 +2380,10 @@ class SyncAudioPlayer(
         totalQueuedSamples.addAndGet(-chunk.sampleCount.toLong())
 
         val track = audioSink ?: return
+
+        if (syncMuted && chunk.pcmData.isNotEmpty()) {
+            chunk.pcmData.fill(0)
+        }
 
         // Track samples consumed for sync error calculation
         samplesReadSinceStart += chunk.sampleCount

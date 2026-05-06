@@ -11,10 +11,17 @@ import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 class SendspinTimeFilterTest {
+
+    private companion object {
+        // Stable identity used by tests that exercise freeze/thaw but do not
+        // care about cross-server detection. The dedicated identity tests use
+        // their own literals.
+        const val TEST_SERVER_NAME = "TestServer"
+        const val TEST_SERVER_ID = "test-server-id"
+    }
 
     private lateinit var filter: SendspinTimeFilter
 
@@ -229,7 +236,7 @@ class SendspinTimeFilterTest {
         }
         assertTrue(filter.isReady)
 
-        filter.freeze()
+        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
         assertTrue(filter.isFrozen)
     }
 
@@ -238,7 +245,7 @@ class SendspinTimeFilterTest {
         filter.addMeasurement(10_000L, 3000L, 1_000_000L)
         assertFalse(filter.isReady)
 
-        filter.freeze()
+        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
         assertFalse(filter.isFrozen)
     }
 
@@ -251,12 +258,13 @@ class SendspinTimeFilterTest {
         val offsetBeforeFreeze = filter.offsetMicros
         val errorBeforeFreeze = filter.errorMicros
 
-        filter.freeze()
+        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
         filter.reset()
 
         assertFalse(filter.isReady)
 
-        filter.thaw()
+        val restored = filter.thaw(TEST_SERVER_NAME, TEST_SERVER_ID)
+        assertTrue("thaw with matching identity should restore", restored)
 
         // Offset should be restored
         assertEquals(offsetBeforeFreeze, filter.offsetMicros)
@@ -268,6 +276,101 @@ class SendspinTimeFilterTest {
         assertFalse("Frozen state should be cleared after thaw", filter.isFrozen)
     }
 
+    // --- thaw() server-identity guard ---
+
+    @Test
+    fun thaw_withMatchingIdentity_restoresState() {
+        for (i in 1..5) {
+            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
+        }
+        val offsetBefore = filter.offsetMicros
+        filter.freeze("ServerA", "server-id-A")
+        filter.reset()
+
+        val restored = filter.thaw("ServerA", "server-id-A")
+
+        assertTrue("thaw with matching identity should return true", restored)
+        assertEquals("Offset should be restored", offsetBefore, filter.offsetMicros)
+        assertFalse("Frozen state should be cleared after successful thaw", filter.isFrozen)
+    }
+
+    @Test
+    fun thaw_withDifferentServerName_doesNotRestoreAndDiscards() {
+        // Cross-server reconnect: freeze on A, then thaw against B.
+        // We must NOT restore A's clock estimate as if it were B's.
+        for (i in 1..5) {
+            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
+        }
+        filter.freeze("ServerA", "server-id-A")
+        filter.reset()
+
+        val restored = filter.thaw("ServerB", "server-id-A")
+
+        assertFalse("thaw with different server name should return false", restored)
+        assertEquals("Offset should NOT be restored", 0L, filter.offsetMicros)
+        assertFalse(
+            "Frozen state should be discarded so a later thaw cannot restore it",
+            filter.isFrozen
+        )
+        // Re-thaw with the original identity should ALSO fail, proving the
+        // discard is real (not just isFrozen flipping because nothing was
+        // captured in the first place).
+        assertFalse(
+            "Frozen state must be truly gone, not merely flagged",
+            filter.thaw("ServerA", "server-id-A")
+        )
+    }
+
+    @Test
+    fun thaw_withDifferentServerId_doesNotRestoreAndDiscards() {
+        // Same display name, different server id.
+        for (i in 1..5) {
+            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
+        }
+        filter.freeze("HomeStereo", "uuid-old")
+        filter.reset()
+
+        val restored = filter.thaw("HomeStereo", "uuid-new")
+
+        assertFalse("thaw with different server id should return false", restored)
+        assertEquals("Offset should NOT be restored", 0L, filter.offsetMicros)
+        assertFalse(filter.isFrozen)
+        assertFalse(
+            "Frozen state must be truly gone, not merely flagged",
+            filter.thaw("HomeStereo", "uuid-old")
+        )
+    }
+
+    // --- thaw() must restore lastUpdateTime ---
+
+    @Test
+    fun thaw_restoresLastUpdateTime() {
+        // After freeze -> reset -> thaw, the filter must remember its last
+        // measurement time. If it does not, the next addMeasurement computes
+        // dt against zero (epoch) and explodes the covariance prediction.
+        // Use realistic clientTimeMicros (System.nanoTime()/1000-scale) so a
+        // lost lastUpdateTime is visible.
+        val baseTimeUs = 1_000_000_000_000L  // ~11.5 days uptime
+        for (i in 1..10) {
+            filter.addMeasurement(10_000L, 3000L, baseTimeUs + i * 1_000_000L)
+        }
+        val lastUpdateBefore = filter.lastUpdateTimeUs
+        assertTrue("Sanity: lastUpdateTime should be set", lastUpdateBefore > 0L)
+
+        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
+        filter.reset()
+        assertEquals("reset() zeros lastUpdateTime", 0L, filter.lastUpdateTimeUs)
+
+        val restored = filter.thaw(TEST_SERVER_NAME, TEST_SERVER_ID)
+        assertTrue("thaw with matching identity should restore", restored)
+
+        assertEquals(
+            "thaw() must restore lastUpdateTime so first post-thaw dt is sane",
+            lastUpdateBefore,
+            filter.lastUpdateTimeUs
+        )
+    }
+
     // --- resetAndDiscard ---
 
     @Test
@@ -275,7 +378,7 @@ class SendspinTimeFilterTest {
         for (i in 1..5) {
             filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
         }
-        filter.freeze()
+        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
         assertTrue(filter.isFrozen)
 
         filter.resetAndDiscard()
@@ -345,63 +448,63 @@ class SendspinTimeFilterTest {
         )
     }
 
-    // --- Stability score (innovation variance ratio) ---
+    // --- Upstream-aligned algorithm behaviors ---
 
     @Test
-    fun stabilityScore_consistentMeasurements_convergesToOne() {
-        // Feed many consistent measurements so the filter converges fully.
-        // With correct innovation normalization (using predicted P00),
-        // the stability score (mean normalized innovation) should settle near 1.0.
-        // The stale-p00 bug caused this to be systematically > 1.0 because the
-        // denominator was too small (prior posterior instead of predicted covariance).
-        val targetOffset = 50_000L  // 50ms
-        val maxError = 5000L
+    fun secondMeasurement_initializesDriftFromFiniteDifference() {
+        // Two measurements 1s apart with offset increasing by 100us.
+        // Expected drift = 100 / 1_000_000 = 1e-4 = 100 ppm.
+        filter.addMeasurement(0L, 5000L, 1_000_000L)
+        filter.addMeasurement(100L, 5000L, 2_000_000L)
+        assertEquals(100.0, filter.driftPpm, 0.5)
+    }
 
-        // Feed enough measurements to fill the innovation window and let
-        // the adaptive process noise settle. INNOVATION_WINDOW_SIZE is 20,
-        // so we need well beyond that for convergence.
-        for (i in 1..60) {
-            filter.addMeasurement(targetOffset, maxError, i * 1_000_000L)
+    @Test
+    fun stepChange_afterConvergence_recoversViaForgetting() {
+        // Drive the filter through MIN_SAMPLES_FOR_FORGETTING (=100) at offset=0,
+        // then introduce a sustained 50ms step change. The filter must adopt
+        // the new offset given enough measurements; the IQR pre-rejection plus
+        // force-accept-after-3 mechanism gates the rate at which the step
+        // reaches the Kalman update, so allow a generous recovery window.
+        for (i in 1..100) {
+            filter.addMeasurement(0L, 3000L, i * 1_000_000L)
+        }
+        val errorBeforeStep = filter.errorMicros
+        assertTrue("Sanity: filter should be converged before step", errorBeforeStep < 10_000L)
+
+        val stepOffset = 50_000L
+        val baseTime = 101_000_000L
+        for (i in 0 until 30) {
+            filter.addMeasurement(stepOffset, 3000L, baseTime + i * 1_000_000L)
         }
 
-        val score = filter.stability
-        assertTrue(
-            "Stability score should converge near 1.0 with consistent measurements, " +
-                    "but was $score (> 1.0 suggests stale covariance in innovation normalization)",
-            score in 0.5..1.5
+        assertEquals(
+            "Filter must adopt the new offset within 30 post-step measurements",
+            stepOffset.toDouble(),
+            filter.offsetMicros.toDouble(),
+            10_000.0
         )
     }
 
     @Test
-    fun stabilityScore_afterReset_isOne() {
-        // Feed some measurements then reset
+    fun smallEarlyOutlier_doesNotTriggerForgetting() {
+        // Before MIN_SAMPLES_FOR_FORGETTING (=100), a single large residual
+        // must NOT inflate covariance via the forgetting branch. The standard
+        // Kalman gain absorbs it on its own; if forgetting fired, a few early
+        // outliers could wipe the model and prevent initial convergence.
         for (i in 1..10) {
-            filter.addMeasurement(10_000L, 5000L, i * 1_000_000L)
+            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
         }
-        filter.reset()
-        assertEquals(1.0, filter.stability, 0.001)
-    }
-
-    @Test
-    fun stabilityScore_noisyMeasurements_remainsReasonable() {
-        // Feed measurements with moderate noise (simulating real-world jitter).
-        // Stability score should still be in a reasonable range, not diverging.
-        val baseOffset = 50_000L
-        val maxError = 5000L
-        val jitterAmplitude = 3000L  // Within measurement uncertainty
-
-        for (i in 1..80) {
-            // Alternate jitter pattern: +/- jitterAmplitude
-            val jitter = if (i % 2 == 0) jitterAmplitude else -jitterAmplitude
-            filter.addMeasurement(baseOffset + jitter, maxError, i * 1_000_000L)
+        // Drive a single outlier through the IQR pre-rejection by exhausting
+        // the rejected-count force-accept path: 3 IQR-rejected outliers, then
+        // the 4th is force-accepted into the Kalman update. Since count is
+        // still well under MIN_SAMPLES_FOR_FORGETTING, forgetting must stay off.
+        for (i in 11..14) {
+            filter.addMeasurement(500_000L, 3000L, i * 1_000_000L)
         }
-
-        val score = filter.stability
-        assertTrue(
-            "Stability score should remain in reasonable range with noisy measurements, " +
-                    "but was $score",
-            score in 0.1..5.0
-        )
+        // Filter should still produce a finite, reasonable error rather than
+        // an inflated value from premature forgetting.
+        assertTrue("Filter must remain numerically sane", filter.errorMicros.toLong() < 10_000_000L)
     }
 
     // --- H-01: Thread safety ---
@@ -414,7 +517,6 @@ class SendspinTimeFilterTest {
         val iterations = 1000
         val failed = AtomicBoolean(false)
         val writerDone = AtomicBoolean(false)
-        val readerCount = AtomicInteger(0)
 
         // Seed the filter so it's ready
         filter.addMeasurement(10_000L, 5000L, 1_000_000L)
@@ -433,12 +535,15 @@ class SendspinTimeFilterTest {
             }
         }
 
-        // Reader thread: continuously reads serverToClient
+        // Reader thread: continuously reads serverToClient. Whether the
+        // reader gets time-sliced before the writer completes is a property
+        // of the OS scheduler, not of the production code -- don't assert
+        // on iteration count. Any read that does happen must produce a
+        // sane result (Long, no exception, within plausible bounds).
         val reader = thread(name = "kalman-reader") {
             try {
                 while (!writerDone.get()) {
                     val result = filter.serverToClient(100_000_000L)
-                    readerCount.incrementAndGet()
                     // Result should be roughly 100M - 10K = 99,990,000
                     // Allow wide tolerance since filter state is changing concurrently
                     if (result < 0 || result > 200_000_000L) {
@@ -454,7 +559,6 @@ class SendspinTimeFilterTest {
         reader.join(5000)
 
         assertFalse("Concurrent access should not cause exceptions or invalid values", failed.get())
-        assertTrue("Reader should have executed multiple times", readerCount.get() > 10)
     }
 
     @Test
@@ -567,9 +671,9 @@ class SendspinTimeFilterTest {
         val freezeThawer = thread(name = "freeze-thaw") {
             try {
                 repeat(100) {
-                    filter.freeze()
+                    filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
                     Thread.sleep(1)
-                    filter.thaw()
+                    filter.thaw(TEST_SERVER_NAME, TEST_SERVER_ID)
                     // Re-add measurements after thaw
                     filter.addMeasurement(10_000L, 3000L, (it + 11) * 1_000_000L)
                 }
