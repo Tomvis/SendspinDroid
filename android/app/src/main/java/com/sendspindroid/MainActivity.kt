@@ -607,14 +607,19 @@ class MainActivity : AppCompatActivity() {
                 // Re-apply any cached metadata/artwork from media controller
                 mediaController?.let { controller ->
                     val metadata = controller.mediaMetadata
-                    updateMetadata(
-                        title = metadata.title?.toString() ?: "",
-                        artist = metadata.artist?.toString() ?: "",
-                        album = metadata.albumTitle?.toString() ?: "",
-                        albumArtist = metadata.albumArtist?.toString(),
-                        year = metadata.releaseYear,
-                        albumTrack = metadata.trackNumber
-                    )
+                    val restoreTitle = metadata.title?.toString() ?: ""
+                    val restoreArtist = metadata.artist?.toString() ?: ""
+                    val restoreAlbum = metadata.albumTitle?.toString() ?: ""
+                    if (restoreTitle.isNotEmpty() || restoreArtist.isNotEmpty() || restoreAlbum.isNotEmpty()) {
+                        updateMetadata(
+                            title = restoreTitle,
+                            artist = restoreArtist,
+                            album = restoreAlbum,
+                            albumArtist = metadata.albumArtist?.toString(),
+                            year = metadata.releaseYear,
+                            albumTrack = metadata.trackNumber
+                        )
+                    }
                     updateAlbumArt(metadata)
                     // Restore play/pause button state
                     updatePlayPauseButton(controller.isPlaying)
@@ -2263,14 +2268,21 @@ class MainActivity : AppCompatActivity() {
                 val artist = mediaMetadata.artist?.toString() ?: ""
                 val album = mediaMetadata.albumTitle?.toString() ?: ""
                 Log.d(TAG, "Metadata from service: $title / $artist / $album")
-                updateMetadata(
-                    title = title,
-                    artist = artist,
-                    album = album,
-                    albumArtist = mediaMetadata.albumArtist?.toString(),
-                    year = mediaMetadata.releaseYear,
-                    albumTrack = mediaMetadata.trackNumber
-                )
+                // Skip blank emissions: Media3's controller can fire these
+                // between tracks and on state transitions. Overwriting the VM
+                // with empty strings would briefly flip the TV NowPlaying
+                // screen into the Idle layout. Authoritative clears run through
+                // resetPlaybackState() on disconnect.
+                if (title.isNotEmpty() || artist.isNotEmpty() || album.isNotEmpty()) {
+                    updateMetadata(
+                        title = title,
+                        artist = artist,
+                        album = album,
+                        albumArtist = mediaMetadata.albumArtist?.toString(),
+                        year = mediaMetadata.releaseYear,
+                        albumTrack = mediaMetadata.trackNumber
+                    )
+                }
 
                 // Load album art from MediaMetadata
                 updateAlbumArt(mediaMetadata)
@@ -2342,14 +2354,19 @@ class MainActivity : AppCompatActivity() {
 
                 // Sync metadata and artwork
                 val metadata = controller.mediaMetadata
-                updateMetadata(
-                    title = metadata.title?.toString() ?: "",
-                    artist = metadata.artist?.toString() ?: "",
-                    album = metadata.albumTitle?.toString() ?: "",
-                    albumArtist = metadata.albumArtist?.toString(),
-                    year = metadata.releaseYear,
-                    albumTrack = metadata.trackNumber
-                )
+                val syncTitle = metadata.title?.toString() ?: ""
+                val syncArtist = metadata.artist?.toString() ?: ""
+                val syncAlbum = metadata.albumTitle?.toString() ?: ""
+                if (syncTitle.isNotEmpty() || syncArtist.isNotEmpty() || syncAlbum.isNotEmpty()) {
+                    updateMetadata(
+                        title = syncTitle,
+                        artist = syncArtist,
+                        album = syncAlbum,
+                        albumArtist = metadata.albumArtist?.toString(),
+                        year = metadata.releaseYear,
+                        albumTrack = metadata.trackNumber
+                    )
+                }
                 updateAlbumArt(metadata)
             }
         }

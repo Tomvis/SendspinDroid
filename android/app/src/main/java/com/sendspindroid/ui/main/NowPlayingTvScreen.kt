@@ -15,13 +15,12 @@ import com.sendspindroid.ui.queue.QueueViewModel
 import com.sendspindroid.ui.theme.SendSpinTvTheme
 
 /**
- * The Now Playing accent color. Edit this to change the accent across every
- * artwork-independent element: progress bar gradient + glow, chip borders,
- * album-art halo, source-badge dot (when paused), idle wordmark + pulsing
- * colons, ambient background wash. Default is the amber from the design
- * tweak panel (#F5A524).
+ * Fallback accent used when the VM has not computed an artwork-derived
+ * accent yet (or on the idle screen where no artwork exists). Drives
+ * progress bar gradient + glow, chip borders, album-art halo, source-badge
+ * dot (when paused), idle wordmark + pulsing colons, and ambient wash.
  */
-private val AccentColor: Color = Color(0xFFF5A524)
+private val FallbackAccent: Color = Color(0xFFF5A524)
 
 @Composable
 internal fun NowPlayingTv(
@@ -31,7 +30,7 @@ internal fun NowPlayingTv(
     @Suppress("UNUSED_PARAMETER") isBuffering: Boolean,
     isPlaying: Boolean,
     @Suppress("UNUSED_PARAMETER") controlsEnabled: Boolean,
-    @Suppress("UNUSED_PARAMETER") accentColor: Color?,
+    accentColor: Color?,
     @Suppress("UNUSED_PARAMETER") isMaConnected: Boolean,
     positionMs: Long,
     durationMs: Long,
@@ -40,7 +39,7 @@ internal fun NowPlayingTv(
     @Suppress("UNUSED_PARAMETER") onPreviousClick: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onPlayPauseClick: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onNextClick: () -> Unit,
-    onSwitchGroupClick: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") onSwitchGroupClick: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onFavoriteClick: () -> Unit,
     @Suppress("UNUSED_PARAMETER") queueViewModel: QueueViewModel?,
     @Suppress("UNUSED_PARAMETER") onBrowseLibrary: () -> Unit,
@@ -48,7 +47,7 @@ internal fun NowPlayingTv(
     @Suppress("UNUSED_PARAMETER") onPlayerClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val accent = AccentColor
+    val accent = accentColor ?: FallbackAccent
     SendSpinTvTheme {
         // Design is authored at 1920x1080 in pixel units. Instead of pinning
         // density to 1.0 (which assumed a 1080p window), scale density so that
@@ -81,7 +80,6 @@ internal fun NowPlayingTv(
                             accent = accent,
                             groupLabel = groupName,
                             audioSpec = audioSpec,
-                            onSourceBadgeClick = onSwitchGroupClick,
                         )
                     }
                 }

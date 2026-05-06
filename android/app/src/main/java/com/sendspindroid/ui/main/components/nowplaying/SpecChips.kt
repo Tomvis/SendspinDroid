@@ -62,7 +62,7 @@ private fun Chip(text: String) {
             .clip(RoundedCornerShape(999.dp))
             .background(ChipBg)
             .border(1.dp, ChipBorder, RoundedCornerShape(999.dp))
-            .padding(horizontal = 18.dp, vertical = 10.dp),
+            .padding(horizontal = 18.dp, vertical = 14.dp),
     )
 }
 

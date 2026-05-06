@@ -1,5 +1,10 @@
 package com.sendspindroid.ui.main.components.nowplaying
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
@@ -10,11 +15,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -28,7 +34,6 @@ import androidx.compose.ui.unit.sp
 import com.sendspindroid.ui.theme.NpInterFamily
 import java.util.Calendar
 import java.util.Locale
-import kotlinx.coroutines.delay
 
 private val StatusGreen = Color(0xFF7EE07E)
 private val StatusAmber = Color(0xFFF5A524)
@@ -83,15 +88,41 @@ fun SourceBadge(
     }
 }
 
+/**
+ * Returns a State<Calendar> that updates on every system minute tick and on
+ * time/timezone changes. Uses ACTION_TIME_TICK (fires on each minute boundary)
+ * so the displayed minute is always within ~1s of the wall clock.
+ */
+@Composable
+internal fun rememberCurrentTime(): State<Calendar> {
+    val state = remember { mutableStateOf(Calendar.getInstance()) }
+    val context = LocalContext.current
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                state.value = Calendar.getInstance()
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_TIME_TICK)
+            addAction(Intent.ACTION_TIME_CHANGED)
+            addAction(Intent.ACTION_TIMEZONE_CHANGED)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            context.registerReceiver(receiver, filter)
+        }
+        state.value = Calendar.getInstance()
+        onDispose { context.unregisterReceiver(receiver) }
+    }
+    return state
+}
+
 @Composable
 fun NowPlayingClock(modifier: Modifier = Modifier) {
-    var now by remember { mutableStateOf(Calendar.getInstance()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(15_000L)
-            now = Calendar.getInstance()
-        }
-    }
+    val now by rememberCurrentTime()
     val hour = now.get(Calendar.HOUR_OF_DAY).toString().padStart(2, '0')
     val minute = now.get(Calendar.MINUTE).toString().padStart(2, '0')
     val weekday = now.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG, Locale.getDefault()).orEmpty()
@@ -116,7 +147,7 @@ fun NowPlayingClock(modifier: Modifier = Modifier) {
             text = "$weekday · $month $day".uppercase(Locale.getDefault()),
             modifier = Modifier.padding(top = 8.dp),
             fontFamily = NpInterFamily,
-            fontSize = 14.sp,
+            fontSize = 18.sp,
             fontWeight = FontWeight.W500,
             letterSpacing = 2.sp,
             color = ChromeFgFaint,

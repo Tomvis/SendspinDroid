@@ -1,6 +1,5 @@
 package com.sendspindroid.ui.main.components.nowplaying
 
-import android.graphics.Bitmap
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -16,16 +15,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
@@ -33,11 +28,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.ImageShader
 import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.TileMode
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -57,8 +51,6 @@ import com.sendspindroid.ui.theme.NpFrauncesFamily
 import com.sendspindroid.ui.theme.NpInterFamily
 import java.util.Calendar
 import java.util.Locale
-import kotlin.random.Random
-import kotlinx.coroutines.delay
 
 private val IdleBase = Color(0xFF07060D)
 private val IdleFg = Color(0xFFFAF6F0)
@@ -81,9 +73,19 @@ fun NowPlayingIdleScreen(
             .fillMaxSize()
             .background(IdleBase),
     ) {
-        IdleBlobs(accent = accent)
-        IdleVignette()
-        IdleGrain()
+        // Force the ambient stack into an offscreen compositing layer so the
+        // BlendMode.Overlay grain has a defined backdrop. Without this, on the
+        // Shield/Tegra GPU the blend reads back from whatever was in the
+        // framebuffer that frame, which manifests as random flicker.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen },
+        ) {
+            IdleBlobs(accent = accent)
+            IdleVignette()
+            IdleGrain()
+        }
 
         Box(
             modifier = Modifier
@@ -123,19 +125,19 @@ fun NowPlayingIdleScreen(
 @Composable
 private fun IdleBlobs(accent: Color) {
     val transition = rememberInfiniteTransition(label = "np-idle-blobs")
-    val t1 by transition.animateFloat(
+    val t1 = transition.animateFloat(
         0f, 1f, infiniteRepeatable(tween(38_000, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "np-idle-blob1",
     )
-    val t2 by transition.animateFloat(
+    val t2 = transition.animateFloat(
         0f, 1f, infiniteRepeatable(tween(46_000, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "np-idle-blob2",
     )
-    val t3 by transition.animateFloat(
+    val t3 = transition.animateFloat(
         0f, 1f, infiniteRepeatable(tween(52_000, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "np-idle-blob3",
     )
-    val t4 by transition.animateFloat(
+    val t4 = transition.animateFloat(
         0f, 1f, infiniteRepeatable(tween(60_000, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "np-idle-blob4",
     )
@@ -146,9 +148,9 @@ private fun IdleBlobs(accent: Color) {
             size = 600.dp,
             offsetX = (-150).dp,
             offsetY = (-100).dp,
-            driftX = 48.dp * t1,
-            driftY = 36.dp * t1,
-            scale = 1f + 0.1f * t1,
+            driftX = { 48.dp * t1.value },
+            driftY = { 36.dp * t1.value },
+            scale = { 1f + 0.1f * t1.value },
         )
         Blob(
             color = accent.copy(alpha = 0.20f),
@@ -156,9 +158,9 @@ private fun IdleBlobs(accent: Color) {
             alignment = Alignment.TopEnd,
             offsetX = 125.dp,
             offsetY = 150.dp,
-            driftX = -30.dp * t2,
-            driftY = -20.dp * t2,
-            scale = 1f - 0.08f * t2,
+            driftX = { -30.dp * t2.value },
+            driftY = { -20.dp * t2.value },
+            scale = { 1f - 0.08f * t2.value },
         )
         Blob(
             color = BlobTintA,
@@ -166,9 +168,9 @@ private fun IdleBlobs(accent: Color) {
             alignment = Alignment.BottomCenter,
             offsetX = 0.dp,
             offsetY = 125.dp,
-            driftX = -18.dp * t3,
-            driftY = 22.dp * t3,
-            scale = 1.05f,
+            driftX = { -18.dp * t3.value },
+            driftY = { 22.dp * t3.value },
+            scale = { 1.05f },
         )
         Blob(
             color = BlobTintB,
@@ -176,9 +178,9 @@ private fun IdleBlobs(accent: Color) {
             alignment = Alignment.Center,
             offsetX = 10.dp,
             offsetY = (-40).dp,
-            driftX = 21.dp * t4,
-            driftY = -17.dp * t4,
-            scale = 0.9f + 0.18f * t4,
+            driftX = { 21.dp * t4.value },
+            driftY = { -17.dp * t4.value },
+            scale = { 0.9f + 0.18f * t4.value },
         )
     }
 }
@@ -189,9 +191,9 @@ private fun Blob(
     size: Dp,
     offsetX: Dp,
     offsetY: Dp,
-    driftX: Dp,
-    driftY: Dp,
-    scale: Float,
+    driftX: () -> Dp,
+    driftY: () -> Dp,
+    scale: () -> Float,
     alignment: Alignment = Alignment.TopStart,
 ) {
     Box(
@@ -200,9 +202,14 @@ private fun Blob(
     ) {
         Box(
             modifier = Modifier
-                .offset(x = offsetX + driftX, y = offsetY + driftY)
                 .size(size)
-                .graphicsLayer { scaleX = scale; scaleY = scale }
+                .graphicsLayer {
+                    translationX = (offsetX + driftX()).toPx()
+                    translationY = (offsetY + driftY()).toPx()
+                    val s = scale()
+                    scaleX = s
+                    scaleY = s
+                }
                 .drawWithCache {
                     val brush = Brush.radialGradient(
                         colors = listOf(color, Color.Transparent),
@@ -240,7 +247,7 @@ private fun IdleVignette() {
 
 @Composable
 private fun IdleGrain() {
-    val grain = remember { buildGrain(tileSize = 256, seed = 7L) }
+    val grain = SharedGrainBitmap
     val brush = remember(grain) {
         ShaderBrush(ImageShader(grain, TileMode.Repeated, TileMode.Repeated))
     }
@@ -253,18 +260,6 @@ private fun IdleGrain() {
                 }
             },
     )
-}
-
-private fun buildGrain(tileSize: Int, seed: Long): ImageBitmap {
-    val bitmap = Bitmap.createBitmap(tileSize, tileSize, Bitmap.Config.ARGB_8888)
-    val pixels = IntArray(tileSize * tileSize)
-    val random = Random(seed)
-    for (i in pixels.indices) {
-        val v = random.nextInt(0, 256)
-        pixels[i] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
-    }
-    bitmap.setPixels(pixels, 0, tileSize, 0, 0, tileSize, tileSize)
-    return bitmap.asImageBitmap()
 }
 
 @Composable
@@ -344,13 +339,7 @@ private fun Wordmark(accent: Color) {
 
 @Composable
 private fun HeroClock(accent: Color) {
-    var now by remember { mutableStateOf(Calendar.getInstance()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(15_000L)
-            now = Calendar.getInstance()
-        }
-    }
+    val now by rememberCurrentTime()
     val hour = now.get(Calendar.HOUR_OF_DAY).toString().padStart(2, '0')
     val minute = now.get(Calendar.MINUTE).toString().padStart(2, '0')
     val weekday = now.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG, Locale.getDefault()).orEmpty()
@@ -396,7 +385,7 @@ private fun HeroClock(accent: Color) {
 @Composable
 private fun PulsingColon(accent: Color) {
     val transition = rememberInfiniteTransition(label = "np-colon")
-    val pulseA by transition.animateFloat(
+    val pulseA = transition.animateFloat(
         initialValue = 0.95f,
         targetValue = 1.06f,
         animationSpec = infiniteRepeatable(
@@ -405,7 +394,7 @@ private fun PulsingColon(accent: Color) {
         ),
         label = "np-colon-a",
     )
-    val pulseB by transition.animateFloat(
+    val pulseB = transition.animateFloat(
         initialValue = 1.06f,
         targetValue = 0.95f,
         animationSpec = infiniteRepeatable(
@@ -423,12 +412,12 @@ private fun PulsingColon(accent: Color) {
         ColonDot(
             color = accent,
             alignment = androidx.compose.ui.BiasAlignment(0f, -0.44f),
-            scale = pulseA,
+            scale = { pulseA.value },
         )
         ColonDot(
             color = accent,
             alignment = androidx.compose.ui.BiasAlignment(0f, 0.36f),
-            scale = pulseB,
+            scale = { pulseB.value },
         )
     }
 }
@@ -437,7 +426,7 @@ private fun PulsingColon(accent: Color) {
 private fun ColonDot(
     color: Color,
     alignment: Alignment,
-    scale: Float,
+    scale: () -> Float,
 ) {
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -447,8 +436,9 @@ private fun ColonDot(
             modifier = Modifier
                 .size(36.dp)
                 .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
+                    val s = scale()
+                    scaleX = s
+                    scaleY = s
                 }
                 .drawWithCache {
                     val glow = Brush.radialGradient(

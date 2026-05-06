@@ -20,6 +20,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageShader
 import androidx.compose.ui.graphics.ShaderBrush
@@ -45,9 +46,15 @@ fun AmbientBg(
     paused: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Force the whole ambient stack into an offscreen compositing layer so the
+    // BlendMode.Screen / BlendMode.Overlay draws below have a defined backdrop.
+    // Without this, on the Shield/Tegra GPU the blend reads back from whatever
+    // happened to be in the framebuffer that frame, which manifests as random
+    // flicker.
     Box(
         modifier = modifier
             .fillMaxSize()
+            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
             .background(AmbientBase),
     ) {
         BlurredCover(artworkSource = artworkSource, paused = paused)
@@ -62,10 +69,12 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
     if (artworkSource == null) return
     val context = LocalContext.current
     val model = remember(artworkSource) {
+        // 384x384 source + radius=24 keeps sigma proportional to the 96x6 baseline
+        // while giving a much smoother ambient on 4K output.
         val builder = ImageRequest.Builder(context)
-            .size(Size(96, 96))
+            .size(Size(384, 384))
             .crossfade(400)
-            .transformations(BoxBlurTransformation(radius = 6, iterations = 3))
+            .transformations(BoxBlurTransformation(radius = 24, iterations = 3))
         when (artworkSource) {
             is ArtworkSource.ByteArray -> builder.data(artworkSource.data)
             is ArtworkSource.Uri -> builder.data(artworkSource.uri)
@@ -219,7 +228,7 @@ private fun Vignette() {
 
 @Composable
 private fun GrainOverlay() {
-    val grain = remember { grainBitmap(tileSize = 256, seed = 2L) }
+    val grain = SharedGrainBitmap
     val brush = remember(grain) {
         ShaderBrush(ImageShader(grain, TileMode.Repeated, TileMode.Repeated))
     }
@@ -234,14 +243,19 @@ private fun GrainOverlay() {
     )
 }
 
-private fun grainBitmap(tileSize: Int, seed: Long): ImageBitmap {
+/**
+ * Shared 256x256 grain tile. Allocated once for the lifetime of the process
+ * and reused by both AmbientBg and NowPlayingIdleScreen.
+ */
+internal val SharedGrainBitmap: ImageBitmap by lazy {
+    val tileSize = 256
     val bitmap = Bitmap.createBitmap(tileSize, tileSize, Bitmap.Config.ARGB_8888)
     val pixels = IntArray(tileSize * tileSize)
-    val random = Random(seed)
+    val random = Random(2L)
     for (i in pixels.indices) {
         val v = random.nextInt(0, 256)
         pixels[i] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
     }
     bitmap.setPixels(pixels, 0, tileSize, 0, 0, tileSize, tileSize)
-    return bitmap.asImageBitmap()
+    bitmap.asImageBitmap()
 }

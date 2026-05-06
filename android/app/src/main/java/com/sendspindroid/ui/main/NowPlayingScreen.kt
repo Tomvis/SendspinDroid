@@ -1,6 +1,7 @@
 package com.sendspindroid.ui.main
 
 import android.content.res.Configuration
+import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -99,10 +100,32 @@ fun NowPlayingScreen(
     val durationMs by viewModel.durationMs.collectAsStateWithLifecycle()
     val positionUpdatedAt by viewModel.positionUpdatedAt.collectAsStateWithLifecycle()
     val audioStreamSpec by viewModel.audioStreamSpec.collectAsStateWithLifecycle()
+    // Media3's MediaController can transiently emit blank MediaMetadata between
+    // tracks and on state transitions, which on the TV layout flips the whole
+    // screen to NowPlayingIdleScreen for one frame (text disappears, ambient
+    // background switches to idle blobs) before the real metadata lands. Hold
+    // onto the last non-empty metadata (and artwork) while the session is
+    // actively connected; release back to whatever the VM currently reports
+    // once we drop out of Connected/Reconnecting.
+    val isActivelyConnected = connectionState is AppConnectionState.Connected ||
+        connectionState is AppConnectionState.Reconnecting
+    var stickyMetadata by remember { mutableStateOf(metadata) }
+    LaunchedEffect(metadata, isActivelyConnected) {
+        if (!isActivelyConnected || !metadata.isEmpty) {
+            stickyMetadata = metadata
+        }
+    }
+    var stickyArtworkSource by remember { mutableStateOf(artworkSource) }
+    LaunchedEffect(artworkSource, isActivelyConnected) {
+        if (!isActivelyConnected || artworkSource != null) {
+            stickyArtworkSource = artworkSource
+        }
+    }
     // SendSpin fires stream/end on pause, which zeroes the audio spec. Keep the
     // last non-null value so the codec/bit-depth/sample-rate chips stay up while
-    // paused, and reset only when the track itself changes.
-    var stickyAudioSpec by remember(metadata.title, metadata.artist, metadata.album) {
+    // paused, and reset only when the track itself changes. Key on the sticky
+    // metadata so a transient blank emission doesn't also wipe the chips.
+    var stickyAudioSpec by remember(stickyMetadata.title, stickyMetadata.artist, stickyMetadata.album) {
         mutableStateOf(audioStreamSpec)
     }
     LaunchedEffect(audioStreamSpec) {
@@ -120,7 +143,7 @@ fun NowPlayingScreen(
                 viewModel.updateTrackProgress(
                     positionMs = 0,
                     durationMs = durationSec * 1000,
-                    positionUpdatedAt = 0
+                    positionUpdatedAt = SystemClock.elapsedRealtime()
                 )
             }
         }
@@ -165,9 +188,9 @@ fun NowPlayingScreen(
             // Head unit: portrait layout with large touch targets + queue peek
             formFactor == FormFactor.HEADUNIT -> {
                 NowPlayingHeadUnit(
-                    metadata = metadata,
+                    metadata = stickyMetadata,
                     groupName = groupName,
-                    artworkSource = artworkSource,
+                    artworkSource = stickyArtworkSource,
                     isBuffering = isBuffering,
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
@@ -184,12 +207,12 @@ fun NowPlayingScreen(
                     queueViewModel = queueViewModel
                 )
             }
-            // TV with MA connected: cinematic layout with toggleable queue sidebar
+            // TV: cinematic layout
             formFactor == FormFactor.TV -> {
                 NowPlayingTv(
-                    metadata = metadata,
+                    metadata = stickyMetadata,
                     groupName = groupName,
-                    artworkSource = artworkSource,
+                    artworkSource = stickyArtworkSource,
                     isBuffering = isBuffering,
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
@@ -210,39 +233,12 @@ fun NowPlayingScreen(
                     onPlayerClick = onPlayerClick
                 )
             }
-            // TV without MA: landscape layout, no queue
-            formFactor == FormFactor.TV -> {
-                NowPlayingLandscape(
-                    metadata = metadata,
-                    groupName = groupName,
-                    artworkSource = artworkSource,
-                    isBuffering = isBuffering,
-                    isPlaying = isPlaying,
-                    controlsEnabled = controlsEnabled,
-                    volume = volume,
-                    accentColor = accentColor,
-                    isMaConnected = isMaConnected,
-                    positionMs = positionMs,
-                    durationMs = durationMs,
-                    positionUpdatedAt = positionUpdatedAt,
-                    onPreviousClick = onPreviousClick,
-                    onPlayPauseClick = onPlayPauseClick,
-                    onNextClick = onNextClick,
-                    onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick,
-                    onVolumeChange = onVolumeChange,
-                    onQueueClick = onQueueClick,
-                    showQueueButton = false,
-                    showPlayerButton = showPlayerButton,
-                    onPlayerClick = onPlayerClick
-                )
-            }
             // Tablet: inline queue panel always visible
             inlineQueueViewModel != null -> {
                 NowPlayingWithQueuePanel(
-                    metadata = metadata,
+                    metadata = stickyMetadata,
                     groupName = groupName,
-                    artworkSource = artworkSource,
+                    artworkSource = stickyArtworkSource,
                     isBuffering = isBuffering,
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
@@ -267,9 +263,9 @@ fun NowPlayingScreen(
             }
             isLandscape -> {
                 NowPlayingLandscape(
-                    metadata = metadata,
+                    metadata = stickyMetadata,
                     groupName = groupName,
-                    artworkSource = artworkSource,
+                    artworkSource = stickyArtworkSource,
                     isBuffering = isBuffering,
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
@@ -292,9 +288,9 @@ fun NowPlayingScreen(
             }
             else -> {
                 NowPlayingPortrait(
-                    metadata = metadata,
+                    metadata = stickyMetadata,
                     groupName = groupName,
-                    artworkSource = artworkSource,
+                    artworkSource = stickyArtworkSource,
                     isBuffering = isBuffering,
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,

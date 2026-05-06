@@ -3,6 +3,7 @@ package com.sendspindroid.ui.main.components.nowplaying
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +25,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -43,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.sendspindroid.R
+import com.sendspindroid.ui.adaptive.TvInitialFocus
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.main.AudioStreamSpec
 import com.sendspindroid.ui.main.TrackMetadata
@@ -64,13 +68,24 @@ fun NowPlayingFocus(
     accent: Color,
     groupLabel: String,
     audioSpec: AudioStreamSpec?,
-    @Suppress("UNUSED_PARAMETER") onSourceBadgeClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val paused = !isPlaying
+    // Now Playing is a passive view; no interactive elements on-screen. Park
+    // initial focus on an invisible anchor so the Activity still gets D-pad
+    // key events (e.g. BACK).
+    val focusAnchor = remember { FocusRequester() }
+    TvInitialFocus(focusAnchor)
 
     Box(modifier = modifier.fillMaxSize()) {
         AmbientBg(artworkSource = artworkSource, accent = accent, paused = paused)
+
+        Box(
+            modifier = Modifier
+                .size(1.dp)
+                .focusRequester(focusAnchor)
+                .focusable(),
+        )
 
         // Top chrome: top=54dp, sides=96dp (spec)
         Row(
@@ -115,7 +130,7 @@ fun NowPlayingFocus(
             durationMs = durationMs,
             positionUpdatedAt = positionUpdatedAt,
             isPlaying = isPlaying,
-            trackNumber = metadata.albumTrack,
+            trackNumber = metadata.queueTrack,
             trackTotal = metadata.totalTracks,
             accent = accent,
             modifier = Modifier
@@ -227,7 +242,7 @@ private fun InfoColumn(
             Text(
                 text = slug.uppercase(Locale.getDefault()),
                 fontFamily = NpInterFamily,
-                fontSize = 16.sp,
+                fontSize = 18.sp,
                 fontWeight = FontWeight.W600,
                 letterSpacing = 4.sp,
                 color = FocusFgDim,

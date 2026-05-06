@@ -2372,6 +2372,7 @@ class PlaybackService : MediaLibraryService() {
         when (focusChange) {
             AudioManager.AUDIOFOCUS_GAIN -> {
                 Log.d(TAG, "Audio focus gained")
+                hasAudioFocus = true
                 // Focus returned - resume if we were playing before losing focus
                 syncAudioPlayer?.resume()
             }
@@ -2383,7 +2384,10 @@ class PlaybackService : MediaLibraryService() {
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 Log.d(TAG, "Audio focus lost transiently")
-                // Temporary loss (phone call, navigation announcement) - pause
+                // Temporary loss (phone call, navigation announcement) - pause.
+                // Drop hasAudioFocus so stray media-button presses are suppressed
+                // while we don't hold focus; restored on AUDIOFOCUS_GAIN.
+                hasAudioFocus = false
                 syncAudioPlayer?.pause()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
@@ -2819,6 +2823,27 @@ class PlaybackService : MediaLibraryService() {
             controller: MediaSession.ControllerInfo
         ) {
             Log.i(TAG, "Controller disconnected: ${controller.packageName} (uid=${controller.uid})")
+        }
+
+        @Suppress("OVERRIDE_DEPRECATION")
+        override fun onPlayerCommandRequest(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            playerCommand: Int
+        ): Int {
+            if (playerCommand != Player.COMMAND_PLAY_PAUSE) return SessionResult.RESULT_SUCCESS
+            if (hasAudioFocus) return SessionResult.RESULT_SUCCESS
+
+            // Self-healing for our own in-app Play button: re-acquire focus and proceed.
+            // External media-button presses (TV remote routed to us while another app
+            // holds focus) get suppressed so we don't toggle the SendSpin server.
+            if (controller.packageName == packageName) {
+                requestAudioFocus()
+                return if (hasAudioFocus) SessionResult.RESULT_SUCCESS else SessionResult.RESULT_ERROR_INVALID_STATE
+            }
+
+            Log.i(TAG, "Suppressing PLAY_PAUSE from ${controller.packageName} (no audio focus)")
+            return SessionResult.RESULT_ERROR_INVALID_STATE
         }
 
         override fun onCustomCommand(

@@ -73,7 +73,10 @@ fun ProgressRail(
     }
 
     LaunchedEffect(isPlaying, anchorPositionMs, anchorTime, durationMs) {
-        if (!isPlaying) {
+        // anchorTime == 0L means the VM hasn't applied a real server frame yet.
+        // Without this guard, `elapsed = elapsedRealtime() - 0` is device uptime
+        // and the bar snaps to durationMs on first render.
+        if (!isPlaying || anchorTime <= 0L) {
             displayPositionMs = anchorPositionMs
             return@LaunchedEffect
         }
@@ -152,7 +155,7 @@ fun ProgressRail(
             Text(
                 text = "Total ${formatRailTime(durationMs)}".uppercase(Locale.getDefault()),
                 fontFamily = NpMonoFamily,
-                fontSize = 13.sp,
+                fontSize = 18.sp,
                 fontWeight = FontWeight.W600,
                 letterSpacing = 2.sp,
                 color = RailFgDim,
@@ -161,7 +164,7 @@ fun ProgressRail(
                 Text(
                     text = "$trackNumber of $trackTotal".uppercase(Locale.getDefault()),
                     fontFamily = NpMonoFamily,
-                    fontSize = 13.sp,
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.W600,
                     letterSpacing = 2.sp,
                     color = RailFgDim,
