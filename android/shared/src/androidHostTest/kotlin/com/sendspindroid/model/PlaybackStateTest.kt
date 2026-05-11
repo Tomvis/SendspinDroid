@@ -197,6 +197,96 @@ class PlaybackStateTest {
         assertNull(updated.totalTracks)
     }
 
+    // --- withMetadata new-track-clear semantics ---
+
+    @Test
+    fun withMetadata_newTrackWithNullAncillariesClearsThem() {
+        // Server sends a new track but omits year / album_track / queue_track /
+        // total_tracks / album_artist (PlaybackService maps "0" / "" to null).
+        // Without the new-track-clear logic, the previous track's values would
+        // stick — manifesting as wrong year and "5 of 12" on a fresh track.
+        val state = PlaybackState(
+            title = "Old Song", artist = "Old Artist", album = "Old Album",
+            albumArtist = "Old AA", year = 1999,
+            albumTrack = 2, queueTrack = 4, totalTracks = 10
+        )
+        val updated = state.withMetadata(
+            title = "New Song", artist = "New Artist", album = "New Album",
+            albumArtist = null,
+            artworkUrl = null,
+            year = null, albumTrack = null, queueTrack = null, totalTracks = null,
+            durationMs = 180000, positionMs = 0
+        )
+        assertEquals("New Song", updated.title)
+        assertNull(updated.albumArtist)
+        assertNull(updated.year)
+        assertNull(updated.albumTrack)
+        assertNull(updated.queueTrack)
+        assertNull(updated.totalTracks)
+    }
+
+    @Test
+    fun withMetadata_sameTrackPreservesAncillariesOnNull() {
+        // Same-track follow-up (e.g., artwork URL arrives after the metadata
+        // frame). Null ancillaries must keep the existing values populated by
+        // an earlier authoritative frame — otherwise queueTrack / totalTracks
+        // get wiped on every refresh.
+        val state = PlaybackState(
+            title = "Song", artist = "Artist", album = "Album",
+            albumArtist = "AA", year = 1999,
+            albumTrack = 2, queueTrack = 4, totalTracks = 10
+        )
+        val updated = state.withMetadata(
+            title = "Song", artist = "Artist", album = "Album",
+            albumArtist = null,
+            artworkUrl = "https://art.jpg",
+            year = null, albumTrack = null, queueTrack = null, totalTracks = null,
+            durationMs = 180000, positionMs = 5000
+        )
+        assertEquals("AA", updated.albumArtist)
+        assertEquals(1999, updated.year)
+        assertEquals(2, updated.albumTrack)
+        assertEquals(4, updated.queueTrack)
+        assertEquals(10, updated.totalTracks)
+    }
+
+    @Test
+    fun withMetadata_newTrackPreservesArtworkUrlOnNull() {
+        // applyFastQueueUpdate (optimistic queue-tap) deliberately passes
+        // artworkUrl=null so the prior image stays on screen during the gap
+        // before the server delivers the new track's image. The new-track
+        // detection must NOT clear artworkUrl on null — only the explicit
+        // empty-string sentinel clears it.
+        val state = PlaybackState(
+            title = "Old Song", artist = "Old Artist", album = "Old Album",
+            artworkUrl = "https://old-art.jpg"
+        )
+        val updated = state.withMetadata(
+            title = "New Song", artist = "New Artist", album = "New Album",
+            albumArtist = null, artworkUrl = null,
+            year = null, albumTrack = null, queueTrack = null, totalTracks = null,
+            durationMs = 180000, positionMs = 0
+        )
+        assertEquals("https://old-art.jpg", updated.artworkUrl)
+    }
+
+    @Test
+    fun withMetadata_newTrackByTitleOnlyClearsAncillaries() {
+        // Track change detected even when only title differs.
+        val state = PlaybackState(
+            title = "Song A", artist = "Artist", album = "Album",
+            year = 1999, queueTrack = 5
+        )
+        val updated = state.withMetadata(
+            title = "Song B", artist = "Artist", album = "Album",
+            albumArtist = null, artworkUrl = null,
+            year = null, albumTrack = null, queueTrack = null, totalTracks = null,
+            durationMs = 0, positionMs = 0
+        )
+        assertNull(updated.year)
+        assertNull(updated.queueTrack)
+    }
+
     // --- withClearedMetadata ---
 
     @Test

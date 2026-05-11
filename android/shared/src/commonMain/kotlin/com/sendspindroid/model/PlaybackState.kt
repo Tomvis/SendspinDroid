@@ -60,60 +60,67 @@ data class PlaybackState(
         durationMs: Long,
         positionMs: Long,
         playbackSpeed: Int = this.playbackSpeed
-    ): PlaybackState = copy(
-        title = when {
+    ): PlaybackState {
+        val newTitle = when {
             title == null -> this.title
             title.isEmpty() -> null
             else -> title
-        },
-        artist = when {
+        }
+        val newArtist = when {
             artist == null -> this.artist
             artist.isEmpty() -> null
             else -> artist
-        },
-        albumArtist = when {
-            albumArtist == null -> this.albumArtist
-            albumArtist.isEmpty() -> null
-            else -> albumArtist
-        },
-        album = when {
+        }
+        val newAlbum = when {
             album == null -> this.album
             album.isEmpty() -> null
             else -> album
-        },
-        artworkUrl = when {
-            artworkUrl == null -> this.artworkUrl
-            artworkUrl.isEmpty() -> null
-            else -> artworkUrl
-        },
-        year = when {
-            year == null -> this.year
-            year <= 0 -> null
-            else -> year
-        },
-        albumTrack = when {
-            albumTrack == null -> this.albumTrack
-            albumTrack <= 0 -> null
-            else -> albumTrack
-        },
-        queueTrack = when {
-            queueTrack == null -> this.queueTrack
-            queueTrack <= 0 -> null
-            else -> queueTrack
-        },
-        totalTracks = when {
-            totalTracks == null -> this.totalTracks
-            totalTracks <= 0 -> null
-            else -> totalTracks
-        },
-        durationMs = if (durationMs > 0) durationMs else this.durationMs,
-        positionMs = positionMs,
-        // Only stamp positionUpdatedAt when position is non-zero. When positionMs is 0
-        // (e.g., initial metadata for a new track before audio starts), keep existing
-        // timestamp so interpolatedPositionMs doesn't phantom-count up from zero.
-        positionUpdatedAt = if (positionMs > 0) Platform.elapsedRealtimeMs() else this.positionUpdatedAt,
-        playbackSpeed = playbackSpeed
-    )
+        }
+        // Detect track change so a null ancillary on a new track clears the
+        // prior value instead of leaking it. The "null = preserve" pattern is
+        // useful for partial follow-up updates on the same track (server
+        // sometimes omits queue_track / year), but on a new track it causes
+        // the previous track's year / track number / queue position to stick.
+        // Mirrors the same isNewTrack check in [mergeTrackMetadata] (VM-side).
+        // artworkUrl deliberately keeps the unconditional-preserve-on-null
+        // behavior: the optimistic queue-tap path relies on keeping the prior
+        // artwork visible during the brief gap before the new image loads.
+        val isNewTrack = newTitle != this.title ||
+            newArtist != this.artist ||
+            newAlbum != this.album
+        fun resolveStr(input: String?, prior: String?): String? = when {
+            input == null -> if (isNewTrack) null else prior
+            input.isEmpty() -> null
+            else -> input
+        }
+        fun resolveInt(input: Int?, prior: Int?): Int? = when {
+            input == null -> if (isNewTrack) null else prior
+            input <= 0 -> null
+            else -> input
+        }
+        return copy(
+            title = newTitle,
+            artist = newArtist,
+            albumArtist = resolveStr(albumArtist, this.albumArtist),
+            album = newAlbum,
+            artworkUrl = when {
+                artworkUrl == null -> this.artworkUrl
+                artworkUrl.isEmpty() -> null
+                else -> artworkUrl
+            },
+            year = resolveInt(year, this.year),
+            albumTrack = resolveInt(albumTrack, this.albumTrack),
+            queueTrack = resolveInt(queueTrack, this.queueTrack),
+            totalTracks = resolveInt(totalTracks, this.totalTracks),
+            durationMs = if (durationMs > 0) durationMs else this.durationMs,
+            positionMs = positionMs,
+            // Only stamp positionUpdatedAt when position is non-zero. When positionMs is 0
+            // (e.g., initial metadata for a new track before audio starts), keep existing
+            // timestamp so interpolatedPositionMs doesn't phantom-count up from zero.
+            positionUpdatedAt = if (positionMs > 0) Platform.elapsedRealtimeMs() else this.positionUpdatedAt,
+            playbackSpeed = playbackSpeed
+        )
+    }
 
     fun withClearedMetadata(): PlaybackState = copy(
         title = null,

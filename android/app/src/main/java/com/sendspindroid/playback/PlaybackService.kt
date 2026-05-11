@@ -1375,11 +1375,13 @@ class PlaybackService : MediaLibraryService() {
                 // Coil's MaProxyImageFetcher can fetch via the WebRTC DataChannel.
                 val effectiveArtworkUrl = rewriteArtworkUrlForRemote(artworkUrl)
 
-                // Int fields: treat 0 / absent as "preserve prior" (matches how
-                // empty strings preserve prior via ifEmpty{null}). Follow-up
-                // metadata for the same track sometimes omits queue_track /
-                // total_tracks; without this guard withMetadata's `<= 0 -> null`
-                // branch silently clears them.
+                // Int fields: 0 / absent maps to null so withMetadata applies
+                // its null-handling rules. Those rules: preserve prior on a
+                // same-track refresh (server sometimes omits queue_track /
+                // total_tracks in follow-up updates), clear on a track change
+                // (so the prior track's year / track / queue position doesn't
+                // leak into a new track that simply lacks those fields).
+                // String fields use ifEmpty{null} for the same reason.
                 _playbackState.value = _playbackState.value.withMetadata(
                     title = title.ifEmpty { null },
                     artist = artist.ifEmpty { null },
@@ -1700,9 +1702,11 @@ class PlaybackService : MediaLibraryService() {
 
         // Skip if the title is already up to date to avoid redundant writes.
         // When SendSpin server/state arrives ~1s later with the same title,
-        // the withMetadata call below is a no-op (null-preserves semantics ensure
-        // no visible flicker). But we skip early here to avoid the sendSpinPlayer
-        // round-trip when nothing has changed.
+        // the withMetadata call below is a no-op (null-preserves semantics
+        // ensure no visible flicker for same-track refreshes). On a track
+        // change, the ancillaries below pass null, which withMetadata clears
+        // on its new-track branch so the prior track's year / track / queue
+        // position don't linger until the server's server/state catches up.
         if (update.title != null && update.title == current.title) return
 
         Log.d(TAG, "Fast metadata via queue_updated: ${update.title} / ${update.artist} / ${update.album}")
@@ -1822,15 +1826,21 @@ class PlaybackService : MediaLibraryService() {
     private fun updateMediaSessionArtwork(bitmap: Bitmap) {
         val state = _playbackState.value
 
+        // Ancillary fields use the "" / 0 clear sentinel rather than null when
+        // syncing the cache to state. MetadataForwardingPlayer treats null as
+        // "preserve prior value" (useful for partial track updates), but here
+        // we want it to mirror state exactly — null in state means "the new
+        // track has no value for this field" and the cache must clear, not
+        // leak the previous track's albumArtist / year / albumTrack.
         forwardingPlayer?.updateMetadata(
             title = state.title,
             artist = state.artist,
             album = state.album,
             artwork = bitmap,
             artworkUri = state.artworkUrl?.let { Uri.parse(it) },
-            albumArtist = state.albumArtist,
-            year = state.year,
-            albumTrack = state.albumTrack
+            albumArtist = state.albumArtist ?: "",
+            year = state.year ?: 0,
+            albumTrack = state.albumTrack ?: 0
         )
 
         broadcastMetadataToControllers(
@@ -1847,15 +1857,16 @@ class PlaybackService : MediaLibraryService() {
     private fun updateMediaMetadata(title: String, artist: String, album: String) {
         val state = _playbackState.value
 
+        // See updateMediaSessionArtwork for why ancillaries use "" / 0 here.
         forwardingPlayer?.updateMetadata(
             title = state.title,
             artist = state.artist,
             album = state.album,
             artwork = effectiveArtwork,
             artworkUri = state.artworkUrl?.let { Uri.parse(it) },
-            albumArtist = state.albumArtist,
-            year = state.year,
-            albumTrack = state.albumTrack
+            albumArtist = state.albumArtist ?: "",
+            year = state.year ?: 0,
+            albumTrack = state.albumTrack ?: 0
         )
 
         broadcastMetadataToControllers(

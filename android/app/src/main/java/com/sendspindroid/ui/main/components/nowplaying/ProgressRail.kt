@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
@@ -65,6 +66,12 @@ fun ProgressRail(
     var anchorPositionMs by remember { mutableLongStateOf(positionMs) }
     var anchorTime by remember { mutableLongStateOf(positionUpdatedAt) }
     var displayPositionMs by remember { mutableLongStateOf(positionMs) }
+    // Tracks the moment isPlaying last flipped false -> true. The interpolation
+    // loop below clamps elapsed-since-anchor at max(anchorTime, playSince) so
+    // the pause duration doesn't leak into displayPositionMs after resume,
+    // even if the server's next server/state hasn't refreshed anchorTime yet.
+    var playSince by remember { mutableLongStateOf(0L) }
+    var wasPlaying by remember { mutableStateOf(isPlaying) }
 
     LaunchedEffect(positionMs, positionUpdatedAt) {
         anchorPositionMs = positionMs
@@ -72,7 +79,14 @@ fun ProgressRail(
         displayPositionMs = positionMs
     }
 
-    LaunchedEffect(isPlaying, anchorPositionMs, anchorTime, durationMs) {
+    LaunchedEffect(isPlaying) {
+        if (isPlaying && !wasPlaying) {
+            playSince = SystemClock.elapsedRealtime()
+        }
+        wasPlaying = isPlaying
+    }
+
+    LaunchedEffect(isPlaying, anchorPositionMs, anchorTime, durationMs, playSince) {
         // anchorTime == 0L means the VM hasn't applied a real server frame yet.
         // Without this guard, `elapsed = elapsedRealtime() - 0` is device uptime
         // and the bar snaps to durationMs on first render.
@@ -80,9 +94,15 @@ fun ProgressRail(
             displayPositionMs = anchorPositionMs
             return@LaunchedEffect
         }
+        // Clamp the elapsed reference to whichever is more recent: the server's
+        // anchorTime, or the most recent local resume moment. Prevents the
+        // pause duration from being added to displayPositionMs during the
+        // brief window between "user pressed play locally" and "server sends
+        // a fresh server/state with the resume position".
+        val timeZero = maxOf(anchorTime, playSince)
         while (isActive) {
             withFrameMillis { }
-            val elapsed = SystemClock.elapsedRealtime() - anchorTime
+            val elapsed = SystemClock.elapsedRealtime() - timeZero
             displayPositionMs = (anchorPositionMs + elapsed).coerceIn(0L, durationMs)
         }
     }
