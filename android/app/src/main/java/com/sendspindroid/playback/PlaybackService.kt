@@ -91,6 +91,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -1127,16 +1128,35 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun startDecodeWorker() {
         decodeJob = serviceScope.launch(decodeDispatcher) {
-            for (task in decodeChannel) {
-                try {
-                    when (task) {
-                        is DecodeTask.Chunk -> handleDecodeChunk(task)
-                        is DecodeTask.StartStream -> handleDecodeStartStream(task)
-                        DecodeTask.Flush -> handleDecodeFlush()
-                        DecodeTask.Release -> handleDecodeRelease()
+            try {
+                for (task in decodeChannel) {
+                    try {
+                        when (task) {
+                            is DecodeTask.Chunk -> handleDecodeChunk(task)
+                            is DecodeTask.StartStream -> handleDecodeStartStream(task)
+                            DecodeTask.Flush -> handleDecodeFlush()
+                            DecodeTask.Release -> handleDecodeRelease()
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Decode worker error on task ${task::class.simpleName}", e)
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Decode worker error on task ${task::class.simpleName}", e)
+                }
+            } finally {
+                // Channel-closed path. Releases the decoder unconditionally so
+                // a shutdown that couldn't enqueue an explicit Release task
+                // (trySend Failed because the channel was full at onDestroy)
+                // still doesn't leak the MediaCodec / codec native handles.
+                // The handleDecodeRelease path (when it runs successfully)
+                // leaves audioDecoder == null already, so this is a no-op in
+                // the normal case.
+                if (audioDecoder != null) {
+                    try {
+                        audioDecoder?.release()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error releasing decoder on worker exit", e)
+                    }
+                    audioDecoder = null
+                    decoderReady = false
                 }
             }
         }
@@ -1454,13 +1474,21 @@ class PlaybackService : MediaLibraryService() {
                 // (onArtwork) will repopulate. Coil caches by URL so a
                 // re-fetch on the same album is essentially free.
                 //
+                // Compare against the post-withMetadata state title rather
+                // than the raw protocol field. The server emits empty title
+                // in idle metadata frames; withMetadata preserves the prior
+                // title on empty input ("no info" semantics), but comparing
+                // against the raw empty input would falsely report a title
+                // change and wipe artwork during idle transitions even
+                // though the on-screen title is unchanged.
+                //
                 // Done BEFORE updateMediaMetadata so effectiveArtwork (which
-                // feeds the forwarding-player cache) is null on a track
+                // feeds the forwarding-player cache) is null on a real track
                 // change, rather than carrying the prior bitmap.
-                val newTitle = title.ifEmpty { null }
-                val titleChanged = newTitle != lastTrackTitle
+                val resolvedTitle = _playbackState.value.title
+                val titleChanged = resolvedTitle != lastTrackTitle
                 if (titleChanged) {
-                    lastTrackTitle = newTitle
+                    lastTrackTitle = resolvedTitle
                     urlArtwork = null
                     binaryArtwork = null
                     ++artworkGeneration
@@ -1564,10 +1592,18 @@ class PlaybackService : MediaLibraryService() {
             // will decode with the new decoder once the worker drains the
             // StartStream task ahead of it.
             decoderReady = true
-            serviceScope.launch {
-                decodeChannel.send(
-                    DecodeTask.StartStream(codec, sampleRate, channels, bitDepth, codecHeader)
-                )
+            // Launched on IO so the send (and any suspension when the channel
+            // is full) doesn't burden the main thread. ClosedSendChannelException
+            // is expected if the service is being torn down concurrently --
+            // the worker has already (or will) release the decoder on close.
+            serviceScope.launch(Dispatchers.IO) {
+                try {
+                    decodeChannel.send(
+                        DecodeTask.StartStream(codec, sampleRate, channels, bitDepth, codecHeader)
+                    )
+                } catch (e: ClosedSendChannelException) {
+                    // benign: shutdown race
+                }
             }
 
             // Non-decoder state updates continue to run on the main thread,
@@ -1638,7 +1674,17 @@ class PlaybackService : MediaLibraryService() {
             // stream/clear message decodes with the pre-flush decoder
             // state; every chunk enqueued after decodes with the flushed
             // decoder. Preserves the FIFO guarantee from the design.
-            serviceScope.launch { decodeChannel.send(DecodeTask.Flush) }
+            //
+            // IO dispatcher + ClosedSendChannelException catch: same rationale
+            // as onStreamStart -- avoid main-thread cycles for the send and
+            // swallow the benign shutdown race.
+            serviceScope.launch(Dispatchers.IO) {
+                try {
+                    decodeChannel.send(DecodeTask.Flush)
+                } catch (e: ClosedSendChannelException) {
+                    // benign: shutdown race
+                }
+            }
 
             mainHandler.post {
                 Log.i(TAG, "[cmd-trace] T3 onStreamClear.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
@@ -1680,8 +1726,18 @@ class PlaybackService : MediaLibraryService() {
             // corrupts codec state (this is exactly the regression PR #142
             // introduced via drop-oldest). Suspend-on-full is the
             // correctness property; see design doc H-4 / M-8 rationale.
-            serviceScope.launch {
-                decodeChannel.send(DecodeTask.Chunk(serverTimeMicros, audioData))
+            //
+            // Dispatchers.IO (not Main) so neither the launch nor any
+            // channel-full suspension burdens the main thread; at 50
+            // chunks/sec we were posting that many coroutine starts to Main
+            // for no reason. ClosedSendChannelException is the benign
+            // shutdown race -- worker handles decoder release in its finally.
+            serviceScope.launch(Dispatchers.IO) {
+                try {
+                    decodeChannel.send(DecodeTask.Chunk(serverTimeMicros, audioData))
+                } catch (e: ClosedSendChannelException) {
+                    // benign: shutdown race
+                }
             }
         }
 
@@ -1945,6 +2001,21 @@ class PlaybackService : MediaLibraryService() {
         return Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
     }
 
+    /**
+     * Filter artwork URIs that the MediaSession bridge can't resolve out of
+     * process. The `ma-proxy://` scheme is only handled inside this app via
+     * Coil's MaProxyImageFetcher (which goes over the WebRTC DataChannel) --
+     * Android Auto, lock screen and AVRCP would try to fetch it externally
+     * and fail. Returning null here forces those consumers to fall back to
+     * the bitmap blob (artworkData) which we already compress and ship via
+     * MetadataForwardingPlayer. Issue from enhanced-branch audit.
+     */
+    private fun externalArtworkUri(url: String?): Uri? {
+        if (url.isNullOrEmpty()) return null
+        if (url.startsWith("${com.sendspindroid.musicassistant.MaProxyImageFetcher.SCHEME}://")) return null
+        return Uri.parse(url)
+    }
+
     @OptIn(UnstableApi::class)
     private fun updateMediaSessionArtwork(bitmap: Bitmap) {
         val state = _playbackState.value
@@ -1960,7 +2031,7 @@ class PlaybackService : MediaLibraryService() {
             artist = state.artist,
             album = state.album,
             artwork = bitmap,
-            artworkUri = state.artworkUrl?.let { Uri.parse(it) },
+            artworkUri = externalArtworkUri(state.artworkUrl),
             albumArtist = state.albumArtist ?: "",
             year = state.year ?: 0,
             albumTrack = state.albumTrack ?: 0
@@ -1985,7 +2056,7 @@ class PlaybackService : MediaLibraryService() {
             artist = state.artist,
             album = state.album,
             artwork = effectiveArtwork,
-            artworkUri = state.artworkUrl?.let { Uri.parse(it) },
+            artworkUri = externalArtworkUri(state.artworkUrl),
             clearArtwork = effectiveArtwork == null,
             albumArtist = state.albumArtist ?: "",
             year = state.year ?: 0,

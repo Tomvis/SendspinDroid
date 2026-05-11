@@ -57,6 +57,15 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     @Volatile
     private var currentArtworkData: ByteArray? = null
 
+    // Source bitmap for the bytes currently in [currentArtworkData]. JPEG
+    // compression is the bulk of [updateMetadata]'s cost (~10-40 ms on Tegra
+    // for a 300x300 ARGB bitmap, on the main thread). Same-track metadata
+    // refreshes re-emit the same Bitmap instance every time; identity check
+    // here skips the redundant recompress without changing observable
+    // behavior. Cleared in lockstep with currentArtworkData.
+    @Volatile
+    private var lastCompressedSource: Bitmap? = null
+
     @Volatile
     private var currentArtworkUri: Uri? = null
 
@@ -125,16 +134,23 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
             currentArtworkUri = if (artworkUri.toString().isEmpty()) null else artworkUri
         }
 
-        // Handle artwork bitmap
+        // Handle artwork bitmap. Recompress only when the source Bitmap is
+        // not the same instance we already compressed - identity check, not
+        // content equality. Same-track refreshes pass the same Bitmap; a new
+        // Coil fetch produces a new instance and falls through to recompress.
         if (artwork != null) {
-            currentArtworkData = ByteArrayOutputStream().use { stream ->
-                artwork.compress(Bitmap.CompressFormat.JPEG, 90, stream)
-                stream.toByteArray()
+            if (artwork !== lastCompressedSource) {
+                currentArtworkData = ByteArrayOutputStream().use { stream ->
+                    artwork.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+                    stream.toByteArray()
+                }
+                lastCompressedSource = artwork
             }
         } else if (clearArtwork) {
             // Explicitly clear artwork (new track has no artwork)
             currentArtworkData = null
             currentArtworkUri = null
+            lastCompressedSource = null
         }
 
         // Rebuild cached metadata
@@ -246,6 +262,7 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         currentAlbumTrack = null
         currentArtworkData = null
         currentArtworkUri = null
+        lastCompressedSource = null
         reconnectingOverlay = null
         cachedMetadata = MediaMetadata.EMPTY
 

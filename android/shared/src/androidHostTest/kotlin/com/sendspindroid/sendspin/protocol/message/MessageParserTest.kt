@@ -264,6 +264,26 @@ class MessageParserTest {
     }
 
     @Test
+    fun parseServerState_albumTrackExplicitZeroFallsBackToLegacyTrack() {
+        // Per spec, 0 means "not set" for integer fields. A mid-migration
+        // server that emits `album_track: 0` (because the field is unknown
+        // in their database) but still has the legacy `track` populated
+        // should surface the legacy value, not the sentinel zero.
+        val payload = buildJsonObject {
+            put("metadata", buildJsonObject {
+                put("title", "Song")
+                put("album_track", 0)
+                put("track", 7)
+            })
+        }
+
+        val (metadata, _) = MessageParser.parseServerState(payload)
+
+        assertNotNull(metadata)
+        assertEquals(7, metadata!!.albumTrack)
+    }
+
+    @Test
     fun parseServerState_legacyFlatStructure_parsesAsFallback() {
         val payload = buildJsonObject {
             put("metadata", buildJsonObject {

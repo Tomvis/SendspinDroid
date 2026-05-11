@@ -60,6 +60,13 @@ fun ProgressRail(
     accent: Color,
     modifier: Modifier = Modifier,
 ) {
+    // No-op when duration is unknown (live stream, or the first server frame
+    // before track_duration arrives). The rail's math floors safeDuration to
+    // 1L which otherwise pins the bar at 100% with "0:00 / 0:00" labels --
+    // visually broken. The rail reappears once the server delivers a real
+    // duration.
+    if (durationMs <= 0L) return
+
     val paused = !isPlaying
     val safeDuration = durationMs.coerceAtLeast(1L)
 

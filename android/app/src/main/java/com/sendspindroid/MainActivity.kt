@@ -690,12 +690,17 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Ask the WindowManager to pick the highest-resolution display mode the
-     * attached display supports at (or near) the current refresh rate. On a
-     * 4K Android TV this can promote the app window from 1080p to 2160p;
-     * combined with the resolution-independent Compose layout, the Now
-     * Playing surface then renders natively at 4K instead of being upscaled
-     * by the TV's hardware scaler. No-op if a larger mode isn't available or
-     * the platform refuses the switch.
+     * attached display supports. On a 4K Android TV this can promote the app
+     * window from 1080p to 2160p; combined with the resolution-independent
+     * Compose layout, the Now Playing surface then renders natively at 4K
+     * instead of being upscaled by the TV's hardware scaler. No-op if a
+     * larger mode isn't available or the platform refuses the switch.
+     *
+     * Selection rule: maximum pixel count wins; refresh rate proximity to the
+     * current mode is only a tiebreaker. The previous implementation filtered
+     * to "same refresh rate first" which silently skipped 4K modes only
+     * offered at 30/24 Hz on TVs that boot at 60 Hz -- the upgrade promised
+     * by the comment never fired on those panels.
      */
     private fun requestLargestDisplayMode() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
@@ -703,11 +708,12 @@ class MainActivity : AppCompatActivity() {
         val modes = display.supportedModes
         if (modes.isEmpty()) return
         val current = display.mode
-        val sameRefresh = modes.filter {
-            kotlin.math.abs(it.refreshRate - current.refreshRate) < 1f
-        }
-        val pool = if (sameRefresh.isNotEmpty()) sameRefresh else modes.toList()
-        val best = pool.maxByOrNull { it.physicalWidth.toLong() * it.physicalHeight } ?: return
+        val best = modes.maxWithOrNull(
+            compareBy<android.view.Display.Mode>(
+                { it.physicalWidth.toLong() * it.physicalHeight },
+                { -kotlin.math.abs(it.refreshRate - current.refreshRate) }
+            )
+        ) ?: return
         val bestPixels = best.physicalWidth.toLong() * best.physicalHeight
         val currentPixels = current.physicalWidth.toLong() * current.physicalHeight
         if (bestPixels <= currentPixels) {
@@ -1952,11 +1958,7 @@ class MainActivity : AppCompatActivity() {
                     serverName = serverName,
                     serverAddress = address,
                     attempt = attempt,
-                    // 2^(attempt-1) capped at 30s. Clamp the shift exponent to
-                    // [0, 5] so attempt = 0 doesn't produce `1 shl -1` (which
-                    // the JVM masks to `1 shl 31` = Int.MIN_VALUE) and large
-                    // attempt counts don't overflow before the coerceAtMost.
-                    nextRetrySeconds = (1 shl (attempt - 1).coerceIn(0, 5)).coerceAtMost(30)
+                    nextRetrySeconds = computeReconnectSecondsForUi(attempt)
                 )
                 // Sync state to ViewModel for Compose UI
                 viewModel.updateConnectionState(connectionState)
@@ -3089,6 +3091,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Mini player updates automatically via Compose/ViewModel state observation
+    }
+
+    /**
+     * UI representation of the next reconnect delay. Mirrors SendSpin's actual
+     * schedule (see SendSpin.kt: INITIAL_RECONNECT_DELAY_MS=500ms, doubled per
+     * attempt, capped at MAX_RECONNECT_DELAY_MS=10s for the first 5 attempts,
+     * then HIGH_POWER_RECONNECT_DELAY_MS=30s steady-state). Rounded UP to the
+     * next second so the banner never reads "0s" on the 500ms first attempt.
+     *
+     * Kept in sync manually; if SendSpin's reconnect constants change, update
+     * this function to match. The previous formula (`1 shl (attempt - 1)`)
+     * over-stated every value by 2x because it ignored the 500ms initial
+     * delay.
+     */
+    private fun computeReconnectSecondsForUi(attempt: Int): Int {
+        if (attempt > 5) return 30
+        val shift = (attempt - 1).coerceIn(0, 4)
+        val delayMs = (500L shl shift).coerceAtMost(10_000L)
+        // Ceiling division so 500ms -> 1s, 1000ms -> 1s, 2000ms -> 2s, etc.
+        return ((delayMs + 999L) / 1000L).coerceAtLeast(1L).toInt()
     }
 
     private fun updateMetadata(
