@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,8 +82,12 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
 
     // Always create the transition; gating it on `paused` would mutate the
     // slot table when paused flips and scramble Compose remembered state.
+    // Bind to the State<Float> rather than reading .value here -- the read
+    // happens inside the graphicsLayer block below, which only invalidates the
+    // layer per frame instead of recomposing all of BlurredCover (60Hz
+    // recompose churn was visible on the Shield Tegra).
     val drift = rememberInfiniteTransition(label = "np-drift")
-    val driftValue by drift.animateFloat(
+    val driftState = drift.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -93,7 +96,6 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
         ),
         label = "np-drift-progress",
     )
-    val driftProgress = if (paused) driftValue else 0f
 
     AsyncImage(
         model = model,
@@ -104,6 +106,7 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
                 scaleX = 1.18f
                 scaleY = 1.18f
                 alpha = 0.7f
+                val driftProgress = if (paused) driftState.value else 0f
                 translationX = -size.width * 0.015f * driftProgress
                 translationY = -size.height * 0.01f * driftProgress
             },

@@ -299,7 +299,7 @@ class SendSpinPlayer : Player {
             mutableQueue[currentQueueIndex] = newItem
             queueMediaItems = mutableQueue
             currentMediaItem = newItem
-            currentTimeline = MultiItemTimeline(queueMediaItems, durationMs)
+            currentTimeline = MultiItemTimeline(queueMediaItems, currentQueueIndex, durationMs)
         } else {
             // No queue -- single-item mode
             currentMediaItem = newItem
@@ -346,7 +346,7 @@ class SendSpinPlayer : Player {
         queueMediaItems = items
         currentQueueIndex = validIndex
         currentMediaItem = items[validIndex]
-        currentTimeline = MultiItemTimeline(items, currentDurationMs)
+        currentTimeline = MultiItemTimeline(items, validIndex, currentDurationMs)
 
         // Notify timeline change
         listeners.forEach { it.onTimelineChanged(currentTimeline, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE) }
@@ -1073,12 +1073,18 @@ private class SingleItemTimeline(
  * to populate its built-in queue UI (the list shown when tapping the queue button
  * on the Now Playing screen).
  *
+ * Only the currently-playing item carries a known duration; other queue items
+ * report TIME_UNSET because SendSpin doesn't push per-track durations for the
+ * tail of the queue ahead of time.
+ *
  * @param items List of MediaItems representing the queue
- * @param currentDurationMs Duration of the currently playing track (used for the current item)
+ * @param currentIndex Index of the currently playing item within [items]
+ * @param currentDurationMs Duration of the currently playing track (ms); 0 if unknown
  */
 @UnstableApi
 private class MultiItemTimeline(
     private val items: List<MediaItem>,
+    private val currentIndex: Int,
     private val currentDurationMs: Long
 ) : Timeline() {
 
@@ -1086,6 +1092,8 @@ private class MultiItemTimeline(
 
     override fun getWindow(windowIndex: Int, window: Window, defaultPositionProjectionUs: Long): Window {
         val item = items.getOrNull(windowIndex) ?: items[0]
+        val isCurrent = windowIndex == currentIndex
+        val hasDuration = isCurrent && currentDurationMs > 0
         window.set(
             /* uid= */ windowIndex,
             /* mediaItem= */ item,
@@ -1094,10 +1102,10 @@ private class MultiItemTimeline(
             /* windowStartTimeMs= */ C.TIME_UNSET,
             /* elapsedRealtimeEpochOffsetMs= */ C.TIME_UNSET,
             /* isSeekable= */ false,
-            /* isDynamic= */ false,
+            /* isDynamic= */ !hasDuration,
             /* liveConfiguration= */ null,
             /* defaultPositionUs= */ 0,
-            /* durationUs= */ C.TIME_UNSET,
+            /* durationUs= */ if (hasDuration) currentDurationMs * 1000 else C.TIME_UNSET,
             /* firstPeriodIndex= */ windowIndex,
             /* lastPeriodIndex= */ windowIndex,
             /* positionInFirstPeriodUs= */ 0
@@ -1108,11 +1116,13 @@ private class MultiItemTimeline(
     override fun getPeriodCount(): Int = items.size
 
     override fun getPeriod(periodIndex: Int, period: Period, setIds: Boolean): Period {
+        val isCurrent = periodIndex == currentIndex
+        val hasDuration = isCurrent && currentDurationMs > 0
         period.set(
             /* id= */ periodIndex,
             /* uid= */ periodIndex,
             /* windowIndex= */ periodIndex,
-            /* durationUs= */ C.TIME_UNSET,
+            /* durationUs= */ if (hasDuration) currentDurationMs * 1000 else C.TIME_UNSET,
             /* positionInWindowUs= */ 0
         )
         return period

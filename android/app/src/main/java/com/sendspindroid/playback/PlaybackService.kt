@@ -1968,12 +1968,19 @@ class PlaybackService : MediaLibraryService() {
         val state = _playbackState.value
 
         // See updateMediaSessionArtwork for why ancillaries use "" / 0 here.
+        // clearArtwork = (effectiveArtwork == null) so a track change that has
+        // wiped urlArtwork / binaryArtwork actually drops the prior bitmap from
+        // the forwarding-player cache. Without it MetadataForwardingPlayer's
+        // null-as-preserve semantics would keep the old track's artwork on the
+        // lock screen until a new bitmap arrives, contradicting the
+        // titleChanged invalidation that onMetadataUpdate already performed.
         forwardingPlayer?.updateMetadata(
             title = state.title,
             artist = state.artist,
             album = state.album,
             artwork = effectiveArtwork,
             artworkUri = state.artworkUrl?.let { Uri.parse(it) },
+            clearArtwork = effectiveArtwork == null,
             albumArtist = state.albumArtist ?: "",
             year = state.year ?: 0,
             albumTrack = state.albumTrack ?: 0
@@ -2719,6 +2726,12 @@ class PlaybackService : MediaLibraryService() {
                 // state until the next group/update message corrects us.
                 if (_playbackState.value.playbackState == PlaybackStateType.PLAYING) {
                     syncAudioPlayer?.resume()
+                    // Mirror local resume into playWhenReady so the lock screen,
+                    // Android Auto, AVRCP and the in-app UI all flip back to
+                    // "playing" together. Using *FromServer because we don't
+                    // want to round-trip through SendSpin (the server already
+                    // thinks we're playing — focus loss was a local-only pause).
+                    sendSpinPlayer?.updatePlayWhenReadyFromServer(true)
                 }
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
@@ -2726,6 +2739,10 @@ class PlaybackService : MediaLibraryService() {
                 // Another app took focus permanently - pause playback
                 synchronized(audioFocusLock) { hasAudioFocus = false }
                 syncAudioPlayer?.pause()
+                // Mirror local pause into playWhenReady so external controllers
+                // see "paused" while we hold no focus. *FromServer skips the
+                // round-trip to SendSpin (server unaware of focus loss).
+                sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 Log.d(TAG, "Audio focus lost transiently")
@@ -2734,6 +2751,10 @@ class PlaybackService : MediaLibraryService() {
                 // while we don't hold focus; restored on AUDIOFOCUS_GAIN.
                 synchronized(audioFocusLock) { hasAudioFocus = false }
                 syncAudioPlayer?.pause()
+                // Same playWhenReady-mirror rationale as AUDIOFOCUS_LOSS above.
+                // The matching AUDIOFOCUS_GAIN branch flips this back to true
+                // when (and only when) the server is still PLAYING.
+                sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 Log.d(TAG, "Audio focus lost transiently (can duck)")

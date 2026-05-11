@@ -1953,7 +1953,11 @@ class MainActivity : AppCompatActivity() {
                     serverName = serverName,
                     serverAddress = address,
                     attempt = attempt,
-                    nextRetrySeconds = (1 shl (attempt - 1)).coerceAtMost(30)
+                    // 2^(attempt-1) capped at 30s. Clamp the shift exponent to
+                    // [0, 5] so attempt = 0 doesn't produce `1 shl -1` (which
+                    // the JVM masks to `1 shl 31` = Int.MIN_VALUE) and large
+                    // attempt counts don't overflow before the coerceAtMost.
+                    nextRetrySeconds = (1 shl (attempt - 1).coerceIn(0, 5)).coerceAtMost(30)
                 )
                 // Sync state to ViewModel for Compose UI
                 viewModel.updateConnectionState(connectionState)
