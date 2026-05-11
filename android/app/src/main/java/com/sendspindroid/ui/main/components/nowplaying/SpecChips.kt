@@ -69,8 +69,9 @@ private fun Chip(text: String) {
 private fun formatSampleRate(sampleRateHz: Int): String {
     val khz = sampleRateHz / 1000f
     // Common rates (44.1, 48, 88.2, 96, 176.4, 192) — show one decimal only when fractional.
+    // Locale.ROOT keeps "44.1" stable across locales (no "44,1" in de-DE etc.).
     val isFractional = sampleRateHz % 1000 != 0
-    val formatted = if (isFractional) "%.1f".format(khz) else khz.toInt().toString()
+    val formatted = if (isFractional) String.format(Locale.ROOT, "%.1f", khz) else khz.toInt().toString()
     return "$formatted kHz"
 }
 

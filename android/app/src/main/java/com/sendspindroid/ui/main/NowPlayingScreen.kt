@@ -122,20 +122,34 @@ fun NowPlayingScreen(
         }
     }
     // SendSpin fires stream/end on pause, which zeroes the audio spec. Keep the
-    // last non-null value so the codec/bit-depth/sample-rate chips stay up while
-    // paused, and reset only when the track itself changes. Key on the sticky
-    // metadata so a transient blank emission doesn't also wipe the chips.
-    var stickyAudioSpec by remember(stickyMetadata.title, stickyMetadata.artist, stickyMetadata.album) {
-        mutableStateOf(audioStreamSpec)
-    }
-    LaunchedEffect(audioStreamSpec) {
-        if (audioStreamSpec != null) stickyAudioSpec = audioStreamSpec
+    // last non-null value so the codec/bit-depth/sample-rate chips stay up
+    // while paused. We deliberately do NOT key the remember on track metadata:
+    // on a track change, audioStreamSpec is typically still the previous
+    // track's value (the server may not yet have fired a fresh stream/start),
+    // so resetting here would snapshot stale data. Clear on disconnect instead.
+    var stickyAudioSpec by remember { mutableStateOf(audioStreamSpec) }
+    LaunchedEffect(audioStreamSpec, isActivelyConnected) {
+        when {
+            !isActivelyConnected -> stickyAudioSpec = null
+            audioStreamSpec != null -> stickyAudioSpec = audioStreamSpec
+        }
     }
     // Optimistic metadata update: when a queue item is tapped, update the UI
     // immediately with the item's metadata instead of waiting for the server round-trip.
+    // Explicit "" / 0 for the ancillary fields so they don't inherit the
+    // previous track's albumArtist / year / albumTrack / queue position.
     LaunchedEffect(queueViewModel) {
         queueViewModel?.playedItem?.collect { item ->
-            viewModel.updateMetadata(item.name, item.artist ?: "", item.album ?: "")
+            viewModel.updateMetadata(
+                title = item.name,
+                artist = item.artist ?: "",
+                album = item.album ?: "",
+                albumArtist = "",
+                year = 0,
+                albumTrack = 0,
+                queueTrack = 0,
+                totalTracks = 0
+            )
             item.imageUri?.takeIf { it.isNotEmpty() }?.let { url ->
                 viewModel.updateArtwork(ArtworkSource.Url(url))
             }

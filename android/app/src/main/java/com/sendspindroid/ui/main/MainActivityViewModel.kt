@@ -180,8 +180,10 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
-     * Update metadata. Pass `null` for any optional field to keep the prior value.
-     * title/artist/album are always written through (caller always knows them).
+     * Update metadata. Delegates the merge to [mergeTrackMetadata] which
+     * handles the "is this a new track?" decision so Media3 emissions that
+     * don't carry SendSpin-only fields (queueTrack / totalTracks) don't
+     * inherit the previous track's queue position.
      */
     fun updateMetadata(
         title: String,
@@ -193,16 +195,16 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         queueTrack: Int? = null,
         totalTracks: Int? = null
     ) {
-        val prev = _metadata.value
-        _metadata.value = TrackMetadata(
+        _metadata.value = mergeTrackMetadata(
+            prev = _metadata.value,
             title = title,
             artist = artist,
             album = album,
-            albumArtist = albumArtist ?: prev.albumArtist,
-            year = year ?: prev.year,
-            albumTrack = albumTrack ?: prev.albumTrack,
-            queueTrack = queueTrack ?: prev.queueTrack,
-            totalTracks = totalTracks ?: prev.totalTracks
+            albumArtist = albumArtist,
+            year = year,
+            albumTrack = albumTrack,
+            queueTrack = queueTrack,
+            totalTracks = totalTracks
         )
     }
 
@@ -331,6 +333,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         _positionUpdatedAt.value = 0L
         _isBuffering.value = false
         _isMaConnected.value = false
+        _audioStreamSpec.value = null
     }
 
     /**

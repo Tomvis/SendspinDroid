@@ -235,8 +235,12 @@ private fun RailBar(
                 )
             }
             if (playheadAlpha < 1f) {
+                // Color.copy(alpha) replaces, doesn't multiply -- preserve the
+                // 0.7f base by multiplying explicitly so the stroked ring at
+                // full pause renders at 70% alpha, matching the rest of the
+                // dim-on-pause treatment.
                 drawRoundRect(
-                    color = RailHeadRing.copy(alpha = 1f - playheadAlpha),
+                    color = RailHeadRing.copy(alpha = 0.7f * (1f - playheadAlpha)),
                     topLeft = Offset(headX - halfW, headY - halfH),
                     size = Size(headWidth, headHeight),
                     cornerRadius = CornerRadius(headRadius),
@@ -294,9 +298,11 @@ private fun formatRailTime(ms: Long): String {
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60
     val seconds = totalSeconds % 60
+    // Locale.ROOT pins ASCII digits + ":" separator across all locales
+    // (some locales would otherwise emit Arabic-Indic digits or NBSP separators).
     return if (hours > 0) {
-        "%d:%02d:%02d".format(hours, minutes, seconds)
+        String.format(Locale.ROOT, "%d:%02d:%02d", hours, minutes, seconds)
     } else {
-        "%d:%02d".format(minutes, seconds)
+        String.format(Locale.ROOT, "%d:%02d", minutes, seconds)
     }
 }

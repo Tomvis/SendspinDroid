@@ -146,6 +146,18 @@ class PlaybackService : MediaLibraryService() {
     private var currentChannels: Int = 0
     private var currentBitDepth: Int = 0
 
+    /**
+     * Reset the audio stream spec to "no active stream". Called on disconnect
+     * so the Now Playing spec chips disappear; not called on stream/end (pause)
+     * since the chips should remain visible while paused.
+     */
+    private fun clearAudioStreamSpec() {
+        currentCodec = "pcm"
+        currentSampleRate = 0
+        currentChannels = 0
+        currentBitDepth = 0
+    }
+
     // Current server connection info (for MA integration)
     private var currentServerId: String? = null
     private var currentConnectionMode: ConnectionMode = ConnectionMode.LOCAL
@@ -851,6 +863,7 @@ class PlaybackService : MediaLibraryService() {
                         lastTrackTitle = null
                         urlArtwork = null
                         binaryArtwork = null
+                        clearAudioStreamSpec()
 
                         // Clear lock screen metadata
                         forwardingPlayer?.clearMetadata()
@@ -898,6 +911,7 @@ class PlaybackService : MediaLibraryService() {
                             lastTrackTitle = null
                             urlArtwork = null
                             binaryArtwork = null
+                            clearAudioStreamSpec()
 
                             // Clear lock screen metadata
                             forwardingPlayer?.clearMetadata()
@@ -1560,8 +1574,8 @@ class PlaybackService : MediaLibraryService() {
                 // Deliberately do NOT zero currentSampleRate/Channels/BitDepth here.
                 // SendSpin fires stream/end whenever playback pauses, and the Now
                 // Playing UI wants the codec/bit-depth/sample-rate chips to remain
-                // visible through a pause. The spec is cleared only on disconnect
-                // (see ConnectionState.Disconnected handler).
+                // visible through a pause. The spec is cleared on disconnect via
+                // clearAudioStreamSpec() in the TransportState.Idle / Failed handlers.
                 syncAudioPlayer?.enterIdle()
                 broadcastSessionExtras()
             }
@@ -3006,13 +3020,15 @@ class PlaybackService : MediaLibraryService() {
             if (playerCommand != Player.COMMAND_PLAY_PAUSE) return SessionResult.RESULT_SUCCESS
             if (hasAudioFocus) return SessionResult.RESULT_SUCCESS
 
-            // Self-healing for our own in-app Play button: re-acquire focus and proceed.
-            // External media-button presses (TV remote routed to us while another app
-            // holds focus) get suppressed so we don't toggle the SendSpin server.
-            if (controller.packageName == packageName) {
-                requestAudioFocus()
-                return if (hasAudioFocus) SessionResult.RESULT_SUCCESS else SessionResult.RESULT_ERROR_INVALID_STATE
-            }
+            // No focus: try to re-acquire regardless of caller. This self-heals
+            // our own UI, the TV remote's hardware media keys (which arrive
+            // routed through "android" / the SystemUI MediaButtonReceiver, not
+            // our package), and lock-screen controls. If another app legitimately
+            // owns focus, requestAudioFocus() will be denied and we fall through
+            // to suppress so we don't toggle the SendSpin server in the
+            // background.
+            requestAudioFocus()
+            if (hasAudioFocus) return SessionResult.RESULT_SUCCESS
 
             Log.i(TAG, "Suppressing PLAY_PAUSE from ${controller.packageName} (no audio focus)")
             return SessionResult.RESULT_ERROR_INVALID_STATE
