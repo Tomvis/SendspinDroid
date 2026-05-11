@@ -596,8 +596,10 @@ class MainActivity : AppCompatActivity() {
                             artist = restoreArtist,
                             album = restoreAlbum,
                             albumArtist = metadata.albumArtist?.toString(),
-                            year = metadata.releaseYear,
-                            albumTrack = metadata.trackNumber
+                            // Filter 0 sentinels from Media3 — see comment on the
+                            // matching call in onMediaMetadataChanged.
+                            year = metadata.releaseYear?.takeIf { it > 0 },
+                            albumTrack = metadata.trackNumber?.takeIf { it > 0 }
                         )
                     }
                     updateAlbumArt(metadata)
@@ -1814,27 +1816,24 @@ class MainActivity : AppCompatActivity() {
             updateGroupName(groupName)
         }
 
-        // Handle audio stream spec updates. Only act when the broadcast
-        // actually carries audio-spec extras: PlaybackService emits these
-        // alongside stream/start and connection-state transitions, but
-        // volume-only / group-only broadcasts omit them. Without this gate,
-        // every unrelated broadcast would call updateAudioStreamSpec(null)
-        // and wipe a previously-valid spec.
-        if (extras.containsKey(PlaybackService.EXTRA_AUDIO_SAMPLE_RATE)) {
-            val audioSampleRate = extras.getInt(PlaybackService.EXTRA_AUDIO_SAMPLE_RATE, 0)
-            val audioChannels = extras.getInt(PlaybackService.EXTRA_AUDIO_CHANNELS, 0)
-            val audioBitDepth = extras.getInt(PlaybackService.EXTRA_AUDIO_BIT_DEPTH, 0)
-            val audioCodec = extras.getString(PlaybackService.EXTRA_AUDIO_CODEC, "")
-            val spec = if (audioSampleRate > 0 && audioChannels > 0 && audioBitDepth > 0) {
-                com.sendspindroid.ui.main.AudioStreamSpec(
-                    codec = audioCodec,
-                    sampleRate = audioSampleRate,
-                    channels = audioChannels,
-                    bitDepth = audioBitDepth,
-                )
-            } else null
-            viewModel.updateAudioStreamSpec(spec)
-        }
+        // Handle audio stream spec updates. PlaybackService unconditionally
+        // includes the spec extras in every broadcast (0 sample rate means
+        // "no active stream"), so we always recompute. The sample-rate /
+        // channels / bit-depth > 0 check converts the 0 sentinel back to a
+        // null AudioStreamSpec.
+        val audioSampleRate = extras.getInt(PlaybackService.EXTRA_AUDIO_SAMPLE_RATE, 0)
+        val audioChannels = extras.getInt(PlaybackService.EXTRA_AUDIO_CHANNELS, 0)
+        val audioBitDepth = extras.getInt(PlaybackService.EXTRA_AUDIO_BIT_DEPTH, 0)
+        val audioCodec = extras.getString(PlaybackService.EXTRA_AUDIO_CODEC, "")
+        val spec = if (audioSampleRate > 0 && audioChannels > 0 && audioBitDepth > 0) {
+            com.sendspindroid.ui.main.AudioStreamSpec(
+                codec = audioCodec,
+                sampleRate = audioSampleRate,
+                channels = audioChannels,
+                bitDepth = audioBitDepth,
+            )
+        } else null
+        viewModel.updateAudioStreamSpec(spec)
 
         // Handle reconnect status updates
         val reconnectStatusStr = extras.getString(PlaybackService.EXTRA_RECONNECT_STATUS)

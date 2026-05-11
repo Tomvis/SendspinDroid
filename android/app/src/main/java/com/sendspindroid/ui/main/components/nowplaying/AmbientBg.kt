@@ -134,7 +134,8 @@ private class BoxBlurTransformation(
         // (copy returns null). If we hit one, bail out with the input unchanged
         // rather than crashing -- the ambient cover will just render unblurred,
         // which is a minor visual regression but not a fatal one.
-        val src: Bitmap = if (input.config == Bitmap.Config.ARGB_8888) {
+        val srcIsCopy = input.config != Bitmap.Config.ARGB_8888
+        val src: Bitmap = if (!srcIsCopy) {
             input
         } else {
             input.copy(Bitmap.Config.ARGB_8888, true) ?: return input
@@ -143,6 +144,11 @@ private class BoxBlurTransformation(
         val height = src.height
         var pixels = IntArray(width * height)
         src.getPixels(pixels, 0, width, 0, 0, width, height)
+        // Drop the temporary ARGB_8888 copy as soon as we've extracted its
+        // pixels; otherwise it stays alive (along with input) until GC. On
+        // the Shield the recurring ambient refreshes were doubling bitmap
+        // pressure.
+        if (srcIsCopy) src.recycle()
         var scratch = IntArray(width * height)
         repeat(iterations) {
             boxBlurHorizontal(pixels, scratch, width, height, radius)

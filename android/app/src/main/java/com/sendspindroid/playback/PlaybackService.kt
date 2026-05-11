@@ -202,6 +202,12 @@ class PlaybackService : MediaLibraryService() {
     // Auto. Bumped whenever urlArtwork / binaryArtwork are cleared; the
     // async completion captures the value at launch and drops late writes
     // when the field has moved on.
+    //
+    // @Volatile because onArtwork captures this on the WebSocket thread
+    // while writes happen on the main thread; without it the WS read isn't
+    // guaranteed to observe the latest write, and long-typed access isn't
+    // atomic on 32-bit ARM.
+    @Volatile
     private var artworkGeneration = 0L
 
     /** Clears all MA caches (called on MA disconnect). */
