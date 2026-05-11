@@ -66,10 +66,12 @@ fun ProgressRail(
     var anchorPositionMs by remember { mutableLongStateOf(positionMs) }
     var anchorTime by remember { mutableLongStateOf(positionUpdatedAt) }
     var displayPositionMs by remember { mutableLongStateOf(positionMs) }
-    // Tracks the moment isPlaying last flipped false -> true. The interpolation
-    // loop below clamps elapsed-since-anchor at max(anchorTime, playSince) so
-    // the pause duration doesn't leak into displayPositionMs after resume,
-    // even if the server's next server/state hasn't refreshed anchorTime yet.
+    // Tracks the moment isPlaying last flipped false -> true. On resume we
+    // re-anchor (anchorPositionMs <- displayPositionMs, anchorTime <- playSince)
+    // so the bar continues forward from the frozen pause value instead of
+    // snapping back to the server's last anchor and ticking forward from there.
+    // The next server/state will replace this local anchor with the authoritative
+    // one.
     var playSince by remember { mutableLongStateOf(0L) }
     var wasPlaying by remember { mutableStateOf(isPlaying) }
 
@@ -81,7 +83,14 @@ fun ProgressRail(
 
     LaunchedEffect(isPlaying) {
         if (isPlaying && !wasPlaying) {
-            playSince = SystemClock.elapsedRealtime()
+            val now = SystemClock.elapsedRealtime()
+            playSince = now
+            // Re-anchor to the value the rail showed during pause so the
+            // interpolation loop continues forward from there. Without this,
+            // resume snaps the bar backward to the last server anchor and
+            // re-ticks the elapsed-since-pause delta.
+            anchorPositionMs = displayPositionMs
+            anchorTime = now
         }
         wasPlaying = isPlaying
     }

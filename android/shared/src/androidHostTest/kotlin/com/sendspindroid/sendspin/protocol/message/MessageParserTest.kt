@@ -227,6 +227,43 @@ class MessageParserTest {
     }
 
     @Test
+    fun parseServerState_legacyTrackKey_mapsToAlbumTrack() {
+        // Pre-rename servers emit `track` instead of `album_track`. The parser
+        // must fall back to the legacy key so older servers still surface a
+        // track number, rather than silently reporting 0.
+        val payload = buildJsonObject {
+            put("metadata", buildJsonObject {
+                put("title", "Old Server Song")
+                put("artist", "Old Server Artist")
+                put("track", 7)
+            })
+        }
+
+        val (metadata, _) = MessageParser.parseServerState(payload)
+
+        assertNotNull(metadata)
+        assertEquals(7, metadata!!.albumTrack)
+    }
+
+    @Test
+    fun parseServerState_albumTrackTakesPriorityOverLegacyTrack() {
+        // If a server emits both (unlikely but possible during migration),
+        // the spec-compliant `album_track` wins.
+        val payload = buildJsonObject {
+            put("metadata", buildJsonObject {
+                put("title", "Song")
+                put("album_track", 3)
+                put("track", 99)
+            })
+        }
+
+        val (metadata, _) = MessageParser.parseServerState(payload)
+
+        assertNotNull(metadata)
+        assertEquals(3, metadata!!.albumTrack)
+    }
+
+    @Test
     fun parseServerState_legacyFlatStructure_parsesAsFallback() {
         val payload = buildJsonObject {
             put("metadata", buildJsonObject {

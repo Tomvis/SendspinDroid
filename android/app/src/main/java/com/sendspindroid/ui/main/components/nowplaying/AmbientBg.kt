@@ -16,9 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -47,11 +45,11 @@ fun AmbientBg(
     paused: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // Force the whole ambient stack into an offscreen compositing layer so the
-    // BlendMode.Screen / BlendMode.Overlay draws below have a defined backdrop.
-    // Without this, on the Shield/Tegra GPU the blend reads back from whatever
-    // happened to be in the framebuffer that frame, which manifests as random
-    // flicker.
+    // Force the whole ambient stack into an offscreen compositing layer so
+    // the stacked alpha-blended layers below composite against a stable
+    // backdrop. Without this, on the Shield/Tegra GPU each alpha layer reads
+    // back from whatever happened to be in the framebuffer that frame, which
+    // manifests as random flicker.
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -129,8 +127,15 @@ private class BoxBlurTransformation(
     override val cacheKey: String = "sendspin-boxblur-r${radius}-i${iterations}"
 
     override suspend fun transform(input: Bitmap, size: coil.size.Size): Bitmap {
-        val src = if (input.config == Bitmap.Config.ARGB_8888) input
-                  else input.copy(Bitmap.Config.ARGB_8888, true)
+        // Bitmap.Config.HARDWARE doesn't support getPixels or copy-to-software
+        // (copy returns null). If we hit one, bail out with the input unchanged
+        // rather than crashing -- the ambient cover will just render unblurred,
+        // which is a minor visual regression but not a fatal one.
+        val src: Bitmap = if (input.config == Bitmap.Config.ARGB_8888) {
+            input
+        } else {
+            input.copy(Bitmap.Config.ARGB_8888, true) ?: return input
+        }
         val width = src.width
         val height = src.height
         var pixels = IntArray(width * height)
@@ -241,14 +246,16 @@ private fun GrainOverlay() {
     val brush = remember(grain) {
         ShaderBrush(ImageShader(grain, TileMode.Repeated, TileMode.Repeated))
     }
+    // Use Modifier.background(brush, alpha) rather than drawRect inside
+    // drawWithCache. The Shield Tegra renderer is unreliable with shader-
+    // backed brushes inside Canvas-style DrawScopes (gradient brushes paint
+    // black there); Modifier.background uses a different code path that
+    // renders reliably. We lose BlendMode.Overlay vs the spec, but at
+    // alpha 0.05 the visual delta is imperceptible.
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .drawWithCache {
-                onDrawBehind {
-                    drawRect(brush = brush, alpha = 0.05f, blendMode = BlendMode.Overlay)
-                }
-            },
+            .background(brush = brush, alpha = 0.05f),
     )
 }
 

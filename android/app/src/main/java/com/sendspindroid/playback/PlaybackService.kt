@@ -1441,7 +1441,7 @@ class PlaybackService : MediaLibraryService() {
                 // underlying player when currentTitle/currentArtist are null),
                 // so lock screen / Auto / AVRCP would see the prior track for
                 // one tick. Mirrors the fix in applyFastQueueMetadata.
-                updateMediaMetadata(title, artist, album)
+                updateMediaMetadata()
 
                 // Update the player's media item for lock screen/notification
                 sendSpinPlayer?.updateMediaItem(
@@ -1505,11 +1505,7 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.d(TAG, "Artwork cleared by server (empty payload)")
                 binaryArtwork = null
-                updateMediaMetadata(
-                    _playbackState.value.title ?: "",
-                    _playbackState.value.artist ?: "",
-                    _playbackState.value.album ?: ""
-                )
+                updateMediaMetadata()
             }
         }
 
@@ -1748,27 +1744,42 @@ class PlaybackService : MediaLibraryService() {
 
         Log.d(TAG, "Fast metadata via queue_updated: ${update.title} / ${update.artist} / ${update.album}")
 
-        // positionMs is forced to 0L here. The same-track early-return above
-        // guarantees we only reach this with a track change, and a new track
-        // always starts at 0. Passing current.positionMs (the prior track's
-        // elapsed time) would make withMetadata stamp positionUpdatedAt=now
-        // with a non-zero position, and ProgressRail would tick the new track
-        // forward from the prior track's elapsed seconds until the authoritative
-        // server/state arrives ~1s later and snaps it back.
-        _playbackState.value = current.withMetadata(
-            title = update.title,
-            artist = update.artist,
-            albumArtist = null,
-            album = update.album,
-            artworkUrl = null,  // preserve existing; server/state will update this
-            year = null,
-            albumTrack = null,
-            queueTrack = null,
-            totalTracks = null,
-            durationMs = update.durationMs ?: current.durationMs,
-            positionMs = 0L,
-            playbackSpeed = current.playbackSpeed
-        )
+        // Title is the authoritative discriminator for a track change: a
+        // same-title update with a different artist/album is almost always a
+        // metadata fix-up, not a queue transition. Branch the position
+        // handling on that:
+        //
+        //  - Track change: zero positionMs (a new track starts at 0; ProgressRail
+        //    then ticks forward from 0 instead of from the prior track's elapsed
+        //    seconds).
+        //  - Same-title fix: bypass withMetadata so we don't re-stamp
+        //    positionUpdatedAt. withMetadata stamps now on any positionMs>0,
+        //    which would snap the rail backward to the anchor (losing the
+        //    interpolated progress) for ~1s until the next server/state.
+        val isTrackChange = update.title != null && update.title != current.title
+        _playbackState.value = if (isTrackChange) {
+            current.withMetadata(
+                title = update.title,
+                artist = update.artist,
+                albumArtist = null,
+                album = update.album,
+                artworkUrl = null,  // preserve existing; server/state will update this
+                year = null,
+                albumTrack = null,
+                queueTrack = null,
+                totalTracks = null,
+                durationMs = update.durationMs ?: current.durationMs,
+                positionMs = 0L,
+                playbackSpeed = current.playbackSpeed
+            )
+        } else {
+            current.copy(
+                title = update.title ?: current.title,
+                artist = update.artist ?: current.artist,
+                album = update.album ?: current.album,
+                durationMs = update.durationMs ?: current.durationMs
+            )
+        }
 
         // Refresh the forwarding-player cache BEFORE firing updateMediaItem.
         // updateMediaItem synchronously dispatches onTimelineChanged /
@@ -1780,12 +1791,7 @@ class PlaybackService : MediaLibraryService() {
         // delegates to the underlying player when currentTitle/currentArtist
         // are null), so lock screen / Auto / AVRCP would see the prior track
         // for one tick.
-        val newState = _playbackState.value
-        updateMediaMetadata(
-            newState.title.orEmpty(),
-            newState.artist.orEmpty(),
-            newState.album.orEmpty()
-        )
+        updateMediaMetadata()
 
         sendSpinPlayer?.updateMediaItem(
             title = update.title,
@@ -1904,18 +1910,11 @@ class PlaybackService : MediaLibraryService() {
             albumTrack = state.albumTrack ?: 0
         )
 
-        broadcastMetadataToControllers(
-            title = state.title ?: "",
-            artist = state.artist ?: "",
-            album = state.album ?: "",
-            artworkUrl = state.artworkUrl,
-            durationMs = state.durationMs,
-            positionMs = state.positionMs
-        )
+        broadcastSessionExtras()
     }
 
     @OptIn(UnstableApi::class)
-    private fun updateMediaMetadata(title: String, artist: String, album: String) {
+    private fun updateMediaMetadata() {
         val state = _playbackState.value
 
         // See updateMediaSessionArtwork for why ancillaries use "" / 0 here.
@@ -1930,25 +1929,6 @@ class PlaybackService : MediaLibraryService() {
             albumTrack = state.albumTrack ?: 0
         )
 
-        broadcastMetadataToControllers(
-            title = title,
-            artist = artist,
-            album = album,
-            artworkUrl = state.artworkUrl,
-            durationMs = state.durationMs,
-            positionMs = state.positionMs
-        )
-    }
-
-    private fun broadcastMetadataToControllers(
-        title: String,
-        artist: String,
-        album: String,
-        artworkUrl: String?,
-        durationMs: Long,
-        positionMs: Long
-    ) {
-        // Use unified broadcast to avoid overwriting other extras
         broadcastSessionExtras()
     }
 
@@ -2665,7 +2645,12 @@ class PlaybackService : MediaLibraryService() {
         when (focusChange) {
             AudioManager.AUDIOFOCUS_GAIN -> {
                 Log.d(TAG, "Audio focus gained")
-                hasAudioFocus = true
+                // hasAudioFocus writes go through audioFocusLock to stay
+                // consistent with requestAudioFocus / abandonAudioFocus, which
+                // can race against this listener (request runs on the Media3
+                // session callback thread via onPlayerCommandRequest while
+                // this callback runs on Main via mainHandler.post).
+                synchronized(audioFocusLock) { hasAudioFocus = true }
                 // Focus returned - resume only if the server-side group is still
                 // PLAYING. If the server transitioned to PAUSED while we held no
                 // focus (e.g. another group member paused during the phone call),
@@ -2678,7 +2663,7 @@ class PlaybackService : MediaLibraryService() {
             AudioManager.AUDIOFOCUS_LOSS -> {
                 Log.d(TAG, "Audio focus lost permanently")
                 // Another app took focus permanently - pause playback
-                hasAudioFocus = false
+                synchronized(audioFocusLock) { hasAudioFocus = false }
                 syncAudioPlayer?.pause()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
@@ -2686,7 +2671,7 @@ class PlaybackService : MediaLibraryService() {
                 // Temporary loss (phone call, navigation announcement) - pause.
                 // Drop hasAudioFocus so stray media-button presses are suppressed
                 // while we don't hold focus; restored on AUDIOFOCUS_GAIN.
-                hasAudioFocus = false
+                synchronized(audioFocusLock) { hasAudioFocus = false }
                 syncAudioPlayer?.pause()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {

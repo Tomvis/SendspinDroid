@@ -28,7 +28,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -77,9 +76,9 @@ fun NowPlayingIdleScreen(
             .background(IdleBase),
     ) {
         // Force the ambient stack into an offscreen compositing layer so the
-        // BlendMode.Overlay grain has a defined backdrop. Without this, on the
-        // Shield/Tegra GPU the blend reads back from whatever was in the
-        // framebuffer that frame, which manifests as random flicker.
+        // alpha-blended grain composites against a stable backdrop. Without
+        // this, on the Shield/Tegra GPU the blend reads back from whatever
+        // was in the framebuffer that frame, which manifests as random flicker.
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -256,14 +255,12 @@ private fun IdleGrain() {
     val brush = remember(grain) {
         ShaderBrush(ImageShader(grain, TileMode.Repeated, TileMode.Repeated))
     }
+    // See GrainOverlay (AmbientBg.kt) for why this uses Modifier.background
+    // rather than drawRect inside drawWithCache. Same Shield rendering caveat.
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .drawWithCache {
-                onDrawBehind {
-                    drawRect(brush = brush, alpha = 0.05f, blendMode = BlendMode.Overlay)
-                }
-            },
+            .background(brush = brush, alpha = 0.05f),
     )
 }
 

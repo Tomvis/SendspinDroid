@@ -63,10 +63,14 @@ fun SourceBadge(
     // drawCircle(brush=...): the Shield Tegra renderer can drop the gradient
     // and paint black; Modifier.background with CircleShape is the safe path.
     // Default Brush.radialGradient auto-fits center / radius to the bounding
-    // box, matching the previous size.minDimension/2 layout.
-    val glowBrush = Brush.radialGradient(
-        colors = listOf(dotColor.copy(alpha = 0.55f), Color.Transparent),
-    )
+    // box, matching the previous size.minDimension/2 layout. Keyed on dotColor
+    // so the shader is reused across recompositions that aren't driven by the
+    // color animation.
+    val glowBrush = remember(dotColor) {
+        Brush.radialGradient(
+            colors = listOf(dotColor.copy(alpha = 0.55f), Color.Transparent),
+        )
+    }
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,

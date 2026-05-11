@@ -81,7 +81,13 @@ object MessageParser {
             val album = optStringClean("album")
             val artworkUrl = optStringClean("artwork_url")
             val year = metadataObj.intOrDefault("year", 0)
-            val albumTrack = metadataObj.intOrDefault("album_track", 0)
+            // Field rename in upstream protocol: legacy `track` is now
+            // `album_track`. Fall back to the legacy key so a server that
+            // hasn't been updated yet still surfaces a track number.
+            val albumTrack = metadataObj.intOrDefault(
+                "album_track",
+                metadataObj.intOrDefault("track", 0)
+            )
             val queueTrack = metadataObj.intOrDefault("queue_track", 0)
             val totalTracks = metadataObj.intOrDefault("total_tracks", 0)
 

@@ -153,13 +153,15 @@ fun NowPlayingScreen(
             item.imageUri?.takeIf { it.isNotEmpty() }?.let { url ->
                 viewModel.updateArtwork(ArtworkSource.Url(url))
             }
-            item.duration?.let { durationSec ->
-                viewModel.updateTrackProgress(
-                    positionMs = 0,
-                    durationMs = durationSec * 1000,
-                    positionUpdatedAt = SystemClock.elapsedRealtime()
-                )
-            }
+            // Always re-anchor the progress to 0 on a queue tap so the rail
+            // doesn't keep ticking off the previous track's anchor while we
+            // wait for the server. If duration is unknown, pass 0 and let the
+            // server-pushed server/state fill it in.
+            viewModel.updateTrackProgress(
+                positionMs = 0,
+                durationMs = item.duration?.let { it * 1000 } ?: 0L,
+                positionUpdatedAt = SystemClock.elapsedRealtime()
+            )
         }
     }
 
