@@ -73,7 +73,11 @@ android {
         // Formula: MAJOR * 10000 + MINOR * 100 + PATCH
         // Ranges: MAJOR 0-9999, MINOR 0-99, PATCH 0-99
         // Example: 2.0.0 = 20000, 2.1.3 = 20103, 10.5.22 = 100522
-        // Beta releases: increment by 1 from base (20001 = Beta2, 20002 = Beta3, etc.)
+        // Beta releases: bump by N from base, BetaN = base + N
+        // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta11 = 20011). Note this diverges
+        // from the global rule in CLAUDE.md ("pre-release shares the stable
+        // versionCode"); this fork bumps each beta so internal users get the
+        // newer build via Play.
         versionCode = 20011
 
         // versionName: User-visible version string

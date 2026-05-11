@@ -190,11 +190,16 @@ private fun AlbumArt(
         BoxWithConstraints(modifier = Modifier.size(700.dp)) {
             val w = constraints.maxWidth.toFloat()
             val h = constraints.maxHeight.toFloat()
-            val glowBrush = Brush.radialGradient(
-                colors = listOf(accent.copy(alpha = glowAlpha), Color.Transparent),
-                center = Offset(w * 0.5f, h * 0.55f),
-                radius = w * 0.5f * 0.9f,
-            )
+            // Keyed on the animated glowAlpha + accent + size so the
+            // shader-backed brush is rebuilt only when one of those changes,
+            // not every recompose driven by sibling animations.
+            val glowBrush = remember(accent, glowAlpha, w, h) {
+                Brush.radialGradient(
+                    colors = listOf(accent.copy(alpha = glowAlpha), Color.Transparent),
+                    center = Offset(w * 0.5f, h * 0.55f),
+                    radius = w * 0.5f * 0.9f,
+                )
+            }
             Box(modifier = Modifier.fillMaxSize().background(glowBrush))
         }
 

@@ -229,11 +229,15 @@ private fun RailBar(
                 .background(RailBarBg),
         )
         if (progress > 0f) {
-            val fillBrush = if (fillAlpha >= 0.5f) {
+            // RailBar recomposes ~60Hz during interpolation; remember the two
+            // gradient brushes so shader allocation isn't on the frame budget.
+            val playingBrush = remember(accent) {
                 Brush.horizontalGradient(listOf(accent, Color.White))
-            } else {
+            }
+            val pausedBrush = remember {
                 Brush.horizontalGradient(listOf(RailFgDim, RailFgDim))
             }
+            val fillBrush = if (fillAlpha >= 0.5f) playingBrush else pausedBrush
             Box(
                 modifier = Modifier
                     .fillMaxWidth(progress)

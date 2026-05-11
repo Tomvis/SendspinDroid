@@ -402,8 +402,16 @@ class PlaybackService : MediaLibraryService() {
     private var volumeObserverRegistered: Boolean = false  // Track registration state to prevent leaks
     private var lastKnownVolume: Int = -1  // Track to detect external volume changes
 
-    // Audio focus management - required for Android Auto to hand over audio output
+    // Audio focus management - required for Android Auto to hand over audio output.
+    // requestAudioFocus() / abandonAudioFocus() can run on the Media3 session
+    // callback thread (via onPlayerCommandRequest) as well as the Main thread
+    // (via the focus-change listener that posts back to mainHandler), so the
+    // fields are @Volatile and the request/abandon paths synchronize on
+    // audioFocusLock to keep lazy init and state writes atomic.
+    private val audioFocusLock = Any()
+    @Volatile
     private var audioFocusRequest: AudioFocusRequest? = null
+    @Volatile
     private var hasAudioFocus: Boolean = false
 
     companion object {
@@ -936,14 +944,11 @@ class PlaybackService : MediaLibraryService() {
                             MusicAssistant.onServerDisconnected()
                             currentServerId = null
                         } else {
-                            // PORTED FROM onError(message):
-                            val message = when (state.reason) {
-                                is FailureReason.AuthRejected -> "Authentication failed -- please log in again"
-                                is FailureReason.HandshakeFailed -> "Could not establish connection"
-                                is FailureReason.TransientNetwork -> "Network error"
-                                is FailureReason.ProtocolError -> "Protocol error"
-                                is FailureReason.Exhausted -> "Connection lost after multiple attempts"
-                            }
+                            // PORTED FROM onError(message). Use the same mapping that
+                            // broadcastSessionExtras feeds to MainActivity so the
+                            // Android Auto error string and the on-screen error string
+                            // match exactly.
+                            val message = failureReasonToMessage(state.reason)
                             Log.e(TAG, "SendSpin error: $message")
 
                             // Show error on Android Auto
@@ -1956,12 +1961,20 @@ class PlaybackService : MediaLibraryService() {
      *
      * Call this method whenever any state changes that needs to be reflected in the UI.
      */
-    private fun broadcastSessionExtras() {
+    private fun broadcastSessionExtras(
+        forceState: String? = null,
+        forceErrorMessage: String? = null,
+    ) {
         val playbackState = _playbackState.value
         val sessionState = coordinator.sessionState.value
         val reconnectStatus = coordinator.reconnectStatus.value
 
-        val connectionStateString = when {
+        // forceState lets the connect*() entry points stamp STATE_CONNECTING /
+        // STATE_ERROR immediately, before the coordinator's stateIn flow has
+        // observed the synchronous transport update. Without the override the
+        // broadcast captures the pre-connect state (Idle / Failed) and
+        // external controllers never see "Connecting..." on a fresh connect.
+        val connectionStateString = forceState ?: when {
             reconnectStatus is ReconnectStatus.Attempting -> STATE_RECONNECTING
             sessionState.sendSpin is TransportState.Failed -> STATE_ERROR
             sessionState.sendSpin is TransportState.Ready -> STATE_CONNECTED
@@ -1971,7 +1984,7 @@ class PlaybackService : MediaLibraryService() {
 
         val serverName: String? = sessionState.server?.name
 
-        val errorMessage: String? = when (val s = sessionState.sendSpin) {
+        val errorMessage: String? = forceErrorMessage ?: when (val s = sessionState.sendSpin) {
             is TransportState.Failed -> failureReasonToMessage(s.reason)
             else -> null
         }
@@ -2083,8 +2096,11 @@ class PlaybackService : MediaLibraryService() {
         Log.d(TAG, "Connecting to server: $address path=$path")
         lastDisconnectUserInitiated = false
 
-        // Broadcast connecting state to controllers (MainActivity)
-        broadcastConnectionState()
+        // Broadcast connecting state to controllers (MainActivity). The
+        // coordinator's sessionState lags behind the synchronous transport
+        // update, so the override is required to surface STATE_CONNECTING
+        // immediately on initial connect and on reconnect-after-error.
+        broadcastConnectionState(forceState = STATE_CONNECTING)
 
         try {
             if (sendSpinClient?.isConnected == true) {
@@ -2107,7 +2123,10 @@ class PlaybackService : MediaLibraryService() {
             sendSpinClient?.connect(SendSpinEndpoint.Local(address, path))
         } catch (e: Exception) {
             Log.e(TAG, "Error connecting to server", e)
-            broadcastConnectionState()
+            broadcastConnectionState(
+                forceState = STATE_ERROR,
+                forceErrorMessage = "Connection failed: ${e.message}",
+            )
         }
     }
 
@@ -2120,8 +2139,8 @@ class PlaybackService : MediaLibraryService() {
         Log.d(TAG, "Connecting to remote server via Remote ID: $remoteId")
         lastDisconnectUserInitiated = false
 
-        // Broadcast connecting state to controllers (MainActivity)
-        broadcastConnectionState()
+        // See connectToServer() for why the override is required.
+        broadcastConnectionState(forceState = STATE_CONNECTING)
 
         try {
             if (sendSpinClient?.isConnected == true) {
@@ -2143,7 +2162,10 @@ class PlaybackService : MediaLibraryService() {
             sendSpinClient?.connect(SendSpinEndpoint.Remote(remoteId))
         } catch (e: Exception) {
             Log.e(TAG, "Error connecting to remote server", e)
-            broadcastConnectionState()
+            broadcastConnectionState(
+                forceState = STATE_ERROR,
+                forceErrorMessage = "Connection failed: ${e.message}",
+            )
         }
     }
 
@@ -2160,8 +2182,8 @@ class PlaybackService : MediaLibraryService() {
         Log.d(TAG, "Connecting to proxy server: $url")
         lastDisconnectUserInitiated = false
 
-        // Broadcast connecting state to controllers (MainActivity)
-        broadcastConnectionState()
+        // See connectToServer() for why the override is required.
+        broadcastConnectionState(forceState = STATE_CONNECTING)
 
         try {
             if (sendSpinClient?.isConnected == true) {
@@ -2183,7 +2205,10 @@ class PlaybackService : MediaLibraryService() {
             sendSpinClient?.connect(SendSpinEndpoint.Proxy(url, authToken))
         } catch (e: Exception) {
             Log.e(TAG, "Error connecting to proxy server", e)
-            broadcastConnectionState()
+            broadcastConnectionState(
+                forceState = STATE_ERROR,
+                forceErrorMessage = "Connection failed: ${e.message}",
+            )
         }
     }
 
@@ -2197,9 +2222,18 @@ class PlaybackService : MediaLibraryService() {
      * the coordinator / playback state inside broadcastSessionExtras(), so
      * callers don't need to pass them -- they just need to make sure the
      * underlying state is set before invoking this.
+     *
+     * [forceState] / [forceErrorMessage] are for callers that need to broadcast
+     * a state which has not yet propagated through the coordinator's
+     * stateIn flow (e.g. the connect*() entry points stamping STATE_CONNECTING
+     * before SendSpinClient.connect() returns, or catch blocks reporting
+     * a synchronous connect failure with the exception message).
      */
-    private fun broadcastConnectionState() {
-        broadcastSessionExtras()
+    private fun broadcastConnectionState(
+        forceState: String? = null,
+        forceErrorMessage: String? = null,
+    ) {
+        broadcastSessionExtras(forceState, forceErrorMessage)
     }
 
     /**
@@ -2580,18 +2614,17 @@ class PlaybackService : MediaLibraryService() {
      * produce audio and won't route output to us.
      */
     private fun requestAudioFocus() {
-        if (hasAudioFocus) return
-
         val am = audioManager ?: return
+        synchronized(audioFocusLock) {
+            if (hasAudioFocus) return
 
-        if (audioFocusRequest == null) {
-            val audioAttributes = AndroidAudioAttributes.Builder()
-                .setUsage(AndroidAudioAttributes.USAGE_MEDIA)
-                .setContentType(AndroidAudioAttributes.CONTENT_TYPE_MUSIC)
-                .build()
-
-            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(audioAttributes)
+            val request = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    AndroidAudioAttributes.Builder()
+                        .setUsage(AndroidAudioAttributes.USAGE_MEDIA)
+                        .setContentType(AndroidAudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
                 .setWillPauseWhenDucked(false)
                 .setOnAudioFocusChangeListener { focusChange ->
                     mainHandler.post {
@@ -2599,24 +2632,27 @@ class PlaybackService : MediaLibraryService() {
                     }
                 }
                 .build()
-        }
+                .also { audioFocusRequest = it }
 
-        val result = am.requestAudioFocus(audioFocusRequest!!)
-        hasAudioFocus = (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
-        Log.d(TAG, "Audio focus requested: ${if (hasAudioFocus) "granted" else "denied"}")
+            val result = am.requestAudioFocus(request)
+            hasAudioFocus = (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+            Log.d(TAG, "Audio focus requested: ${if (hasAudioFocus) "granted" else "denied"}")
+        }
     }
 
     /**
      * Abandons audio focus when playback stops.
      */
     private fun abandonAudioFocus() {
-        if (!hasAudioFocus) return
+        synchronized(audioFocusLock) {
+            if (!hasAudioFocus) return
 
-        audioFocusRequest?.let { request ->
-            audioManager?.abandonAudioFocusRequest(request)
-            Log.d(TAG, "Audio focus abandoned")
+            audioFocusRequest?.let { request ->
+                audioManager?.abandonAudioFocusRequest(request)
+                Log.d(TAG, "Audio focus abandoned")
+            }
+            hasAudioFocus = false
         }
-        hasAudioFocus = false
     }
 
     /**

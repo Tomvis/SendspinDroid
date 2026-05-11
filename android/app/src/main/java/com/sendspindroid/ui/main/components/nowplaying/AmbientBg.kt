@@ -200,11 +200,15 @@ private fun AccentWash(accent: Color, paused: Boolean) {
         val w = constraints.maxWidth.toFloat()
         val h = constraints.maxHeight.toFloat()
         val washAlpha = if (paused) 0.08f else 0.2f
-        val brush = Brush.radialGradient(
-            colors = listOf(accent.copy(alpha = washAlpha), Color.Transparent),
-            center = Offset(w * 0.30f, h * 0.35f),
-            radius = maxOf(w, h) * 0.55f,
-        )
+        // Keyed on accent + paused + size: brushes back a Shader, and
+        // re-allocating one per recompose churns GC on every animation frame.
+        val brush = remember(accent, washAlpha, w, h) {
+            Brush.radialGradient(
+                colors = listOf(accent.copy(alpha = washAlpha), Color.Transparent),
+                center = Offset(w * 0.30f, h * 0.35f),
+                radius = maxOf(w, h) * 0.55f,
+            )
+        }
         Box(modifier = Modifier.fillMaxSize().background(brush))
     }
 }
@@ -217,14 +221,16 @@ private fun Vignette() {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val w = constraints.maxWidth.toFloat()
         val h = constraints.maxHeight.toFloat()
-        val brush = Brush.radialGradient(
-            colorStops = arrayOf(
-                0.35f to Color.Transparent,
-                1.0f to Color.Black,
-            ),
-            center = Offset(w * 0.5f, h * 0.5f),
-            radius = maxOf(w, h) * 0.75f,
-        )
+        val brush = remember(w, h) {
+            Brush.radialGradient(
+                colorStops = arrayOf(
+                    0.35f to Color.Transparent,
+                    1.0f to Color.Black,
+                ),
+                center = Offset(w * 0.5f, h * 0.5f),
+                radius = maxOf(w, h) * 0.75f,
+            )
+        }
         Box(modifier = Modifier.fillMaxSize().background(brush))
     }
 }

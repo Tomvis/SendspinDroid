@@ -204,7 +204,11 @@ private fun Blob(
     // composed inside drawWithCache/drawBehind and paints black. The default
     // Brush.radialGradient auto-fits center to the box center and radius to
     // size.minDimension/2 -- identical to the explicit values used before.
-    val blobBrush = Brush.radialGradient(colors = listOf(color, Color.Transparent))
+    // Keyed on color so the shader survives the infinite-transition recomposes
+    // driving translation/scale below.
+    val blobBrush = remember(color) {
+        Brush.radialGradient(colors = listOf(color, Color.Transparent))
+    }
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = alignment,
@@ -232,14 +236,16 @@ private fun IdleVignette() {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val w = constraints.maxWidth.toFloat()
         val h = constraints.maxHeight.toFloat()
-        val brush = Brush.radialGradient(
-            colorStops = arrayOf(
-                0.35f to Color.Transparent,
-                1.0f to Color.Black,
-            ),
-            center = Offset(w * 0.5f, h * 0.5f),
-            radius = maxOf(w, h) * 0.8f,
-        )
+        val brush = remember(w, h) {
+            Brush.radialGradient(
+                colorStops = arrayOf(
+                    0.35f to Color.Transparent,
+                    1.0f to Color.Black,
+                ),
+                center = Offset(w * 0.5f, h * 0.5f),
+                radius = maxOf(w, h) * 0.8f,
+            )
+        }
         Box(modifier = Modifier.fillMaxSize().background(brush))
     }
 }
@@ -430,10 +436,13 @@ private fun ColonDot(
     // Glow goes through Modifier.background (Shield Tegra drops brushes
     // drawn inside Canvas, paints black). Wrap in a 72dp box so the
     // auto-fit radius (min/2 = 36dp) matches the original size.minDimension
-    // glow radius -- visually equivalent.
-    val glowBrush = Brush.radialGradient(
-        colors = listOf(color.copy(alpha = 0.6f), Color.Transparent),
-    )
+    // glow radius -- visually equivalent. Keyed on color so the shader is
+    // recycled across every pulse-driven recompose.
+    val glowBrush = remember(color) {
+        Brush.radialGradient(
+            colors = listOf(color.copy(alpha = 0.6f), Color.Transparent),
+        )
+    }
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = alignment,
@@ -470,9 +479,11 @@ private fun HorizonTagline() {
     // Use Modifier.background for the divider gradient rather than a Canvas-
     // style drawRect(brush=...) -- the Shield Tegra renderer can drop the
     // gradient and paint black; Modifier.background is the safe path.
-    val dividerBrush = Brush.horizontalGradient(
-        colors = listOf(Color.Transparent, IdleFgFaint, Color.Transparent),
-    )
+    val dividerBrush = remember {
+        Brush.horizontalGradient(
+            colors = listOf(Color.Transparent, IdleFgFaint, Color.Transparent),
+        )
+    }
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
         verticalAlignment = Alignment.CenterVertically,

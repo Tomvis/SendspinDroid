@@ -232,7 +232,10 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     }
 
     /**
-     * Clears all metadata (e.g., on disconnect).
+     * Clears all metadata (e.g., on disconnect). Also clears any active
+     * reconnecting overlay so getMediaMetadata()'s overlay-precedence branch
+     * doesn't end up returning the now-EMPTY cachedMetadata while still
+     * claiming "Reconnecting to..." semantics.
      */
     fun clearMetadata() {
         currentTitle = null
@@ -243,10 +246,13 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         currentAlbumTrack = null
         currentArtworkData = null
         currentArtworkUri = null
+        reconnectingOverlay = null
         cachedMetadata = MediaMetadata.EMPTY
 
+        val newState = getPlaybackState()
         listeners.forEach { listener ->
             listener.onMediaMetadataChanged(cachedMetadata)
+            listener.onPlaybackStateChanged(newState)
         }
     }
 
