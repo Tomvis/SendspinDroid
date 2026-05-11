@@ -1592,11 +1592,19 @@ class PlaybackService : MediaLibraryService() {
             // will decode with the new decoder once the worker drains the
             // StartStream task ahead of it.
             decoderReady = true
-            // Launched on IO so the send (and any suspension when the channel
-            // is full) doesn't burden the main thread. ClosedSendChannelException
-            // is expected if the service is being torn down concurrently --
-            // the worker has already (or will) release the decoder on close.
-            serviceScope.launch(Dispatchers.IO) {
+            // CRITICAL: launch on the scope's default Main dispatcher (NOT
+            // Dispatchers.IO). The WebSocket receive loop invokes onStreamStart
+            // and onAudioChunk serially from a single coroutine, but if those
+            // callbacks each launch on a multi-thread dispatcher like
+            // Dispatchers.IO, the launched coroutines race when reaching
+            // decodeChannel.send(...). That reorders StartStream vs. its
+            // following Chunks at the decoder -- the decoder is either still
+            // the old one or absent when chunks arrive, producing dropped
+            // frames or codec-state corruption (audibly: choppy audio,
+            // glitches). Main is single-threaded, so launches drain in
+            // submission order. ClosedSendChannelException is the benign
+            // shutdown race -- worker releases the decoder in its finally.
+            serviceScope.launch {
                 try {
                     decodeChannel.send(
                         DecodeTask.StartStream(codec, sampleRate, channels, bitDepth, codecHeader)
@@ -1675,10 +1683,10 @@ class PlaybackService : MediaLibraryService() {
             // state; every chunk enqueued after decodes with the flushed
             // decoder. Preserves the FIFO guarantee from the design.
             //
-            // IO dispatcher + ClosedSendChannelException catch: same rationale
-            // as onStreamStart -- avoid main-thread cycles for the send and
-            // swallow the benign shutdown race.
-            serviceScope.launch(Dispatchers.IO) {
+            // Must use the scope's default Main dispatcher -- see onStreamStart
+            // for the full reasoning. A multi-threaded dispatcher would let
+            // Flush race against neighbouring Chunks at the channel.
+            serviceScope.launch {
                 try {
                     decodeChannel.send(DecodeTask.Flush)
                 } catch (e: ClosedSendChannelException) {
@@ -1727,12 +1735,17 @@ class PlaybackService : MediaLibraryService() {
             // introduced via drop-oldest). Suspend-on-full is the
             // correctness property; see design doc H-4 / M-8 rationale.
             //
-            // Dispatchers.IO (not Main) so neither the launch nor any
-            // channel-full suspension burdens the main thread; at 50
-            // chunks/sec we were posting that many coroutine starts to Main
-            // for no reason. ClosedSendChannelException is the benign
-            // shutdown race -- worker handles decoder release in its finally.
-            serviceScope.launch(Dispatchers.IO) {
+            // CRITICAL: launch on the scope's default Main dispatcher (NOT
+            // a multi-threaded one like Dispatchers.IO). Chunks must reach
+            // decodeChannel.send(...) in the same order onAudioChunk was
+            // called; with a multi-thread pool the launched coroutines race
+            // and chunks land out of order at the decoder, corrupting codec
+            // state and producing choppy audio. Main is single-threaded so
+            // launches drain in submission order. The 50 launches/sec cost
+            // is ~150us/sec on Main -- negligible vs the frame budget.
+            // ClosedSendChannelException is the benign shutdown race --
+            // worker handles decoder release in its finally.
+            serviceScope.launch {
                 try {
                     decodeChannel.send(DecodeTask.Chunk(serverTimeMicros, audioData))
                 } catch (e: ClosedSendChannelException) {
