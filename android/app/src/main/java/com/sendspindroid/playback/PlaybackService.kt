@@ -854,24 +854,25 @@ class PlaybackService : MediaLibraryService() {
                         // Refresh browse tree root so "Connect" reappears
                         mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
 
-                        // Clear stream spec before the broadcast so the
-                        // STATE_DISCONNECTED bundle reports the zeroed spec
-                        // (broadcastSessionExtras reads currentSampleRate /
-                        // Channels / BitDepth / Codec at send time).
+                        // Clear all per-track state BEFORE the disconnection
+                        // broadcast. broadcastSessionExtras reads _playbackState
+                        // and currentCodec/SampleRate/Channels/BitDepth at send
+                        // time; without clearing first, the STATE_DISCONNECTED
+                        // bundle carries the prior track's title/artist/album/
+                        // year/track and MainActivity.processSessionExtras
+                        // re-populates the just-cleared VM (and triggers a
+                        // stale Coil artwork fetch) before the next event
+                        // arrives.
                         clearAudioStreamSpec()
-
-                        // Broadcast disconnection to controllers (MainActivity)
-                        broadcastConnectionState(STATE_DISCONNECTED)
-
-                        // Clear playback state on disconnect
                         _playbackState.value = PlaybackState()
                         lastArtworkUrl = null
                         lastTrackTitle = null
                         urlArtwork = null
                         binaryArtwork = null
-
-                        // Clear lock screen metadata
                         forwardingPlayer?.clearMetadata()
+
+                        // Broadcast disconnection to controllers (MainActivity)
+                        broadcastConnectionState(STATE_DISCONNECTED)
 
                         // Notify MusicAssistant of disconnection
                         MusicAssistant.onServerDisconnected()
@@ -907,24 +908,23 @@ class PlaybackService : MediaLibraryService() {
                             // Refresh browse tree root so "Connect" reappears
                             mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
 
-                            // Clear stream spec before the broadcast so the
-                            // STATE_DISCONNECTED bundle reports the zeroed spec
-                            // (broadcastSessionExtras reads currentSampleRate /
-                            // Channels / BitDepth / Codec at send time).
+                            // Clear all per-track state BEFORE the disconnection
+                            // broadcast. See the Idle branch above for the full
+                            // rationale: broadcastSessionExtras reads
+                            // _playbackState and currentCodec/SampleRate/
+                            // Channels/BitDepth at send time, so the
+                            // STATE_DISCONNECTED bundle would carry stale
+                            // metadata back to MainActivity.
                             clearAudioStreamSpec()
-
-                            // Broadcast disconnection to controllers (MainActivity)
-                            broadcastConnectionState(STATE_DISCONNECTED)
-
-                            // Clear playback state on disconnect
                             _playbackState.value = PlaybackState()
                             lastArtworkUrl = null
                             lastTrackTitle = null
                             urlArtwork = null
                             binaryArtwork = null
-
-                            // Clear lock screen metadata
                             forwardingPlayer?.clearMetadata()
+
+                            // Broadcast disconnection to controllers (MainActivity)
+                            broadcastConnectionState(STATE_DISCONNECTED)
 
                             // Notify MusicAssistant of disconnection
                             MusicAssistant.onServerDisconnected()
@@ -1731,6 +1731,19 @@ class PlaybackService : MediaLibraryService() {
             artist = update.artist,
             album = update.album,
             durationMs = update.durationMs ?: 0L
+        )
+
+        // Refresh the forwarding-player cache and session extras. Without this,
+        // MetadataForwardingPlayer.getMediaMetadata() keeps returning its prior
+        // cachedMetadata (the override at MetadataForwardingPlayer.kt:259 only
+        // delegates to the underlying player when currentTitle/currentArtist
+        // are null), so lock screen / Auto / AVRCP would stay on the prior
+        // track until the next authoritative server/state ~1s later.
+        val newState = _playbackState.value
+        updateMediaMetadata(
+            newState.title.orEmpty(),
+            newState.artist.orEmpty(),
+            newState.album.orEmpty()
         )
     }
 
