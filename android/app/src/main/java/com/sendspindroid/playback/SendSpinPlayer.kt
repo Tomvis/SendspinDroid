@@ -208,7 +208,7 @@ class SendSpinPlayer : Player {
         // progress bar advances smoothly without needing discontinuity events.
         val jumpedBackward = positionMs < previousInterpolatedMs - 2000
         if (jumpedBackward) {
-            notifyPositionDiscontinuity(Player.DISCONTINUITY_REASON_INTERNAL)
+            notifyPositionDiscontinuity(previousInterpolatedMs, positionMs, Player.DISCONTINUITY_REASON_INTERNAL)
         }
     }
 
@@ -379,15 +379,15 @@ class SendSpinPlayer : Player {
         }
     }
 
-    private fun notifyPositionDiscontinuity(reason: Int) {
+    private fun notifyPositionDiscontinuity(oldPositionMs: Long, newPositionMs: Long, reason: Int) {
         val oldPosition = Player.PositionInfo(
             /* windowUid= */ null,
             /* mediaItemIndex= */ 0,
             /* mediaItem= */ null,
             /* periodUid= */ null,
             /* periodIndex= */ 0,
-            /* positionMs= */ anchorPositionMs,
-            /* contentPositionMs= */ anchorPositionMs,
+            /* positionMs= */ oldPositionMs,
+            /* contentPositionMs= */ oldPositionMs,
             /* adGroupIndex= */ C.INDEX_UNSET,
             /* adIndexInAdGroup= */ C.INDEX_UNSET
         )
@@ -397,8 +397,8 @@ class SendSpinPlayer : Player {
             /* mediaItem= */ null,
             /* periodUid= */ null,
             /* periodIndex= */ 0,
-            /* positionMs= */ anchorPositionMs,
-            /* contentPositionMs= */ anchorPositionMs,
+            /* positionMs= */ newPositionMs,
+            /* contentPositionMs= */ newPositionMs,
             /* adGroupIndex= */ C.INDEX_UNSET,
             /* adIndexInAdGroup= */ C.INDEX_UNSET
         )

@@ -102,10 +102,14 @@ object MessageParser {
                     playbackSpeed = progressObj.intOrDefault("playback_speed", 1000)
                 )
             } ?: run {
+                // Legacy flat structure: a server without the nested `progress`
+                // object may still expose playback_speed at the metadata root.
+                // Fall back to that before defaulting to 1000 (1.0x) so a
+                // non-1.0 speed isn't silently coerced.
                 TrackProgress(
                     trackProgress = metadataObj.longOrDefault("position_ms", 0),
                     trackDuration = metadataObj.longOrDefault("duration_ms", 0),
-                    playbackSpeed = 1000
+                    playbackSpeed = metadataObj.intOrDefault("playback_speed", 1000)
                 )
             }
 
