@@ -63,14 +63,26 @@ fun SourceBadge(
     // drawCircle(brush=...): the Shield Tegra renderer can drop the gradient
     // and paint black; Modifier.background with CircleShape is the safe path.
     // Default Brush.radialGradient auto-fits center / radius to the bounding
-    // box, matching the previous size.minDimension/2 layout. Keyed on dotColor
-    // so the shader is reused across recompositions that aren't driven by the
-    // color animation.
-    val glowBrush = remember(dotColor) {
+    // box, matching the previous size.minDimension/2 layout.
+    //
+    // Two pre-built halo brushes (one per status) and a hard switch on
+    // `paused`. Keying the brush on the animated dotColor would re-allocate
+    // a radial gradient (and its backing Shader) on every frame of the
+    // 500ms color tween — ~30 Shader allocations per play/pause toggle on
+    // the Shield Tegra. The inner dot still animates via dotColor so the
+    // status transition reads smoothly; the 20dp halo's hard color switch
+    // is imperceptible against that.
+    val glowBrushGreen = remember {
         Brush.radialGradient(
-            colors = listOf(dotColor.copy(alpha = 0.55f), Color.Transparent),
+            colors = listOf(StatusGreen.copy(alpha = 0.55f), Color.Transparent),
         )
     }
+    val glowBrushAmber = remember {
+        Brush.radialGradient(
+            colors = listOf(StatusAmber.copy(alpha = 0.55f), Color.Transparent),
+        )
+    }
+    val glowBrush = if (paused) glowBrushAmber else glowBrushGreen
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,

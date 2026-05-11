@@ -121,7 +121,10 @@ fun ProgressRail(
         while (isActive) {
             withFrameMillis { }
             val elapsed = SystemClock.elapsedRealtime() - timeZero
-            displayPositionMs = (anchorPositionMs + elapsed).coerceIn(0L, durationMs)
+            // Use safeDuration (>= 1L) so a malformed durationMs (e.g., 0 or
+            // negative) doesn't trip coerceIn's range precondition and crash
+            // the interpolation loop.
+            displayPositionMs = (anchorPositionMs + elapsed).coerceIn(0L, safeDuration)
         }
     }
 

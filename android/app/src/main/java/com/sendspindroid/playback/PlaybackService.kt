@@ -196,6 +196,14 @@ class PlaybackService : MediaLibraryService() {
     // Generation counter for populatePlayerQueue() to discard stale async results
     private var queuePopulateGeneration = 0L
 
+    // Generation counter for fetchArtwork() / onArtwork() so an in-flight
+    // bitmap decode/fetch that finishes after a disconnect or track change
+    // doesn't resurrect the prior track's artwork on lock screen / Android
+    // Auto. Bumped whenever urlArtwork / binaryArtwork are cleared; the
+    // async completion captures the value at launch and drops late writes
+    // when the field has moved on.
+    private var artworkGeneration = 0L
+
     /** Clears all MA caches (called on MA disconnect). */
     private fun clearMaCaches() {
         maPlaylistsCache = null
@@ -413,6 +421,13 @@ class PlaybackService : MediaLibraryService() {
     private var audioFocusRequest: AudioFocusRequest? = null
     @Volatile
     private var hasAudioFocus: Boolean = false
+    // True between requestAudioFocus() and abandonAudioFocus(), independent of
+    // whether the system has currently granted focus. AUDIOFOCUS_LOSS_TRANSIENT
+    // flips hasAudioFocus to false (so we suppress media-button presses) but
+    // the listener is still registered with AudioManager — we must still
+    // abandon on teardown or the listener (capturing this service) leaks.
+    @Volatile
+    private var audioFocusRegistered: Boolean = false
 
     companion object {
         private const val TAG = "PlaybackService"
@@ -883,6 +898,7 @@ class PlaybackService : MediaLibraryService() {
                         lastTrackTitle = null
                         urlArtwork = null
                         binaryArtwork = null
+                        ++artworkGeneration
                         forwardingPlayer?.clearMetadata()
 
                         // Broadcast disconnection to controllers (MainActivity)
@@ -935,6 +951,7 @@ class PlaybackService : MediaLibraryService() {
                             lastTrackTitle = null
                             urlArtwork = null
                             binaryArtwork = null
+                            ++artworkGeneration
                             forwardingPlayer?.clearMetadata()
 
                             // Broadcast disconnection to controllers (MainActivity)
@@ -965,6 +982,11 @@ class PlaybackService : MediaLibraryService() {
                         // From-Idle: initial connect attempt, no UI overlay needed.
                         // From-Failed: reconnect attempt after a transient failure.
                         // From-Ready: reselection (network handover) -- DRAINING applies.
+                        // Always clear any stale error on the player so the reconnect
+                        // overlay isn't shown alongside the prior failure string on
+                        // Android Auto / lock screen. setError + setPlayerError are
+                        // idempotent on the Media3 side when no error is present.
+                        sendSpinPlayer?.clearError()
                         if (prevSendSpinState is TransportState.Ready) {
                             // PORTED FROM onReconnecting (the Ready->Connecting path during
                             // network handover or stall watchdog):
@@ -1396,13 +1418,20 @@ class PlaybackService : MediaLibraryService() {
                 // total_tracks in follow-up updates), clear on a track change
                 // (so the prior track's year / track / queue position doesn't
                 // leak into a new track that simply lacks those fields).
-                // String fields use ifEmpty{null} for the same reason.
+                // String fields (title/artist/album/albumArtist) use
+                // ifEmpty{null} for the same reason. artworkUrl uses a
+                // different contract in withMetadata: null preserves
+                // unconditionally (reserved for applyFastQueueUpdate's
+                // optimistic prior-image hold), empty clears. We pass the
+                // server-provided value through unchanged so a server-pushed
+                // track without artwork actually clears, rather than
+                // leaking the prior track's image into a new track.
                 _playbackState.value = _playbackState.value.withMetadata(
                     title = title.ifEmpty { null },
                     artist = artist.ifEmpty { null },
                     albumArtist = albumArtist.ifEmpty { null },
                     album = album.ifEmpty { null },
-                    artworkUrl = effectiveArtworkUrl.ifEmpty { null },
+                    artworkUrl = effectiveArtworkUrl,
                     year = year.takeIf { it > 0 },
                     albumTrack = albumTrack.takeIf { it > 0 },
                     queueTrack = queueTrack.takeIf { it > 0 },
@@ -1428,6 +1457,7 @@ class PlaybackService : MediaLibraryService() {
                     lastTrackTitle = newTitle
                     urlArtwork = null
                     binaryArtwork = null
+                    ++artworkGeneration
                 }
 
                 // Refresh the forwarding-player cache BEFORE firing
@@ -1480,6 +1510,11 @@ class PlaybackService : MediaLibraryService() {
                 return
             }
 
+            // Capture generation on the dispatching thread before launching;
+            // a disconnect/track-change between launch and decode-completion
+            // would otherwise re-stamp binaryArtwork with the prior track's
+            // bytes. Same pattern as fetchArtwork.
+            val generation = artworkGeneration
             serviceScope.launch {
                 Log.d(TAG, "Artwork received: ${imageData.size} bytes")
                 try {
@@ -1488,6 +1523,10 @@ class PlaybackService : MediaLibraryService() {
                         bitmap?.let { scaleArtwork(it) }
                     }
                     if (scaled != null) {
+                        if (generation != artworkGeneration) {
+                            Log.d(TAG, "Discarding stale binary artwork (gen=$generation, current=$artworkGeneration)")
+                            return@launch
+                        }
                         binaryArtwork = scaled
                         // Only push to MediaSession if we don't already have URL-based
                         // artwork; URL is preferred (see urlArtwork field comment).
@@ -1505,6 +1544,7 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.d(TAG, "Artwork cleared by server (empty payload)")
                 binaryArtwork = null
+                ++artworkGeneration
                 updateMediaMetadata()
             }
         }
@@ -1817,6 +1857,12 @@ class PlaybackService : MediaLibraryService() {
             return
         }
 
+        // Capture generation at launch. If the artwork state is cleared
+        // (disconnect, track change, server-pushed clear) before the fetch
+        // resolves, the late completion would re-publish the prior track's
+        // image to the MediaSession. The check at completion drops stale
+        // writes -- mirrors the queuePopulateGeneration pattern.
+        val generation = artworkGeneration
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val request = ImageRequest.Builder(this@PlaybackService)
@@ -1828,6 +1874,10 @@ class PlaybackService : MediaLibraryService() {
                     val bitmap = result.drawable.toBitmap()
                     val scaled = scaleArtwork(bitmap)
                     mainHandler.post {
+                        if (generation != artworkGeneration) {
+                            Log.d(TAG, "Discarding stale artwork fetch (gen=$generation, current=$artworkGeneration)")
+                            return@post
+                        }
                         urlArtwork = scaled
                         // URL is preferred over binary; push this to MediaSession
                         // unconditionally.
@@ -2616,22 +2666,33 @@ class PlaybackService : MediaLibraryService() {
 
             val result = am.requestAudioFocus(request)
             hasAudioFocus = (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+            // The listener is registered with AudioManager as soon as
+            // requestAudioFocus() returns, regardless of grant outcome. Track
+            // this so abandonAudioFocus can release the listener even when
+            // hasAudioFocus is false (e.g., after AUDIOFOCUS_LOSS_TRANSIENT).
+            audioFocusRegistered = true
             Log.d(TAG, "Audio focus requested: ${if (hasAudioFocus) "granted" else "denied"}")
         }
     }
 
     /**
      * Abandons audio focus when playback stops.
+     *
+     * Gated on audioFocusRegistered (not hasAudioFocus) so a service teardown
+     * during AUDIOFOCUS_LOSS_TRANSIENT still releases the AudioManager
+     * listener — otherwise the lambda captures this service and the system
+     * keeps it alive past onDestroy().
      */
     private fun abandonAudioFocus() {
         synchronized(audioFocusLock) {
-            if (!hasAudioFocus) return
+            if (!audioFocusRegistered) return
 
             audioFocusRequest?.let { request ->
                 audioManager?.abandonAudioFocusRequest(request)
                 Log.d(TAG, "Audio focus abandoned")
             }
             hasAudioFocus = false
+            audioFocusRegistered = false
         }
     }
 

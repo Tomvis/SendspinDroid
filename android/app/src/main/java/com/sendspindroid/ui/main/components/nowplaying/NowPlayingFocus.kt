@@ -190,17 +190,24 @@ private fun AlbumArt(
         BoxWithConstraints(modifier = Modifier.size(700.dp)) {
             val w = constraints.maxWidth.toFloat()
             val h = constraints.maxHeight.toFloat()
-            // Keyed on the animated glowAlpha + accent + size so the
-            // shader-backed brush is rebuilt only when one of those changes,
-            // not every recompose driven by sibling animations.
-            val glowBrush = remember(accent, glowAlpha, w, h) {
+            // Keyed on accent + size only; the per-frame glowAlpha tween is
+            // applied via graphicsLayer so the gradient's backing Shader
+            // isn't re-allocated on every animation tick. The visual result
+            // is equivalent (lerp(c.copy(alpha=a), transparent, t) ==
+            // alpha*lerp(c, transparent, t)).
+            val glowBrush = remember(accent, w, h) {
                 Brush.radialGradient(
-                    colors = listOf(accent.copy(alpha = glowAlpha), Color.Transparent),
+                    colors = listOf(accent, Color.Transparent),
                     center = Offset(w * 0.5f, h * 0.55f),
                     radius = w * 0.5f * 0.9f,
                 )
             }
-            Box(modifier = Modifier.fillMaxSize().background(glowBrush))
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = glowAlpha }
+                    .background(glowBrush)
+            )
         }
 
         val context = LocalContext.current

@@ -220,6 +220,13 @@ class SendSpinPlayer : Player {
      */
     fun updateConnectionState(connected: Boolean, serverName: String? = null) {
         if (!connected) {
+            // Reset playWhenReady before the state update so listeners observe
+            // a coherent (STATE_IDLE, playWhenReady=false) pair. Without this
+            // the stale playWhenReady=true from the prior session can cause
+            // updateStateFromPlayer to flip the next session into a buffering
+            // state before any real protocol message arrives.
+            val playWhenReadyChanged = playWhenReady
+            playWhenReady = false
             updatePlaybackStateInternal(Player.STATE_IDLE, false)
             anchorPositionMs = 0
             anchorElapsedRealtime = 0
@@ -229,6 +236,20 @@ class SendSpinPlayer : Player {
             currentTimeline = Timeline.EMPTY
             queueMediaItems = emptyList()
             currentQueueIndex = 0
+            // Notify Media3 listeners (Android Auto, AVRCP, lock screen)
+            // about the timeline / current-item clear. Without these
+            // callbacks, controllers keep the prior timeline and current
+            // MediaItem in their view of the player until a later state
+            // update triggers a refresh.
+            listeners.forEach {
+                it.onTimelineChanged(currentTimeline, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE)
+                it.onMediaItemTransition(null, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
+            }
+            if (playWhenReadyChanged) {
+                listeners.forEach {
+                    it.onPlayWhenReadyChanged(false, Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE)
+                }
+            }
         } else if (syncAudioPlayer == null) {
             // Connected but no audio yet
             updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)

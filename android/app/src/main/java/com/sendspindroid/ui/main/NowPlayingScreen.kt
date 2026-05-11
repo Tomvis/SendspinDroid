@@ -49,6 +49,7 @@ import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.FormFactor
 import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.main.components.AlbumArtCard
 import com.sendspindroid.ui.main.components.ConnectionProgress
 import com.sendspindroid.ui.main.components.PlaybackControls
@@ -329,12 +330,16 @@ fun NowPlayingScreen(
             }
         }
 
-        // Reconnecting banner overlay at top
+        // Reconnecting banner overlay at top. overscanSafe adds 48dp on TV so
+        // the banner doesn't sit inside the panel's overscan zone; no-op on
+        // phone / tablet / head-unit. The 16dp internal padding shapes the
+        // gap between the safe-area edge and the banner pill.
         reconnectingState?.let { state ->
             ReconnectingBanner(
                 state = state,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
+                    .overscanSafe()
                     .padding(16.dp)
             )
         }
