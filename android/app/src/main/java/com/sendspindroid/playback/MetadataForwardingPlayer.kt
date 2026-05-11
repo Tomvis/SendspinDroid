@@ -174,7 +174,11 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
             .setSubtitle(subtitle)  // Android Auto uses DISPLAY_SUBTITLE for second line
             .setArtist(currentArtist)
             .setAlbumTitle(currentAlbum)
-            .setAlbumArtist(currentAlbumArtist ?: currentArtist)
+            // Don't fall back to currentArtist: this MediaMetadata is observed
+            // back by MainActivity's onMediaMetadataChanged, which would write
+            // the synthetic albumArtist into TrackMetadata.albumArtist and
+            // erase the "no real albumArtist" distinction in the VM.
+            .setAlbumArtist(currentAlbumArtist)
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
             .setIsPlayable(true)
             .apply {

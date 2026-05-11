@@ -457,6 +457,12 @@ private fun ColonDot(
 
 @Composable
 private fun HorizonTagline() {
+    // Use Modifier.background for the divider gradient rather than a Canvas-
+    // style drawRect(brush=...) -- the Shield Tegra renderer can drop the
+    // gradient and paint black; Modifier.background is the safe path.
+    val dividerBrush = Brush.horizontalGradient(
+        colors = listOf(Color.Transparent, IdleFgFaint, Color.Transparent),
+    )
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -466,12 +472,7 @@ private fun HorizonTagline() {
             modifier = Modifier
                 .weight(1f)
                 .height(1.dp)
-                .drawWithCache {
-                    val brush = Brush.horizontalGradient(
-                        colors = listOf(Color.Transparent, IdleFgFaint, Color.Transparent),
-                    )
-                    onDrawBehind { drawRect(brush = brush) }
-                },
+                .background(dividerBrush),
         )
         Text(
             text = "silence, in its own key",
@@ -486,12 +487,7 @@ private fun HorizonTagline() {
             modifier = Modifier
                 .weight(1f)
                 .height(1.dp)
-                .drawWithCache {
-                    val brush = Brush.horizontalGradient(
-                        colors = listOf(Color.Transparent, IdleFgFaint, Color.Transparent),
-                    )
-                    onDrawBehind { drawRect(brush = brush) }
-                },
+                .background(dividerBrush),
         )
     }
 }

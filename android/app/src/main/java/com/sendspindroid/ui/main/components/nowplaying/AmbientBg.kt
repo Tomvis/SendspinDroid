@@ -82,21 +82,19 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
         }.build()
     }
 
-    val driftProgress = if (paused) {
-        val drift = rememberInfiniteTransition(label = "np-drift")
-        val v by drift.animateFloat(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 40_000, easing = FastOutSlowInEasing),
-                repeatMode = RepeatMode.Reverse,
-            ),
-            label = "np-drift-progress",
-        )
-        v
-    } else {
-        0f
-    }
+    // Always create the transition; gating it on `paused` would mutate the
+    // slot table when paused flips and scramble Compose remembered state.
+    val drift = rememberInfiniteTransition(label = "np-drift")
+    val driftValue by drift.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 40_000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "np-drift-progress",
+    )
+    val driftProgress = if (paused) driftValue else 0f
 
     AsyncImage(
         model = model,

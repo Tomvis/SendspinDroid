@@ -1756,16 +1756,20 @@ class MainActivity : AppCompatActivity() {
             handleConnectionStateChange(connectionStateStr, extras)
         }
 
-        // Handle metadata updates
+        // Handle metadata updates. PlaybackService encodes null aux fields as
+        // 0 / "" because Bundle.putInt is non-nullable; convert back so
+        // mergeTrackMetadata can preserve prior values on same-track refresh
+        // (e.g. Media3's onMediaMetadataChanged carries year/track that a
+        // subsequent session-extras broadcast would otherwise stamp to 0).
         val title = extras.getString(PlaybackService.EXTRA_TITLE, "")
         val artist = extras.getString(PlaybackService.EXTRA_ARTIST, "")
-        val albumArtist = extras.getString(PlaybackService.EXTRA_ALBUM_ARTIST, "")
+        val albumArtist = extras.getString(PlaybackService.EXTRA_ALBUM_ARTIST, "").ifEmpty { null }
         val album = extras.getString(PlaybackService.EXTRA_ALBUM, "")
         val artworkUrl = extras.getString(PlaybackService.EXTRA_ARTWORK_URL, "")
-        val year = extras.getInt(PlaybackService.EXTRA_YEAR, 0)
-        val albumTrack = extras.getInt(PlaybackService.EXTRA_ALBUM_TRACK, 0)
-        val queueTrack = extras.getInt(PlaybackService.EXTRA_QUEUE_TRACK, 0)
-        val totalTracks = extras.getInt(PlaybackService.EXTRA_TOTAL_TRACKS, 0)
+        val year = extras.getInt(PlaybackService.EXTRA_YEAR, 0).takeIf { it > 0 }
+        val albumTrack = extras.getInt(PlaybackService.EXTRA_ALBUM_TRACK, 0).takeIf { it > 0 }
+        val queueTrack = extras.getInt(PlaybackService.EXTRA_QUEUE_TRACK, 0).takeIf { it > 0 }
+        val totalTracks = extras.getInt(PlaybackService.EXTRA_TOTAL_TRACKS, 0).takeIf { it > 0 }
 
         if (title.isNotEmpty() || artist.isNotEmpty() || album.isNotEmpty()) {
             Log.d(TAG, "Metadata changed: $title / $artist (artwork: $artworkUrl)")

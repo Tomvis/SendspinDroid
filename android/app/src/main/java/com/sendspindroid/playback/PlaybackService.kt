@@ -854,6 +854,12 @@ class PlaybackService : MediaLibraryService() {
                         // Refresh browse tree root so "Connect" reappears
                         mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
 
+                        // Clear stream spec before the broadcast so the
+                        // STATE_DISCONNECTED bundle reports the zeroed spec
+                        // (broadcastSessionExtras reads currentSampleRate /
+                        // Channels / BitDepth / Codec at send time).
+                        clearAudioStreamSpec()
+
                         // Broadcast disconnection to controllers (MainActivity)
                         broadcastConnectionState(STATE_DISCONNECTED)
 
@@ -863,7 +869,6 @@ class PlaybackService : MediaLibraryService() {
                         lastTrackTitle = null
                         urlArtwork = null
                         binaryArtwork = null
-                        clearAudioStreamSpec()
 
                         // Clear lock screen metadata
                         forwardingPlayer?.clearMetadata()
@@ -902,6 +907,12 @@ class PlaybackService : MediaLibraryService() {
                             // Refresh browse tree root so "Connect" reappears
                             mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
 
+                            // Clear stream spec before the broadcast so the
+                            // STATE_DISCONNECTED bundle reports the zeroed spec
+                            // (broadcastSessionExtras reads currentSampleRate /
+                            // Channels / BitDepth / Codec at send time).
+                            clearAudioStreamSpec()
+
                             // Broadcast disconnection to controllers (MainActivity)
                             broadcastConnectionState(STATE_DISCONNECTED)
 
@@ -911,7 +922,6 @@ class PlaybackService : MediaLibraryService() {
                             lastTrackTitle = null
                             urlArtwork = null
                             binaryArtwork = null
-                            clearAudioStreamSpec()
 
                             // Clear lock screen metadata
                             forwardingPlayer?.clearMetadata()

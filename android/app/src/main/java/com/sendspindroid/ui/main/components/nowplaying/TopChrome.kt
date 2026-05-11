@@ -7,12 +7,14 @@ import android.content.IntentFilter
 import android.os.Build
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -23,8 +25,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -59,24 +59,34 @@ fun SourceBadge(
         }
     }
 
+    // Use Modifier.background for the glow halo rather than a Canvas-style
+    // drawCircle(brush=...): the Shield Tegra renderer can drop the gradient
+    // and paint black; Modifier.background with CircleShape is the safe path.
+    // Default Brush.radialGradient auto-fits center / radius to the bounding
+    // box, matching the previous size.minDimension/2 layout.
+    val glowBrush = Brush.radialGradient(
+        colors = listOf(dotColor.copy(alpha = 0.55f), Color.Transparent),
+    )
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Box(
-            modifier = Modifier
-                .size(20.dp)
-                .drawBehind {
-                    val glowBrush = Brush.radialGradient(
-                        colors = listOf(dotColor.copy(alpha = 0.55f), Color.Transparent),
-                        center = Offset(size.width / 2f, size.height / 2f),
-                        radius = size.minDimension / 2f,
-                    )
-                    drawCircle(brush = glowBrush, radius = size.minDimension / 2f)
-                    drawCircle(color = dotColor, radius = 4.dp.toPx())
-                },
-        )
+            modifier = Modifier.size(20.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(20.dp)
+                    .background(glowBrush, CircleShape),
+            )
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(dotColor, CircleShape),
+            )
+        }
         Text(
             text = label.uppercase(Locale.getDefault()),
             fontFamily = NpInterFamily,
