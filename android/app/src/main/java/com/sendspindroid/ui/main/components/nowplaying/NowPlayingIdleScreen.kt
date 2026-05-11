@@ -7,9 +7,11 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -196,6 +199,12 @@ private fun Blob(
     scale: () -> Float,
     alignment: Alignment = Alignment.TopStart,
 ) {
+    // Use Modifier.background for the radial gradient rather than a Canvas-
+    // style drawRect(brush=...): the Shield Tegra renderer drops gradients
+    // composed inside drawWithCache/drawBehind and paints black. The default
+    // Brush.radialGradient auto-fits center to the box center and radius to
+    // size.minDimension/2 -- identical to the explicit values used before.
+    val blobBrush = Brush.radialGradient(colors = listOf(color, Color.Transparent))
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = alignment,
@@ -210,39 +219,29 @@ private fun Blob(
                     scaleX = s
                     scaleY = s
                 }
-                .drawWithCache {
-                    val brush = Brush.radialGradient(
-                        colors = listOf(color, Color.Transparent),
-                        center = Offset(this.size.width / 2f, this.size.height / 2f),
-                        radius = this.size.minDimension / 2f,
-                    )
-                    onDrawBehind {
-                        drawRect(brush = brush)
-                    }
-                },
+                .background(blobBrush),
         )
     }
 }
 
 @Composable
 private fun IdleVignette() {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .drawWithCache {
-                val brush = Brush.radialGradient(
-                    colorStops = arrayOf(
-                        0.35f to Color.Transparent,
-                        1.0f to Color.Black,
-                    ),
-                    center = Offset(size.width * 0.5f, size.height * 0.5f),
-                    radius = maxOf(size.width, size.height) * 0.8f,
-                )
-                onDrawBehind {
-                    drawRect(brush = brush)
-                }
-            },
-    )
+    // BoxWithConstraints reads the layout size so the brush radius can be
+    // computed once and applied via Modifier.background. Shield Tegra
+    // renders drawRect(brush=...) as black; Modifier.background works.
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val w = constraints.maxWidth.toFloat()
+        val h = constraints.maxHeight.toFloat()
+        val brush = Brush.radialGradient(
+            colorStops = arrayOf(
+                0.35f to Color.Transparent,
+                1.0f to Color.Black,
+            ),
+            center = Offset(w * 0.5f, h * 0.5f),
+            radius = maxOf(w, h) * 0.8f,
+        )
+        Box(modifier = Modifier.fillMaxSize().background(brush))
+    }
 }
 
 @Composable
@@ -428,30 +427,41 @@ private fun ColonDot(
     alignment: Alignment,
     scale: () -> Float,
 ) {
+    // Glow goes through Modifier.background (Shield Tegra drops brushes
+    // drawn inside Canvas, paints black). Wrap in a 72dp box so the
+    // auto-fit radius (min/2 = 36dp) matches the original size.minDimension
+    // glow radius -- visually equivalent.
+    val glowBrush = Brush.radialGradient(
+        colors = listOf(color.copy(alpha = 0.6f), Color.Transparent),
+    )
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = alignment,
     ) {
         Box(
             modifier = Modifier
-                .size(36.dp)
+                .size(72.dp)
                 .graphicsLayer {
                     val s = scale()
                     scaleX = s
                     scaleY = s
-                }
-                .drawWithCache {
-                    val glow = Brush.radialGradient(
-                        colors = listOf(color.copy(alpha = 0.6f), Color.Transparent),
-                        center = Offset(size.width / 2f, size.height / 2f),
-                        radius = size.minDimension,
-                    )
-                    onDrawBehind {
-                        drawCircle(brush = glow, radius = size.minDimension)
-                        drawCircle(color = color, radius = size.minDimension / 2f)
-                    }
                 },
-        )
+            contentAlignment = Alignment.Center,
+        ) {
+            // Glow halo: 72dp box with radial gradient that fades to
+            // transparent at the box edge. Clipped to a circle so the
+            // background fills a disc rather than a square.
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .background(glowBrush, CircleShape),
+            )
+            // Solid inner dot stays in Canvas -- flat color, no brush, no
+            // Shield issue.
+            Canvas(modifier = Modifier.size(36.dp)) {
+                drawCircle(color = color, radius = size.minDimension / 2f)
+            }
+        }
     }
 }
 

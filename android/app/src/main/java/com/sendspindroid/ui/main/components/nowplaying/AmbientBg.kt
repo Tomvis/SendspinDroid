@@ -9,6 +9,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -205,23 +206,22 @@ private fun AccentWash(accent: Color, paused: Boolean) {
 
 @Composable
 private fun Vignette() {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .drawWithCache {
-                val brush = Brush.radialGradient(
-                    colorStops = arrayOf(
-                        0.35f to Color.Transparent,
-                        1.0f to Color.Black,
-                    ),
-                    center = Offset(size.width * 0.5f, size.height * 0.5f),
-                    radius = maxOf(size.width, size.height) * 0.75f,
-                )
-                onDrawBehind {
-                    drawRect(brush = brush)
-                }
-            },
-    )
+    // BoxWithConstraints reads layout size so the brush radius can be
+    // computed and applied via Modifier.background. Shield Tegra renders
+    // drawRect(brush=...) as black; Modifier.background works.
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val w = constraints.maxWidth.toFloat()
+        val h = constraints.maxHeight.toFloat()
+        val brush = Brush.radialGradient(
+            colorStops = arrayOf(
+                0.35f to Color.Transparent,
+                1.0f to Color.Black,
+            ),
+            center = Offset(w * 0.5f, h * 0.5f),
+            radius = maxOf(w, h) * 0.75f,
+        )
+        Box(modifier = Modifier.fillMaxSize().background(brush))
+    }
 }
 
 @Composable
