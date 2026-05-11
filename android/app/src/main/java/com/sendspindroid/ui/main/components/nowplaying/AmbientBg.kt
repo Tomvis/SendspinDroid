@@ -187,21 +187,26 @@ private class BoxBlurTransformation(
 
 @Composable
 private fun AccentWash(accent: Color, paused: Boolean) {
-    val washAlpha = if (paused) 0.08f else 0.2f
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .drawWithCache {
-                val brush = Brush.radialGradient(
-                    colors = listOf(accent.copy(alpha = washAlpha), Color.Transparent),
-                    center = Offset(size.width * 0.30f, size.height * 0.35f),
-                    radius = maxOf(size.width, size.height) * 0.55f,
-                )
-                onDrawBehind {
-                    drawRect(brush = brush, blendMode = BlendMode.Screen)
-                }
-            },
-    )
+    // BoxWithConstraints reads layout size so the radial brush can be sized,
+    // then the brush is applied via Modifier.background. Shield Tegra renders
+    // drawRect(brush=...) inside DrawScope as black, which made the prior
+    // implementation invisible on the target device; Modifier.background
+    // takes a different code path that works. The BlendMode.Screen that the
+    // design originally called for can't be expressed via Modifier.background.
+    // For the accent colors and low alpha values used here, the visual delta
+    // between Screen and normal alpha composition is subtle, so the wash
+    // alphas are kept identical to the pre-fix code.
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val w = constraints.maxWidth.toFloat()
+        val h = constraints.maxHeight.toFloat()
+        val washAlpha = if (paused) 0.08f else 0.2f
+        val brush = Brush.radialGradient(
+            colors = listOf(accent.copy(alpha = washAlpha), Color.Transparent),
+            center = Offset(w * 0.30f, h * 0.35f),
+            radius = maxOf(w, h) * 0.55f,
+        )
+        Box(modifier = Modifier.fillMaxSize().background(brush))
+    }
 }
 
 @Composable

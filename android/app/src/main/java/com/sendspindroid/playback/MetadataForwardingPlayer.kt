@@ -260,9 +260,15 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         // The reconnecting overlay always takes precedence: even if no track
         // metadata has ever been set, the user should see "Reconnecting to..."
         // rather than an empty lock screen.
+        //
+        // currentAlbum is included so an album-only partial update (rare but
+        // possible when the server pushes album metadata before title/artist)
+        // doesn't silently fall through to the underlying player's empty
+        // metadata.
         return if (reconnectingOverlay != null ||
             currentTitle != null ||
-            currentArtist != null) {
+            currentArtist != null ||
+            currentAlbum != null) {
             cachedMetadata
         } else {
             super.getMediaMetadata()

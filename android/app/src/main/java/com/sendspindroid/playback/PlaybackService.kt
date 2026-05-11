@@ -1725,17 +1725,31 @@ class PlaybackService : MediaLibraryService() {
 
         val current = _playbackState.value
 
-        // Skip if the title is already up to date to avoid redundant writes.
-        // When SendSpin server/state arrives ~1s later with the same title,
-        // the withMetadata call below is a no-op (null-preserves semantics
-        // ensure no visible flicker for same-track refreshes). On a track
-        // change, the ancillaries below pass null, which withMetadata clears
-        // on its new-track branch so the prior track's year / track / queue
-        // position don't linger until the server's server/state catches up.
-        if (update.title != null && update.title == current.title) return
+        // Skip if applying this update would not change title/artist/album.
+        // A null field in the update means "no information for this field" --
+        // it's never a change. A non-null field is a change only if it differs
+        // from current. We have to compare all three fields because compilation
+        // tracks share titles across artists (and split EPs share artists
+        // across albums); a title-only check would silently drop those.
+        //
+        // When SendSpin server/state arrives ~1s later as a real same-track
+        // refresh, the withMetadata call below is a no-op anyway (null-preserves
+        // semantics ensure no visible flicker), but the early-return avoids the
+        // sendSpinPlayer round-trip in the common case.
+        val titleMatches = update.title == null || update.title == current.title
+        val artistMatches = update.artist == null || update.artist == current.artist
+        val albumMatches = update.album == null || update.album == current.album
+        if (titleMatches && artistMatches && albumMatches) return
 
         Log.d(TAG, "Fast metadata via queue_updated: ${update.title} / ${update.artist} / ${update.album}")
 
+        // positionMs is forced to 0L here. The same-track early-return above
+        // guarantees we only reach this with a track change, and a new track
+        // always starts at 0. Passing current.positionMs (the prior track's
+        // elapsed time) would make withMetadata stamp positionUpdatedAt=now
+        // with a non-zero position, and ProgressRail would tick the new track
+        // forward from the prior track's elapsed seconds until the authoritative
+        // server/state arrives ~1s later and snaps it back.
         _playbackState.value = current.withMetadata(
             title = update.title,
             artist = update.artist,
@@ -1747,7 +1761,7 @@ class PlaybackService : MediaLibraryService() {
             queueTrack = null,
             totalTracks = null,
             durationMs = update.durationMs ?: current.durationMs,
-            positionMs = current.positionMs,
+            positionMs = 0L,
             playbackSpeed = current.playbackSpeed
         )
 
@@ -2616,8 +2630,14 @@ class PlaybackService : MediaLibraryService() {
             AudioManager.AUDIOFOCUS_GAIN -> {
                 Log.d(TAG, "Audio focus gained")
                 hasAudioFocus = true
-                // Focus returned - resume if we were playing before losing focus
-                syncAudioPlayer?.resume()
+                // Focus returned - resume only if the server-side group is still
+                // PLAYING. If the server transitioned to PAUSED while we held no
+                // focus (e.g. another group member paused during the phone call),
+                // resuming locally would contradict the authoritative server
+                // state until the next group/update message corrects us.
+                if (_playbackState.value.playbackState == PlaybackStateType.PLAYING) {
+                    syncAudioPlayer?.resume()
+                }
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
                 Log.d(TAG, "Audio focus lost permanently")
