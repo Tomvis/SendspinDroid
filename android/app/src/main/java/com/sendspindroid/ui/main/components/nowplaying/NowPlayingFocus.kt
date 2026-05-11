@@ -47,6 +47,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.sendspindroid.R
 import com.sendspindroid.ui.adaptive.TvInitialFocus
+import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.main.AudioStreamSpec
 import com.sendspindroid.ui.main.TrackMetadata
@@ -78,6 +79,9 @@ fun NowPlayingFocus(
     TvInitialFocus(focusAnchor)
 
     Box(modifier = modifier.fillMaxSize()) {
+        // AmbientBg deliberately full-bleed (outside overscanSafe) so the
+        // blurred-cover wash extends to the actual screen edge; nothing
+        // critical sits there.
         AmbientBg(artworkSource = artworkSource, accent = accent, paused = paused)
 
         Box(
@@ -87,57 +91,64 @@ fun NowPlayingFocus(
                 .focusable(),
         )
 
-        // Top chrome: top=54dp, sides=96dp (spec)
-        Row(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .padding(top = 54.dp, start = 96.dp, end = 96.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top,
-        ) {
-            SourceBadge(
-                paused = paused,
-                groupLabel = groupLabel,
-            )
-            NowPlayingClock()
-        }
+        // Foreground stack rides inside the overscan-safe inset. The design's
+        // spec margins (54dp top/bottom, 96dp sides) are split: 48dp comes from
+        // overscanSafe so we comply with the fork policy explicitly, and the
+        // remainder lives in the per-Row padding below. Net visual margin from
+        // the screen edge is unchanged.
+        Box(modifier = Modifier.fillMaxSize().overscanSafe()) {
+            // Top chrome: total top=54dp (48 overscan + 6 internal), sides=96dp.
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(top = 6.dp, start = 48.dp, end = 48.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top,
+            ) {
+                SourceBadge(
+                    paused = paused,
+                    groupLabel = groupLabel,
+                )
+                NowPlayingClock()
+            }
 
-        // Center content: art (620dp) + 88dp gap + info column. Sides=96dp.
-        Row(
-            modifier = Modifier
-                .align(Alignment.Center)
-                .fillMaxWidth()
-                .padding(horizontal = 96.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AlbumArt(
-                artworkSource = artworkSource,
+            // Center content: art (620dp) + 88dp gap + info column. Sides=96dp.
+            Row(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .fillMaxWidth()
+                    .padding(horizontal = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AlbumArt(
+                    artworkSource = artworkSource,
+                    accent = accent,
+                    paused = paused,
+                )
+                Spacer(modifier = Modifier.width(88.dp))
+                InfoColumn(
+                    metadata = metadata,
+                    audioSpec = audioSpec,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            // Progress rail: total bottom=54dp (48 overscan + 6 internal), sides=96dp.
+            ProgressRail(
+                positionMs = positionMs,
+                durationMs = durationMs,
+                positionUpdatedAt = positionUpdatedAt,
+                isPlaying = isPlaying,
+                trackNumber = metadata.queueTrack,
+                trackTotal = metadata.totalTracks,
                 accent = accent,
-                paused = paused,
-            )
-            Spacer(modifier = Modifier.width(88.dp))
-            InfoColumn(
-                metadata = metadata,
-                audioSpec = audioSpec,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(start = 48.dp, end = 48.dp, bottom = 6.dp),
             )
         }
-
-        // Progress rail: bottom=54dp, sides=96dp (spec)
-        ProgressRail(
-            positionMs = positionMs,
-            durationMs = durationMs,
-            positionUpdatedAt = positionUpdatedAt,
-            isPlaying = isPlaying,
-            trackNumber = metadata.queueTrack,
-            trackTotal = metadata.totalTracks,
-            accent = accent,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(start = 96.dp, end = 96.dp, bottom = 54.dp),
-        )
     }
 }
 

@@ -1266,15 +1266,14 @@ class PlaybackService : MediaLibraryService() {
                     syncAudioPlayer?.pause()
                     releasePlaybackLocks()
                 } else if (newState == PlaybackStateType.PLAYING) {
-                    // Playing: resume playback if paused. Re-attach syncAudioPlayer
-                    // on SendSpinPlayer to match onGroupUpdate's PLAYING branch --
-                    // disconnect clears the reference (lines 846/898), and a
-                    // resume that arrives via server/state alone would otherwise
-                    // leave SendSpinPlayer.syncAudioPlayer null after a reconnect.
+                    // Playing: resume playback if paused. syncAudioPlayer is
+                    // recreated and re-attached on the next stream/start
+                    // (PlaybackService.kt:1567); a resume that arrives here
+                    // before stream/start has no syncAudioPlayer to resume
+                    // anyway, so no extra re-attach is needed.
                     Log.d(TAG, "State is playing - resuming audio and acquiring playback locks")
                     sendSpinPlayer?.updatePlayWhenReadyFromServer(true)
                     syncAudioPlayer?.resume()
-                    sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
                     acquirePlaybackLocks()
                 }
 
@@ -1408,6 +1407,37 @@ class PlaybackService : MediaLibraryService() {
                     playbackSpeed = playbackSpeed
                 )
 
+                // Title change invalidates BOTH artwork caches so the
+                // notification doesn't briefly show the prior track's image
+                // alongside the new track's title. The next URL fetch
+                // (kicked off below) or server-pushed binary artwork
+                // (onArtwork) will repopulate. Coil caches by URL so a
+                // re-fetch on the same album is essentially free.
+                //
+                // Done BEFORE updateMediaMetadata so effectiveArtwork (which
+                // feeds the forwarding-player cache) is null on a track
+                // change, rather than carrying the prior bitmap.
+                val newTitle = title.ifEmpty { null }
+                val titleChanged = newTitle != lastTrackTitle
+                if (titleChanged) {
+                    lastTrackTitle = newTitle
+                    urlArtwork = null
+                    binaryArtwork = null
+                }
+
+                // Refresh the forwarding-player cache BEFORE firing
+                // updateMediaItem. updateMediaItem synchronously dispatches
+                // onTimelineChanged / onMediaItemTransition to all listeners
+                // (SendSpinPlayer.kt:291-294); the MediaSession reads metadata
+                // via forwardingPlayer in response. Without the cache refresh
+                // first, MetadataForwardingPlayer.getMediaMetadata() returns
+                // its prior cachedMetadata (the override at
+                // MetadataForwardingPlayer.kt:259 only delegates to the
+                // underlying player when currentTitle/currentArtist are null),
+                // so lock screen / Auto / AVRCP would see the prior track for
+                // one tick. Mirrors the fix in applyFastQueueMetadata.
+                updateMediaMetadata(title, artist, album)
+
                 // Update the player's media item for lock screen/notification
                 sendSpinPlayer?.updateMediaItem(
                     title = title.ifEmpty { null },
@@ -1430,28 +1460,12 @@ class PlaybackService : MediaLibraryService() {
                 // Populate the player's timeline with queue items for native queue UI
                 populatePlayerQueue()
 
-                // Title change invalidates BOTH artwork caches so the
-                // notification doesn't briefly show the prior track's image
-                // alongside the new track's title. The next URL fetch
-                // (kicked off below) or server-pushed binary artwork
-                // (onArtwork) will repopulate. Coil caches by URL so a
-                // re-fetch on the same album is essentially free.
-                val newTitle = title.ifEmpty { null }
-                val titleChanged = newTitle != lastTrackTitle
-                if (titleChanged) {
-                    lastTrackTitle = newTitle
-                    urlArtwork = null
-                    binaryArtwork = null
-                }
-
                 if (effectiveArtworkUrl.isEmpty()) {
                     lastArtworkUrl = null
                 } else if (effectiveArtworkUrl != lastArtworkUrl || titleChanged) {
                     lastArtworkUrl = effectiveArtworkUrl
                     fetchArtwork(effectiveArtworkUrl)
                 }
-
-                updateMediaMetadata(title, artist, album)
             }
         }
 

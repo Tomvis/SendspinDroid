@@ -32,7 +32,7 @@ fun SpecChips(
 ) {
     val labels = buildList {
         if (spec.codec.isNotBlank()) add(spec.codec)
-        if (spec.bitDepth > 0) add("${spec.bitDepth}‑BIT")
+        if (spec.bitDepth > 0) add("${spec.bitDepth}-BIT")
         if (spec.sampleRate > 0) add(formatSampleRate(spec.sampleRate))
         if (spec.bitrateKbps > 0) add("${spec.bitrateKbps} kbps")
     }

@@ -232,7 +232,12 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     fun clearArtwork() {
         _artworkSource.value = null
-        _playerColors.value = null
+        // _playerColors deliberately preserved: when an artwork-less track is
+        // displayed, NowPlayingScreen's sticky-artwork logic keeps the prior
+        // image visible. Clearing the derived accent here would leave the
+        // sticky image with the fallback accent — a visible mismatch (e.g.
+        // orange-tinted album art surrounded by amber glows). resetPlaybackState
+        // is the authoritative path that clears both on disconnect.
     }
 
     // ========================================================================

@@ -90,8 +90,17 @@ fun ProgressRail(
         // anchorTime == 0L means the VM hasn't applied a real server frame yet.
         // Without this guard, `elapsed = elapsedRealtime() - 0` is device uptime
         // and the bar snaps to durationMs on first render.
-        if (!isPlaying || anchorTime <= 0L) {
+        if (anchorTime <= 0L) {
             displayPositionMs = anchorPositionMs
+            return@LaunchedEffect
+        }
+        if (!isPlaying) {
+            // Pause: freeze displayPositionMs at its current value rather than
+            // snapping back to anchorPositionMs. The interpolation loop has been
+            // advancing past the anchor; snapping back would jerk the bar
+            // visibly. The next server-pushed position (LaunchedEffect above
+            // re-anchors on positionMs / positionUpdatedAt) will re-sync the
+            // bar to the authoritative server state.
             return@LaunchedEffect
         }
         // Clamp the elapsed reference to whichever is more recent: the server's

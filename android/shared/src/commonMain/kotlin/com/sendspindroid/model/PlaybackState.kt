@@ -114,10 +114,16 @@ data class PlaybackState(
             totalTracks = resolveInt(totalTracks, this.totalTracks),
             durationMs = if (durationMs > 0) durationMs else this.durationMs,
             positionMs = positionMs,
-            // Only stamp positionUpdatedAt when position is non-zero. When positionMs is 0
-            // (e.g., initial metadata for a new track before audio starts), keep existing
-            // timestamp so interpolatedPositionMs doesn't phantom-count up from zero.
-            positionUpdatedAt = if (positionMs > 0) Platform.elapsedRealtimeMs() else this.positionUpdatedAt,
+            // positionUpdatedAt: stamp when positionMs > 0 (real anchor),
+            // zero on a new track with positionMs == 0 (interpolatedPositionMs
+            // / ProgressRail use 0 as the "no real anchor yet" sentinel and
+            // would otherwise leak the prior track's elapsed time into the
+            // new track's display), preserve on same-track refresh.
+            positionUpdatedAt = when {
+                positionMs > 0 -> Platform.elapsedRealtimeMs()
+                isNewTrack -> 0L
+                else -> this.positionUpdatedAt
+            },
             playbackSpeed = playbackSpeed
         )
     }

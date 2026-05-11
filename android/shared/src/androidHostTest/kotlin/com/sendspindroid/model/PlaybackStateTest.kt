@@ -390,7 +390,9 @@ class PlaybackStateTest {
 
     @Test
     fun withMetadata_zeroPosition_preservesExistingTimestamp() {
-        // If there was a previous valid timestamp, zero position preserves it
+        // Same-track refresh with positionMs=0 (server sometimes omits position
+        // in follow-up frames). Preserves the prior anchor so interpolation
+        // continues without resetting to zero.
         val state = PlaybackState(positionUpdatedAt = 5_000L)
         val updated = state.withMetadata(
             title = null, artist = null, albumArtist = null, album = null, artworkUrl = null,
@@ -398,6 +400,26 @@ class PlaybackStateTest {
             durationMs = 0, positionMs = 0
         )
         assertEquals(5_000L, updated.positionUpdatedAt)
+    }
+
+    @Test
+    fun withMetadata_newTrackZeroPosition_zeroesOutTimestamp() {
+        // New track + positionMs=0 zeroes the anchor so interpolatedPositionMs
+        // / ProgressRail's "no real anchor" guard short-circuits to positionMs.
+        // Without this, the prior track's positionUpdatedAt would leak: a
+        // freshly-loaded track would briefly display elapsed-since-prior-anchor
+        // instead of 0.
+        val state = PlaybackState(title = "Old", positionUpdatedAt = 5_000L)
+        val updated = state.withMetadata(
+            title = "New", artist = null, albumArtist = null, album = null, artworkUrl = null,
+            year = null, albumTrack = null, queueTrack = null, totalTracks = null,
+            durationMs = 180000, positionMs = 0
+        )
+        assertEquals(0L, updated.positionUpdatedAt)
+        // And interpolation now returns the raw positionMs rather than counting
+        // up from a stale anchor.
+        val playing = updated.copy(playbackState = PlaybackStateType.PLAYING)
+        assertEquals(0L, playing.interpolatedPositionMs)
     }
 
     @Test
