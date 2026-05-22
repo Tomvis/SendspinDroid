@@ -626,11 +626,48 @@ class SendspinTimeFilterTest {
     }
 
     @Test
-    fun `server sync_offset writes route to user field with SERVER source`() {
+    fun `server sync_offset reports SERVER source and contributes to staticDelayMs`() {
         val f = SendspinTimeFilter()
         f.setServerSyncOffsetMs(-40.0)
         assertEquals(-40.0, f.staticDelayMs, 0.0001)
         assertEquals(StaticDelaySource.SERVER, f.staticDelaySource)
+    }
+
+    @Test
+    fun `server sync_offset does not clobber user sync_offset`() {
+        // Both server-pushed and user-set offsets must stack: they are
+        // independent corrections on top of the measured hardware latency.
+        // Previously they shared one backing field and the server value
+        // silently wiped the user value (and vice versa).
+        val f = SendspinTimeFilter()
+        f.setUserSyncOffsetMs(30.0)
+        f.setServerSyncOffsetMs(-40.0)
+        // 30 + (-40) = -10
+        assertEquals(-10.0, f.staticDelayMs, 0.0001)
+        // The most recent writer is SERVER; the user value is still active.
+        assertEquals(StaticDelaySource.SERVER, f.staticDelaySource)
+        assertEquals(30.0, f.userSyncOffsetMs, 0.0001)
+        assertEquals(-40.0, f.serverSyncOffsetMs, 0.0001)
+    }
+
+    @Test
+    fun `user sync_offset does not clobber server sync_offset`() {
+        val f = SendspinTimeFilter()
+        f.setServerSyncOffsetMs(-40.0)
+        f.setUserSyncOffsetMs(30.0)
+        assertEquals(-10.0, f.staticDelayMs, 0.0001)
+        assertEquals(StaticDelaySource.USER, f.staticDelaySource)
+        assertEquals(30.0, f.userSyncOffsetMs, 0.0001)
+        assertEquals(-40.0, f.serverSyncOffsetMs, 0.0001)
+    }
+
+    @Test
+    fun `auto-measured plus user plus server stack into staticDelayMs`() {
+        val f = SendspinTimeFilter()
+        f.setAutoMeasuredDelayMicros(100_000L, StaticDelaySource.AUTO) // 100ms
+        f.setUserSyncOffsetMs(25.0)
+        f.setServerSyncOffsetMs(-10.0)
+        assertEquals(115.0, f.staticDelayMs, 0.0001)
     }
 
     @Test

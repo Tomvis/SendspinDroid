@@ -491,6 +491,67 @@ class MessageParserTest {
         assertEquals("stopped", state)
     }
 
+    // --- parseServerState controller object ---
+
+    @Test
+    fun parseServerState_controllerState_extractsAllFields() {
+        val payload = buildJsonObject {
+            put("controller", buildJsonObject {
+                put("supported_commands", buildJsonArray {
+                    add(JsonPrimitive("play"))
+                    add(JsonPrimitive("pause"))
+                    add(JsonPrimitive("next"))
+                })
+                put("volume", 73)
+                put("muted", false)
+            })
+        }
+
+        val result = MessageParser.parseServerState(payload)
+
+        assertNotNull(result.controllerState)
+        val cs = result.controllerState!!
+        assertEquals(listOf("play", "pause", "next"), cs.supportedCommands)
+        assertEquals(73, cs.volume)
+        assertFalse(cs.muted)
+    }
+
+    @Test
+    fun parseServerState_noControllerObject_returnsNullControllerState() {
+        val payload = buildJsonObject {
+            put("metadata", buildJsonObject {
+                put("timestamp", 1L)
+                put("title", "X")
+            })
+        }
+        val result = MessageParser.parseServerState(payload)
+        assertNull(result.controllerState)
+    }
+
+    @Test
+    fun parseServerState_controllerVolumeOutOfRange_returnsNullControllerState() {
+        val payload = buildJsonObject {
+            put("controller", buildJsonObject {
+                put("supported_commands", buildJsonArray { })
+                put("volume", 101)
+                put("muted", false)
+            })
+        }
+        assertNull(MessageParser.parseServerState(payload).controllerState)
+    }
+
+    @Test
+    fun parseServerState_controllerMissingField_returnsNullControllerState() {
+        // muted missing -> reject; spec marks all three fields as required.
+        val payload = buildJsonObject {
+            put("controller", buildJsonObject {
+                put("supported_commands", buildJsonArray { })
+                put("volume", 50)
+            })
+        }
+        assertNull(MessageParser.parseServerState(payload).controllerState)
+    }
+
     // --- parseServerCommand ---
 
     @Test

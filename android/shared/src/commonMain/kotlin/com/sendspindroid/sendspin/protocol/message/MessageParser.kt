@@ -1,9 +1,11 @@
 package com.sendspindroid.sendspin.protocol.message
 
+import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.ServerCommandResult
 import com.sendspindroid.sendspin.protocol.ServerHelloResult
+import com.sendspindroid.sendspin.protocol.ServerStateResult
 import com.sendspindroid.sendspin.protocol.StreamConfig
 import com.sendspindroid.sendspin.protocol.SyncOffsetResult
 import com.sendspindroid.sendspin.protocol.TimeMeasurement
@@ -70,8 +72,8 @@ object MessageParser {
     fun parseServerState(
         payload: JsonObject?,
         previous: TrackMetadata? = null
-    ): Pair<TrackMetadata?, String?> {
-        if (payload == null) return Pair(null, null)
+    ): ServerStateResult {
+        if (payload == null) return ServerStateResult(null, null, null)
 
         // The server emits diff-style updates (see aiosendspin
         // server/roles/metadata/state.py::diff_update): only fields that
@@ -167,7 +169,33 @@ object MessageParser {
 
         val state = payload.stringOrDefault("state", "").takeIf { it.isNotEmpty() }
 
-        return Pair(metadata, state)
+        // server/state may carry a `controller` object for clients that
+        // advertise the controller@v1 role. It reports group-level volume/mute
+        // (distinct from per-player volume/mute, which arrives via
+        // server/command) and the subset of MediaCommand values the
+        // application backing the group accepts.
+        val controllerState = (payload["controller"] as? JsonObject)?.let { controllerObj ->
+            val volume = controllerObj["volume"]?.jsonPrimitive?.intOrNull
+            val muted = controllerObj["muted"]?.jsonPrimitive?.booleanOrNull
+            val supportedArray = controllerObj["supported_commands"]?.jsonArray
+            if (volume == null || muted == null || supportedArray == null) {
+                Log.w(TAG, "server/state.controller missing required fields")
+                null
+            } else if (volume !in 0..100) {
+                Log.w(TAG, "server/state.controller.volume out of range: $volume")
+                null
+            } else {
+                ControllerState(
+                    supportedCommands = supportedArray.mapNotNull {
+                        it.jsonPrimitive.contentOrNull
+                    },
+                    volume = volume,
+                    muted = muted,
+                )
+            }
+        }
+
+        return ServerStateResult(metadata, state, controllerState)
     }
 
     fun parseServerCommand(payload: JsonObject?): ServerCommandResult? {

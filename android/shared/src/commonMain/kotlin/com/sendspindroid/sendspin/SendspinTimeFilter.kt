@@ -145,13 +145,16 @@ class SendspinTimeFilter {
     // Set when first measurement is received, used as reference point for time conversions
     private var baselineClientTime: Long = 0
 
-    // Static delay = auto-measured output latency + user sync offset.
-    // Each source is tracked separately so auto-measurement and user
-    // corrections don't clobber each other. [staticDelayMs] returns the sum.
+    // Static delay = auto-measured output latency + user sync offset
+    // + server-pushed sync offset. Each source is tracked separately so
+    // auto-measurement, user corrections, and server-pushed corrections
+    // (from client/sync_offset) don't clobber each other. [staticDelayMs]
+    // returns the sum.
     // @Volatile fields: read by audio thread (serverToClient), written from
     // UI/main or estimator threads.
     @Volatile private var autoMeasuredDelayMicros: Long = 0
     @Volatile private var userSyncOffsetMicros: Long = 0
+    @Volatile private var serverSyncOffsetMicros: Long = 0
     @Volatile var staticDelaySource: StaticDelaySource = StaticDelaySource.NONE
         private set
 
@@ -233,13 +236,14 @@ class SendspinTimeFilter {
 
     /**
      * Effective static delay in milliseconds. Sum of the auto-measured
-     * hardware latency and the user's sync-offset correction. Both
-     * components may be written independently by their respective setters.
+     * hardware latency, the user's manual sync-offset correction, and any
+     * server-pushed sync offset. All three components may be written
+     * independently by their respective setters.
      *
      * Positive = delay playback (plays later), Negative = advance (plays earlier).
      */
     val staticDelayMs: Double
-        get() = (autoMeasuredDelayMicros + userSyncOffsetMicros) / 1000.0
+        get() = (autoMeasuredDelayMicros + userSyncOffsetMicros + serverSyncOffsetMicros) / 1000.0
 
     /**
      * Raw auto-measured component (milliseconds).
@@ -252,6 +256,12 @@ class SendspinTimeFilter {
      */
     val userSyncOffsetMs: Double
         get() = userSyncOffsetMicros / 1000.0
+
+    /**
+     * Raw server-pushed sync-offset component (milliseconds).
+     */
+    val serverSyncOffsetMs: Double
+        get() = serverSyncOffsetMicros / 1000.0
 
     /**
      * Write the auto-measured hardware output latency. Called by
@@ -274,11 +284,13 @@ class SendspinTimeFilter {
 
     /**
      * Write a server-pushed sync-offset (from `client/sync_offset`).
-     * Goes into the same field as the user slider because both are
-     * semantically "corrections on top of the measured hardware latency".
+     *
+     * Stored separately from [setUserSyncOffsetMs] so the two do not clobber
+     * each other -- both are corrections on top of the measured hardware
+     * latency and they stack additively in [staticDelayMs].
      */
     fun setServerSyncOffsetMs(ms: Double) {
-        userSyncOffsetMicros = (ms * 1000).toLong()
+        serverSyncOffsetMicros = (ms * 1000).toLong()
         staticDelaySource = StaticDelaySource.SERVER
     }
 
@@ -633,7 +645,7 @@ class SendspinTimeFilter {
      */
     fun serverToClient(serverTimeMicros: Long): Long {
         val baseResult = serverTimeMicros - offset.toLong()
-        return baseResult + autoMeasuredDelayMicros + userSyncOffsetMicros
+        return baseResult + autoMeasuredDelayMicros + userSyncOffsetMicros + serverSyncOffsetMicros
     }
 
     /**
@@ -641,6 +653,7 @@ class SendspinTimeFilter {
      * for why drift is not applied. Lock-free.
      */
     fun clientToServer(clientTimeMicros: Long): Long {
-        return clientTimeMicros + offset.toLong() - autoMeasuredDelayMicros - userSyncOffsetMicros
+        return clientTimeMicros + offset.toLong() -
+                autoMeasuredDelayMicros - userSyncOffsetMicros - serverSyncOffsetMicros
     }
 }

@@ -121,6 +121,16 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun onGroupUpdate(info: GroupInfo)
 
     /**
+     * Called when group-level controller state arrives via `server/state`.
+     * Reports the application's supported MediaCommand values and the
+     * group's current volume/mute. Only fires for clients that advertise the
+     * controller@v1 role.
+     *
+     * Default no-op for handlers that don't expose group-level controls.
+     */
+    protected open fun onControllerStateUpdate(state: ControllerState) {}
+
+    /**
      * Called when audio stream starts.
      */
     protected abstract fun onStreamStart(config: StreamConfig)
@@ -418,7 +428,7 @@ abstract class SendSpinProtocolHandler(
                 SendSpinProtocol.MessageType.GROUP_UPDATE -> handleGroupUpdate(payload)
                 SendSpinProtocol.MessageType.STREAM_START -> handleStreamStart(payload)
                 SendSpinProtocol.MessageType.STREAM_END -> handleStreamEnd(payload)
-                SendSpinProtocol.MessageType.STREAM_CLEAR -> handleStreamClear()
+                SendSpinProtocol.MessageType.STREAM_CLEAR -> handleStreamClear(payload)
                 SendSpinProtocol.MessageType.CLIENT_SYNC_OFFSET -> handleClientSyncOffset(payload)
                 else -> Log.d(tag, "Unhandled message type: $type")
             }
@@ -466,7 +476,7 @@ abstract class SendSpinProtocolHandler(
         // The server only sends fields that changed; without merging we'd
         // wipe artist/album/artwork/progress on every title-only or
         // progress-only update.
-        val (metadata, state) = MessageParser.parseServerState(payload, lastMetadata)
+        val (metadata, state, controllerState) = MessageParser.parseServerState(payload, lastMetadata)
 
         if (metadata != null) {
             lastMetadata = metadata
@@ -476,6 +486,10 @@ abstract class SendSpinProtocolHandler(
         if (state != null && state != lastPlaybackState) {
             lastPlaybackState = state
             onPlaybackStateChanged(state)
+        }
+
+        if (controllerState != null) {
+            onControllerStateUpdate(controllerState)
         }
     }
 
@@ -530,18 +544,35 @@ abstract class SendSpinProtocolHandler(
         onStreamStart(config)
     }
 
-    protected fun handleStreamClear() {
+    protected fun handleStreamClear(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamClear ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
-        Log.v(tag, "Stream clear - flushing audio buffers")
+        // `roles` field carries unversioned family names per spec
+        // (STREAM_CLEAR_ROLE_FAMILIES = {"player", "visualizer"}). If the field
+        // is present and "player" is not in it, the clear targets a role we
+        // don't host (e.g. visualizer-only) and must not wipe our audio buffer.
+        val rolesArray = payload?.get("roles")?.jsonArray
+        val roles = rolesArray?.map { it.jsonPrimitive.content }
+
+        if (roles != null && SendSpinProtocol.RoleFamily.PLAYER !in roles) {
+            Log.d(tag, "Stream clear for non-player roles: $roles - ignoring")
+            return
+        }
+
+        Log.v(tag, "Stream clear - flushing audio buffers (roles=${roles ?: "all"})")
         onStreamClear()
     }
 
     protected fun handleStreamEnd(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamEnd ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
+        // `roles` field carries unversioned family names per spec
+        // (STREAM_END_ROLE_FAMILIES = {"player", "artwork", "visualizer"}).
+        // Compare against the family name, not the versioned [Roles.PLAYER]
+        // (= "player@v1"); the latter never matches and silently swallows
+        // every stream/end the server emits.
         val rolesArray = payload?.get("roles")?.jsonArray
         val roles = rolesArray?.map { it.jsonPrimitive.content }
 
-        if (roles != null && SendSpinProtocol.Roles.PLAYER !in roles) {
+        if (roles != null && SendSpinProtocol.RoleFamily.PLAYER !in roles) {
             Log.d(tag, "Stream end for non-player roles: $roles - ignoring")
             return
         }

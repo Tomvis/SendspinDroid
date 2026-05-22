@@ -120,13 +120,29 @@ object SendSpinProtocol {
     }
 
     /**
-     * Supported client roles.
+     * Supported client roles (versioned role IDs sent in client/hello.supported_roles
+     * and received in server/hello.active_roles).
      */
     object Roles {
         const val PLAYER = "player@v1"
         const val CONTROLLER = "controller@v1"
         const val METADATA = "metadata@v1"
         const val ARTWORK = "artwork@v1"
+    }
+
+    /**
+     * Unversioned role family names. The server emits these in role-scoped
+     * payloads such as `stream/end.roles` and `stream/clear.roles`, where the
+     * version is intentionally elided so a single message can target every
+     * version of a role family. Do NOT use [Roles] (which carries `@vN`) when
+     * comparing against those fields.
+     */
+    object RoleFamily {
+        const val PLAYER = "player"
+        const val CONTROLLER = "controller"
+        const val METADATA = "metadata"
+        const val ARTWORK = "artwork"
+        const val VISUALIZER = "visualizer"
     }
 }
 
@@ -252,6 +268,34 @@ sealed class ServerCommandResult {
     data class Mute(val muted: Boolean) : ServerCommandResult()
     data class Unknown(val command: String) : ServerCommandResult()
 }
+
+/**
+ * Group-level controller state from `server/state.controller`. Sent to clients
+ * that advertise the `controller@v1` role. Reports which media commands the
+ * application backing the group supports plus the group's current volume and
+ * mute. Distinct from per-player volume/mute (which arrives via
+ * `server/command`).
+ *
+ * @param supportedCommands MediaCommand string values the application accepts
+ *     (e.g. "play", "pause", "next", "repeat_all"). Subset of the
+ *     spec-defined MediaCommand enum.
+ * @param volume Group volume, 0-100.
+ * @param muted Group mute state.
+ */
+data class ControllerState(
+    val supportedCommands: List<String>,
+    val volume: Int,
+    val muted: Boolean,
+)
+
+/**
+ * Result from parsing server/state message.
+ */
+data class ServerStateResult(
+    val metadata: TrackMetadata?,
+    val state: String?,
+    val controllerState: ControllerState?,
+)
 
 /**
  * Result from parsing client/sync_offset message.

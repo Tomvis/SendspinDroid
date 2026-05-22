@@ -150,6 +150,21 @@ class SendSpin(
         fun onNetworkChanged()
 
         /**
+         * Called when group-level controller state arrives from the server
+         * (only for clients that advertise the `controller@v1` role).
+         * Reports the application-supported MediaCommand values plus the
+         * group's current volume/mute. Distinct from per-player volume/mute,
+         * which arrives via [onVolumeChanged] / [onMutedChanged].
+         *
+         * Default no-op for callers that don't expose group-level controls.
+         */
+        fun onControllerStateUpdate(
+            supportedCommands: List<String>,
+            volume: Int,
+            muted: Boolean,
+        ) {}
+
+        /**
          * Called when audio output should be silenced or unsilenced because
          * the client cannot maintain sync. Per Sendspin spec, "error" state
          * mutes audio while continuing to drain the buffer. Implementations
@@ -435,6 +450,10 @@ class SendSpin(
 
     override fun onGroupUpdate(info: GroupInfo) {
         callback.onGroupUpdate(info.groupId, info.groupName, info.playbackState)
+    }
+
+    override fun onControllerStateUpdate(state: com.sendspindroid.sendspin.protocol.ControllerState) {
+        callback.onControllerStateUpdate(state.supportedCommands, state.volume, state.muted)
     }
 
     override fun onStreamStart(config: StreamConfig) {

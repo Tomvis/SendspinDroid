@@ -295,6 +295,107 @@ class SendSpinProtocolHandlerTest {
         assertEquals(44100, handler.streamStarts[1].sampleRate)
     }
 
+    // ========== Controller State Dispatch ==========
+
+    @Test
+    fun `server state with controller object dispatches onControllerStateUpdate`() {
+        // Group volume / mute / supported commands arrive as `payload.controller`
+        // on server/state for clients with the controller@v1 role.
+        val msg = """
+            {
+                "type": "server/state",
+                "payload": {
+                    "controller": {
+                        "supported_commands": ["play","pause","next"],
+                        "volume": 65,
+                        "muted": false
+                    }
+                }
+            }
+        """.trimIndent()
+        handler.handleTextMessageForTest(msg)
+        assertEquals(1, handler.controllerStates.size)
+        val cs = handler.controllerStates[0]
+        assertEquals(listOf("play", "pause", "next"), cs.supportedCommands)
+        assertEquals(65, cs.volume)
+        assertFalse(cs.muted)
+    }
+
+    @Test
+    fun `server state without controller object does not dispatch`() {
+        val msg = """
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": {"timestamp": 1, "title": "X"}
+                }
+            }
+        """.trimIndent()
+        handler.handleTextMessageForTest(msg)
+        assertTrue(handler.controllerStates.isEmpty())
+    }
+
+    // ========== Stream End / Clear role-filter Tests ==========
+
+    @Test
+    fun `stream end with roles=player fires onStreamEnd`() {
+        // aiosendspin sends roles=["player"] (unversioned family name); the
+        // handler must treat that as "ends our stream". Versioned "player@v1"
+        // never appears here -- if the comparison ever regresses back to
+        // Roles.PLAYER, this test catches the silent swallow.
+        handler.handleTextMessageForTest(
+            """{"type":"stream/end","payload":{"roles":["player"]}}"""
+        )
+        assertEquals(1, handler.streamEnds.size)
+    }
+
+    @Test
+    fun `stream end with no roles fires onStreamEnd`() {
+        // Absent `roles` means "all streams" per spec; treat as a player end.
+        handler.handleTextMessageForTest("""{"type":"stream/end","payload":{}}""")
+        assertEquals(1, handler.streamEnds.size)
+    }
+
+    @Test
+    fun `stream end with roles=visualizer does not fire onStreamEnd`() {
+        // We only host the player family; a visualizer-only end is not ours.
+        handler.handleTextMessageForTest(
+            """{"type":"stream/end","payload":{"roles":["visualizer"]}}"""
+        )
+        assertEquals(0, handler.streamEnds.size)
+    }
+
+    @Test
+    fun `stream end with roles including player fires onStreamEnd`() {
+        handler.handleTextMessageForTest(
+            """{"type":"stream/end","payload":{"roles":["player","visualizer"]}}"""
+        )
+        assertEquals(1, handler.streamEnds.size)
+    }
+
+    @Test
+    fun `stream clear with roles=player fires onStreamClear`() {
+        handler.handleTextMessageForTest(
+            """{"type":"stream/clear","payload":{"roles":["player"]}}"""
+        )
+        assertEquals(1, handler.streamClears.size)
+    }
+
+    @Test
+    fun `stream clear with no roles fires onStreamClear`() {
+        handler.handleTextMessageForTest("""{"type":"stream/clear","payload":{}}""")
+        assertEquals(1, handler.streamClears.size)
+    }
+
+    @Test
+    fun `stream clear with roles=visualizer does not fire onStreamClear`() {
+        // A visualizer-only clear must not wipe our audio buffer.
+        handler.handleTextMessageForTest(
+            """{"type":"stream/clear","payload":{"roles":["visualizer"]}}"""
+        )
+        assertEquals(0, handler.streamClears.size)
+    }
+
     // ========== Helpers ==========
 
     private fun buildServerStateJson(
@@ -362,6 +463,9 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     val playbackStateChanges = mutableListOf<String>()
     val groupUpdates = mutableListOf<GroupInfo>()
     val streamStarts = mutableListOf<StreamConfig>()
+    val streamClears = mutableListOf<Unit>()
+    val streamEnds = mutableListOf<Unit>()
+    val controllerStates = mutableListOf<ControllerState>()
     val muteEvents = mutableListOf<Boolean>()
 
     fun setHandshakeCompleteForTest() {
@@ -415,13 +519,21 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
         groupUpdates.add(info)
     }
 
+    override fun onControllerStateUpdate(state: ControllerState) {
+        controllerStates.add(state)
+    }
+
     override fun onStreamStart(config: StreamConfig) {
         streamStarts.add(config)
     }
 
-    override fun onStreamClear() {}
+    override fun onStreamClear() {
+        streamClears.add(Unit)
+    }
 
-    override fun onStreamEnd() {}
+    override fun onStreamEnd() {
+        streamEnds.add(Unit)
+    }
 
     override fun onAudioChunk(timestampMicros: Long, audioData: ByteArray) {}
 
