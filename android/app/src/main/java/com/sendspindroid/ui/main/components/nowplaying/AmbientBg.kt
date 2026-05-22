@@ -26,10 +26,8 @@ import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import coil.size.Size
 import coil.transform.Transformation
 import com.sendspindroid.ui.main.ArtworkSource
@@ -65,19 +63,17 @@ fun AmbientBg(
 @Composable
 private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
     if (artworkSource == null) return
-    val context = LocalContext.current
-    val model = remember(artworkSource) {
+    val model = rememberCrossfadingArtworkRequest(
+        artworkSource = artworkSource,
+        // Distinct namespace from the unblurred focus art so the blurred
+        // result has its own memory-cache entry.
+        namespace = "np-ambient",
+        crossfadeMillis = 400,
+    ) {
         // 384x384 source + radius=24 keeps sigma proportional to the 96x6 baseline
         // while giving a much smoother ambient on 4K output.
-        val builder = ImageRequest.Builder(context)
-            .size(Size(384, 384))
-            .crossfade(400)
-            .transformations(BoxBlurTransformation(radius = 24, iterations = 3))
-        when (artworkSource) {
-            is ArtworkSource.ByteArray -> builder.data(artworkSource.data)
-            is ArtworkSource.Uri -> builder.data(artworkSource.uri)
-            is ArtworkSource.Url -> builder.data(artworkSource.url)
-        }.build()
+        size(Size(384, 384))
+        transformations(BoxBlurTransformation(radius = 24, iterations = 3))
     }
 
     // Always create the transition; gating it on `paused` would mutate the
@@ -259,12 +255,12 @@ private fun GrainOverlay() {
     // drawWithCache. The Shield Tegra renderer is unreliable with shader-
     // backed brushes inside Canvas-style DrawScopes (gradient brushes paint
     // black there); Modifier.background uses a different code path that
-    // renders reliably. We lose BlendMode.Overlay vs the spec, but at
-    // alpha 0.05 the visual delta is imperceptible.
+    // renders reliably. We lose BlendMode.Overlay vs the spec, but at this
+    // alpha the visual delta is imperceptible.
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(brush = brush, alpha = 0.05f),
+            .background(brush = brush, alpha = 0.012f),
     )
 }
 

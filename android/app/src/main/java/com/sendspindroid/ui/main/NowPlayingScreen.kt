@@ -232,6 +232,7 @@ fun NowPlayingScreen(
                     artworkSource = stickyArtworkSource,
                     isBuffering = isBuffering,
                     isPlaying = isPlaying,
+                    playbackState = playbackState,
                     controlsEnabled = controlsEnabled,
                     accentColor = accentColor,
                     isMaConnected = isMaConnected,

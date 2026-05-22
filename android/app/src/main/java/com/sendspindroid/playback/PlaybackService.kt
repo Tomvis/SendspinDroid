@@ -1467,12 +1467,10 @@ class PlaybackService : MediaLibraryService() {
                     playbackSpeed = playbackSpeed
                 )
 
-                // Title change invalidates BOTH artwork caches so the
-                // notification doesn't briefly show the prior track's image
-                // alongside the new track's title. The next URL fetch
-                // (kicked off below) or server-pushed binary artwork
-                // (onArtwork) will repopulate. Coil caches by URL so a
-                // re-fetch on the same album is essentially free.
+                // Bump the artwork generation on every title change so any
+                // in-flight fetch/decode for the previous track gets dropped
+                // at completion (the captured generation won't match the
+                // current one).
                 //
                 // Compare against the post-withMetadata state title rather
                 // than the raw protocol field. The server emits empty title
@@ -1482,16 +1480,23 @@ class PlaybackService : MediaLibraryService() {
                 // change and wipe artwork during idle transitions even
                 // though the on-screen title is unchanged.
                 //
-                // Done BEFORE updateMediaMetadata so effectiveArtwork (which
-                // feeds the forwarding-player cache) is null on a real track
-                // change, rather than carrying the prior bitmap.
+                // Only wipe the bitmap caches when the new track has no
+                // artwork URL of its own. With a new URL incoming, keeping
+                // the prior bitmap lets AsyncImage / lock screen show the
+                // old image until the fetch resolves and replaces it,
+                // instead of flashing the placeholder for the duration of
+                // the HTTP fetch. The fetch-failure path (see fetchArtwork)
+                // drops the stale bitmap so a 404 doesn't keep the wrong
+                // image up.
                 val resolvedTitle = _playbackState.value.title
                 val titleChanged = resolvedTitle != lastTrackTitle
                 if (titleChanged) {
                     lastTrackTitle = resolvedTitle
-                    urlArtwork = null
-                    binaryArtwork = null
                     ++artworkGeneration
+                    if (effectiveArtworkUrl.isEmpty()) {
+                        urlArtwork = null
+                        binaryArtwork = null
+                    }
                 }
 
                 // Refresh the forwarding-player cache BEFORE firing
@@ -1939,7 +1944,7 @@ class PlaybackService : MediaLibraryService() {
         // writes -- mirrors the queuePopulateGeneration pattern.
         val generation = artworkGeneration
         serviceScope.launch(Dispatchers.IO) {
-            try {
+            val errorReason: String? = try {
                 val request = ImageRequest.Builder(this@PlaybackService)
                     .data(url)
                     .build()
@@ -1958,9 +1963,33 @@ class PlaybackService : MediaLibraryService() {
                         // unconditionally.
                         updateMediaSessionArtwork(scaled)
                     }
+                    null
+                } else {
+                    "non-success result"
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to fetch artwork", e)
+                e.javaClass.simpleName
+            }
+
+            // Fetch failed (network error, decode error, 404). The
+            // onMetadataUpdate flicker fix keeps the prior track's bitmap
+            // populated through the fetch so the UI doesn't flash the
+            // placeholder; if the fetch never produces a replacement we
+            // have to drop the prior bitmap now or the UI keeps showing
+            // the wrong image for the rest of the new track.
+            //
+            // Guarded by the generation check so a slow fetch that gets
+            // superseded by a later track's fetch doesn't drop the newer
+            // bitmap that already arrived.
+            if (errorReason != null) {
+                mainHandler.post {
+                    if (generation != artworkGeneration) return@post
+                    if (urlArtwork == null) return@post
+                    Log.d(TAG, "Dropping prior bitmap after fetch failure ($errorReason) for $url")
+                    urlArtwork = null
+                    updateMediaMetadata()
+                }
             }
         }
     }

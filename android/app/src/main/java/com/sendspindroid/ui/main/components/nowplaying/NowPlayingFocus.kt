@@ -33,7 +33,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -44,12 +43,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import com.sendspindroid.R
 import com.sendspindroid.ui.adaptive.TvInitialFocus
 import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.main.AudioStreamSpec
+import com.sendspindroid.ui.main.PlaybackState
 import com.sendspindroid.ui.main.TrackMetadata
 import com.sendspindroid.ui.theme.NpFrauncesFamily
 import com.sendspindroid.ui.theme.NpInterFamily
@@ -66,12 +65,19 @@ fun NowPlayingFocus(
     durationMs: Long,
     positionUpdatedAt: Long,
     isPlaying: Boolean,
+    playbackState: PlaybackState,
     accent: Color,
     groupLabel: String,
     audioSpec: AudioStreamSpec?,
     modifier: Modifier = Modifier,
 ) {
-    val paused = !isPlaying
+    // Treat !isPlaying as the user-paused look only when the player is
+    // actually in READY. STATE_BUFFERING during a SendSpin track transition
+    // flips Media3's isPlaying false for a few hundred ms; without the
+    // state guard, the album art / ambient / source badge run their full
+    // paused-state animations and snap back, producing the visible
+    // shrink-and-return on every track change.
+    val paused = !isPlaying && playbackState == PlaybackState.READY
     // Now Playing is a passive view; no interactive elements on-screen. Park
     // initial focus on an invisible anchor so the Activity still gets D-pad
     // key events (e.g. BACK).
@@ -210,16 +216,10 @@ private fun AlbumArt(
             )
         }
 
-        val context = LocalContext.current
-        val model = remember(artworkSource) {
-            if (artworkSource == null) return@remember null
-            val builder = ImageRequest.Builder(context).crossfade(true)
-            when (artworkSource) {
-                is ArtworkSource.ByteArray -> builder.data(artworkSource.data)
-                is ArtworkSource.Uri -> builder.data(artworkSource.uri)
-                is ArtworkSource.Url -> builder.data(artworkSource.url)
-            }.build()
-        }
+        val model = rememberCrossfadingArtworkRequest(
+            artworkSource = artworkSource,
+            namespace = "np-focus",
+        )
 
         AsyncImage(
             model = model,
