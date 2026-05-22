@@ -839,7 +839,11 @@ class SendSpin(
         stopTimeSync()
         reconnecting.set(false)
         waitingForNetwork.set(false)
-        sendGoodbye("network_type_changed")
+        // Use the spec-valid "restart" reason: the client is going to reconnect
+        // on a different transport. "network_type_changed" was not in the
+        // GoodbyeReason enum and made the server drop the connection with a
+        // noisy ValueError trace.
+        sendGoodbye(SendSpinProtocol.GoodbyeReason.RESTART)
         // Clear the transport listener BEFORE closing to prevent the async onClosed
         // callback from firing a second onDisconnected after we fire one synchronously below.
         transport?.setListener(null)
@@ -864,7 +868,7 @@ class SendSpin(
         stopTimeSync()
         reconnecting.set(false)
         waitingForNetwork.set(false)
-        sendGoodbye("user_request")
+        sendGoodbye(SendSpinProtocol.GoodbyeReason.USER_REQUEST)
         // Clear the transport listener BEFORE closing to prevent the async onClosed
         // callback from firing a second onDisconnected after we fire one synchronously below.
         transport?.setListener(null)

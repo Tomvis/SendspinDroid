@@ -67,52 +67,87 @@ object MessageParser {
         return TimeMeasurement(offset, rtt, clientReceivedMicros)
     }
 
-    fun parseServerState(payload: JsonObject?): Pair<TrackMetadata?, String?> {
+    fun parseServerState(
+        payload: JsonObject?,
+        previous: TrackMetadata? = null
+    ): Pair<TrackMetadata?, String?> {
         if (payload == null) return Pair(null, null)
 
+        // The server emits diff-style updates (see aiosendspin
+        // server/roles/metadata/state.py::diff_update): only fields that
+        // changed appear in the message. A field that is absent from JSON
+        // means "unchanged" and must inherit from [previous] rather than
+        // reset to a default. A field present with `null` means "clear" and
+        // resets to the type default ("" / 0). Without this distinction, a
+        // title-only update would wipe artist/album/artwork/progress.
         val metadata = (payload["metadata"] as? JsonObject)?.let { metadataObj ->
-            fun optStringClean(key: String) =
-                metadataObj[key]?.jsonPrimitive?.contentOrNull?.takeUnless { it == "null" } ?: ""
+            fun stringField(key: String, fallback: String): String {
+                if (key !in metadataObj) return fallback
+                return metadataObj[key]?.jsonPrimitive?.contentOrNull
+                    ?.takeUnless { it == "null" } ?: ""
+            }
+            fun longField(key: String, fallback: Long): Long {
+                if (key !in metadataObj) return fallback
+                return metadataObj[key]?.jsonPrimitive?.longOrNull ?: 0L
+            }
+            fun intField(key: String, fallback: Int): Int {
+                if (key !in metadataObj) return fallback
+                return metadataObj[key]?.jsonPrimitive?.intOrNull ?: 0
+            }
 
-            val timestamp = metadataObj.longOrDefault("timestamp", 0)
-            val title = optStringClean("title")
-            val artist = optStringClean("artist")
-            val albumArtist = optStringClean("album_artist")
-            val album = optStringClean("album")
-            val artworkUrl = optStringClean("artwork_url")
-            val year = metadataObj.intOrDefault("year", 0)
-            // Field rename in upstream protocol: legacy `track` is now
-            // `album_track`. Fall back to the legacy key when album_track is
-            // absent OR present-but-zero, per the spec's "0 = not set"
-            // semantics. (intOrDefault treats present-but-zero as set, which
-            // would skip the legacy fallback for a server emitting both keys
-            // with album_track=0.)
-            val albumTrackPrimary = metadataObj.intOrDefault("album_track", 0)
-            val albumTrack = if (albumTrackPrimary > 0) albumTrackPrimary
-                else metadataObj.intOrDefault("track", 0)
-            val queueTrack = metadataObj.intOrDefault("queue_track", 0)
-            val totalTracks = metadataObj.intOrDefault("total_tracks", 0)
+            val timestamp = longField("timestamp", previous?.timestamp ?: 0L)
+            val title = stringField("title", previous?.title ?: "")
+            val artist = stringField("artist", previous?.artist ?: "")
+            val albumArtist = stringField("album_artist", previous?.albumArtist ?: "")
+            val album = stringField("album", previous?.album ?: "")
+            val artworkUrl = stringField("artwork_url", previous?.artworkUrl ?: "")
+            val year = intField("year", previous?.year ?: 0)
 
-            // Use `as? JsonObject` rather than `?.jsonObject`: the latter throws
-            // IllegalArgumentException when the field is JsonNull (the server
-            // sometimes sends `"progress": null` in idle metadata). The cast
-            // form treats JsonNull the same as missing, which is what we want.
-            val progress = (metadataObj["progress"] as? JsonObject)?.let { progressObj ->
-                TrackProgress(
-                    trackProgress = progressObj.longOrDefault("track_progress", 0),
-                    trackDuration = progressObj.longOrDefault("track_duration", 0),
-                    playbackSpeed = progressObj.intOrDefault("playback_speed", 1000)
-                )
-            } ?: run {
-                // Legacy flat structure: a server without the nested `progress`
-                // object may still expose playback_speed at the metadata root.
-                // Fall back to that before defaulting to 1000 (1.0x) so a
-                // non-1.0 speed isn't silently coerced.
-                TrackProgress(
-                    trackProgress = metadataObj.longOrDefault("position_ms", 0),
-                    trackDuration = metadataObj.longOrDefault("duration_ms", 0),
-                    playbackSpeed = metadataObj.intOrDefault("playback_speed", 1000)
-                )
+            // album_track / legacy `track` resolution. Spec says "0 = not set",
+            // so a present-but-zero album_track still falls back to legacy
+            // `track` before finally inheriting from the previous metadata.
+            val albumTrack: Int = when {
+                "album_track" in metadataObj -> {
+                    val v = metadataObj.intOrDefault("album_track", 0)
+                    when {
+                        v > 0 -> v
+                        "track" in metadataObj -> metadataObj.intOrDefault("track", 0)
+                        else -> previous?.albumTrack ?: 0
+                    }
+                }
+                "track" in metadataObj -> metadataObj.intOrDefault("track", 0)
+                else -> previous?.albumTrack ?: 0
+            }
+
+            val queueTrack = intField("queue_track", previous?.queueTrack ?: 0)
+            val totalTracks = intField("total_tracks", previous?.totalTracks ?: 0)
+
+            // Progress:
+            // - "progress" present as object  -> update from object fields
+            // - "progress" present but null   -> clear to defaults (server's
+            //                                    cleared_update path)
+            // - "progress" absent + legacy flat keys present -> legacy parse
+            // - "progress" absent, no legacy  -> inherit from previous
+            // Using `as? JsonObject` rather than `?.jsonObject` so JsonNull
+            // (idle metadata) does not throw IllegalArgumentException.
+            val progress: TrackProgress = when {
+                "progress" in metadataObj -> {
+                    (metadataObj["progress"] as? JsonObject)?.let { progressObj ->
+                        TrackProgress(
+                            trackProgress = progressObj.longOrDefault("track_progress", 0),
+                            trackDuration = progressObj.longOrDefault("track_duration", 0),
+                            playbackSpeed = progressObj.intOrDefault("playback_speed", 1000)
+                        )
+                    } ?: TrackProgress(0, 0, 1000)
+                }
+                "position_ms" in metadataObj || "duration_ms" in metadataObj -> {
+                    TrackProgress(
+                        trackProgress = metadataObj.longOrDefault("position_ms", 0),
+                        trackDuration = metadataObj.longOrDefault("duration_ms", 0),
+                        playbackSpeed = metadataObj.intOrDefault("playback_speed", 1000)
+                    )
+                }
+                else -> previous?.progress ?: TrackProgress(0, 0, 1000)
             }
 
             TrackMetadata(

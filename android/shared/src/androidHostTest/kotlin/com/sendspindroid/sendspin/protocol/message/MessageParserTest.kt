@@ -352,6 +352,133 @@ class MessageParserTest {
     }
 
     @Test
+    fun parseServerState_partialUpdate_preservesAbsentFields() {
+        // The server's diff_update path emits only changed fields. With no
+        // previous to merge against, absent fields fall through to defaults
+        // (this preserves the existing missingIntFields contract). When a
+        // previous metadata is supplied, absent fields must inherit so that
+        // a title-only update does not wipe artist/album/artwork/progress.
+        val previous = com.sendspindroid.sendspin.protocol.TrackMetadata(
+            timestamp = 1000L,
+            title = "Old Title",
+            artist = "Old Artist",
+            albumArtist = "Old Album Artist",
+            album = "Old Album",
+            artworkUrl = "https://example.com/old.jpg",
+            year = 2020,
+            albumTrack = 4,
+            queueTrack = 2,
+            totalTracks = 10,
+            progress = com.sendspindroid.sendspin.protocol.TrackProgress(
+                trackProgress = 60000L,
+                trackDuration = 240000L,
+                playbackSpeed = 1000
+            )
+        )
+        val payload = buildJsonObject {
+            put("metadata", buildJsonObject {
+                put("timestamp", 2000L)
+                put("title", "New Title")
+            })
+        }
+
+        val (metadata, _) = MessageParser.parseServerState(payload, previous)
+
+        assertNotNull(metadata)
+        assertEquals("New Title", metadata!!.title)
+        assertEquals("Old Artist", metadata.artist)
+        assertEquals("Old Album Artist", metadata.albumArtist)
+        assertEquals("Old Album", metadata.album)
+        assertEquals("https://example.com/old.jpg", metadata.artworkUrl)
+        assertEquals(2020, metadata.year)
+        assertEquals(4, metadata.albumTrack)
+        assertEquals(2, metadata.queueTrack)
+        assertEquals(10, metadata.totalTracks)
+        assertEquals(60000L, metadata.progress.trackProgress)
+        assertEquals(240000L, metadata.progress.trackDuration)
+        assertEquals(1000, metadata.progress.playbackSpeed)
+    }
+
+    @Test
+    fun parseServerState_partialUpdate_clearsExplicitlyNullFields() {
+        // Field present with `null` means "clear" per the server's
+        // cleared_update path; the client must reset to the type default
+        // (empty string / 0) even when a previous value exists.
+        val previous = com.sendspindroid.sendspin.protocol.TrackMetadata(
+            timestamp = 1000L,
+            title = "Old Title",
+            artist = "Old Artist",
+            albumArtist = "",
+            album = "",
+            artworkUrl = "https://example.com/old.jpg",
+            year = 2020,
+            albumTrack = 0,
+            queueTrack = 0,
+            totalTracks = 0,
+            progress = com.sendspindroid.sendspin.protocol.TrackProgress(
+                trackProgress = 60000L,
+                trackDuration = 240000L,
+                playbackSpeed = 1000
+            )
+        )
+        val payload = buildJsonObject {
+            put("metadata", buildJsonObject {
+                put("timestamp", 2000L)
+                put("artist", JsonPrimitive(null as String?))
+                put("artwork_url", JsonPrimitive(null as String?))
+                put("progress", JsonPrimitive(null as String?))
+            })
+        }
+
+        val (metadata, _) = MessageParser.parseServerState(payload, previous)
+
+        assertNotNull(metadata)
+        assertEquals("Old Title", metadata!!.title)
+        assertEquals("", metadata.artist)
+        assertEquals("", metadata.artworkUrl)
+        assertEquals(0L, metadata.progress.trackProgress)
+        assertEquals(0L, metadata.progress.trackDuration)
+    }
+
+    @Test
+    fun parseServerState_progressOnlyUpdate_keepsTitleAndArtist() {
+        // The server typically emits progress separately from title changes
+        // mid-track. Pre-fix this regressed title to "" on every progress
+        // tick.
+        val previous = com.sendspindroid.sendspin.protocol.TrackMetadata(
+            timestamp = 1000L,
+            title = "Currently Playing",
+            artist = "Currently Playing Artist",
+            albumArtist = "",
+            album = "Album",
+            artworkUrl = "",
+            year = 0,
+            albumTrack = 0,
+            queueTrack = 0,
+            totalTracks = 0,
+            progress = com.sendspindroid.sendspin.protocol.TrackProgress(0L, 240000L, 1000)
+        )
+        val payload = buildJsonObject {
+            put("metadata", buildJsonObject {
+                put("timestamp", 2000L)
+                put("progress", buildJsonObject {
+                    put("track_progress", 12345L)
+                    put("track_duration", 240000L)
+                    put("playback_speed", 1000)
+                })
+            })
+        }
+
+        val (metadata, _) = MessageParser.parseServerState(payload, previous)
+
+        assertNotNull(metadata)
+        assertEquals("Currently Playing", metadata!!.title)
+        assertEquals("Currently Playing Artist", metadata.artist)
+        assertEquals("Album", metadata.album)
+        assertEquals(12345L, metadata.progress.trackProgress)
+    }
+
+    @Test
     fun parseServerState_nullMetadataField_returnsNullMetadata() {
         // Defensive: if the server ever sends `{"metadata": null}` instead of
         // an object, we must treat it like missing rather than throwing.

@@ -69,11 +69,13 @@ class MessageBuilderTest {
 
     @Test
     fun buildPlayerState_includesStaticDelayMs() {
+        // Per spec the wire field is unsigned int; the builder emits int even
+        // for values that arrive rounded from a Double caller.
         val msg = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "synchronized", 12.5)
+            MessageBuilder.buildPlayerState(50, false, "synchronized", 12)
         ).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(12.5, player["static_delay_ms"]?.jsonPrimitive?.double ?: 0.0, 0.01)
+        assertEquals(12, player["static_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
@@ -82,7 +84,40 @@ class MessageBuilderTest {
             MessageBuilder.buildPlayerState(50, false)
         ).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(0.0, player["static_delay_ms"]?.jsonPrimitive?.double ?: -1.0, 0.01)
+        assertEquals(0, player["static_delay_ms"]?.jsonPrimitive?.int)
+    }
+
+    @Test
+    fun buildPlayerState_staticDelayMsClampsNegative() {
+        // The time filter tracks signed Double internally (negative user
+        // offsets are valid). The wire requires [0, 5000]; a negative slip
+        // through used to drop the connection with a ValueError.
+        val msg = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, "synchronized", -42)
+        ).jsonObject
+        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
+        assertEquals(0, player["static_delay_ms"]?.jsonPrimitive?.int)
+    }
+
+    @Test
+    fun buildPlayerState_staticDelayMsClampsAboveMax() {
+        val msg = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, "synchronized", 6000)
+        ).jsonObject
+        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
+        assertEquals(5000, player["static_delay_ms"]?.jsonPrimitive?.int)
+    }
+
+    @Test
+    fun buildPlayerState_emitsStateAtTopLevel() {
+        // Spec PR-50 moved `state` from inside `player` to the top of the
+        // payload. We emit at both locations for back-compat, but the
+        // top-level emission is what newer servers consume.
+        val msg = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, "error")
+        ).jsonObject
+        val payload = msg["payload"]!!.jsonObject
+        assertEquals("error", payload["state"]?.jsonPrimitive?.content)
     }
 
     // --- buildCommand ---

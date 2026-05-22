@@ -218,7 +218,12 @@ abstract class SendSpinProtocolHandler(
      * Send player state update (volume/muted/sync state).
      */
     protected fun sendPlayerStateUpdate() {
+        // The filter tracks signed-Double ms (negative user offsets are valid
+        // internally). The wire requires unsigned int [0, 5000] — round and
+        // clamp here; buildPlayerState clamps again as a defence in depth.
         val delayMs = getTimeFilter().staticDelayMs
+            .let { kotlin.math.round(it).toInt() }
+            .coerceIn(SendSpinProtocol.StaticDelay.MIN_MS, SendSpinProtocol.StaticDelay.MAX_MS)
         sendTextMessage(MessageBuilder.buildPlayerState(currentVolume, currentMuted, currentSyncState, delayMs))
     }
 
@@ -237,14 +242,18 @@ abstract class SendSpinProtocolHandler(
      * Set sync state and notify server.
      *
      * Per spec: report "synchronized" when locked to server timeline,
-     * report "error" when unable to maintain sync (buffer underrun, clock issues).
-     *
-     * @param syncState Either "synchronized" or "error"
+     * "error" when unable to maintain sync, or "external_source" when audio
+     * output has been taken by another app and Sendspin cannot participate.
      */
     fun setSyncState(syncState: String) {
-        if (syncState != "synchronized" && syncState != "error") {
-            Log.w(tag, "Invalid sync state: $syncState (must be 'synchronized' or 'error')")
-            return
+        when (syncState) {
+            SendSpinProtocol.ClientState.SYNCHRONIZED,
+            SendSpinProtocol.ClientState.ERROR,
+            SendSpinProtocol.ClientState.EXTERNAL_SOURCE -> Unit
+            else -> {
+                Log.w(tag, "Invalid sync state: $syncState")
+                return
+            }
         }
         if (currentSyncState != syncState) {
             currentSyncState = syncState
@@ -453,7 +462,11 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected fun handleServerState(payload: JsonObject?) {
-        val (metadata, state) = MessageParser.parseServerState(payload)
+        // Pass the previous metadata so the parser can merge partial updates.
+        // The server only sends fields that changed; without merging we'd
+        // wipe artist/album/artwork/progress on every title-only or
+        // progress-only update.
+        val (metadata, state) = MessageParser.parseServerState(payload, lastMetadata)
 
         if (metadata != null) {
             lastMetadata = metadata

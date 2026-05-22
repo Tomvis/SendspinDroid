@@ -21,6 +21,38 @@ object SendSpinProtocol {
         const val AUDIO = 4
         const val ARTWORK_BASE = 8  // 8-11 for channels 0-3
         const val VISUALIZER = 16
+        const val VISUALIZER_BEAT = 17
+    }
+
+    /**
+     * Valid values for the `static_delay_ms` wire field. Per spec, this is an
+     * unsigned millisecond integer in [0, 5000]. Negative offsets must be
+     * applied client-side only.
+     */
+    object StaticDelay {
+        const val MIN_MS = 0
+        const val MAX_MS = 5000
+    }
+
+    /**
+     * Valid values for the top-level `state` field on `client/state` messages.
+     */
+    object ClientState {
+        const val SYNCHRONIZED = "synchronized"
+        const val ERROR = "error"
+        const val EXTERNAL_SOURCE = "external_source"
+    }
+
+    /**
+     * Valid values for the `reason` field on `client/goodbye` messages.
+     * The server validates this against an enum; any other value drops the
+     * connection with a noisy exception trace.
+     */
+    object GoodbyeReason {
+        const val ANOTHER_SERVER = "another_server"
+        const val SHUTDOWN = "shutdown"
+        const val RESTART = "restart"
+        const val USER_REQUEST = "user_request"
     }
 
     /**

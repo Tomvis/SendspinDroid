@@ -96,15 +96,27 @@ object MessageBuilder {
         return message.toString()
     }
 
-    fun buildPlayerState(volume: Int, muted: Boolean, syncState: String = "synchronized", staticDelayMs: Double = 0.0): String {
+    fun buildPlayerState(volume: Int, muted: Boolean, syncState: String = "synchronized", staticDelayMs: Int = 0): String {
+        // Per spec the wire field is int in [0, 5000]. Anything outside drops
+        // the connection. The caller (time filter) tracks a signed Double so
+        // it can apply a negative user offset internally — but it must not
+        // leak negative or fractional values onto the wire.
+        val clampedDelay = staticDelayMs.coerceIn(
+            SendSpinProtocol.StaticDelay.MIN_MS,
+            SendSpinProtocol.StaticDelay.MAX_MS
+        )
         val message = buildJsonObject {
             put("type", SendSpinProtocol.MessageType.CLIENT_STATE)
             put("payload", buildJsonObject {
+                // Top-level `state` is the spec-current location (PR #50).
+                // Keep emitting it inside `player` as well for compat with
+                // older servers that only read the deprecated location.
+                put("state", syncState)
                 put("player", buildJsonObject {
                     put("state", syncState)
                     put("volume", volume)
                     put("muted", muted)
-                    put("static_delay_ms", staticDelayMs)
+                    put("static_delay_ms", clampedDelay)
                 })
             })
         }
