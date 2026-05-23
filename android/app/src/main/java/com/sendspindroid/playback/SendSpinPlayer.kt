@@ -181,7 +181,13 @@ class SendSpinPlayer : Player {
         // Update the anchor point for position interpolation
         anchorPositionMs = positionMs
         anchorElapsedRealtime = SystemClock.elapsedRealtime()
-        currentDurationMs = durationMs
+        // Preserve previously-known duration when the server sends a transitional
+        // update without a duration (durationMs <= 0). Overwriting with 0 would
+        // cause getDuration() to return 0, isCurrentMediaItemDynamic to flip true,
+        // and Android Auto / lock-screen progress bars to lose their endpoint.
+        if (durationMs > 0) {
+            currentDurationMs = durationMs
+        }
         currentBufferedPositionMs = positionMs
 
         if (syncState != null) {
@@ -220,14 +226,14 @@ class SendSpinPlayer : Player {
      */
     fun updateConnectionState(connected: Boolean, serverName: String? = null) {
         if (!connected) {
-            // Reset playWhenReady before the state update so listeners observe
-            // a coherent (STATE_IDLE, playWhenReady=false) pair. Without this
-            // the stale playWhenReady=true from the prior session can cause
-            // updateStateFromPlayer to flip the next session into a buffering
-            // state before any real protocol message arrives.
+            // Fire listener callbacks in Media3's conventional order:
+            //   onPlayWhenReadyChanged → onPlaybackStateChanged → onTimelineChanged
+            //     → onMediaItemTransition → onIsPlayingChanged
+            // so that controllers (Android Auto, AVRCP, lock screen) never see
+            // an intermediate state where STATE_IDLE has been reported but the
+            // timeline / current item still reference the prior session.
             val playWhenReadyChanged = playWhenReady
             playWhenReady = false
-            updatePlaybackStateInternal(Player.STATE_IDLE, false)
             anchorPositionMs = 0
             anchorElapsedRealtime = 0
             currentDurationMs = 0
@@ -236,20 +242,17 @@ class SendSpinPlayer : Player {
             currentTimeline = Timeline.EMPTY
             queueMediaItems = emptyList()
             currentQueueIndex = 0
-            // Notify Media3 listeners (Android Auto, AVRCP, lock screen)
-            // about the timeline / current-item clear. Without these
-            // callbacks, controllers keep the prior timeline and current
-            // MediaItem in their view of the player until a later state
-            // update triggers a refresh.
-            listeners.forEach {
-                it.onTimelineChanged(currentTimeline, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE)
-                it.onMediaItemTransition(null, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
-            }
+
             if (playWhenReadyChanged) {
                 listeners.forEach {
                     it.onPlayWhenReadyChanged(false, Player.PLAY_WHEN_READY_CHANGE_REASON_REMOTE)
                 }
             }
+            listeners.forEach {
+                it.onTimelineChanged(currentTimeline, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE)
+                it.onMediaItemTransition(null, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
+            }
+            updatePlaybackStateInternal(Player.STATE_IDLE, false)
         } else if (syncAudioPlayer == null) {
             // Connected but no audio yet
             updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
@@ -268,7 +271,7 @@ class SendSpinPlayer : Player {
         title: String?,
         artist: String?,
         album: String?,
-        durationMs: Long,
+        durationMs: Long?,
         albumArtist: String? = null,
         year: Int? = null,
         albumTrack: Int? = null
@@ -291,7 +294,15 @@ class SendSpinPlayer : Player {
             .setMediaMetadata(metadata)
             .build()
 
-        currentDurationMs = durationMs
+        // null = preserve previously-known duration (e.g. a fast queue update
+        // that carries metadata but not duration), 0 = explicit "unknown /
+        // live stream", positive = use as-is. Without the preserve case, a
+        // duration-less metadata refresh would zero out the Timeline window's
+        // duration and break controller progress bars.
+        if (durationMs != null) {
+            currentDurationMs = durationMs
+        }
+        val timelineDurationMs = currentDurationMs
 
         if (queueMediaItems.isNotEmpty() && currentQueueIndex < queueMediaItems.size) {
             // Queue is active -- update current item in-place, keep MultiItemTimeline
@@ -299,13 +310,13 @@ class SendSpinPlayer : Player {
             mutableQueue[currentQueueIndex] = newItem
             queueMediaItems = mutableQueue
             currentMediaItem = newItem
-            currentTimeline = MultiItemTimeline(queueMediaItems, currentQueueIndex, durationMs)
+            currentTimeline = MultiItemTimeline(queueMediaItems, currentQueueIndex, timelineDurationMs)
         } else {
             // No queue -- single-item mode
             currentMediaItem = newItem
             queueMediaItems = emptyList()
             currentQueueIndex = 0
-            currentTimeline = SingleItemTimeline(newItem, durationMs)
+            currentTimeline = SingleItemTimeline(newItem, timelineDurationMs)
         }
 
         // Notify listeners of timeline change
@@ -460,6 +471,14 @@ class SendSpinPlayer : Player {
             // Also update isPlaying state and notify listeners
             val newIsPlaying = playing && currentPlaybackState == Player.STATE_READY
             if (newIsPlaying != currentlyPlaying) {
+                // Re-anchor the interpolation timestamp when transitioning to
+                // playing, so getCurrentPosition() does not include the pause
+                // duration in its elapsed calc (which would otherwise jump the
+                // playhead forward by however long we were paused, until the
+                // next periodic server/state arrives).
+                if (newIsPlaying) {
+                    anchorElapsedRealtime = SystemClock.elapsedRealtime()
+                }
                 currentlyPlaying = newIsPlaying
                 listeners.forEach { it.onIsPlayingChanged(newIsPlaying) }
             }

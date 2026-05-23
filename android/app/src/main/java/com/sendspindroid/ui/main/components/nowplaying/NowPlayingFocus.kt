@@ -1,6 +1,5 @@
 package com.sendspindroid.ui.main.components.nowplaying
 
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -110,20 +109,17 @@ fun NowPlayingFocus(
     // real user-initiated pause.
     val effectivePaused = paused && !isBuffering
 
-    // Accent color tween. Artwork-derived palettes hard-cut between tracks
-    // and a brusque pigment swap across halo + wash + progress fill reads
-    // cheap. But too slow a tween makes the ambient drag behind the audio
-    // -- the user hears the new track while the wash is still on the
-    // previous album's colour. Match the tween to the album-art crossfade
-    // (100 ms in ArtworkRequest) plus a small tail so the colour finishes
-    // settling just as the new artwork lands. 250 ms is the sweet spot:
-    // smooth enough to read as a transition, fast enough that it never
-    // visibly trails the audio on a track skip.
-    val animatedAccent by animateColorAsState(
-        targetValue = accent,
-        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
-        label = "np-accent",
-    )
+    // Accent snap. animateColorAsState produced a new Color object on every
+    // frame for the duration of the tween, and the downstream halo + wash +
+    // progress-fill brushes all re-keyed their `remember(accent, ...)` slot
+    // on each frame -- meaning a fresh ShaderBrush + backing Shader was
+    // allocated ~15 times per track change. On the Shield Tegra that
+    // showed up as GC pressure during exactly the moment the art crossfade
+    // also fires. Snapping instead of tweening eliminates the brush churn;
+    // the simultaneous 100ms art crossfade in ArtworkRequest hides the
+    // colour pop and the audible track change makes any residual snap read
+    // as intentional.
+    val animatedAccent = accent
 
     // Sticky queue position. server/state and the track-info frame arrive on
     // separate WebSocket messages, so on a fresh play we can momentarily
@@ -133,20 +129,12 @@ fun NowPlayingFocus(
     // Hold the last good pair and reset only when we're confident the new
     // track really has no queue context: wait 1.5 s after seeing zeros, and
     // only commit the clear if the title is also empty (genuine end of
-    // playback). On a track *change*, the title flips first so we reset
-    // immediately to avoid showing the prior track's queue position.
+    // playback). Hold the previous numbers across track changes too -- if a
+    // new track has no queue context, the 1.5 s debounce below clears them;
+    // otherwise the next non-zero queueTrack/totalTracks pair updates in
+    // place without a visible blank.
     var stickyTrackNumber by remember { mutableIntStateOf(metadata.queueTrack) }
     var stickyTrackTotal by remember { mutableIntStateOf(metadata.totalTracks) }
-    var queueAnchorTitle by remember { mutableStateOf(metadata.title) }
-    LaunchedEffect(metadata.title) {
-        // New track: drop the stale numbers so we don't claim "3 of 7" for a
-        // track that actually isn't in any queue context.
-        if (metadata.title != queueAnchorTitle) {
-            queueAnchorTitle = metadata.title
-            stickyTrackNumber = metadata.queueTrack
-            stickyTrackTotal = metadata.totalTracks
-        }
-    }
     LaunchedEffect(metadata.queueTrack, metadata.totalTracks, metadata.title) {
         if (metadata.queueTrack > 0 && metadata.totalTracks > 0) {
             stickyTrackNumber = metadata.queueTrack

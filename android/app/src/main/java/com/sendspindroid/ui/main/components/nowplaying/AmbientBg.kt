@@ -62,23 +62,11 @@ fun AmbientBg(
 
 @Composable
 private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
-    if (artworkSource == null) return
-    val model = rememberCrossfadingArtworkRequest(
-        artworkSource = artworkSource,
-        // Distinct namespace from the unblurred focus art so the blurred
-        // result has its own memory-cache entry.
-        namespace = "np-ambient",
-        // Crossfade off: the blurred-image alpha-blend mid-transition reads
-        // as a screen-wide brightness shift. With the held-bitmap underlay
-        // below, the swap to the new bitmap is hidden because the underlay
-        // already shows the prior content.
-        crossfadeMillis = 0,
-    ) {
-        // 384x384 source + radius=24 keeps sigma proportional to the 96x6 baseline
-        // while giving a much smoother ambient on 4K output.
-        size(Size(384, 384))
-        transformations(BoxBlurTransformation(radius = 24, iterations = 3))
-    }
+    // Always allocate the same remember slots so the slot table is stable
+    // across artwork null<->non-null transitions. The original early return
+    // re-keyed `heldBitmap` on every transition through null and defeated the
+    // held-bitmap underlay's purpose (covering the gap until the new blurred
+    // bitmap arrives).
 
     // Always create the transition; gating it on `paused` would mutate the
     // slot table when paused flips and scramble Compose remembered state.
@@ -107,6 +95,23 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
     // AsyncImage paints over it once the new bitmap arrives.
     var heldBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
 
+    val model = rememberCrossfadingArtworkRequest(
+        artworkSource = artworkSource,
+        // Distinct namespace from the unblurred focus art so the blurred
+        // result has its own memory-cache entry.
+        namespace = "np-ambient",
+        // Crossfade off: the blurred-image alpha-blend mid-transition reads
+        // as a screen-wide brightness shift. With the held-bitmap underlay
+        // below, the swap to the new bitmap is hidden because the underlay
+        // already shows the prior content.
+        crossfadeMillis = 0,
+    ) {
+        // 384x384 source + radius=24 keeps sigma proportional to the 96x6 baseline
+        // while giving a much smoother ambient on 4K output.
+        size(Size(384, 384))
+        transformations(BoxBlurTransformation(radius = 24, iterations = 3))
+    }
+
     val coverLayer: GraphicsLayerScope.() -> Unit = {
         scaleX = 1.18f
         scaleY = 1.18f
@@ -128,21 +133,23 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
                 alignment = BiasAlignment(0f, -0.4f),
             )
         }
-        AsyncImage(
-            model = model,
-            contentDescription = null,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer(block = coverLayer),
-            onSuccess = { state ->
-                val drawable = state.result.drawable
-                if (drawable is BitmapDrawable) {
-                    heldBitmap = drawable.bitmap.asImageBitmap()
-                }
-            },
-            contentScale = ContentScale.Crop,
-            alignment = BiasAlignment(0f, -0.4f),
-        )
+        if (model != null) {
+            AsyncImage(
+                model = model,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(block = coverLayer),
+                onSuccess = { state ->
+                    val drawable = state.result.drawable
+                    if (drawable is BitmapDrawable) {
+                        heldBitmap = drawable.bitmap.asImageBitmap()
+                    }
+                },
+                contentScale = ContentScale.Crop,
+                alignment = BiasAlignment(0f, -0.4f),
+            )
+        }
     }
 }
 

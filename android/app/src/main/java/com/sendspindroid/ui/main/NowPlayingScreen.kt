@@ -110,9 +110,46 @@ fun NowPlayingScreen(
     // once we drop out of Connected/Reconnecting.
     val isActivelyConnected = connectionState is AppConnectionState.Connected ||
         connectionState is AppConnectionState.Reconnecting
+    // Zombie-state safeguard flag, set by the artwork effect below and read
+    // by the metadata effect. Pulling stickyMetadata writes into a single
+    // effect keeps state ownership clear: if both effects wrote
+    // stickyMetadata directly, the metadata effect would re-overwrite the
+    // zombie clear on the next non-empty metadata emission, and the order
+    // of arrivals decided whether the user landed on the idle screen.
+    var artworkZombieClear by remember { mutableStateOf(false) }
+
+    var stickyArtworkSource by remember { mutableStateOf(artworkSource) }
+    LaunchedEffect(artworkSource, isActivelyConnected) {
+        if (!isActivelyConnected || artworkSource != null) {
+            stickyArtworkSource = artworkSource
+            artworkZombieClear = false
+        } else {
+            // Same debounce as stickyMetadata: a brief null from Media3 between
+            // tracks should not clear the held artwork, but the watchdog's
+            // intentional clear should.
+            kotlinx.coroutines.delay(500)
+            if (artworkSource == null) stickyArtworkSource = null
+            // Zombie-state safeguard. MA's "Clear queue" stops audio but
+            // doesn't fire an empty-metadata frame, so without this the user
+            // would see text + spec chips + a frozen progress rail layered
+            // over a dark placeholder card, with no way for the screen to
+            // recover until the 60 s pause watchdog finally nulls everything.
+            // Wait another 1.2 s after the artwork is confirmed gone; if it
+            // hasn't come back, signal the metadata effect to flip to EMPTY.
+            if (isActivelyConnected && stickyArtworkSource == null) {
+                kotlinx.coroutines.delay(1200)
+                if (stickyArtworkSource == null) {
+                    artworkZombieClear = true
+                }
+            }
+        }
+    }
+
     var stickyMetadata by remember { mutableStateOf(metadata) }
-    LaunchedEffect(metadata, isActivelyConnected) {
-        if (!isActivelyConnected || !metadata.isEmpty) {
+    LaunchedEffect(metadata, isActivelyConnected, artworkZombieClear) {
+        if (artworkZombieClear) {
+            stickyMetadata = TrackMetadata.EMPTY
+        } else if (!isActivelyConnected || !metadata.isEmpty) {
             stickyMetadata = metadata
         } else {
             // Debounce the blank: Media3's transient empty emissions resolve
@@ -121,39 +158,6 @@ fun NowPlayingScreen(
             // accept the clear if metadata is still empty.
             kotlinx.coroutines.delay(500)
             if (metadata.isEmpty) stickyMetadata = metadata
-        }
-    }
-    var stickyArtworkSource by remember { mutableStateOf(artworkSource) }
-    LaunchedEffect(artworkSource, isActivelyConnected) {
-        if (!isActivelyConnected || artworkSource != null) {
-            stickyArtworkSource = artworkSource
-        } else {
-            // Same debounce as stickyMetadata: a brief null from Media3 between
-            // tracks should not clear the held artwork, but the watchdog's
-            // intentional clear should.
-            kotlinx.coroutines.delay(500)
-            if (artworkSource == null) stickyArtworkSource = null
-        }
-    }
-    // Zombie-state safeguard. MA's "Clear queue" stops audio but doesn't fire
-    // an empty-metadata frame, so stickyMetadata otherwise persists
-    // indefinitely while stickyArtworkSource clears on its own debounce. The
-    // user sees text + spec chips + a frozen progress rail layered over a
-    // dark placeholder card, with no way for the screen to recover until the
-    // 60 s pause watchdog finally nulls everything.
-    //
-    // When the artwork has cleared (sticky is null) AND we're still
-    // connected (so we know this isn't just a session-tear-down race), wait
-    // another 1.2 s. If the artwork really hasn't come back by then, this is
-    // a "queue ended" situation, not a transient gap between tracks -- flip
-    // metadata back to EMPTY so the screen reverts to NowPlayingIdleScreen
-    // cleanly.
-    LaunchedEffect(stickyArtworkSource, isActivelyConnected) {
-        if (isActivelyConnected && stickyArtworkSource == null && !stickyMetadata.isEmpty) {
-            kotlinx.coroutines.delay(1200)
-            if (stickyArtworkSource == null) {
-                stickyMetadata = TrackMetadata.EMPTY
-            }
         }
     }
     // SendSpin fires stream/end on pause, which zeroes the audio spec. Keep the

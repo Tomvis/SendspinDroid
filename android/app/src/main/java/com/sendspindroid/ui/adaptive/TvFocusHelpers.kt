@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,16 +75,29 @@ fun Modifier.tvFocusable(
 }
 
 /**
- * Requests focus on first composition for TV initial focus.
- * Use this to auto-focus the primary control (e.g., Play button) when a TV screen appears.
+ * Counter that wrapper composables increment whenever a transient overlay (e.g.
+ * the TV overflow menu) is dismissed and focus needs to be reclaimed by the
+ * underlying screen. [TvInitialFocus] keys on this so the anchor re-requests
+ * focus instead of being stranded after the overlay tears down.
+ *
+ * Default is `0`; the harness only acts on changes from the initial value.
+ */
+val LocalTvFocusReclaimToken = compositionLocalOf { 0 }
+
+/**
+ * Requests focus on first composition for TV initial focus, and again whenever
+ * [LocalTvFocusReclaimToken] changes (e.g. after a TV overflow overlay closes).
+ * Use this to auto-focus the primary control (e.g., Play button) when a TV
+ * screen appears and to recover focus after transient overlays dismiss.
  *
  * @param focusRequester The FocusRequester to trigger on first composition
  */
 @Composable
 fun TvInitialFocus(focusRequester: FocusRequester) {
     val formFactor = LocalFormFactor.current
+    val reclaim = LocalTvFocusReclaimToken.current
     if (formFactor == FormFactor.TV) {
-        LaunchedEffect(Unit) {
+        LaunchedEffect(reclaim) {
             focusRequester.requestFocus()
         }
     }

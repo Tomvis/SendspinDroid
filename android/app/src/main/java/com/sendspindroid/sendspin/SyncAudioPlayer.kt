@@ -559,7 +559,12 @@ class SyncAudioPlayer(
     @Volatile private var hasPendingChunks = false
 
     // Gap/overlap handling (from Python reference)
-    private var expectedNextTimestampUs: Long? = null  // Expected server timestamp of next chunk
+    // @Volatile because this is written by both the decode worker (in
+    // processChunk via queueChunk) and the Main thread (in resume/enterIdle/
+    // clearBuffer/stop). Without it, the worker can observe a stale value
+    // after a Main-thread reset and compute spurious gap/overlap stats at
+    // the splice point.
+    @Volatile private var expectedNextTimestampUs: Long? = null  // Expected server timestamp of next chunk
     private var gapsFilled = 0L           // Count of gaps filled with silence
     private var gapSilenceMs = 0L         // Total milliseconds of silence inserted
     private var overlapsTrimmed = 0L      // Count of overlaps trimmed

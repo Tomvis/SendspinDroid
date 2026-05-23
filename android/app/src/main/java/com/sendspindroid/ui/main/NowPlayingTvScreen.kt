@@ -61,10 +61,18 @@ internal fun NowPlayingTv(
         // identical while taking advantage of the extra pixels. fontScale is
         // preserved from the platform so user accessibility settings apply.
         BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+            // Skip rendering until layout has resolved real constraints --
+            // BoxWithConstraints can transiently emit maxWidth/maxHeight == 0
+            // during configuration changes or before first measurement, and
+            // a zero-density CompositionLocalProvider would render every dp
+            // value at sub-pixel size for one frame.
+            if (constraints.maxWidth <= 0 || constraints.maxHeight <= 0) {
+                return@BoxWithConstraints
+            }
             val designScale = minOf(
                 constraints.maxWidth.toFloat() / 1920f,
                 constraints.maxHeight.toFloat() / 1080f,
-            ).coerceAtLeast(0.1f)
+            )
             val platformFontScale = LocalDensity.current.fontScale
             CompositionLocalProvider(
                 LocalDensity provides Density(density = designScale, fontScale = platformFontScale),

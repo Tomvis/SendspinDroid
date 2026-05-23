@@ -319,13 +319,21 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
      * Android Auto's legacy compat bridge reads metadata from the MediaItem
      * (not getMediaMetadata()), so we must override this to include artwork
      * and other enhanced fields.
+     *
+     * Edge case: when a reconnecting overlay is active but the underlying
+     * player has no current item (e.g. first connect attempt fails after
+     * stream/end before any metadata arrived), we synthesize a MediaItem so
+     * the "Reconnecting to..." overlay still surfaces via the MediaItem path
+     * on legacy Auto bridges.
      */
     override fun getCurrentMediaItem(): MediaItem? {
-        val baseItem = super.getCurrentMediaItem() ?: return null
+        val baseItem = super.getCurrentMediaItem()
         val metadata = getMediaMetadata()
         if (metadata == MediaMetadata.EMPTY) return baseItem
-
-        return baseItem.buildUpon()
+        val base = baseItem ?: MediaItem.Builder()
+            .setMediaId("sendspin_overlay")
+            .build()
+        return base.buildUpon()
             .setMediaMetadata(metadata)
             .build()
     }

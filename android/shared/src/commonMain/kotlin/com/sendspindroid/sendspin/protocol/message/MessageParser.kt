@@ -76,7 +76,8 @@ object MessageParser {
         return try {
             adapter.fromJsonValue(payload)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to decode payload: ${e.message}")
+            val preview = payload.toString().take(200)
+            Log.w(TAG, "Failed to decode payload (${e.message}): $preview")
             null
         }
     }
@@ -106,9 +107,9 @@ object MessageParser {
         }
         val wire = decode(payload, helloAdapter) ?: return null
         return ServerHelloResult(
-            serverName = wire.name.ifEmpty { defaultName },
-            serverId = wire.serverId,
-            activeRoles = wire.activeRoles,
+            serverName = wire.name?.ifEmpty { defaultName } ?: defaultName,
+            serverId = wire.serverId ?: "",
+            activeRoles = wire.activeRoles ?: emptyList(),
             connectionReason = wire.connectionReason ?: "discovery",
         )
     }
@@ -146,20 +147,24 @@ object MessageParser {
     fun parseServerCommand(payload: Any?): ServerCommandResult? {
         val wire = decode(payload, serverCommandAdapter) ?: return null
         val player = wire.player ?: return null
-        return when (player.command) {
+        return when (val cmd = player.command) {
             "volume" -> {
                 val v = player.volume
                 if (v != null && v in 0..100) ServerCommandResult.Volume(v) else null
             }
             "mute" -> ServerCommandResult.Mute(player.mute ?: false)
-            "" -> null
-            else -> ServerCommandResult.Unknown(player.command)
+            null, "" -> null
+            else -> ServerCommandResult.Unknown(cmd)
         }
     }
 
     fun parseGroupUpdate(payload: Any?): GroupInfo? {
         val wire = decode(payload, groupUpdateAdapter) ?: return null
-        return GroupInfo(wire.groupId, wire.groupName, wire.playbackState)
+        return GroupInfo(
+            wire.groupId ?: "",
+            wire.groupName ?: "",
+            wire.playbackState ?: "",
+        )
     }
 
     fun parseStreamStart(payload: Any?): StreamConfig? {
@@ -174,17 +179,21 @@ object MessageParser {
             }
         }
         return StreamConfig(
-            codec = player.codec,
-            sampleRate = player.sampleRate,
-            channels = player.channels,
-            bitDepth = player.bitDepth,
+            codec = player.codec ?: "pcm",
+            sampleRate = player.sampleRate ?: 48000,
+            channels = player.channels ?: 2,
+            bitDepth = player.bitDepth ?: 16,
             codecHeader = codecHeader,
         )
     }
 
     fun parseSyncOffset(payload: Any?): SyncOffsetResult? {
         val wire = decode(payload, syncOffsetAdapter) ?: return null
-        return SyncOffsetResult(wire.playerId, wire.offsetMs, wire.source)
+        return SyncOffsetResult(
+            wire.playerId ?: "",
+            wire.offsetMs ?: 0.0,
+            wire.source ?: "unknown",
+        )
     }
 
     /**
@@ -220,8 +229,9 @@ object MessageParser {
         val year = year.mergeInt(previous?.year)
         val queueTrack = queueTrack.mergeInt(previous?.queueTrack)
         val totalTracks = totalTracks.mergeInt(previous?.totalTracks)
+        val ts = timestamp
         val timestampValue =
-            if (timestamp != 0L) timestamp
+            if (ts != null && ts != 0L) ts
             else previous?.timestamp ?: 0L
 
         // album_track ↔ legacy `track` resolution. Spec says "0 = not set",
@@ -241,22 +251,27 @@ object MessageParser {
         }
 
         // Progress:
-        //  - "progress" present as object → update from object fields
+        //  - "progress" present as object → update from object fields, missing
+        //    sub-fields inherit from previous (servers send partial updates)
         //  - "progress" present but null  → clear to defaults (server cleared_update path)
-        //  - "progress" absent + legacy flat keys → legacy parse
+        //  - "progress" absent + legacy flat keys → legacy parse (missing legacy
+        //    sub-fields inherit from previous)
         //  - "progress" absent, no legacy → inherit from previous
         val progressValue: TrackProgress = when (val p = progress) {
             is JsonOptional.Present -> {
-                p.value?.toTrackProgress() ?: TrackProgress(0L, 0L, 1000)
+                p.value?.toTrackProgress(previous?.progress) ?: TrackProgress(0L, 0L, 1000)
             }
             JsonOptional.Absent -> {
                 if (legacyPositionMs is JsonOptional.Present ||
                     legacyDurationMs is JsonOptional.Present
                 ) {
                     TrackProgress(
-                        trackProgress = (legacyPositionMs as? JsonOptional.Present)?.value ?: 0L,
-                        trackDuration = (legacyDurationMs as? JsonOptional.Present)?.value ?: 0L,
-                        playbackSpeed = (legacyPlaybackSpeed as? JsonOptional.Present)?.value ?: 1000,
+                        trackProgress = (legacyPositionMs as? JsonOptional.Present)?.value
+                            ?: previous?.progress?.trackProgress ?: 0L,
+                        trackDuration = (legacyDurationMs as? JsonOptional.Present)?.value
+                            ?: previous?.progress?.trackDuration ?: 0L,
+                        playbackSpeed = (legacyPlaybackSpeed as? JsonOptional.Present)?.value
+                            ?: previous?.progress?.playbackSpeed ?: 1000,
                     )
                 } else {
                     previous?.progress ?: TrackProgress(0L, 0L, 1000)
@@ -279,11 +294,11 @@ object MessageParser {
         )
     }
 
-    private fun WireProgress.toTrackProgress() =
+    private fun WireProgress.toTrackProgress(previous: TrackProgress?) =
         TrackProgress(
-            trackProgress = trackProgress,
-            trackDuration = trackDuration,
-            playbackSpeed = playbackSpeed,
+            trackProgress = trackProgress ?: previous?.trackProgress ?: 0L,
+            trackDuration = trackDuration ?: previous?.trackDuration ?: 0L,
+            playbackSpeed = playbackSpeed ?: previous?.playbackSpeed ?: 1000,
         )
 
     private fun WireController.toControllerState(
@@ -323,7 +338,7 @@ object MessageParser {
 
     private fun WireColor.toColorState(): ColorState =
         ColorState(
-            timestamp = timestamp,
+            timestamp = timestamp ?: 0L,
             backgroundDark = backgroundDark?.let(::validRgbTriple),
             backgroundLight = backgroundLight?.let(::validRgbTriple),
             primary = primary?.let(::validRgbTriple),

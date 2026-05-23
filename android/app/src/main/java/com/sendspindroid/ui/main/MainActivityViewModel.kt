@@ -9,6 +9,7 @@ import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.model.UnifiedServer
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -199,6 +200,12 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         } else if (idleTimeoutJob == null && _metadata.value != TrackMetadata.EMPTY) {
             idleTimeoutJob = viewModelScope.launch {
                 delay(IDLE_TIMEOUT_MS)
+                // ensureActive() so a cancel issued during the delay window
+                // (e.g. from resetPlaybackState on a fresh connect) doesn't
+                // race past the cancellation and clobber freshly-set state
+                // after the cancel. Without this, Job.cancel() is async and
+                // the body could still execute after the cancel.
+                ensureActive()
                 // Re-check on fire: a metadata update or resume during the
                 // delay should preempt clearing.
                 if (!_isPlaying.value) {

@@ -6,11 +6,10 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +38,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sendspindroid.ui.theme.NpInterFamily
+import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.Locale
 
@@ -58,30 +59,51 @@ fun SourceBadge(
         animationSpec = tween(durationMillis = 500),
         label = "np-dot-color",
     )
-    // Buffering breath: the dot scales 0.85<->1.15 and the halo alpha rides
+    // Buffering breath: the dot scales 0.85<->1.18 and the halo alpha rides
     // along, so the badge reads as "actively working" without changing color
-    // or label vocabulary. Driven by a single infinite transition that only
-    // ticks when isBuffering is true (the .takeIf gate keeps the targets
-    // identical at rest so animateFloatAsState idles).
-    val pulseTransition = rememberInfiniteTransition(label = "np-badge-pulse")
-    val pulseScale by pulseTransition.animateFloat(
-        initialValue = if (isBuffering) 0.85f else 1f,
-        targetValue = if (isBuffering) 1.18f else 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1100, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "np-badge-pulse-scale",
-    )
-    val pulseAlpha by pulseTransition.animateFloat(
-        initialValue = if (isBuffering) 0.55f else 1f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1100, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "np-badge-pulse-alpha",
-    )
+    // or label vocabulary.
+    //
+    // Driven by two Animatables and a LaunchedEffect rather than
+    // rememberInfiniteTransition: the latter captures `initialValue` once at
+    // first composition, so when isBuffering later flips false->true the
+    // pulse would continue from its current value (1.0) toward 1.18 instead
+    // of restarting from 0.85 -- the first half-cycle of every buffering
+    // start was visibly off. With Animatable we snap to the start value and
+    // launch a fresh infinite animation each time isBuffering goes true, and
+    // snap back to rest (1f) when it goes false.
+    val pulseScaleAnim = remember { Animatable(1f) }
+    val pulseAlphaAnim = remember { Animatable(1f) }
+    LaunchedEffect(isBuffering) {
+        if (isBuffering) {
+            pulseScaleAnim.snapTo(0.85f)
+            pulseAlphaAnim.snapTo(0.55f)
+            kotlinx.coroutines.coroutineScope {
+                launch {
+                    pulseScaleAnim.animateTo(
+                        targetValue = 1.18f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(durationMillis = 1100, easing = LinearEasing),
+                            repeatMode = RepeatMode.Reverse,
+                        ),
+                    )
+                }
+                launch {
+                    pulseAlphaAnim.animateTo(
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(durationMillis = 1100, easing = LinearEasing),
+                            repeatMode = RepeatMode.Reverse,
+                        ),
+                    )
+                }
+            }
+        } else {
+            pulseScaleAnim.snapTo(1f)
+            pulseAlphaAnim.snapTo(1f)
+        }
+    }
+    val pulseScale = pulseScaleAnim.value
+    val pulseAlpha = pulseAlphaAnim.value
     val label = buildString {
         append(
             when {

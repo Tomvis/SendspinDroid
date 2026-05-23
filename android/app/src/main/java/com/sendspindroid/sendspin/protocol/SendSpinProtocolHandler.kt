@@ -47,6 +47,7 @@ abstract class SendSpinProtocolHandler(
     private var lastPlaybackState: String? = null
     private var lastGroupInfo: GroupInfo? = null
     private var lastColorState: ColorState? = null
+    private var lastControllerState: ControllerState? = null
 
     // Time sync manager (lazy initialized by subclass)
     protected var timeSyncManager: TimeSyncManager? = null
@@ -472,12 +473,23 @@ abstract class SendSpinProtocolHandler(
 
         handshakeComplete = true
 
-        // Clear cached values so the first post-handshake messages always propagate
+        // Clear cached values so the first post-handshake messages always propagate.
+        // lastColorState in particular MUST be cleared: on reconnect or switch
+        // to a different server, the dedup check `colorState != lastColorState`
+        // in handleServerState would otherwise suppress the first color update
+        // from the new server (if it happened to be byte-identical) or, worse,
+        // leave the previous server's palette in place when the new server
+        // does not advertise color@v1 at all.
         _streamActive = false
         _currentStreamConfig = null
         lastMetadata = null
         lastPlaybackState = null
         lastGroupInfo = null
+        lastControllerState = null
+        if (lastColorState != null) {
+            lastColorState = null
+            onColorStateCleared()
+        }
 
         onHandshakeComplete(result.serverName, result.serverId)
 
@@ -516,7 +528,17 @@ abstract class SendSpinProtocolHandler(
         }
 
         if (controllerState != null) {
-            onControllerStateUpdate(controllerState)
+            // Merge with previous: server may omit repeat/shuffle from a partial
+            // controller update, which the parser flattens to null. Without
+            // merging, consumers of onControllerStateUpdate would see those
+            // fields wiped to null even though the previous controller state
+            // had real values.
+            val merged = controllerState.copy(
+                repeat = controllerState.repeat ?: lastControllerState?.repeat,
+                shuffle = controllerState.shuffle ?: lastControllerState?.shuffle,
+            )
+            lastControllerState = merged
+            onControllerStateUpdate(merged)
         }
 
         if (colorState != null && colorState != lastColorState) {

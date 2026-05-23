@@ -52,7 +52,9 @@ import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffo
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffoldDefaults
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -95,6 +97,7 @@ import com.sendspindroid.musicassistant.MusicAssistant
 import com.sendspindroid.musicassistant.model.MaLibraryItem
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.LocalTvFocusReclaimToken
 import com.sendspindroid.ui.detail.components.BulkAddState
 import com.sendspindroid.ui.detail.components.PlaylistPickerDialog
 import com.sendspindroid.ui.detail.AlbumDetailScreen
@@ -301,6 +304,11 @@ private fun ConnectedShell(
 
     // Overflow menu state
     var showOverflowMenu by remember { mutableStateOf(false) }
+    // Incremented each time a transient TV overlay (overflow menu) dismisses,
+    // so the underlying NowPlaying focus anchor can reclaim D-pad focus.
+    // Without this, focus is stranded after the overlay tears down and the
+    // user has to back out to the Activity-level BackHandler to recover.
+    var tvFocusReclaimToken by remember { mutableIntStateOf(0) }
 
     // Browse queue sidebar visibility (tablet/TV)
     var browseQueueVisible by rememberSaveable { mutableStateOf(false) }
@@ -689,15 +697,24 @@ private fun ConnectedShell(
                 else -> false
             }
         }) {
-            Scaffold(
-                topBar = if (hideTopBar) ({}) else topBar,
-                content = contentArea
-            )
+            CompositionLocalProvider(
+                LocalTvFocusReclaimToken provides tvFocusReclaimToken,
+            ) {
+                Scaffold(
+                    topBar = if (hideTopBar) ({}) else topBar,
+                    content = contentArea
+                )
+            }
             if (hideTopBar && showOverflowMenu) {
                 // Material3 DropdownMenu items are not D-pad operable on TV;
                 // render a TV-tailored overlay with tvFocusable items instead.
                 TvOverflowMenuOverlay(
-                    onDismiss = { showOverflowMenu = false },
+                    onDismiss = {
+                        showOverflowMenu = false
+                        // Bump the reclaim token so NowPlayingFocus's anchor
+                        // re-requests focus once the overlay tears down.
+                        tvFocusReclaimToken++
+                    },
                     onStats = onStatsClick,
                     onEditServer = onEditServerClick,
                     onSwitchServer = onDisconnectClick,

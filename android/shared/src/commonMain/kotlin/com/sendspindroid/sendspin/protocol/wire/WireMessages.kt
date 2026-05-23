@@ -22,12 +22,15 @@ import com.squareup.moshi.JsonClass
 
 // ── Incoming ──────────────────────────────────────────────────────────────
 
+// Incoming wire types: scalar fields are nullable with `= null` defaults so
+// that `present-but-null` JSON does not throw `JsonDataException` from the
+// KSP-generated adapter. Defaults are applied at the domain-mapping step.
 @JsonClass(generateAdapter = true)
 internal data class WireServerHelloPayload(
-    @Json(name = "name") val name: String = "",
-    @Json(name = "server_id") val serverId: String = "",
-    @Json(name = "version") val version: Int = 1,
-    @Json(name = "active_roles") val activeRoles: List<String> = emptyList(),
+    @Json(name = "name") val name: String? = null,
+    @Json(name = "server_id") val serverId: String? = null,
+    @Json(name = "version") val version: Int? = null,
+    @Json(name = "active_roles") val activeRoles: List<String>? = null,
     @Json(name = "connection_reason") val connectionReason: String? = null,
 )
 
@@ -48,7 +51,7 @@ internal data class WireServerStatePayload(
 
 @JsonClass(generateAdapter = true)
 internal data class WireMetadata(
-    @Json(name = "timestamp") val timestamp: Long = 0L,
+    @Json(name = "timestamp") val timestamp: Long? = null,
     @Json(name = "title") val title: JsonOptional<String> = JsonOptional.Absent,
     @Json(name = "artist") val artist: JsonOptional<String> = JsonOptional.Absent,
     @Json(name = "album_artist") val albumArtist: JsonOptional<String> = JsonOptional.Absent,
@@ -71,9 +74,9 @@ internal data class WireMetadata(
 
 @JsonClass(generateAdapter = true)
 internal data class WireProgress(
-    @Json(name = "track_progress") val trackProgress: Long = 0L,
-    @Json(name = "track_duration") val trackDuration: Long = 0L,
-    @Json(name = "playback_speed") val playbackSpeed: Int = 1000,
+    @Json(name = "track_progress") val trackProgress: Long? = null,
+    @Json(name = "track_duration") val trackDuration: Long? = null,
+    @Json(name = "playback_speed") val playbackSpeed: Int? = null,
 )
 
 @JsonClass(generateAdapter = true)
@@ -87,7 +90,7 @@ internal data class WireController(
 
 @JsonClass(generateAdapter = true)
 internal data class WireColor(
-    @Json(name = "timestamp") val timestamp: Long = 0L,
+    @Json(name = "timestamp") val timestamp: Long? = null,
     @Json(name = "background_dark") val backgroundDark: List<Int>? = null,
     @Json(name = "background_light") val backgroundLight: List<Int>? = null,
     @Json(name = "primary") val primary: List<Int>? = null,
@@ -103,10 +106,10 @@ internal data class WireStreamStartPayload(
 
 @JsonClass(generateAdapter = true)
 internal data class WireStreamPlayer(
-    @Json(name = "codec") val codec: String = "pcm",
-    @Json(name = "sample_rate") val sampleRate: Int = 48000,
-    @Json(name = "channels") val channels: Int = 2,
-    @Json(name = "bit_depth") val bitDepth: Int = 16,
+    @Json(name = "codec") val codec: String? = null,
+    @Json(name = "sample_rate") val sampleRate: Int? = null,
+    @Json(name = "channels") val channels: Int? = null,
+    @Json(name = "bit_depth") val bitDepth: Int? = null,
     @Json(name = "codec_header") val codecHeader: String? = null,
 )
 
@@ -117,23 +120,23 @@ internal data class WireServerCommandPayload(
 
 @JsonClass(generateAdapter = true)
 internal data class WireServerPlayerCommand(
-    @Json(name = "command") val command: String = "",
+    @Json(name = "command") val command: String? = null,
     @Json(name = "volume") val volume: Int? = null,
     @Json(name = "mute") val mute: Boolean? = null,
 )
 
 @JsonClass(generateAdapter = true)
 internal data class WireGroupUpdatePayload(
-    @Json(name = "group_id") val groupId: String = "",
-    @Json(name = "group_name") val groupName: String = "",
-    @Json(name = "playback_state") val playbackState: String = "",
+    @Json(name = "group_id") val groupId: String? = null,
+    @Json(name = "group_name") val groupName: String? = null,
+    @Json(name = "playback_state") val playbackState: String? = null,
 )
 
 @JsonClass(generateAdapter = true)
 internal data class WireSyncOffsetPayload(
-    @Json(name = "player_id") val playerId: String = "",
-    @Json(name = "offset_ms") val offsetMs: Double = 0.0,
-    @Json(name = "source") val source: String = "unknown",
+    @Json(name = "player_id") val playerId: String? = null,
+    @Json(name = "offset_ms") val offsetMs: Double? = null,
+    @Json(name = "source") val source: String? = null,
 )
 
 // ── Outgoing ──────────────────────────────────────────────────────────────

@@ -883,6 +883,10 @@ class PlaybackService : MediaLibraryService() {
                         syncAudioPlayer?.release()
                         syncAudioPlayer = null
                         sendSpinPlayer?.setSyncAudioPlayer(null)
+                        // Close the chunk fast-path gate so any chunks still in
+                        // the WS receive queue post-disconnect drop before being
+                        // launched into the decode pipeline.
+                        decoderReady = false
                         releasePlaybackLocks()
                         releaseHighPowerLocks()
                         // Stop the foreground notification since we're fully disconnecting
@@ -909,7 +913,16 @@ class PlaybackService : MediaLibraryService() {
                         // stale Coil artwork fetch) before the next event
                         // arrives.
                         clearAudioStreamSpec()
-                        _playbackState.value = PlaybackState()
+                        // Preserve volume/muted across the disconnect: the
+                        // device's STREAM_MUSIC volume hasn't changed, but a
+                        // fresh PlaybackState() defaults volume back to 100,
+                        // which would broadcast a wrong volume to the
+                        // MediaController slider until the next connect reads
+                        // the actual device volume.
+                        _playbackState.value = PlaybackState(
+                            volume = _playbackState.value.volume,
+                            muted = _playbackState.value.muted,
+                        )
                         lastArtworkUrl = null
                         lastTrackTitle = null
                         urlArtwork = null
@@ -942,6 +955,8 @@ class PlaybackService : MediaLibraryService() {
                             syncAudioPlayer?.release()
                             syncAudioPlayer = null
                             sendSpinPlayer?.setSyncAudioPlayer(null)
+                            // Close the chunk fast-path gate (see Idle branch).
+                            decoderReady = false
                             releasePlaybackLocks()
                             releaseHighPowerLocks()
                             stopForegroundNotification()
@@ -1328,14 +1343,16 @@ class PlaybackService : MediaLibraryService() {
                     syncAudioPlayer?.pause()
                     releasePlaybackLocks()
                 } else if (newState == PlaybackStateType.PLAYING) {
-                    // Playing: resume playback if paused. syncAudioPlayer is
-                    // recreated and re-attached on the next stream/start
-                    // (PlaybackService.kt:1567); a resume that arrives here
-                    // before stream/start has no syncAudioPlayer to resume
-                    // anyway, so no extra re-attach is needed.
+                    // Playing: resume playback if paused. Re-attach syncAudioPlayer
+                    // symmetrically with the onGroupUpdate PLAYING branch -- a
+                    // server-PLAYING transition that arrives without a matching
+                    // stream/start (rare but possible) can otherwise leave
+                    // sendSpinPlayer's reference stale if a prior disconnect
+                    // path nulled it.
                     Log.d(TAG, "State is playing - resuming audio and acquiring playback locks")
                     sendSpinPlayer?.updatePlayWhenReadyFromServer(true)
                     syncAudioPlayer?.resume()
+                    sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
                     acquirePlaybackLocks()
                 }
 
@@ -1720,6 +1737,13 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.i(TAG, "[cmd-trace] T3 onStreamEnd.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
                 Log.i(TAG, "Stream end - server terminated playback")
+                // Close the fast-path gate so any chunks still in the WS receive
+                // queue after stream/end are dropped before being launched into
+                // the decode channel. The streamGeneration counter inside
+                // SyncAudioPlayer is the primary defense against stale chunks,
+                // but rejecting them at the source avoids the decode-pipeline
+                // CPU burn. The next stream/start re-opens the gate.
+                decoderReady = false
                 // Enter idle mode: keep AudioTrack alive and writing silence
                 // so DAC timestamps stay warm for the next stream start.
                 //
@@ -1926,7 +1950,11 @@ class PlaybackService : MediaLibraryService() {
             title = update.title,
             artist = update.artist,
             album = update.album,
-            durationMs = update.durationMs ?: 0L
+            // Pass through `null` so the player preserves its existing duration
+            // when MA's queue_updated doesn't carry one. Coercing to 0L here
+            // would zero out the Timeline window duration on every fast queue
+            // update, killing Android Auto / lock-screen progress bars.
+            durationMs = update.durationMs,
         )
     }
 
@@ -2895,14 +2923,17 @@ class PlaybackService : MediaLibraryService() {
                 }
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
-                Log.d(TAG, "Audio focus lost permanently")
-                // Another app took focus permanently - pause playback
+                Log.d(TAG, "Audio focus lost permanently - disconnecting")
+                // Another app took focus permanently. We can't recover from
+                // this without a fresh AUDIOFOCUS_GAIN, which the system does
+                // NOT issue after a permanent loss. If we merely paused
+                // locally, the server would keep streaming PCM (server is
+                // unaware of focus loss) and the chunk queue inside
+                // SyncAudioPlayer would grow unbounded -- ~150 KB/s on 48 kHz
+                // 16-bit stereo. Disconnect symmetric with the user-initiated
+                // disconnect path so the server tears down the stream.
                 synchronized(audioFocusLock) { hasAudioFocus = false }
-                syncAudioPlayer?.pause()
-                // Mirror local pause into playWhenReady so external controllers
-                // see "paused" while we hold no focus. *FromServer skips the
-                // round-trip to SendSpin (server unaware of focus loss).
-                sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
+                disconnectFromServer()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 Log.d(TAG, "Audio focus lost transiently")

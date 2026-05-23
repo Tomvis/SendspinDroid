@@ -35,6 +35,20 @@ import java.lang.reflect.Type
  *
  * Use [orElse] to pick a fallback when the field is absent but present-null is a
  * legitimate "clear" signal you want to act on.
+ *
+ * **READ-ONLY**: This type is for INCOMING wire fields only. The serialization
+ * path collapses [Absent] and [Present] with null to the same JSON null, so
+ * outgoing fields that round-trip through JsonOptional lose the tri-state
+ * distinction on the wire. Use a plain nullable field (`T? = null`) for
+ * outgoing payloads; Moshi's default (`serializeNulls=false`) omits null
+ * keys from output, which is what spec-compliant client messages need.
+ *
+ * **REQUIRED DEFAULT**: Every JsonOptional field must declare a Kotlin
+ * default of [Absent] (e.g. `val title: JsonOptional<String> = JsonOptional.Absent`).
+ * Without that default, an absent JSON key would fail decoding with a
+ * "non-null value 'foo' was null" error from the KSP-generated adapter --
+ * the adapter is only invoked when the key is present, so absent has to
+ * resolve via the Kotlin default.
  */
 sealed class JsonOptional<out T> {
     object Absent : JsonOptional<Nothing>()

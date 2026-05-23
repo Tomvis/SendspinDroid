@@ -60,16 +60,15 @@ fun ProgressRail(
     accent: Color,
     modifier: Modifier = Modifier,
 ) {
-    // No-op when duration is unknown (live stream, or the first server frame
-    // before track_duration arrives). The rail's math floors safeDuration to
-    // 1L which otherwise pins the bar at 100% with "0:00 / 0:00" labels --
-    // visually broken. The rail reappears once the server delivers a real
-    // duration.
-    if (durationMs <= 0L) return
-
     val paused = !isPlaying
     val safeDuration = durationMs.coerceAtLeast(1L)
 
+    // Allocate all remember slots unconditionally so the slot table is stable
+    // across durationMs <= 0 transitions. The original early return at the
+    // function head re-keyed displayPositionMs/anchor/playSince every time
+    // durationMs dipped to 0 (e.g., transient metadata refresh) -- tearing
+    // down interpolation state and forcing a fresh snap from server values
+    // on the next non-zero frame.
     var anchorPositionMs by remember { mutableLongStateOf(positionMs) }
     var anchorTime by remember { mutableLongStateOf(positionUpdatedAt) }
     var displayPositionMs by remember { mutableLongStateOf(positionMs) }
@@ -100,8 +99,18 @@ fun ProgressRail(
         }
     }
 
-    LaunchedEffect(isPlaying) {
-        if (isPlaying && !wasPlaying) {
+    // Single effect that owns the resume re-anchor AND the per-frame
+    // interpolation loop. Previously these were two LaunchedEffects, both
+    // keyed on isPlaying. On a pause->play flip, the first effect would write
+    // new anchor/playSince values, but the second effect's restart captured
+    // the OLD anchor/playSince at composition time -- so for one frame the
+    // interpolation loop ran with stale anchors and the playhead could lurch
+    // forward by however long we were paused. Merging the work eliminates
+    // the inter-effect race.
+    LaunchedEffect(isPlaying, anchorPositionMs, anchorTime, durationMs) {
+        // Apply the resume re-anchor synchronously at the top of the effect
+        // so the per-frame loop below sees fresh values.
+        val localPlaySince = if (isPlaying && !wasPlaying) {
             val now = SystemClock.elapsedRealtime()
             playSince = now
             // Re-anchor to the value the rail showed during pause so the
@@ -110,11 +119,12 @@ fun ProgressRail(
             // re-ticks the elapsed-since-pause delta.
             anchorPositionMs = displayPositionMs
             anchorTime = now
+            wasPlaying = true
+            now
+        } else {
+            wasPlaying = isPlaying
+            playSince
         }
-        wasPlaying = isPlaying
-    }
-
-    LaunchedEffect(isPlaying, anchorPositionMs, anchorTime, durationMs, playSince) {
         // anchorTime == 0L means the VM hasn't applied a real server frame yet.
         // Without this guard, `elapsed = elapsedRealtime() - 0` is device uptime
         // and the bar snaps to durationMs on first render.
@@ -126,7 +136,7 @@ fun ProgressRail(
             // Pause: freeze displayPositionMs at its current value rather than
             // snapping back to anchorPositionMs. The interpolation loop has been
             // advancing past the anchor; snapping back would jerk the bar
-            // visibly. The next server-pushed position (LaunchedEffect above
+            // visibly. The next server-pushed position (the effect above
             // re-anchors on positionMs / positionUpdatedAt) will re-sync the
             // bar to the authoritative server state.
             return@LaunchedEffect
@@ -136,7 +146,7 @@ fun ProgressRail(
         // pause duration from being added to displayPositionMs during the
         // brief window between "user pressed play locally" and "server sends
         // a fresh server/state with the resume position".
-        val timeZero = maxOf(anchorTime, playSince)
+        val timeZero = maxOf(anchorTime, localPlaySince)
         while (isActive) {
             withFrameMillis { }
             val elapsed = SystemClock.elapsedRealtime() - timeZero
@@ -146,6 +156,13 @@ fun ProgressRail(
             displayPositionMs = (anchorPositionMs + elapsed).coerceIn(0L, safeDuration)
         }
     }
+
+    // No-op render when duration is unknown (live stream, or the first server
+    // frame before track_duration arrives). The rail's math floors safeDuration
+    // to 1L which otherwise pins the bar at 100% with "0:00 / 0:00" labels --
+    // visually broken. The rail reappears once the server delivers a real
+    // duration; remember slots above stay stable across this gate.
+    if (durationMs <= 0L) return
 
     val remainingMs = (durationMs - displayPositionMs).coerceAtLeast(0L)
     val progress = (displayPositionMs.toFloat() / safeDuration).coerceIn(0f, 1f)
