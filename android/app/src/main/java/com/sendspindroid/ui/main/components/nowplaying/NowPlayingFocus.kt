@@ -84,7 +84,12 @@ fun NowPlayingFocus(
     val focusAnchor = remember { FocusRequester() }
     TvInitialFocus(focusAnchor)
 
-    Box(modifier = modifier.fillMaxSize()) {
+    // Black backdrop on the root so any uncovered gap during a track-change
+    // recomposition reads as black rather than as the Scaffold background
+    // (which on a light system theme would flash white). AmbientBg's
+    // BlurredCover holds its own held-bitmap underlay; this is belt and
+    // suspenders for the rest of the surface.
+    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
         // AmbientBg deliberately full-bleed (outside overscanSafe) so the
         // blurred-cover wash extends to the actual screen edge; nothing
         // critical sits there.

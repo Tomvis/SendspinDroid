@@ -190,6 +190,18 @@ fun NowPlayingScreen(
 
     // Determine accent color from player colors
     val accentColor = playerColors?.let { Color(it.accentColor) }
+    // Artwork-derived accent can briefly drop to null during a track
+    // transition (palette recomputes on the new bitmap). Hold the last
+    // non-null value so downstream consumers -- TV ambient wash and album-art
+    // glow, progress bar gradient, volume slider tint -- don't flash through
+    // FallbackAccent between tracks. Mirrors the stickyMetadata /
+    // stickyArtworkSource pattern above.
+    var stickyAccentColor by remember { mutableStateOf(accentColor) }
+    LaunchedEffect(accentColor, isActivelyConnected) {
+        if (!isActivelyConnected || accentColor != null) {
+            stickyAccentColor = accentColor
+        }
+    }
 
     // Check orientation and form factor
     val configuration = LocalConfiguration.current
@@ -211,7 +223,7 @@ fun NowPlayingScreen(
                     isBuffering = isBuffering,
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
-                    accentColor = accentColor,
+                    accentColor = stickyAccentColor,
                     isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
@@ -234,7 +246,7 @@ fun NowPlayingScreen(
                     isPlaying = isPlaying,
                     playbackState = playbackState,
                     controlsEnabled = controlsEnabled,
-                    accentColor = accentColor,
+                    accentColor = stickyAccentColor,
                     isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
@@ -261,7 +273,7 @@ fun NowPlayingScreen(
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
                     volume = volume,
-                    accentColor = accentColor,
+                    accentColor = stickyAccentColor,
                     isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
@@ -288,7 +300,7 @@ fun NowPlayingScreen(
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
                     volume = volume,
-                    accentColor = accentColor,
+                    accentColor = stickyAccentColor,
                     isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
@@ -313,7 +325,7 @@ fun NowPlayingScreen(
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
                     volume = volume,
-                    accentColor = accentColor,
+                    accentColor = stickyAccentColor,
                     isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,

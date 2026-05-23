@@ -1,24 +1,30 @@
 package com.sendspindroid.ui.main.components.nowplaying
 
 import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.GraphicsLayerScope
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageShader
 import androidx.compose.ui.graphics.ShaderBrush
@@ -42,15 +48,9 @@ fun AmbientBg(
     paused: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    // Force the whole ambient stack into an offscreen compositing layer so
-    // the stacked alpha-blended layers below composite against a stable
-    // backdrop. Without this, on the Shield/Tegra GPU each alpha layer reads
-    // back from whatever happened to be in the framebuffer that frame, which
-    // manifests as random flicker.
     Box(
         modifier = modifier
             .fillMaxSize()
-            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
             .background(AmbientBase),
     ) {
         BlurredCover(artworkSource = artworkSource, paused = paused)
@@ -68,7 +68,11 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
         // Distinct namespace from the unblurred focus art so the blurred
         // result has its own memory-cache entry.
         namespace = "np-ambient",
-        crossfadeMillis = 400,
+        // Crossfade off: the blurred-image alpha-blend mid-transition reads
+        // as a screen-wide brightness shift. With the held-bitmap underlay
+        // below, the swap to the new bitmap is hidden because the underlay
+        // already shows the prior content.
+        crossfadeMillis = 0,
     ) {
         // 384x384 source + radius=24 keeps sigma proportional to the 96x6 baseline
         // while giving a much smoother ambient on 4K output.
@@ -93,22 +97,53 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
         label = "np-drift-progress",
     )
 
-    AsyncImage(
-        model = model,
-        contentDescription = null,
-        modifier = Modifier
-            .fillMaxSize()
-            .graphicsLayer {
-                scaleX = 1.18f
-                scaleY = 1.18f
-                alpha = 0.7f
-                val driftProgress = if (paused) driftState.value else 0f
-                translationX = -size.width * 0.015f * driftProgress
-                translationY = -size.height * 0.01f * driftProgress
+    // Persistent underlay holding the last successfully loaded bitmap.
+    // Coil's placeholderMemoryCacheKey lookup uses bare-string equality on
+    // MemoryCache.Key, but a stored entry for a *transformed* image (our
+    // BoxBlurTransformation) carries the transformation list as Key extras --
+    // so the placeholder lookup misses on every track change and the
+    // AsyncImage briefly draws nothing while loading the new blurred bitmap.
+    // The underlay covers that gap with the previous content; the foreground
+    // AsyncImage paints over it once the new bitmap arrives.
+    var heldBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+
+    val coverLayer: GraphicsLayerScope.() -> Unit = {
+        scaleX = 1.18f
+        scaleY = 1.18f
+        alpha = 0.7f
+        val driftProgress = if (paused) driftState.value else 0f
+        translationX = -size.width * 0.015f * driftProgress
+        translationY = -size.height * 0.01f * driftProgress
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        heldBitmap?.let { bitmap ->
+            Image(
+                bitmap = bitmap,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(block = coverLayer),
+                contentScale = ContentScale.Crop,
+                alignment = BiasAlignment(0f, -0.4f),
+            )
+        }
+        AsyncImage(
+            model = model,
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(block = coverLayer),
+            onSuccess = { state ->
+                val drawable = state.result.drawable
+                if (drawable is BitmapDrawable) {
+                    heldBitmap = drawable.bitmap.asImageBitmap()
+                }
             },
-        contentScale = ContentScale.Crop,
-        alignment = androidx.compose.ui.BiasAlignment(0f, -0.4f),
-    )
+            contentScale = ContentScale.Crop,
+            alignment = BiasAlignment(0f, -0.4f),
+        )
+    }
 }
 
 /**
