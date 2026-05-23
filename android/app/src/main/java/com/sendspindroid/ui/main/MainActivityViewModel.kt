@@ -7,12 +7,15 @@ import androidx.lifecycle.viewModelScope
 import com.sendspindroid.UserSettings
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.model.UnifiedServer
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 /**
  * ViewModel for MainActivity.
@@ -31,6 +34,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     companion object {
         private const val TAG = "MainActivityViewModel"
+        private const val IDLE_TIMEOUT_MS = 60_000L
     }
 
     // ========================================================================
@@ -173,10 +177,40 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     // Playback State Updates
     // ========================================================================
 
+    // When playback has been paused for IDLE_TIMEOUT_MS with no resume and no
+    // new metadata, drop back to the idle screen. Without this, MA stop/clear
+    // leaves the previous track on screen indefinitely because the SendSpin
+    // server never pushes a "metadata cleared" event (it just stops sending
+    // audio). 60 s is comfortably longer than MA's 30 s pause auto-stop, so
+    // a short paused interval stays as "Paused" with the last track visible.
+    private var idleTimeoutJob: Job? = null
+
     fun updatePlaybackState(isPlaying: Boolean, state: PlaybackState) {
         _isPlaying.value = isPlaying
         _playbackState.value = state
         _isBuffering.value = state == PlaybackState.BUFFERING
+
+        // Reset the idle watchdog on any "audio is actively flowing" signal.
+        // STATE_READY+isPlaying=true is the only "definitely playing" combination
+        // produced by the SendSpinPlayer state mapping.
+        if (isPlaying && state == PlaybackState.READY) {
+            idleTimeoutJob?.cancel()
+            idleTimeoutJob = null
+        } else if (idleTimeoutJob == null && _metadata.value != TrackMetadata.EMPTY) {
+            idleTimeoutJob = viewModelScope.launch {
+                delay(IDLE_TIMEOUT_MS)
+                // Re-check on fire: a metadata update or resume during the
+                // delay should preempt clearing.
+                if (!_isPlaying.value) {
+                    Log.d(TAG, "Idle watchdog: clearing stale metadata after ${IDLE_TIMEOUT_MS / 1000}s of non-playing state")
+                    _metadata.value = TrackMetadata.EMPTY
+                    _artworkSource.value = null
+                    _playerColors.value = null
+                    _audioStreamSpec.value = null
+                }
+                idleTimeoutJob = null
+            }
+        }
     }
 
     /**
@@ -195,6 +229,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         queueTrack: Int? = null,
         totalTracks: Int? = null
     ) {
+        val previousTitle = _metadata.value.title
+        val previousArtist = _metadata.value.artist
         _metadata.value = mergeTrackMetadata(
             prev = _metadata.value,
             title = title,
@@ -206,6 +242,16 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             queueTrack = queueTrack,
             totalTracks = totalTracks
         )
+        // Only cancel the idle watchdog on a real track change (different
+        // title/artist after the merge). MA pushes server/state updates
+        // every few seconds even when paused; cancelling on every push
+        // would keep the watchdog from ever firing.
+        val nowTitle = _metadata.value.title
+        val nowArtist = _metadata.value.artist
+        if (nowTitle != previousTitle || nowArtist != previousArtist) {
+            idleTimeoutJob?.cancel()
+            idleTimeoutJob = null
+        }
     }
 
     fun updateGroupName(name: String) {
@@ -327,6 +373,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
      * Reset all playback-related state when disconnecting.
      */
     fun resetPlaybackState() {
+        idleTimeoutJob?.cancel()
+        idleTimeoutJob = null
         _isPlaying.value = false
         _playbackState.value = PlaybackState.IDLE
         _metadata.value = TrackMetadata.EMPTY

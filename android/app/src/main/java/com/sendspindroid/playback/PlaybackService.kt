@@ -129,6 +129,15 @@ class PlaybackService : MediaLibraryService() {
     private var mediaSession: MediaLibrarySession? = null
     private var sendSpinPlayer: SendSpinPlayer? = null
     private var forwardingPlayer: MetadataForwardingPlayer? = null
+
+    // Fingerprint of the last bundle pushed via setSessionExtras. Used to
+    // skip redundant broadcasts (which trigger AvrcpMediaPlayerWrapper "tried
+    // to update with no new data" warnings from the system Bluetooth stack
+    // every time we re-push an identical bundle). The bundle is rebuilt and
+    // pushed from many call sites -- metadata updates, volume changes, sync
+    // offset, periodic server/time messages -- and many of those produce
+    // identical contents.
+    private var lastSessionExtrasFingerprint: Long = Long.MIN_VALUE
     private var sendSpinClient: SendSpin? = null
     @Volatile private var syncAudioPlayer: SyncAudioPlayer? = null
     // Owned exclusively by the decode worker coroutine (serialized on
@@ -2231,7 +2240,39 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
-        mediaSession?.setSessionExtras(extras)
+        // Skip the broadcast if nothing material changed since last push.
+        // Fingerprint is a 64-bit hash over the bundle's stable fields --
+        // good enough to detect identical contents without allocating a
+        // diff structure each call.
+        val fingerprint = fingerprintSessionExtras(extras)
+        if (fingerprint != lastSessionExtrasFingerprint) {
+            lastSessionExtrasFingerprint = fingerprint
+            mediaSession?.setSessionExtras(extras)
+        }
+    }
+
+    /**
+     * Build a 64-bit fingerprint over the fields of a session-extras bundle so
+     * we can skip identical re-broadcasts. Order-sensitive on purpose: the
+     * bundle is always populated in the same order in broadcastSessionExtras,
+     * and changing that order would correctly invalidate the cache.
+     */
+    @Suppress("DEPRECATION") // Bundle.get(key) for mixed-type fingerprinting
+    private fun fingerprintSessionExtras(extras: Bundle): Long {
+        var h = 1125899906842597L // 2^50 - 27 (large prime starting value)
+        for (key in extras.keySet().sorted()) {
+            h = h * 31 + key.hashCode().toLong()
+            val v = extras.get(key) ?: continue
+            h = h * 31 + when (v) {
+                is String -> v.hashCode().toLong()
+                is Long -> v
+                is Int -> v.toLong()
+                is Boolean -> if (v) 1L else 0L
+                is Double -> java.lang.Double.doubleToRawLongBits(v)
+                else -> v.hashCode().toLong()
+            }
+        }
+        return h
     }
 
     private fun failureReasonToMessage(reason: FailureReason): String = when (reason) {

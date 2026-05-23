@@ -20,8 +20,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +55,7 @@ import com.sendspindroid.ui.main.PlaybackState
 import com.sendspindroid.ui.main.TrackMetadata
 import com.sendspindroid.ui.theme.NpFrauncesFamily
 import com.sendspindroid.ui.theme.NpInterFamily
+import kotlinx.coroutines.delay
 import java.util.Locale
 
 private val FocusFg = Color(0xFFFAF6F0)
@@ -65,19 +69,31 @@ fun NowPlayingFocus(
     durationMs: Long,
     positionUpdatedAt: Long,
     isPlaying: Boolean,
-    playbackState: PlaybackState,
+    @Suppress("UNUSED_PARAMETER") playbackState: PlaybackState,
     accent: Color,
     groupLabel: String,
     audioSpec: AudioStreamSpec?,
     modifier: Modifier = Modifier,
 ) {
-    // Treat !isPlaying as the user-paused look only when the player is
-    // actually in READY. STATE_BUFFERING during a SendSpin track transition
-    // flips Media3's isPlaying false for a few hundred ms; without the
-    // state guard, the album art / ambient / source badge run their full
-    // paused-state animations and snap back, producing the visible
-    // shrink-and-return on every track change.
-    val paused = !isPlaying && playbackState == PlaybackState.READY
+    // Debounced pause detection. STATE_BUFFERING during a SendSpin track
+    // transition flips isPlaying false for ~200-500 ms; the previous guard
+    // (`isPlaying == false && playbackState == READY`) was meant to suppress
+    // the shrink-and-return on those transitions, but READY+isPlaying=false
+    // never actually occurs -- the SendSpin -> Media3 mapping pairs PLAYING
+    // with READY and everything else (INITIALIZING / WAITING_FOR_START /
+    // REANCHORING) with BUFFERING, so the guard made `paused` impossible.
+    // Result: badge / art / ambient stayed in the playing look even after
+    // MA pause. Debounce by ~500 ms instead: a real pause persists past
+    // the threshold; track transitions resolve before it fires.
+    var paused by remember { mutableStateOf(false) }
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            paused = false
+        } else {
+            delay(500)
+            paused = true
+        }
+    }
     // Now Playing is a passive view; no interactive elements on-screen. Park
     // initial focus on an invisible anchor so the Activity still gets D-pad
     // key events (e.g. BACK).

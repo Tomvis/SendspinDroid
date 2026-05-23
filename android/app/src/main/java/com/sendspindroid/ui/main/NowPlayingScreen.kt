@@ -114,12 +114,25 @@ fun NowPlayingScreen(
     LaunchedEffect(metadata, isActivelyConnected) {
         if (!isActivelyConnected || !metadata.isEmpty) {
             stickyMetadata = metadata
+        } else {
+            // Debounce the blank: Media3's transient empty emissions resolve
+            // in under a few hundred ms. The idle watchdog's intentional
+            // clear (after 60 s paused) persists, so wait briefly and only
+            // accept the clear if metadata is still empty.
+            kotlinx.coroutines.delay(500)
+            if (metadata.isEmpty) stickyMetadata = metadata
         }
     }
     var stickyArtworkSource by remember { mutableStateOf(artworkSource) }
     LaunchedEffect(artworkSource, isActivelyConnected) {
         if (!isActivelyConnected || artworkSource != null) {
             stickyArtworkSource = artworkSource
+        } else {
+            // Same debounce as stickyMetadata: a brief null from Media3 between
+            // tracks should not clear the held artwork, but the watchdog's
+            // intentional clear should.
+            kotlinx.coroutines.delay(500)
+            if (artworkSource == null) stickyArtworkSource = null
         }
     }
     // SendSpin fires stream/end on pause, which zeroes the audio spec. Keep the

@@ -130,6 +130,10 @@ class MainActivity : AppCompatActivity() {
     // ViewBinding provides type-safe access to views (legacy, being phased out)
     private lateinit var binding: ActivityMainBinding
 
+    // Back-press callback whose enabled state tracks whether there's in-app
+    // state to back out of (detail stack or nav content). See setupBackPressHandler.
+    private lateinit var backPressCallback: OnBackPressedCallback
+
     // Compose shell overlay -- primary UI, renders on top of XML layout
     private var composeOverlay: ComposeView? = null
 
@@ -1058,6 +1062,7 @@ class MainActivity : AppCompatActivity() {
             isNavigationContentVisible = true
             // Sync state to ViewModel for Compose UI
             viewModel.setNavigationContentVisible(true)
+            updateBackPressCallbackEnabled()
             Log.d(TAG, "Showing navigation content")
 
             // Content visibility: show nav fragment, hide others
@@ -1095,6 +1100,7 @@ class MainActivity : AppCompatActivity() {
             isNavigationContentVisible = false
             // Sync state to ViewModel for Compose UI
             viewModel.setNavigationContentVisible(false)
+            updateBackPressCallbackEnabled()
             Log.d(TAG, "Hiding navigation content, returning to full player")
 
             // Hide nav content and both mini players
@@ -1157,12 +1163,23 @@ class MainActivity : AppCompatActivity() {
     /**
      * Sets up the back press handler to return from navigation content to full player.
      * Uses the modern OnBackPressedCallback approach (onBackPressed is deprecated).
+     *
+     * The callback is reactive: only enabled when there is in-app state to back
+     * out of (Compose detail stack or legacy XML nav). When nothing to handle,
+     * the callback stays disabled and BACK flows through to the framework's
+     * default handlers -- this matters for popup menus (toolbar overflow), which
+     * dismiss via Window-level key dispatch rather than the back-press
+     * dispatcher. With the callback enabled and using a "decline by disabling +
+     * re-dispatching" pattern, the popup needed two BACK presses to dismiss
+     * (the first was consumed clearing focus inside the popup adapter, only
+     * the second actually closed it).
      */
     private fun setupBackPressHandler() {
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+        backPressCallback = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() {
                 // Check if a Compose detail screen is showing
                 if (viewModel.navigateDetailBack()) {
+                    updateBackPressCallbackEnabled()
                     return
                 }
 
@@ -1176,14 +1193,29 @@ class MainActivity : AppCompatActivity() {
                         // At tab root -- return to full player
                         hideNavigationContent()
                     }
-                } else {
-                    // Default back behavior (exit app or navigate back)
-                    isEnabled = false
-                    onBackPressedDispatcher.onBackPressed()
-                    isEnabled = true
                 }
+                updateBackPressCallbackEnabled()
             }
-        })
+        }
+        onBackPressedDispatcher.addCallback(this, backPressCallback)
+
+        // Keep the callback's enabled state in sync with whether there's
+        // anything in-app to back out of, so popups / dialogs / framework
+        // dismissal paths see BACK unobstructed when we have nothing to do.
+        lifecycleScope.launch {
+            viewModel.detailBackStack.collect { updateBackPressCallbackEnabled() }
+        }
+    }
+
+    /**
+     * Enable the BACK callback iff there's in-app state to pop. Called from
+     * the callback itself after a pop, from nav content show/hide, and from
+     * the detailBackStack collector.
+     */
+    private fun updateBackPressCallbackEnabled() {
+        if (!::backPressCallback.isInitialized) return
+        backPressCallback.isEnabled = isNavigationContentVisible ||
+            viewModel.detailBackStack.value.isNotEmpty()
     }
 
     // setupSectionedServerAdapter() removed - server list is now Compose-based (ServerListScreen)
@@ -1279,6 +1311,7 @@ class MainActivity : AppCompatActivity() {
         if (isNavigationContentVisible) {
             isNavigationContentVisible = false
             viewModel.setNavigationContentVisible(false)
+            updateBackPressCallbackEnabled()
         }
 
         // Set toolbar to app name

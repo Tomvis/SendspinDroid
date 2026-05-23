@@ -11,6 +11,13 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,8 +26,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
@@ -32,6 +42,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -52,6 +63,18 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -346,6 +369,48 @@ private fun ConnectedShell(
         }
     }
 
+    // Shared overflow menu items, rendered inside the top-bar DropdownMenu and
+    // (on TV, where the top bar is hidden) inside a parallel top-end menu
+    // surface triggered by the OK / DPAD_CENTER remote button.
+    val overflowMenuItems: @Composable () -> Unit = {
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.action_stats)) },
+            onClick = {
+                showOverflowMenu = false
+                onStatsClick()
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.action_edit_server)) },
+            onClick = {
+                showOverflowMenu = false
+                onEditServerClick()
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.action_switch_server)) },
+            onClick = {
+                showOverflowMenu = false
+                onDisconnectClick()
+            }
+        )
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.action_app_settings)) },
+            onClick = {
+                showOverflowMenu = false
+                onSettingsClick()
+            }
+        )
+        HorizontalDivider()
+        DropdownMenuItem(
+            text = { Text(stringResource(R.string.action_exit_app)) },
+            onClick = {
+                showOverflowMenu = false
+                onExitAppClick()
+            }
+        )
+    }
+
     // Shared top bar composable
     val topBar: @Composable () -> Unit = {
         TopAppBar(
@@ -435,42 +500,7 @@ private fun ConnectedShell(
                             expanded = showOverflowMenu,
                             onDismissRequest = { showOverflowMenu = false }
                         ) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.action_stats)) },
-                                onClick = {
-                                    showOverflowMenu = false
-                                    onStatsClick()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.action_edit_server)) },
-                                onClick = {
-                                    showOverflowMenu = false
-                                    onEditServerClick()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.action_switch_server)) },
-                                onClick = {
-                                    showOverflowMenu = false
-                                    onDisconnectClick()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.action_app_settings)) },
-                                onClick = {
-                                    showOverflowMenu = false
-                                    onSettingsClick()
-                                }
-                            )
-                            HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.action_exit_app)) },
-                                onClick = {
-                                    showOverflowMenu = false
-                                    onExitAppClick()
-                                }
-                            )
+                            overflowMenuItems()
                         }
                     }
                 }
@@ -642,11 +672,40 @@ private fun ConnectedShell(
         val hideTopBar = formFactor == FormFactor.TV &&
             selectedNavTab == null &&
             currentDetail == null
-        Scaffold(
-            modifier = modifier,
-            topBar = if (hideTopBar) ({}) else topBar,
-            content = contentArea
-        )
+        // When the top bar is hidden on TV+Now Playing the overflow icon isn't
+        // reachable, so OK / DPAD_CENTER on the passive focus anchor opens the
+        // overflow menu instead. Returns false unless we actually consume the
+        // press, so focused buttons elsewhere keep their normal behavior.
+        Box(modifier = modifier.onKeyEvent { event ->
+            when {
+                !hideTopBar || showOverflowMenu -> false
+                event.type != KeyEventType.KeyUp -> false
+                event.key == Key.DirectionCenter ||
+                    event.key == Key.Enter ||
+                    event.key == Key.NumPadEnter -> {
+                    showOverflowMenu = true
+                    true
+                }
+                else -> false
+            }
+        }) {
+            Scaffold(
+                topBar = if (hideTopBar) ({}) else topBar,
+                content = contentArea
+            )
+            if (hideTopBar && showOverflowMenu) {
+                // Material3 DropdownMenu items are not D-pad operable on TV;
+                // render a TV-tailored overlay with tvFocusable items instead.
+                TvOverflowMenuOverlay(
+                    onDismiss = { showOverflowMenu = false },
+                    onStats = onStatsClick,
+                    onEditServer = onEditServerClick,
+                    onSwitchServer = onDisconnectClick,
+                    onSettings = onSettingsClick,
+                    onExitApp = onExitAppClick,
+                )
+            }
+        }
     } else {
         // MA connected -> NavigationSuiteScaffold with browse tabs + Now Playing
         // Override navigation type based on form factor and orientation:
@@ -1420,5 +1479,131 @@ private fun SideMiniPlayerBar(
                 modifier = Modifier.width(AdaptiveDefaults.sideMiniPlayerWidth())
             )
         }
+    }
+}
+
+/**
+ * TV overflow menu overlay: shown on Now Playing when the user presses OK on
+ * the remote (top bar is hidden so the dropdown is unreachable). Items are
+ * tvFocusable with large hit targets and visible focus ring; first item gets
+ * initial focus; Back dismisses.
+ */
+@Composable
+private fun TvOverflowMenuOverlay(
+    onDismiss: () -> Unit,
+    onStats: () -> Unit,
+    onEditServer: () -> Unit,
+    onSwitchServer: () -> Unit,
+    onSettings: () -> Unit,
+    onExitApp: () -> Unit,
+) {
+    val firstFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { firstFocus.requestFocus() }
+
+    // Intercept BACK during the tunnel (preview) phase so it dismisses the
+    // overlay in one press. Without this, BACK first reaches the focused
+    // menu item's `clickable` modifier and is consumed there (clearing the
+    // focus highlight without dismissing), so the user has to press BACK
+    // twice -- once to clear focus, once for the surrounding BackHandler to
+    // fire. Routing BACK here first puts the dismiss above any child focus
+    // consumer. KeyDown filter avoids handling the up event.
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onPreviewKeyEvent { event ->
+                if (event.key == Key.Back && event.type == KeyEventType.KeyDown) {
+                    onDismiss()
+                    true
+                } else {
+                    false
+                }
+            }
+            .background(Color.Black.copy(alpha = 0.55f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 8.dp,
+            modifier = Modifier
+                .widthIn(min = 360.dp, max = 520.dp)
+                .padding(48.dp),
+        ) {
+            Column(modifier = Modifier.padding(vertical = 12.dp)) {
+                TvOverflowMenuItem(
+                    label = stringResource(R.string.action_stats),
+                    onClick = { onDismiss(); onStats() },
+                    focusRequester = firstFocus,
+                )
+                TvOverflowMenuItem(
+                    label = stringResource(R.string.action_edit_server),
+                    onClick = { onDismiss(); onEditServer() },
+                )
+                TvOverflowMenuItem(
+                    label = stringResource(R.string.action_switch_server),
+                    onClick = { onDismiss(); onSwitchServer() },
+                )
+                TvOverflowMenuItem(
+                    label = stringResource(R.string.action_app_settings),
+                    onClick = { onDismiss(); onSettings() },
+                )
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
+                TvOverflowMenuItem(
+                    label = stringResource(R.string.action_exit_app),
+                    onClick = { onDismiss(); onExitApp() },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TvOverflowMenuItem(
+    label: String,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null,
+) {
+    // tvFocusable + clickable on the same Box adds two focus targets, and the
+    // outer (tvFocusable's) absorbs focus while the inner clickable holds the
+    // OK key handler -- pressing OK does nothing. Drive the visual ring from
+    // clickable's own interaction source so there's only one focus target.
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isFocused) 1.02f else 1f,
+        label = "tv-menu-item-scale",
+    )
+    val borderColor = if (isFocused) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        Color.Transparent
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .scale(scale)
+            .border(width = 3.dp, color = borderColor, shape = RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(10.dp))
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick,
+            )
+            .heightIn(min = 56.dp)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = label,
+            fontSize = 20.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     }
 }

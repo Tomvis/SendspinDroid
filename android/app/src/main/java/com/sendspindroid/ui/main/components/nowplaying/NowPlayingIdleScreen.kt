@@ -260,7 +260,7 @@ private fun IdleGrain() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(brush = brush, alpha = 0.05f),
+            .background(brush = brush, alpha = 0.012f),
     )
 }
 
