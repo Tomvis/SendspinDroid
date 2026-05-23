@@ -1,5 +1,6 @@
 package com.sendspindroid.ui.main.components.nowplaying
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -22,6 +23,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -73,27 +75,87 @@ fun NowPlayingFocus(
     accent: Color,
     groupLabel: String,
     audioSpec: AudioStreamSpec?,
+    isBuffering: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    // Debounced pause detection. STATE_BUFFERING during a SendSpin track
-    // transition flips isPlaying false for ~200-500 ms; the previous guard
-    // (`isPlaying == false && playbackState == READY`) was meant to suppress
-    // the shrink-and-return on those transitions, but READY+isPlaying=false
-    // never actually occurs -- the SendSpin -> Media3 mapping pairs PLAYING
-    // with READY and everything else (INITIALIZING / WAITING_FOR_START /
-    // REANCHORING) with BUFFERING, so the guard made `paused` impossible.
-    // Result: badge / art / ambient stayed in the playing look even after
-    // MA pause. Debounce by ~500 ms instead: a real pause persists past
-    // the threshold; track transitions resolve before it fires.
-    var paused by remember { mutableStateOf(false) }
+    // Paused-state machine.
+    //
+    // We commit to the paused look after an 800 ms debounce off isPlaying
+    // -- short enough to feel responsive when the user presses pause, long
+    // enough to ride out the ~200-500 ms isPlaying dropouts that Media3
+    // emits when SendSpin sends stream/end before stream/start during a
+    // skip. The slower buffering windows that go past 800 ms are caught by
+    // `effectivePaused` below, which suppresses the paused visuals while
+    // `isBuffering` is true.
+    var paused by remember { mutableStateOf(!isPlaying) }
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
             paused = false
         } else {
-            delay(500)
+            delay(800)
             paused = true
         }
     }
+
+    // The badge correctly labels three states (Buffering > Paused > Now
+    // Playing), but the art / glow / ambient wash shouldn't dim during a
+    // track-start load just because isPlaying happens to be false. Gate the
+    // dim treatments on (paused && !isBuffering) so they only fire on a
+    // real user-initiated pause.
+    val effectivePaused = paused && !isBuffering
+
+    // Accent color tween. Artwork-derived palettes hard-cut between tracks
+    // and the change rippling through halo + wash + progress fill + chip
+    // accents at once reads as a snap. A 600 ms ease blurs the boundary so
+    // the track change feels lived-in. The two-tween split (accentSlow for
+    // pigment-heavy surfaces, accent passed straight through to one or two
+    // small details if we ever want a faster path) leaves room to tune
+    // later without restructuring callers.
+    val animatedAccent by animateColorAsState(
+        targetValue = accent,
+        animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing),
+        label = "np-accent",
+    )
+
+    // Sticky queue position. server/state and the track-info frame arrive on
+    // separate WebSocket messages, so on a fresh play we can momentarily
+    // have a real title with queueTrack=0 / totalTracks=0. The bottom-right
+    // "X OF Y" label would pop in a beat after the rest of the screen.
+    //
+    // Hold the last good pair and reset only when we're confident the new
+    // track really has no queue context: wait 1.5 s after seeing zeros, and
+    // only commit the clear if the title is also empty (genuine end of
+    // playback). On a track *change*, the title flips first so we reset
+    // immediately to avoid showing the prior track's queue position.
+    var stickyTrackNumber by remember { mutableIntStateOf(metadata.queueTrack) }
+    var stickyTrackTotal by remember { mutableIntStateOf(metadata.totalTracks) }
+    var queueAnchorTitle by remember { mutableStateOf(metadata.title) }
+    LaunchedEffect(metadata.title) {
+        // New track: drop the stale numbers so we don't claim "3 of 7" for a
+        // track that actually isn't in any queue context.
+        if (metadata.title != queueAnchorTitle) {
+            queueAnchorTitle = metadata.title
+            stickyTrackNumber = metadata.queueTrack
+            stickyTrackTotal = metadata.totalTracks
+        }
+    }
+    LaunchedEffect(metadata.queueTrack, metadata.totalTracks, metadata.title) {
+        if (metadata.queueTrack > 0 && metadata.totalTracks > 0) {
+            stickyTrackNumber = metadata.queueTrack
+            stickyTrackTotal = metadata.totalTracks
+        } else if (metadata.title.isNotBlank()) {
+            // Title is present but queue position isn't yet. Hold the
+            // previous numbers briefly; if the server still hasn't pushed
+            // them after 1.5 s, this track genuinely has no queue context
+            // and we clear.
+            delay(1500)
+            if (metadata.queueTrack == 0 && metadata.totalTracks == 0) {
+                stickyTrackNumber = 0
+                stickyTrackTotal = 0
+            }
+        }
+    }
+
     // Now Playing is a passive view; no interactive elements on-screen. Park
     // initial focus on an invisible anchor so the Activity still gets D-pad
     // key events (e.g. BACK).
@@ -109,7 +171,7 @@ fun NowPlayingFocus(
         // AmbientBg deliberately full-bleed (outside overscanSafe) so the
         // blurred-cover wash extends to the actual screen edge; nothing
         // critical sits there.
-        AmbientBg(artworkSource = artworkSource, accent = accent, paused = paused)
+        AmbientBg(artworkSource = artworkSource, accent = animatedAccent, paused = effectivePaused)
 
         Box(
             modifier = Modifier
@@ -136,6 +198,7 @@ fun NowPlayingFocus(
                 SourceBadge(
                     paused = paused,
                     groupLabel = groupLabel,
+                    isBuffering = isBuffering,
                 )
                 NowPlayingClock()
             }
@@ -150,8 +213,8 @@ fun NowPlayingFocus(
             ) {
                 AlbumArt(
                     artworkSource = artworkSource,
-                    accent = accent,
-                    paused = paused,
+                    accent = animatedAccent,
+                    paused = effectivePaused,
                 )
                 Spacer(modifier = Modifier.width(88.dp))
                 InfoColumn(
@@ -167,9 +230,9 @@ fun NowPlayingFocus(
                 durationMs = durationMs,
                 positionUpdatedAt = positionUpdatedAt,
                 isPlaying = isPlaying,
-                trackNumber = metadata.queueTrack,
-                trackTotal = metadata.totalTracks,
-                accent = accent,
+                trackNumber = stickyTrackNumber,
+                trackTotal = stickyTrackTotal,
+                accent = animatedAccent,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
@@ -242,9 +305,14 @@ private fun AlbumArt(
             namespace = "np-focus",
         )
 
-        AsyncImage(
-            model = model,
-            contentDescription = null,
+        // 620 dp card. The dark backdrop sits behind the image so that:
+        //  - while artwork is loading, the user sees a calm dark surface
+        //    that already picks up the current accent rather than a stark
+        //    light-gray square that fights the rest of the screen,
+        //  - after artwork lands, the AsyncImage paints opaquely over it
+        //    and the backdrop is hidden,
+        //  - the elevation shadow stays a property of the whole card.
+        Box(
             modifier = Modifier
                 .size(620.dp)
                 .shadow(
@@ -252,13 +320,73 @@ private fun AlbumArt(
                     shape = RoundedCornerShape(8.dp),
                     clip = false,
                 )
-                .graphicsLayer { alpha = imageAlpha }
                 .clip(RoundedCornerShape(8.dp)),
-            contentScale = ContentScale.Crop,
-            placeholder = painterResource(R.drawable.placeholder_album_simple),
-            error = painterResource(R.drawable.placeholder_album_simple),
-            fallback = painterResource(R.drawable.placeholder_album_simple),
+        ) {
+            DarkAlbumBackdrop(accent = accent, modifier = Modifier.fillMaxSize())
+            AsyncImage(
+                model = model,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = imageAlpha },
+                contentScale = ContentScale.Crop,
+                placeholder = painterResource(R.drawable.placeholder_album_simple_dark),
+                error = painterResource(R.drawable.placeholder_album_simple_dark),
+                fallback = painterResource(R.drawable.placeholder_album_simple_dark),
+            )
+        }
+    }
+}
+
+/**
+ * Calm dark surface used when there's no artwork to show (track lacks cover,
+ * load failed, or queue is between tracks). Renders the same ambient
+ * vocabulary as the rest of the focus screen: a near-black base with a
+ * soft accent radial offset toward the top-left, a faint hairline border,
+ * and the placeholder music note from R.drawable.placeholder_album_simple_dark
+ * layered at low alpha so the slot still reads as "album art".
+ *
+ * Uses Modifier.background for both the base and the accent wash because
+ * the Shield Tegra renderer drops Canvas-shader brushes (see AmbientBg.kt
+ * for the long version).
+ */
+@Composable
+private fun DarkAlbumBackdrop(
+    accent: Color,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val w = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+        val h = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+        val washBrush = remember(accent, w, h) {
+            Brush.radialGradient(
+                colors = listOf(accent.copy(alpha = 0.14f), Color.Transparent),
+                center = Offset(w * 0.28f, h * 0.30f),
+                radius = maxOf(w, h) * 0.85f,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF0B0810)),
         )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(washBrush),
+        )
+        // Cream hairline so the card still reads as a physical object when
+        // the dark backdrop is showing. 6% alpha matches the cover's own
+        // box-shadow inner stroke from the design spec.
+        androidx.compose.foundation.Canvas(
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            drawRoundRect(
+                color = Color(0xFFFAF6F0).copy(alpha = 0.06f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx()),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()),
+            )
+        }
     }
 }
 

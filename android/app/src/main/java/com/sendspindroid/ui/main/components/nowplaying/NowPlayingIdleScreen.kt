@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.TvInitialFocus
 import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.theme.NpFrauncesFamily
@@ -61,14 +62,38 @@ private val IdleFgFaint = Color(0xFFFAF6F0).copy(alpha = 0.35f)
 private val BlobTintA = Color(0xFF6A4D9A).copy(alpha = 0.4f)
 private val BlobTintB = Color(0xFFD98C58).copy(alpha = 0.67f)
 
+/**
+ * View-model for the idle screen's status surfaces (standby badge + wordmark
+ * subtitle). The two surfaces share the same five-state machine so the badge
+ * dot and wordmark subtitle always agree.
+ */
+private enum class IdleStatus(val dotLabel: String, val wordmarkLabel: String) {
+    READY("Standby", "Audio · Ready"),
+    CONNECTING("Connecting", "Linking · Audio"),
+    RECONNECTING("Reconnecting", "Searching · Audio"),
+    OFFLINE("Offline", "No Server"),
+    ERROR("Disconnected", "Connection Lost"),
+}
+
+private fun AppConnectionState?.toIdleStatus(): IdleStatus = when (this) {
+    null -> IdleStatus.READY
+    is AppConnectionState.Connected -> IdleStatus.READY
+    is AppConnectionState.Connecting -> IdleStatus.CONNECTING
+    is AppConnectionState.Reconnecting -> IdleStatus.RECONNECTING
+    is AppConnectionState.Error -> IdleStatus.ERROR
+    AppConnectionState.ServerList -> IdleStatus.OFFLINE
+}
+
 @Composable
 fun NowPlayingIdleScreen(
     accent: Color,
     groupLabel: String,
+    connectionState: AppConnectionState? = null,
     modifier: Modifier = Modifier,
 ) {
     val focusAnchor = remember { FocusRequester() }
     TvInitialFocus(focusAnchor)
+    val status = connectionState.toIdleStatus()
 
     Box(
         modifier = modifier
@@ -106,8 +131,8 @@ fun NowPlayingIdleScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Top,
             ) {
-                StandbyBadge(groupLabel = groupLabel)
-                Wordmark(accent = accent)
+                StandbyBadge(groupLabel = groupLabel, status = status, accent = accent)
+                Wordmark(accent = accent, status = status)
             }
 
             Box(
@@ -265,9 +290,34 @@ private fun IdleGrain() {
 }
 
 @Composable
-private fun StandbyBadge(groupLabel: String) {
+private fun StandbyBadge(
+    groupLabel: String,
+    status: IdleStatus,
+    accent: Color,
+) {
+    // When the link isn't healthy, the dot does the same gentle breath
+    // SourceBadge uses on the focus screen. Reusing the cadence makes the
+    // two screens read as the same instrument in two states.
+    val isLive = status != IdleStatus.READY && status != IdleStatus.OFFLINE
+    val transition = rememberInfiniteTransition(label = "np-idle-badge")
+    val pulseScale by transition.animateFloat(
+        initialValue = if (isLive) 0.85f else 1f,
+        targetValue = if (isLive) 1.18f else 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "np-idle-badge-scale",
+    )
+    val dotColor = when (status) {
+        IdleStatus.READY -> IdleFgFaint
+        IdleStatus.OFFLINE -> IdleFgFaint
+        IdleStatus.CONNECTING -> accent
+        IdleStatus.RECONNECTING -> accent
+        IdleStatus.ERROR -> Color(0xFFE57373) // muted coral, doesn't fight cream/accent
+    }
     val label = buildString {
-        append("Standby")
+        append(status.dotLabel)
         if (groupLabel.isNotBlank()) {
             append(" · ")
             append(groupLabel)
@@ -280,9 +330,13 @@ private fun StandbyBadge(groupLabel: String) {
         Box(
             modifier = Modifier
                 .size(8.dp)
+                .graphicsLayer {
+                    scaleX = pulseScale
+                    scaleY = pulseScale
+                }
                 .drawWithCache {
                     onDrawBehind {
-                        drawCircle(color = IdleFgFaint)
+                        drawCircle(color = dotColor)
                     }
                 },
         )
@@ -298,7 +352,7 @@ private fun StandbyBadge(groupLabel: String) {
 }
 
 @Composable
-private fun Wordmark(accent: Color) {
+private fun Wordmark(accent: Color, status: IdleStatus) {
     val annotated = buildAnnotatedString {
         withStyle(
             SpanStyle(
@@ -327,7 +381,7 @@ private fun Wordmark(accent: Color) {
             lineHeight = 32.sp,
         )
         Text(
-            text = "Audio · Ready".uppercase(Locale.getDefault()),
+            text = status.wordmarkLabel.uppercase(Locale.getDefault()),
             modifier = Modifier.padding(top = 8.dp),
             fontFamily = NpInterFamily,
             fontSize = 16.sp,

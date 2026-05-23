@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
+import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.main.components.nowplaying.NowPlayingFocus
 import com.sendspindroid.ui.main.components.nowplaying.NowPlayingIdleScreen
 import com.sendspindroid.ui.queue.QueueViewModel
@@ -27,7 +28,7 @@ internal fun NowPlayingTv(
     metadata: TrackMetadata,
     groupName: String,
     artworkSource: ArtworkSource?,
-    @Suppress("UNUSED_PARAMETER") isBuffering: Boolean,
+    isBuffering: Boolean,
     isPlaying: Boolean,
     playbackState: PlaybackState,
     @Suppress("UNUSED_PARAMETER") controlsEnabled: Boolean,
@@ -37,6 +38,7 @@ internal fun NowPlayingTv(
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
     audioSpec: AudioStreamSpec? = null,
+    connectionState: AppConnectionState? = null,
     @Suppress("UNUSED_PARAMETER") onPreviousClick: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onPlayPauseClick: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onNextClick: () -> Unit,
@@ -69,7 +71,11 @@ internal fun NowPlayingTv(
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     if (metadata.isEmpty) {
-                        NowPlayingIdleScreen(accent = accent, groupLabel = groupName)
+                        NowPlayingIdleScreen(
+                            accent = accent,
+                            groupLabel = groupName,
+                            connectionState = connectionState,
+                        )
                     } else {
                         NowPlayingFocus(
                             metadata = metadata,
@@ -82,6 +88,7 @@ internal fun NowPlayingTv(
                             accent = accent,
                             groupLabel = groupName,
                             audioSpec = audioSpec,
+                            isBuffering = isBuffering,
                         )
                     }
                 }

@@ -135,6 +135,27 @@ fun NowPlayingScreen(
             if (artworkSource == null) stickyArtworkSource = null
         }
     }
+    // Zombie-state safeguard. MA's "Clear queue" stops audio but doesn't fire
+    // an empty-metadata frame, so stickyMetadata otherwise persists
+    // indefinitely while stickyArtworkSource clears on its own debounce. The
+    // user sees text + spec chips + a frozen progress rail layered over a
+    // dark placeholder card, with no way for the screen to recover until the
+    // 60 s pause watchdog finally nulls everything.
+    //
+    // When the artwork has cleared (sticky is null) AND we're still
+    // connected (so we know this isn't just a session-tear-down race), wait
+    // another 1.2 s. If the artwork really hasn't come back by then, this is
+    // a "queue ended" situation, not a transient gap between tracks -- flip
+    // metadata back to EMPTY so the screen reverts to NowPlayingIdleScreen
+    // cleanly.
+    LaunchedEffect(stickyArtworkSource, isActivelyConnected) {
+        if (isActivelyConnected && stickyArtworkSource == null && !stickyMetadata.isEmpty) {
+            kotlinx.coroutines.delay(1200)
+            if (stickyArtworkSource == null) {
+                stickyMetadata = TrackMetadata.EMPTY
+            }
+        }
+    }
     // SendSpin fires stream/end on pause, which zeroes the audio spec. Keep the
     // last non-null value so the codec/bit-depth/sample-rate chips stay up
     // while paused. We deliberately do NOT key the remember on track metadata:
@@ -146,6 +167,15 @@ fun NowPlayingScreen(
         when {
             !isActivelyConnected -> stickyAudioSpec = null
             audioStreamSpec != null -> stickyAudioSpec = audioStreamSpec
+        }
+    }
+    // When the zombie-state safeguard flips stickyMetadata back to EMPTY,
+    // the spec chips should clear too -- otherwise we'd land on the idle
+    // screen and the user would still be looking at the "OPUS · 16-BIT" row
+    // for the previous track. Idle implies no spec.
+    LaunchedEffect(stickyMetadata) {
+        if (stickyMetadata.isEmpty) {
+            stickyAudioSpec = null
         }
     }
     // Optimistic metadata update: when a queue item is tapped, update the UI
@@ -179,9 +209,19 @@ fun NowPlayingScreen(
         }
     }
 
-    // Don't show buffering spinner when paused -- SendSpin's audio stream stops on
-    // pause, so Media3 reports STATE_BUFFERING even though the user intentionally paused.
-    val isBuffering = playbackState == PlaybackState.BUFFERING && !metadata.isEmpty && isPlaying
+    // "Audio is loading" signal -- not the same as playbackState==BUFFERING,
+    // because SendSpin's mapping marks a real pause as BUFFERING too. We
+    // need to distinguish:
+    //   - track start / mid-skip buffer fill  -> show the buffering look
+    //   - user pressed pause                  -> show the paused look
+    // We disambiguate by position: a track that's been playing for >2.5s
+    // before its audio engine drops out is a pause; <=2.5s is the load
+    // window that follows a stream/start. This also keeps the badge calm
+    // when paused mid-song -- only the initial seconds of playback can
+    // ever trip the pulse.
+    val isBuffering = playbackState == PlaybackState.BUFFERING &&
+        !metadata.isEmpty &&
+        positionMs < 2500L
     val controlsEnabled = playbackState == PlaybackState.READY || playbackState == PlaybackState.BUFFERING
 
     // Get server name from connection state
@@ -265,6 +305,7 @@ fun NowPlayingScreen(
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
                     audioSpec = stickyAudioSpec,
+                    connectionState = connectionState,
                     onPreviousClick = onPreviousClick,
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,

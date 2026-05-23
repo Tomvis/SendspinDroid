@@ -6,6 +6,11 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -44,6 +50,7 @@ private val ChromeFgFaint = Color(0xFFFFFFFF).copy(alpha = 0.55f)
 fun SourceBadge(
     paused: Boolean,
     groupLabel: String,
+    isBuffering: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val dotColor by animateColorAsState(
@@ -51,8 +58,38 @@ fun SourceBadge(
         animationSpec = tween(durationMillis = 500),
         label = "np-dot-color",
     )
+    // Buffering breath: the dot scales 0.85<->1.15 and the halo alpha rides
+    // along, so the badge reads as "actively working" without changing color
+    // or label vocabulary. Driven by a single infinite transition that only
+    // ticks when isBuffering is true (the .takeIf gate keeps the targets
+    // identical at rest so animateFloatAsState idles).
+    val pulseTransition = rememberInfiniteTransition(label = "np-badge-pulse")
+    val pulseScale by pulseTransition.animateFloat(
+        initialValue = if (isBuffering) 0.85f else 1f,
+        targetValue = if (isBuffering) 1.18f else 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "np-badge-pulse-scale",
+    )
+    val pulseAlpha by pulseTransition.animateFloat(
+        initialValue = if (isBuffering) 0.55f else 1f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "np-badge-pulse-alpha",
+    )
     val label = buildString {
-        append(if (paused) "Paused" else "Now Playing")
+        append(
+            when {
+                isBuffering -> "Buffering"
+                paused -> "Paused"
+                else -> "Now Playing"
+            }
+        )
         if (groupLabel.isNotBlank()) {
             append(" · ")
             append(groupLabel)
@@ -95,11 +132,20 @@ fun SourceBadge(
             Box(
                 modifier = Modifier
                     .size(20.dp)
+                    .graphicsLayer {
+                        scaleX = pulseScale
+                        scaleY = pulseScale
+                        alpha = pulseAlpha
+                    }
                     .background(glowBrush, CircleShape),
             )
             Box(
                 modifier = Modifier
                     .size(8.dp)
+                    .graphicsLayer {
+                        scaleX = pulseScale
+                        scaleY = pulseScale
+                    }
                     .background(dotColor, CircleShape),
             )
         }
