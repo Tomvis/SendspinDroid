@@ -105,15 +105,17 @@ fun NowPlayingFocus(
     val effectivePaused = paused && !isBuffering
 
     // Accent color tween. Artwork-derived palettes hard-cut between tracks
-    // and the change rippling through halo + wash + progress fill + chip
-    // accents at once reads as a snap. A 600 ms ease blurs the boundary so
-    // the track change feels lived-in. The two-tween split (accentSlow for
-    // pigment-heavy surfaces, accent passed straight through to one or two
-    // small details if we ever want a faster path) leaves room to tune
-    // later without restructuring callers.
+    // and a brusque pigment swap across halo + wash + progress fill reads
+    // cheap. But too slow a tween makes the ambient drag behind the audio
+    // -- the user hears the new track while the wash is still on the
+    // previous album's colour. Match the tween to the album-art crossfade
+    // (100 ms in ArtworkRequest) plus a small tail so the colour finishes
+    // settling just as the new artwork lands. 250 ms is the sweet spot:
+    // smooth enough to read as a transition, fast enough that it never
+    // visibly trails the audio on a track skip.
     val animatedAccent by animateColorAsState(
         targetValue = accent,
-        animationSpec = tween(durationMillis = 600, easing = FastOutSlowInEasing),
+        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
         label = "np-accent",
     )
 
