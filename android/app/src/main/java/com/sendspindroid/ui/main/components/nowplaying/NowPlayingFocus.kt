@@ -80,19 +80,25 @@ fun NowPlayingFocus(
 ) {
     // Paused-state machine.
     //
-    // We commit to the paused look after an 800 ms debounce off isPlaying
-    // -- short enough to feel responsive when the user presses pause, long
-    // enough to ride out the ~200-500 ms isPlaying dropouts that Media3
-    // emits when SendSpin sends stream/end before stream/start during a
-    // skip. The slower buffering windows that go past 800 ms are caught by
-    // `effectivePaused` below, which suppresses the paused visuals while
-    // `isBuffering` is true.
+    // Commit to the paused look after a 150 ms debounce off isPlaying. The
+    // old 800 ms debounce existed to ride out the ~200-500 ms isPlaying
+    // dropouts that Media3 emits when SendSpin sends stream/end before
+    // stream/start during a skip -- but that meant the art / glow /
+    // ambient wash didn't begin reacting to a real pause press for nearly
+    // a full second. With `effectivePaused` below now gating the dim
+    // treatments on `!isBuffering`, the longer skip transitions are
+    // suppressed by the buffering signal instead of by an outright
+    // visual-state delay. 150 ms is long enough to filter sub-frame
+    // jitter and brief stream/end -> stream/start gaps that resolve
+    // before positionMs has a chance to reset (which is what activates
+    // the buffering gate), and short enough that a real pause begins
+    // animating before the 500 ms tween finishes.
     var paused by remember { mutableStateOf(!isPlaying) }
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
             paused = false
         } else {
-            delay(800)
+            delay(150)
             paused = true
         }
     }

@@ -85,7 +85,19 @@ fun ProgressRail(
     LaunchedEffect(positionMs, positionUpdatedAt) {
         anchorPositionMs = positionMs
         anchorTime = positionUpdatedAt
-        displayPositionMs = positionMs
+        // Snap displayPositionMs only when actively playing OR when the new
+        // server position represents a clear track change (positionMs reset
+        // near 0 while displayPositionMs was deep into the previous track).
+        // While paused mid-track the server's snapshot of "where the track
+        // currently is" routinely trails local interpolation by a beat, and
+        // snapping would visibly jerk the playhead backward right as the
+        // pause animation is firing. Preserve the local value; the resume
+        // path re-anchors to displayPositionMs so the bar continues forward
+        // from where the user saw it freeze.
+        val isTrackChange = positionMs < 2000L && displayPositionMs > 5000L
+        if (isPlaying || isTrackChange) {
+            displayPositionMs = positionMs
+        }
     }
 
     LaunchedEffect(isPlaying) {
