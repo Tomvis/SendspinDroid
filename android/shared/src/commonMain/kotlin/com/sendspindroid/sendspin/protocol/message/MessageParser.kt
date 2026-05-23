@@ -1,8 +1,10 @@
 package com.sendspindroid.sendspin.protocol.message
 
+import com.sendspindroid.sendspin.protocol.ColorState
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
-import com.sendspindroid.sendspin.protocol.SendSpinProtocol
+import com.sendspindroid.sendspin.protocol.JsonOptional
+import com.sendspindroid.sendspin.protocol.MoshiInstance
 import com.sendspindroid.sendspin.protocol.ServerCommandResult
 import com.sendspindroid.sendspin.protocol.ServerHelloResult
 import com.sendspindroid.sendspin.protocol.ServerStateResult
@@ -11,278 +13,346 @@ import com.sendspindroid.sendspin.protocol.SyncOffsetResult
 import com.sendspindroid.sendspin.protocol.TimeMeasurement
 import com.sendspindroid.sendspin.protocol.TrackMetadata
 import com.sendspindroid.sendspin.protocol.TrackProgress
+import com.sendspindroid.sendspin.protocol.wire.WireColor
+import com.sendspindroid.sendspin.protocol.wire.WireController
+import com.sendspindroid.sendspin.protocol.wire.WireGroupUpdatePayload
+import com.sendspindroid.sendspin.protocol.wire.WireMetadata
+import com.sendspindroid.sendspin.protocol.wire.WireProgress
+import com.sendspindroid.sendspin.protocol.wire.WireProxyAuthResponse
+import com.sendspindroid.sendspin.protocol.wire.WireServerCommandPayload
+import com.sendspindroid.sendspin.protocol.wire.WireServerHelloPayload
+import com.sendspindroid.sendspin.protocol.wire.WireServerStatePayload
+import com.sendspindroid.sendspin.protocol.wire.WireServerTimePayload
+import com.sendspindroid.sendspin.protocol.wire.WireStreamStartPayload
+import com.sendspindroid.sendspin.protocol.wire.WireSyncOffsetPayload
 import com.sendspindroid.shared.log.Log
 import com.sendspindroid.shared.platform.Platform
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.longOrNull
+import com.squareup.moshi.JsonAdapter
 
+/**
+ * Parses Sendspin server messages into domain types.
+ *
+ * Public methods take the message `payload` as a `Map<String, Any?>` (or any
+ * Moshi raw JSON value: Map, List, String, Boolean, Number, null) — which is
+ * exactly what the envelope adapter in [SendSpinProtocolHandler] hands back
+ * after decoding the outer `{type, payload}` shape. Internally each method
+ * defers to a KSP-generated Moshi adapter via [JsonAdapter.fromJsonValue],
+ * so there is no string round-trip and no runtime reflection on the hot
+ * path. Diff-merge and legacy-fallback logic for `server/state` lives below.
+ *
+ * Tests construct payloads directly with `mapOf("key" to value, ...)`; no
+ * JSON library dependency is required at the call site.
+ */
 object MessageParser {
     private const val TAG = "MessageParser"
 
-    fun parseServerHello(payload: JsonObject?, defaultName: String): ServerHelloResult? {
+    private val helloAdapter by lazy {
+        MoshiInstance.moshi.adapter(WireServerHelloPayload::class.java)
+    }
+    private val timeAdapter by lazy {
+        MoshiInstance.moshi.adapter(WireServerTimePayload::class.java)
+    }
+    private val stateAdapter by lazy {
+        MoshiInstance.moshi.adapter(WireServerStatePayload::class.java)
+    }
+    private val streamStartAdapter by lazy {
+        MoshiInstance.moshi.adapter(WireStreamStartPayload::class.java)
+    }
+    private val serverCommandAdapter by lazy {
+        MoshiInstance.moshi.adapter(WireServerCommandPayload::class.java)
+    }
+    private val groupUpdateAdapter by lazy {
+        MoshiInstance.moshi.adapter(WireGroupUpdatePayload::class.java)
+    }
+    private val syncOffsetAdapter by lazy {
+        MoshiInstance.moshi.adapter(WireSyncOffsetPayload::class.java)
+    }
+    private val proxyAuthResponseAdapter by lazy {
+        MoshiInstance.moshi.adapter(WireProxyAuthResponse::class.java)
+    }
+
+    private fun <T : Any> decode(payload: Any?, adapter: JsonAdapter<T>): T? {
+        if (payload == null) return null
+        return try {
+            adapter.fromJsonValue(payload)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to decode payload: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Parses a Sendspin text-message envelope `{type, payload}` from JSON.
+     * Returns `(type, payloadValue)` or null when the JSON is malformed or
+     * the envelope is missing a `type` field. `payloadValue` is the raw
+     * Moshi JSON value — typically `Map<String, Any?>` for object payloads,
+     * suitable to feed straight into the parseXxx methods below.
+     */
+    fun parseEnvelope(text: String): Pair<String, Any?>? {
+        return try {
+            val map = MoshiInstance.envelopeAdapter.fromJson(text) ?: return null
+            val type = map["type"] as? String ?: return null
+            type to map["payload"]
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to decode envelope: ${e.message}")
+            null
+        }
+    }
+
+    fun parseServerHello(payload: Any?, defaultName: String): ServerHelloResult? {
         if (payload == null) {
             Log.e(TAG, "server/hello missing payload")
             return null
         }
-
-        val serverName = payload.stringOrDefault("name", defaultName)
-        val serverId = payload.stringOrDefault("server_id", "")
-        val connectionReason = payload.stringOrDefault("connection_reason", "discovery")
-
-        val activeRoles = payload["active_roles"]?.jsonArray?.map {
-            it.jsonPrimitive.content
-        } ?: emptyList()
-
+        val wire = decode(payload, helloAdapter) ?: return null
         return ServerHelloResult(
-            serverName = serverName,
-            serverId = serverId,
-            activeRoles = activeRoles,
-            connectionReason = connectionReason
+            serverName = wire.name.ifEmpty { defaultName },
+            serverId = wire.serverId,
+            activeRoles = wire.activeRoles,
+            connectionReason = wire.connectionReason ?: "discovery",
         )
     }
 
-    fun parseServerTime(payload: JsonObject?, clientReceivedMicros: Long): TimeMeasurement? {
-        if (payload == null) return null
-
-        // Use nullable accessors so an explicit zero is distinguishable from
-        // an absent field. Zero is a valid timestamp value; only an absent
-        // field is grounds for rejection.
-        val clientTransmitted = payload["client_transmitted"]?.jsonPrimitive?.longOrNull
-        val serverReceived = payload["server_received"]?.jsonPrimitive?.longOrNull
-        val serverTransmitted = payload["server_transmitted"]?.jsonPrimitive?.longOrNull
-
-        if (clientTransmitted == null || serverReceived == null || serverTransmitted == null) {
+    fun parseServerTime(payload: Any?, clientReceivedMicros: Long): TimeMeasurement? {
+        val wire = decode(payload, timeAdapter) ?: return null
+        val t1 = wire.clientTransmitted
+        val t2 = wire.serverReceived
+        val t3 = wire.serverTransmitted
+        if (t1 == null || t2 == null || t3 == null) {
             Log.w(TAG, "Invalid server/time payload")
             return null
         }
-
-        val offset = ((serverReceived - clientTransmitted) + (serverTransmitted - clientReceivedMicros)) / 2
-        val rtt = (clientReceivedMicros - clientTransmitted) - (serverTransmitted - serverReceived)
-
+        val offset = ((t2 - t1) + (t3 - clientReceivedMicros)) / 2
+        val rtt = (clientReceivedMicros - t1) - (t3 - t2)
         return TimeMeasurement(offset, rtt, clientReceivedMicros)
     }
 
     fun parseServerState(
-        payload: JsonObject?,
-        previous: TrackMetadata? = null
+        payload: Any?,
+        previous: TrackMetadata? = null,
     ): ServerStateResult {
-        if (payload == null) return ServerStateResult(null, null, null)
+        val wire = decode(payload, stateAdapter)
+            ?: return ServerStateResult(null, null, null, null)
 
-        // The server emits diff-style updates (see aiosendspin
-        // server/roles/metadata/state.py::diff_update): only fields that
-        // changed appear in the message. A field that is absent from JSON
-        // means "unchanged" and must inherit from [previous] rather than
-        // reset to a default. A field present with `null` means "clear" and
-        // resets to the type default ("" / 0). Without this distinction, a
-        // title-only update would wipe artist/album/artwork/progress.
-        val metadata = (payload["metadata"] as? JsonObject)?.let { metadataObj ->
-            fun stringField(key: String, fallback: String): String {
-                if (key !in metadataObj) return fallback
-                return metadataObj[key]?.jsonPrimitive?.contentOrNull
-                    ?.takeUnless { it == "null" } ?: ""
-            }
-            fun longField(key: String, fallback: Long): Long {
-                if (key !in metadataObj) return fallback
-                return metadataObj[key]?.jsonPrimitive?.longOrNull ?: 0L
-            }
-            fun intField(key: String, fallback: Int): Int {
-                if (key !in metadataObj) return fallback
-                return metadataObj[key]?.jsonPrimitive?.intOrNull ?: 0
-            }
-
-            val timestamp = longField("timestamp", previous?.timestamp ?: 0L)
-            val title = stringField("title", previous?.title ?: "")
-            val artist = stringField("artist", previous?.artist ?: "")
-            val albumArtist = stringField("album_artist", previous?.albumArtist ?: "")
-            val album = stringField("album", previous?.album ?: "")
-            val artworkUrl = stringField("artwork_url", previous?.artworkUrl ?: "")
-            val year = intField("year", previous?.year ?: 0)
-
-            // album_track / legacy `track` resolution. Spec says "0 = not set",
-            // so a present-but-zero album_track still falls back to legacy
-            // `track` before finally inheriting from the previous metadata.
-            val albumTrack: Int = when {
-                "album_track" in metadataObj -> {
-                    val v = metadataObj.intOrDefault("album_track", 0)
-                    when {
-                        v > 0 -> v
-                        "track" in metadataObj -> metadataObj.intOrDefault("track", 0)
-                        else -> previous?.albumTrack ?: 0
-                    }
-                }
-                "track" in metadataObj -> metadataObj.intOrDefault("track", 0)
-                else -> previous?.albumTrack ?: 0
-            }
-
-            val queueTrack = intField("queue_track", previous?.queueTrack ?: 0)
-            val totalTracks = intField("total_tracks", previous?.totalTracks ?: 0)
-
-            // Progress:
-            // - "progress" present as object  -> update from object fields
-            // - "progress" present but null   -> clear to defaults (server's
-            //                                    cleared_update path)
-            // - "progress" absent + legacy flat keys present -> legacy parse
-            // - "progress" absent, no legacy  -> inherit from previous
-            // Using `as? JsonObject` rather than `?.jsonObject` so JsonNull
-            // (idle metadata) does not throw IllegalArgumentException.
-            val progress: TrackProgress = when {
-                "progress" in metadataObj -> {
-                    (metadataObj["progress"] as? JsonObject)?.let { progressObj ->
-                        TrackProgress(
-                            trackProgress = progressObj.longOrDefault("track_progress", 0),
-                            trackDuration = progressObj.longOrDefault("track_duration", 0),
-                            playbackSpeed = progressObj.intOrDefault("playback_speed", 1000)
-                        )
-                    } ?: TrackProgress(0, 0, 1000)
-                }
-                "position_ms" in metadataObj || "duration_ms" in metadataObj -> {
-                    TrackProgress(
-                        trackProgress = metadataObj.longOrDefault("position_ms", 0),
-                        trackDuration = metadataObj.longOrDefault("duration_ms", 0),
-                        playbackSpeed = metadataObj.intOrDefault("playback_speed", 1000)
-                    )
-                }
-                else -> previous?.progress ?: TrackProgress(0, 0, 1000)
-            }
-
-            TrackMetadata(
-                timestamp = timestamp,
-                title = title,
-                artist = artist,
-                albumArtist = albumArtist,
-                album = album,
-                artworkUrl = artworkUrl,
-                year = year,
-                albumTrack = albumTrack,
-                queueTrack = queueTrack,
-                totalTracks = totalTracks,
-                progress = progress
-            )
-        }
-
-        val state = payload.stringOrDefault("state", "").takeIf { it.isNotEmpty() }
-
-        // server/state may carry a `controller` object for clients that
-        // advertise the controller@v1 role. It reports group-level volume/mute
-        // (distinct from per-player volume/mute, which arrives via
-        // server/command) and the subset of MediaCommand values the
-        // application backing the group accepts.
-        val controllerState = (payload["controller"] as? JsonObject)?.let { controllerObj ->
-            val volume = controllerObj["volume"]?.jsonPrimitive?.intOrNull
-            val muted = controllerObj["muted"]?.jsonPrimitive?.booleanOrNull
-            val supportedArray = controllerObj["supported_commands"]?.jsonArray
-            if (volume == null || muted == null || supportedArray == null) {
-                Log.w(TAG, "server/state.controller missing required fields")
-                null
-            } else if (volume !in 0..100) {
-                Log.w(TAG, "server/state.controller.volume out of range: $volume")
-                null
-            } else {
-                ControllerState(
-                    supportedCommands = supportedArray.mapNotNull {
-                        it.jsonPrimitive.contentOrNull
-                    },
-                    volume = volume,
-                    muted = muted,
-                )
-            }
-        }
-
-        return ServerStateResult(metadata, state, controllerState)
+        val metadata = wire.metadata?.let { it.toTrackMetadata(previous) }
+        val state = wire.state?.takeIf { it.isNotEmpty() }
+        val legacyRepeat = wire.metadata?.legacyRepeat
+        val legacyShuffle = wire.metadata?.legacyShuffle
+        val controllerState = wire.controller?.toControllerState(legacyRepeat, legacyShuffle)
+        val colorState = wire.color?.toColorState()
+        return ServerStateResult(metadata, state, controllerState, colorState)
     }
 
-    fun parseServerCommand(payload: JsonObject?): ServerCommandResult? {
-        if (payload == null) return null
-
-        val player = payload["player"]?.jsonObject ?: return null
-        val command = player.stringOrDefault("command", "")
-
-        return when (command) {
+    fun parseServerCommand(payload: Any?): ServerCommandResult? {
+        val wire = decode(payload, serverCommandAdapter) ?: return null
+        val player = wire.player ?: return null
+        return when (player.command) {
             "volume" -> {
-                val volume = player.intOrDefault("volume", -1)
-                if (volume in 0..100) {
-                    ServerCommandResult.Volume(volume)
-                } else {
-                    null
-                }
+                val v = player.volume
+                if (v != null && v in 0..100) ServerCommandResult.Volume(v) else null
             }
-            "mute" -> {
-                val muted = player.booleanOrDefault("mute", false)
-                ServerCommandResult.Mute(muted)
-            }
-            else -> {
-                if (command.isNotEmpty()) {
-                    ServerCommandResult.Unknown(command)
-                } else {
-                    null
-                }
-            }
+            "mute" -> ServerCommandResult.Mute(player.mute ?: false)
+            "" -> null
+            else -> ServerCommandResult.Unknown(player.command)
         }
     }
 
-    fun parseGroupUpdate(payload: JsonObject?): GroupInfo? {
-        if (payload == null) return null
-
-        val groupId = payload.stringOrDefault("group_id", "")
-        val groupName = payload.stringOrDefault("group_name", "")
-        val playbackState = payload.stringOrDefault("playback_state", "")
-
-        return GroupInfo(groupId, groupName, playbackState)
+    fun parseGroupUpdate(payload: Any?): GroupInfo? {
+        val wire = decode(payload, groupUpdateAdapter) ?: return null
+        return GroupInfo(wire.groupId, wire.groupName, wire.playbackState)
     }
 
-    fun parseStreamStart(payload: JsonObject?): StreamConfig? {
-        if (payload == null) return null
-
-        val player = payload["player"]?.jsonObject ?: return null
-
-        val codec = player.stringOrDefault("codec", SendSpinProtocol.AudioFormat.DEFAULT_CODEC)
-        val sampleRate = player.intOrDefault("sample_rate", SendSpinProtocol.AudioFormat.SAMPLE_RATE)
-        val channels = player.intOrDefault("channels", SendSpinProtocol.AudioFormat.CHANNELS)
-        val bitDepth = player.intOrDefault("bit_depth", SendSpinProtocol.AudioFormat.BIT_DEPTH)
-
-        val codecHeader = player["codec_header"]?.jsonPrimitive?.contentOrNull?.let { base64 ->
+    fun parseStreamStart(payload: Any?): StreamConfig? {
+        val wire = decode(payload, streamStartAdapter) ?: return null
+        val player = wire.player ?: return null
+        val codecHeader = player.codecHeader?.let {
             try {
-                Platform.base64Decode(base64)
+                Platform.base64Decode(it)
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to decode codec_header")
                 null
             }
         }
-
-        return StreamConfig(codec, sampleRate, channels, bitDepth, codecHeader)
+        return StreamConfig(
+            codec = player.codec,
+            sampleRate = player.sampleRate,
+            channels = player.channels,
+            bitDepth = player.bitDepth,
+            codecHeader = codecHeader,
+        )
     }
 
-    fun parseSyncOffset(payload: JsonObject?): SyncOffsetResult? {
-        if (payload == null) return null
-
-        val playerId = payload.stringOrDefault("player_id", "")
-        val offsetMs = payload.doubleOrDefault("offset_ms", 0.0)
-        val source = payload.stringOrDefault("source", "unknown")
-
-        return SyncOffsetResult(playerId, offsetMs, source)
+    fun parseSyncOffset(payload: Any?): SyncOffsetResult? {
+        val wire = decode(payload, syncOffsetAdapter) ?: return null
+        return SyncOffsetResult(wire.playerId, wire.offsetMs, wire.source)
     }
 
-    // Helper extensions for safe JSON access with defaults
+    /**
+     * Parses a proxy-auth server response. Returns `(type, message)`; either
+     * may be null when the field is absent. The full text is fed in (not just
+     * a payload) because the response is a flat object — no envelope split.
+     */
+    fun parseProxyAuthResponse(text: String): Pair<String?, String?> {
+        val wire = try {
+            proxyAuthResponseAdapter.fromJson(text)
+        } catch (e: Exception) {
+            null
+        }
+        return (wire?.type to wire?.message)
+    }
 
-    private fun JsonObject.stringOrDefault(key: String, default: String): String =
-        this[key]?.jsonPrimitive?.contentOrNull ?: default
+    // ── Wire → domain conversions ────────────────────────────────────────────
 
-    private fun JsonObject.longOrDefault(key: String, default: Long): Long =
-        this[key]?.jsonPrimitive?.longOrNull ?: default
+    /**
+     * Maps the diff-style wire metadata to a [TrackMetadata], merging with the
+     * previous accumulated value. The three [JsonOptional] cases per field:
+     *  - Absent      → inherit from [previous] (or type default if first message)
+     *  - Present(null) → clear to type default
+     *  - Present(v)  → use v (but also coerce the literal string "null" to clear,
+     *                   to handle legacy servers that emit the string sentinel)
+     */
+    private fun WireMetadata.toTrackMetadata(previous: TrackMetadata?): TrackMetadata {
+        val title = title.mergeString(previous?.title)
+        val artist = artist.mergeString(previous?.artist)
+        val albumArtist = albumArtist.mergeString(previous?.albumArtist)
+        val album = album.mergeString(previous?.album)
+        val artworkUrl = artworkUrl.mergeString(previous?.artworkUrl)
+        val year = year.mergeInt(previous?.year)
+        val queueTrack = queueTrack.mergeInt(previous?.queueTrack)
+        val totalTracks = totalTracks.mergeInt(previous?.totalTracks)
+        val timestampValue =
+            if (timestamp != 0L) timestamp
+            else previous?.timestamp ?: 0L
 
-    private fun JsonObject.intOrDefault(key: String, default: Int): Int =
-        this[key]?.jsonPrimitive?.intOrNull ?: default
+        // album_track ↔ legacy `track` resolution. Spec says "0 = not set",
+        // so a present-but-zero album_track still falls back to legacy `track`
+        // before finally inheriting from the previous metadata.
+        val albumTrackValue: Int = when {
+            albumTrack is JsonOptional.Present -> {
+                val v = albumTrack.value ?: 0
+                when {
+                    v > 0 -> v
+                    legacyTrack is JsonOptional.Present -> legacyTrack.value ?: 0
+                    else -> previous?.albumTrack ?: 0
+                }
+            }
+            legacyTrack is JsonOptional.Present -> legacyTrack.value ?: 0
+            else -> previous?.albumTrack ?: 0
+        }
 
-    private fun JsonObject.doubleOrDefault(key: String, default: Double): Double =
-        this[key]?.jsonPrimitive?.doubleOrNull ?: default
+        // Progress:
+        //  - "progress" present as object → update from object fields
+        //  - "progress" present but null  → clear to defaults (server cleared_update path)
+        //  - "progress" absent + legacy flat keys → legacy parse
+        //  - "progress" absent, no legacy → inherit from previous
+        val progressValue: TrackProgress = when (val p = progress) {
+            is JsonOptional.Present -> {
+                p.value?.toTrackProgress() ?: TrackProgress(0L, 0L, 1000)
+            }
+            JsonOptional.Absent -> {
+                if (legacyPositionMs is JsonOptional.Present ||
+                    legacyDurationMs is JsonOptional.Present
+                ) {
+                    TrackProgress(
+                        trackProgress = (legacyPositionMs as? JsonOptional.Present)?.value ?: 0L,
+                        trackDuration = (legacyDurationMs as? JsonOptional.Present)?.value ?: 0L,
+                        playbackSpeed = (legacyPlaybackSpeed as? JsonOptional.Present)?.value ?: 1000,
+                    )
+                } else {
+                    previous?.progress ?: TrackProgress(0L, 0L, 1000)
+                }
+            }
+        }
 
-    private fun JsonObject.booleanOrDefault(key: String, default: Boolean): Boolean =
-        this[key]?.jsonPrimitive?.booleanOrNull ?: default
+        return TrackMetadata(
+            timestamp = timestampValue,
+            title = title,
+            artist = artist,
+            albumArtist = albumArtist,
+            album = album,
+            artworkUrl = artworkUrl,
+            year = year,
+            albumTrack = albumTrackValue,
+            queueTrack = queueTrack,
+            totalTracks = totalTracks,
+            progress = progressValue,
+        )
+    }
+
+    private fun WireProgress.toTrackProgress() =
+        TrackProgress(
+            trackProgress = trackProgress,
+            trackDuration = trackDuration,
+            playbackSpeed = playbackSpeed,
+        )
+
+    private fun WireController.toControllerState(
+        legacyRepeat: JsonOptional<String>?,
+        legacyShuffle: JsonOptional<Boolean>?,
+    ): ControllerState? {
+        val v = volume
+        val m = muted
+        val cmds = supportedCommands
+        if (v == null || m == null || cmds == null) {
+            Log.w(TAG, "server/state.controller missing required fields")
+            return null
+        }
+        if (v !in 0..100) {
+            Log.w(TAG, "server/state.controller.volume out of range: $v")
+            return null
+        }
+        // controller wins; metadata.{repeat,shuffle} is the legacy fallback.
+        val repeatValue: String? = when (val r = repeat) {
+            is JsonOptional.Present -> r.value
+            JsonOptional.Absent ->
+                (legacyRepeat as? JsonOptional.Present)?.value
+        }
+        val shuffleValue: Boolean? = when (val s = shuffle) {
+            is JsonOptional.Present -> s.value
+            JsonOptional.Absent ->
+                (legacyShuffle as? JsonOptional.Present)?.value
+        }
+        return ControllerState(
+            supportedCommands = cmds,
+            volume = v,
+            muted = m,
+            repeat = repeatValue,
+            shuffle = shuffleValue,
+        )
+    }
+
+    private fun WireColor.toColorState(): ColorState =
+        ColorState(
+            timestamp = timestamp,
+            backgroundDark = backgroundDark?.let(::validRgbTriple),
+            backgroundLight = backgroundLight?.let(::validRgbTriple),
+            primary = primary?.let(::validRgbTriple),
+            accent = accent?.let(::validRgbTriple),
+            onDark = onDark?.let(::validRgbTriple),
+            onLight = onLight?.let(::validRgbTriple),
+        )
+
+    private fun validRgbTriple(list: List<Int>): List<Int>? {
+        if (list.size != 3) return null
+        if (list.any { it !in 0..255 }) return null
+        return list
+    }
+
+    /**
+     * String field merge: Absent inherits from previous; Present-null and the
+     * literal string "null" both clear to "". Present-with-value uses the value.
+     */
+    private fun JsonOptional<String>.mergeString(prev: String?): String = when (this) {
+        is JsonOptional.Absent -> prev ?: ""
+        is JsonOptional.Present -> value?.takeUnless { it == "null" } ?: ""
+    }
+
+    /**
+     * Int field merge: Absent inherits from previous; Present-null clears to 0;
+     * Present-with-value uses the value.
+     */
+    private fun JsonOptional<Int>.mergeInt(prev: Int?): Int = when (this) {
+        is JsonOptional.Absent -> prev ?: 0
+        is JsonOptional.Present -> value ?: 0
+    }
 }

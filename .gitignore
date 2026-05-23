@@ -2,6 +2,7 @@
 android/build/
 android/app/build/
 android/shared/build/
+android/conformance-client/build/
 android/.gradle/
 android/local.properties
 *.iml

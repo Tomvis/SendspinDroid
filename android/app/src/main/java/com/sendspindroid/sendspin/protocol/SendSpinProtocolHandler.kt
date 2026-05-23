@@ -7,12 +7,6 @@ import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import com.sendspindroid.sendspin.protocol.message.MessageParser
 import com.sendspindroid.sendspin.protocol.timesync.TimeSyncManager
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Abstract base class for SendSpin protocol handling.
@@ -52,6 +46,7 @@ abstract class SendSpinProtocolHandler(
     private var lastMetadata: TrackMetadata? = null
     private var lastPlaybackState: String? = null
     private var lastGroupInfo: GroupInfo? = null
+    private var lastColorState: ColorState? = null
 
     // Time sync manager (lazy initialized by subclass)
     protected var timeSyncManager: TimeSyncManager? = null
@@ -129,6 +124,23 @@ abstract class SendSpinProtocolHandler(
      * Default no-op for handlers that don't expose group-level controls.
      */
     protected open fun onControllerStateUpdate(state: ControllerState) {}
+
+    /**
+     * Called when artwork-derived color state arrives via `server/state.color`.
+     * Only fires for clients that advertise the `color@v1` role. Idempotent
+     * dedup is done by [handleServerState] -- only fires on changes.
+     *
+     * Default no-op for handlers that don't render color-based theming.
+     */
+    protected open fun onColorStateUpdate(state: ColorState) {}
+
+    /**
+     * Called when the artwork color stream ends and any prior color state
+     * should be cleared.
+     *
+     * Default no-op for handlers that don't render color-based theming.
+     */
+    protected open fun onColorStateCleared() {}
 
     /**
      * Called when audio stream starts.
@@ -410,15 +422,18 @@ abstract class SendSpinProtocolHandler(
 
     /**
      * Handle incoming text (JSON) message.
-     * Dispatches to appropriate handler based on message type.
+     *
+     * Envelope decoding goes through Moshi's generic Map adapter (no
+     * kotlinx.serialization on this path). The envelope is `{type, payload}`;
+     * the payload value is forwarded to MessageParser as a raw Moshi JSON
+     * value (typically Map<String, Any?>), and MessageParser feeds it to the
+     * appropriate KSP-generated wire adapter via fromJsonValue.
      */
     protected fun handleTextMessage(text: String) {
         Log.d(tag, "Received: ${text.take(500)}")
 
         try {
-            val json = Json.parseToJsonElement(text).jsonObject
-            val type = json["type"]?.jsonPrimitive?.contentOrNull ?: return
-            val payload = json["payload"]?.jsonObject
+            val (type, payload) = MessageParser.parseEnvelope(text) ?: return
 
             when (type) {
                 SendSpinProtocol.MessageType.SERVER_HELLO -> handleServerHello(payload)
@@ -437,7 +452,15 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    protected open fun handleServerHello(payload: JsonObject?) {
+    /** Extract `roles` from a Map-shaped payload, as a list of strings.
+     *  Returns null when the field is absent (treat as "all roles"). */
+    private fun extractRoles(payload: Any?): List<String>? {
+        val map = payload as? Map<*, *> ?: return null
+        val raw = map["roles"] as? List<*> ?: return null
+        return raw.mapNotNull { it as? String }
+    }
+
+    protected open fun handleServerHello(payload: Any?) {
         val result = MessageParser.parseServerHello(payload, "Unknown")
         if (result == null) {
             Log.e(tag, "Failed to parse server/hello")
@@ -462,7 +485,7 @@ abstract class SendSpinProtocolHandler(
         startTimeSync()
     }
 
-    protected fun handleServerTime(payload: JsonObject?) {
+    protected fun handleServerTime(payload: Any?) {
         val clientReceived = System.nanoTime() / 1000
         val measurement = MessageParser.parseServerTime(payload, clientReceived)
 
@@ -471,12 +494,16 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    protected fun handleServerState(payload: JsonObject?) {
+    protected fun handleServerState(payload: Any?) {
         // Pass the previous metadata so the parser can merge partial updates.
         // The server only sends fields that changed; without merging we'd
         // wipe artist/album/artwork/progress on every title-only or
         // progress-only update.
-        val (metadata, state, controllerState) = MessageParser.parseServerState(payload, lastMetadata)
+        val result = MessageParser.parseServerState(payload, lastMetadata)
+        val metadata = result.metadata
+        val state = result.state
+        val controllerState = result.controllerState
+        val colorState = result.colorState
 
         if (metadata != null) {
             lastMetadata = metadata
@@ -491,9 +518,14 @@ abstract class SendSpinProtocolHandler(
         if (controllerState != null) {
             onControllerStateUpdate(controllerState)
         }
+
+        if (colorState != null && colorState != lastColorState) {
+            lastColorState = colorState
+            onColorStateUpdate(colorState)
+        }
     }
 
-    protected fun handleServerCommand(payload: JsonObject?) {
+    protected fun handleServerCommand(payload: Any?) {
         Log.i(tag, "[cmd-trace] T1 handleServerCommand ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
         when (val result = MessageParser.parseServerCommand(payload)) {
             is ServerCommandResult.Volume -> {
@@ -515,7 +547,7 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    protected fun handleGroupUpdate(payload: JsonObject?) {
+    protected fun handleGroupUpdate(payload: Any?) {
         val info = MessageParser.parseGroupUpdate(payload)
         if (info != null) {
             lastGroupInfo = info
@@ -524,7 +556,7 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    protected fun handleStreamStart(payload: JsonObject?) {
+    protected fun handleStreamStart(payload: Any?) {
         val config = MessageParser.parseStreamStart(payload)
         if (config == null) return
 
@@ -544,14 +576,13 @@ abstract class SendSpinProtocolHandler(
         onStreamStart(config)
     }
 
-    protected fun handleStreamClear(payload: JsonObject?) {
+    protected fun handleStreamClear(payload: Any?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamClear ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
         // `roles` field carries unversioned family names per spec
         // (STREAM_CLEAR_ROLE_FAMILIES = {"player", "visualizer"}). If the field
         // is present and "player" is not in it, the clear targets a role we
         // don't host (e.g. visualizer-only) and must not wipe our audio buffer.
-        val rolesArray = payload?.get("roles")?.jsonArray
-        val roles = rolesArray?.map { it.jsonPrimitive.content }
+        val roles = extractRoles(payload)
 
         if (roles != null && SendSpinProtocol.RoleFamily.PLAYER !in roles) {
             Log.d(tag, "Stream clear for non-player roles: $roles - ignoring")
@@ -562,15 +593,24 @@ abstract class SendSpinProtocolHandler(
         onStreamClear()
     }
 
-    protected fun handleStreamEnd(payload: JsonObject?) {
+    protected fun handleStreamEnd(payload: Any?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamEnd ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
         // `roles` field carries unversioned family names per spec
-        // (STREAM_END_ROLE_FAMILIES = {"player", "artwork", "visualizer"}).
+        // (STREAM_END_ROLE_FAMILIES = {"player", "artwork", "visualizer", "color"}).
         // Compare against the family name, not the versioned [Roles.PLAYER]
         // (= "player@v1"); the latter never matches and silently swallows
         // every stream/end the server emits.
-        val rolesArray = payload?.get("roles")?.jsonArray
-        val roles = rolesArray?.map { it.jsonPrimitive.content }
+        val roles = extractRoles(payload)
+
+        // Color role: clears any cached palette regardless of which other roles
+        // are ending. Independent of the player-end branch below because a
+        // color-only end (just artwork swap with no audio change) should not
+        // tear down the audio stream.
+        val endColor = roles == null || SendSpinProtocol.RoleFamily.COLOR in roles
+        if (endColor && lastColorState != null) {
+            lastColorState = null
+            onColorStateCleared()
+        }
 
         if (roles != null && SendSpinProtocol.RoleFamily.PLAYER !in roles) {
             Log.d(tag, "Stream end for non-player roles: $roles - ignoring")
@@ -583,7 +623,7 @@ abstract class SendSpinProtocolHandler(
         onStreamEnd()
     }
 
-    protected fun handleClientSyncOffset(payload: JsonObject?) {
+    protected fun handleClientSyncOffset(payload: Any?) {
         val result = MessageParser.parseSyncOffset(payload)
         if (result == null) {
             Log.w(tag, "client/sync_offset: missing or invalid payload")

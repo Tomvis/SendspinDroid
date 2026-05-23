@@ -128,6 +128,7 @@ object SendSpinProtocol {
         const val CONTROLLER = "controller@v1"
         const val METADATA = "metadata@v1"
         const val ARTWORK = "artwork@v1"
+        const val COLOR = "color@v1"
     }
 
     /**
@@ -143,6 +144,16 @@ object SendSpinProtocol {
         const val METADATA = "metadata"
         const val ARTWORK = "artwork"
         const val VISUALIZER = "visualizer"
+        const val COLOR = "color"
+    }
+
+    /**
+     * Valid values for `controller.repeat` per spec.
+     */
+    object RepeatMode {
+        const val OFF = "off"
+        const val ONE = "one"
+        const val ALL = "all"
     }
 }
 
@@ -281,11 +292,40 @@ sealed class ServerCommandResult {
  *     spec-defined MediaCommand enum.
  * @param volume Group volume, 0-100.
  * @param muted Group mute state.
+ * @param repeat Repeat mode ("off"/"one"/"all"). Null means the server did not
+ *     report a value (older server, or absent from this update). The wire
+ *     position is `controller.repeat`; older servers emit it on
+ *     `metadata.repeat` as a fallback. A future migration to JsonOptional&lt;T&gt;
+ *     will distinguish "absent" from "explicit null".
+ * @param shuffle Shuffle state. Null means the server did not report a value.
+ *     Wire position is `controller.shuffle`; older servers emit on
+ *     `metadata.shuffle`.
  */
 data class ControllerState(
     val supportedCommands: List<String>,
     val volume: Int,
     val muted: Boolean,
+    val repeat: String? = null,
+    val shuffle: Boolean? = null,
+)
+
+/**
+ * Color palette extracted from the currently-playing artwork. Sent on
+ * `server/state.color` to clients that advertise the `color@v1` role.
+ *
+ * Each color is a list of three integers in 0..255 (RGB). Fields are nullable
+ * because the server may emit a partial palette (only the colors it could
+ * extract for the current artwork). [timestamp] is the server-side capture
+ * time in microseconds.
+ */
+data class ColorState(
+    val timestamp: Long = 0L,
+    val backgroundDark: List<Int>? = null,
+    val backgroundLight: List<Int>? = null,
+    val primary: List<Int>? = null,
+    val accent: List<Int>? = null,
+    val onDark: List<Int>? = null,
+    val onLight: List<Int>? = null,
 )
 
 /**
@@ -295,6 +335,7 @@ data class ServerStateResult(
     val metadata: TrackMetadata?,
     val state: String?,
     val controllerState: ControllerState?,
+    val colorState: ColorState? = null,
 )
 
 /**

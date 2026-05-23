@@ -335,6 +335,65 @@ class SendSpinProtocolHandlerTest {
         assertTrue(handler.controllerStates.isEmpty())
     }
 
+    // ========== Color State Dispatch ==========
+
+    @Test
+    fun `server state with color object dispatches onColorStateUpdate`() {
+        val msg = """
+            {
+                "type": "server/state",
+                "payload": {
+                    "color": {
+                        "timestamp": 99,
+                        "background_dark": [10, 20, 30],
+                        "primary": [200, 150, 50]
+                    }
+                }
+            }
+        """.trimIndent()
+        handler.handleTextMessageForTest(msg)
+        assertEquals(1, handler.colorStates.size)
+        assertEquals(listOf(10, 20, 30), handler.colorStates[0].backgroundDark)
+        assertEquals(listOf(200, 150, 50), handler.colorStates[0].primary)
+    }
+
+    @Test
+    fun `duplicate color state does not re-dispatch`() {
+        val msg = """
+            {"type":"server/state","payload":{"color":{"timestamp":1,"primary":[1,2,3]}}}
+        """.trimIndent()
+        handler.handleTextMessageForTest(msg)
+        handler.handleTextMessageForTest(msg)
+        assertEquals("Same color state must dedup", 1, handler.colorStates.size)
+    }
+
+    @Test
+    fun `stream end with roles=color clears color state`() {
+        handler.handleTextMessageForTest(
+            """{"type":"server/state","payload":{"color":{"timestamp":1,"primary":[1,2,3]}}}"""
+        )
+        assertEquals(1, handler.colorStates.size)
+        handler.handleTextMessageForTest(
+            """{"type":"stream/end","payload":{"roles":["color"]}}"""
+        )
+        assertEquals(1, handler.colorClears.size)
+        // color-only end must not fire onStreamEnd (audio path stays live).
+        assertEquals(0, handler.streamEnds.size)
+    }
+
+    @Test
+    fun `stream end with no roles also clears color state`() {
+        handler.handleTextMessageForTest(
+            """{"type":"server/state","payload":{"color":{"timestamp":1,"primary":[1,2,3]}}}"""
+        )
+        handler.handleTextMessageForTest(
+            """{"type":"stream/end","payload":{}}"""
+        )
+        // absent roles = "end all" so both color cleared AND player ended fire.
+        assertEquals(1, handler.colorClears.size)
+        assertEquals(1, handler.streamEnds.size)
+    }
+
     // ========== Stream End / Clear role-filter Tests ==========
 
     @Test
@@ -466,6 +525,8 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     val streamClears = mutableListOf<Unit>()
     val streamEnds = mutableListOf<Unit>()
     val controllerStates = mutableListOf<ControllerState>()
+    val colorStates = mutableListOf<ColorState>()
+    val colorClears = mutableListOf<Unit>()
     val muteEvents = mutableListOf<Boolean>()
 
     fun setHandshakeCompleteForTest() {
@@ -521,6 +582,14 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     override fun onControllerStateUpdate(state: ControllerState) {
         controllerStates.add(state)
+    }
+
+    override fun onColorStateUpdate(state: ColorState) {
+        colorStates.add(state)
+    }
+
+    override fun onColorStateCleared() {
+        colorClears.add(Unit)
     }
 
     override fun onStreamStart(config: StreamConfig) {

@@ -32,12 +32,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import com.sendspindroid.sendspin.protocol.message.MessageParser
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -156,13 +151,45 @@ class SendSpin(
          * group's current volume/mute. Distinct from per-player volume/mute,
          * which arrives via [onVolumeChanged] / [onMutedChanged].
          *
+         * [repeat] is `null` when the server did not report a value (e.g.
+         * older server before controller.repeat was added). Valid string
+         * values are `"off"`, `"one"`, `"all"`. [shuffle] is null on the same
+         * fallback grounds.
+         *
          * Default no-op for callers that don't expose group-level controls.
          */
         fun onControllerStateUpdate(
             supportedCommands: List<String>,
             volume: Int,
             muted: Boolean,
+            repeat: String? = null,
+            shuffle: Boolean? = null,
         ) {}
+
+        /**
+         * Called when artwork-derived color state arrives from the server
+         * (only for clients that advertise the `color@v1` role). Each list
+         * is either null (the server did not extract this color for the
+         * current artwork) or a 3-element list of RGB integers in 0..255.
+         *
+         * Default no-op for callers that don't render color-based theming.
+         */
+        fun onColorStateUpdate(
+            timestamp: Long,
+            backgroundDark: List<Int>?,
+            backgroundLight: List<Int>?,
+            primary: List<Int>?,
+            accent: List<Int>?,
+            onDark: List<Int>?,
+            onLight: List<Int>?,
+        ) {}
+
+        /**
+         * Called when the color stream ends and any cached palette should
+         * be cleared. Default no-op for callers that don't render
+         * color-based theming.
+         */
+        fun onColorStateCleared() {}
 
         /**
          * Called when audio output should be silenced or unsilenced because
@@ -285,6 +312,18 @@ class SendSpin(
 
     val isConnected: Boolean
         get() = _connectionState.value is TransportState.Ready
+
+    /**
+     * Optional pre-buffer hook: fires for every received audio chunk before
+     * the [Callback.onAudioChunk] path runs. Receives chunks regardless of
+     * the clock-sync filter's state, making it suitable for raw recording
+     * or conformance testing where downstream buffer / late-drop logic
+     * should not apply.
+     *
+     * Set to null (the default) to disable. Thread-safe to assign.
+     */
+    @Volatile
+    var onAudioChunkHook: ((Long, ByteArray) -> Unit)? = null
 
     /**
      * Get the number of reconnection attempts since last successful connect.
@@ -453,7 +492,29 @@ class SendSpin(
     }
 
     override fun onControllerStateUpdate(state: com.sendspindroid.sendspin.protocol.ControllerState) {
-        callback.onControllerStateUpdate(state.supportedCommands, state.volume, state.muted)
+        callback.onControllerStateUpdate(
+            state.supportedCommands,
+            state.volume,
+            state.muted,
+            state.repeat,
+            state.shuffle,
+        )
+    }
+
+    override fun onColorStateUpdate(state: com.sendspindroid.sendspin.protocol.ColorState) {
+        callback.onColorStateUpdate(
+            state.timestamp,
+            state.backgroundDark,
+            state.backgroundLight,
+            state.primary,
+            state.accent,
+            state.onDark,
+            state.onLight,
+        )
+    }
+
+    override fun onColorStateCleared() {
+        callback.onColorStateCleared()
     }
 
     override fun onStreamStart(config: StreamConfig) {
@@ -484,6 +545,10 @@ class SendSpin(
     }
 
     override fun onAudioChunk(timestampMicros: Long, audioData: ByteArray) {
+        // Pre-buffer hook: fires first so recorders see every chunk even when
+        // the callback path is throttled or buffer-bound. Stored as a Volatile
+        // var so a captured local snapshot won't race with assign-to-null.
+        onAudioChunkHook?.invoke(timestampMicros, audioData)
         callback.onAudioChunk(timestampMicros, audioData)
     }
 
@@ -1316,12 +1381,8 @@ class SendSpin(
                 // WebSocket message.
                 Log.d(TAG, "Sending proxy auth message (token ${authToken!!.length} chars)")
                 awaitingAuthResponse = true
-                val authMsg = buildJsonObject {
-                    put("type", JsonPrimitive("auth"))
-                    put("token", JsonPrimitive(authToken))
-                    put("client_id", JsonPrimitive(clientId))
-                }
-                val sent = transport?.send(authMsg.toString())
+                val authMsg = MessageBuilder.buildProxyAuth(token = authToken!!, clientId = clientId)
+                val sent = transport?.send(authMsg)
                 Log.d(TAG, "Auth message send result: $sent")
             } else if (connectionMode == ConnectionMode.PROXY && authToken.isNullOrBlank()) {
                 // Proxy mode but no token available - auth will fail
@@ -1338,19 +1399,13 @@ class SendSpin(
             lastByteReceivedAtMs.set(System.currentTimeMillis())
             // Check for auth failure (server may send error if token is invalid)
             if (connectionMode == ConnectionMode.PROXY && !handshakeComplete) {
-                try {
-                    val json = Json.parseToJsonElement(text).jsonObject
-                    val msgType = json["type"]?.jsonPrimitive?.contentOrNull ?: ""
-                    if (msgType == "auth_failed" || msgType == "error") {
-                        val msg = json["message"]?.jsonPrimitive?.contentOrNull ?: "Authentication failed"
-                        Log.e(TAG, "Proxy auth failed: $msg")
-                        awaitingAuthResponse = false
-                        _connectionState.value = TransportState.Failed(FailureReason.AuthRejected)
-                        disconnect()
-                        return
-                    }
-                } catch (e: Exception) {
-                    // Not a JSON message or doesn't have type field - continue normally
+                val (msgType, message) = MessageParser.parseProxyAuthResponse(text)
+                if (msgType == "auth_failed" || msgType == "error") {
+                    Log.e(TAG, "Proxy auth failed: ${message ?: "Authentication failed"}")
+                    awaitingAuthResponse = false
+                    _connectionState.value = TransportState.Failed(FailureReason.AuthRejected)
+                    disconnect()
+                    return
                 }
             }
 

@@ -334,6 +334,56 @@ class MessageBuilderTest {
         assertEquals(6_720_000, playerSupport["buffer_capacity"]?.jsonPrimitive?.int)
     }
 
+    @Test
+    fun buildClientHello_advertisesColorAndControllerRoles() {
+        // color@v1 + controller@v1 + metadata@v1 are advertised alongside
+        // player@v1 / artwork@v1. Test pins this so the role list cannot
+        // silently regress (the server only sends server/state.color to
+        // clients that explicitly advertise the color@v1 role).
+        val formats = listOf(MessageBuilder.FormatEntry("pcm", 48000, 2, 16))
+        val text = MessageBuilder.buildClientHello(
+            clientId = "test-id",
+            deviceName = "Test Device",
+            bufferCapacity = 6_720_000,
+            manufacturer = "Test",
+            supportedFormats = formats
+        )
+        val payload = Json.parseToJsonElement(text).jsonObject["payload"]!!.jsonObject
+        val roles = payload["supported_roles"]!!
+            .let { it as kotlinx.serialization.json.JsonArray }
+            .map { it.jsonPrimitive.content }
+        assertTrue("color@v1 must be advertised", "color@v1" in roles)
+        assertTrue("controller@v1 must be advertised", "controller@v1" in roles)
+        assertTrue("metadata@v1 must be advertised", "metadata@v1" in roles)
+        assertTrue("player@v1 must be advertised", "player@v1" in roles)
+        assertTrue("artwork@v1 must be advertised (non-lowMem)", "artwork@v1" in roles)
+        // Capability objects are emitted for each advertised role.
+        assertNotNull(payload["color@v1_support"])
+        assertNotNull(payload["controller@v1_support"])
+        assertNotNull(payload["metadata@v1_support"])
+    }
+
+    @Test
+    fun buildClientHello_lowMemoryDropsArtworkOnly() {
+        // Low-memory mode strips the artwork role but keeps color/controller/metadata.
+        val formats = listOf(MessageBuilder.FormatEntry("pcm", 48000, 2, 16))
+        val text = MessageBuilder.buildClientHello(
+            clientId = "test-id",
+            deviceName = "Test Device",
+            bufferCapacity = 1_920_000,
+            manufacturer = "Test",
+            supportedFormats = formats,
+            lowMemoryMode = true
+        )
+        val payload = Json.parseToJsonElement(text).jsonObject["payload"]!!.jsonObject
+        val roles = payload["supported_roles"]!!
+            .let { it as kotlinx.serialization.json.JsonArray }
+            .map { it.jsonPrimitive.content }
+        assertFalse("artwork@v1 must be omitted in lowMem", "artwork@v1" in roles)
+        assertTrue("color@v1 must still be advertised", "color@v1" in roles)
+        assertNull(payload["artwork@v1_support"])
+    }
+
     // --- No serialize needed (returns String directly) ---
 
     @Test
