@@ -131,6 +131,7 @@ object MessageParser {
     fun parseServerState(
         payload: Any?,
         previous: TrackMetadata? = null,
+        previousController: ControllerState? = null,
     ): ServerStateResult {
         val wire = decode(payload, stateAdapter)
             ?: return ServerStateResult(null, null, null, null)
@@ -139,7 +140,27 @@ object MessageParser {
         val state = wire.state?.takeIf { it.isNotEmpty() }
         val legacyRepeat = wire.metadata?.legacyRepeat
         val legacyShuffle = wire.metadata?.legacyShuffle
-        val controllerState = wire.controller?.toControllerState(legacyRepeat, legacyShuffle)
+        val controllerState = when {
+            wire.controller != null ->
+                wire.controller.toControllerState(legacyRepeat, legacyShuffle, previousController)
+            // Legacy-only path: no controller object on the wire, but metadata
+            // carries legacy repeat/shuffle. Surface those as a partial update
+            // on top of the previous controller state (we don't have volume /
+            // muted / commands to construct a fresh one from scratch).
+            previousController != null &&
+                (legacyRepeat is JsonOptional.Present || legacyShuffle is JsonOptional.Present) -> {
+                val r: String? = when (val l = legacyRepeat) {
+                    is JsonOptional.Present -> l.value
+                    null, JsonOptional.Absent -> previousController.repeat
+                }
+                val s: Boolean? = when (val l = legacyShuffle) {
+                    is JsonOptional.Present -> l.value
+                    null, JsonOptional.Absent -> previousController.shuffle
+                }
+                previousController.copy(repeat = r, shuffle = s)
+            }
+            else -> null
+        }
         val colorState = wire.color?.toColorState()
         return ServerStateResult(metadata, state, controllerState, colorState)
     }
@@ -189,9 +210,14 @@ object MessageParser {
 
     fun parseSyncOffset(payload: Any?): SyncOffsetResult? {
         val wire = decode(payload, syncOffsetAdapter) ?: return null
+        // offset_ms is the meaningful payload of this message. A missing /
+        // explicit-null offset_ms is malformed: silently defaulting to 0.0
+        // would wipe any prior applied offset and produce an audible sync
+        // transient. Reject the message and let the handler log/skip.
+        val offset = wire.offsetMs ?: return null
         return SyncOffsetResult(
             wire.playerId ?: "",
-            wire.offsetMs ?: 0.0,
+            offset,
             wire.source ?: "unknown",
         )
     }
@@ -304,12 +330,16 @@ object MessageParser {
     private fun WireController.toControllerState(
         legacyRepeat: JsonOptional<String>?,
         legacyShuffle: JsonOptional<Boolean>?,
+        previous: ControllerState?,
     ): ControllerState? {
-        val v = volume
-        val m = muted
-        val cmds = supportedCommands
+        // Required fields inherit from previous on partial updates: spec-PR50
+        // servers may send `{"controller": {"volume": 70}}` to communicate that
+        // only the group volume changed.
+        val v = volume ?: previous?.volume
+        val m = muted ?: previous?.muted
+        val cmds = supportedCommands ?: previous?.supportedCommands
         if (v == null || m == null || cmds == null) {
-            Log.w(TAG, "server/state.controller missing required fields")
+            Log.w(TAG, "server/state.controller missing required fields and no previous to merge from")
             return null
         }
         if (v !in 0..100) {
@@ -317,15 +347,23 @@ object MessageParser {
             return null
         }
         // controller wins; metadata.{repeat,shuffle} is the legacy fallback.
+        // Tri-state per field:
+        //  - Present(v):    use v
+        //  - Present(null): explicit clear from server (→ null)
+        //  - Absent:        try the legacy field; otherwise inherit from previous
         val repeatValue: String? = when (val r = repeat) {
             is JsonOptional.Present -> r.value
-            JsonOptional.Absent ->
-                (legacyRepeat as? JsonOptional.Present)?.value
+            JsonOptional.Absent -> when (val l = legacyRepeat) {
+                is JsonOptional.Present -> l.value
+                null, JsonOptional.Absent -> previous?.repeat
+            }
         }
         val shuffleValue: Boolean? = when (val s = shuffle) {
             is JsonOptional.Present -> s.value
-            JsonOptional.Absent ->
-                (legacyShuffle as? JsonOptional.Present)?.value
+            JsonOptional.Absent -> when (val l = legacyShuffle) {
+                is JsonOptional.Present -> l.value
+                null, JsonOptional.Absent -> previous?.shuffle
+            }
         }
         return ControllerState(
             supportedCommands = cmds,

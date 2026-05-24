@@ -28,10 +28,19 @@ abstract class SendSpinProtocolHandler(
     // Protocol state
     @Volatile
     protected var handshakeComplete = false
+    // Volatile: written from the WebSocket dispatcher thread (via
+    // handleServerCommand) and from the Main thread (via setVolume/setMuted).
+    // Without volatility, a write from one thread may not be observed by the
+    // other when sendPlayerStateUpdate composes the wire message.
+    @Volatile
     protected var currentVolume: Int = 100
+    @Volatile
     protected var currentMuted: Boolean = false
     // Per Sendspin spec, a client that has not yet synchronized to the
     // server timeline reports "error". Updated by [evaluateAndPublishSyncState].
+    // Volatile + guarded by [syncStateLock] for writes from setSyncState /
+    // evaluateAndPublishSyncState which can fire from different threads.
+    @Volatile
     protected var currentSyncState: String = "error"
 
     private val syncStateLock = Any()
@@ -278,12 +287,22 @@ abstract class SendSpinProtocolHandler(
                 return
             }
         }
-        if (currentSyncState != syncState) {
-            currentSyncState = syncState
-            Log.d(tag, "Sync state changed to: $syncState")
-            if (handshakeComplete) {
-                sendPlayerStateUpdate()
+        // Take syncStateLock so the compare-and-set is atomic relative to
+        // evaluateAndPublishSyncState (which writes the same field from
+        // inside the lock). Without the lock, an "external_source" call from
+        // the audio-focus path racing with the time-filter evaluator could
+        // lose the transition.
+        val shouldSend = synchronized(syncStateLock) {
+            if (currentSyncState != syncState) {
+                currentSyncState = syncState
+                Log.d(tag, "Sync state changed to: $syncState")
+                handshakeComplete
+            } else {
+                false
             }
+        }
+        if (shouldSend) {
+            sendPlayerStateUpdate()
         }
     }
 
@@ -507,11 +526,14 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected fun handleServerState(payload: Any?) {
-        // Pass the previous metadata so the parser can merge partial updates.
-        // The server only sends fields that changed; without merging we'd
-        // wipe artist/album/artwork/progress on every title-only or
-        // progress-only update.
-        val result = MessageParser.parseServerState(payload, lastMetadata)
+        // Pass the previous metadata + controller so the parser can merge
+        // partial updates. The server only sends fields that changed; without
+        // merging we'd wipe artist/album/artwork/progress on every title-only
+        // or progress-only update. The parser owns the tri-state distinction
+        // for repeat/shuffle (Absent inherits, Present(null) explicit clear,
+        // Present(v) wins) and for required fields (volume/muted/cmds inherit
+        // from previous when absent on a diff-style controller update).
+        val result = MessageParser.parseServerState(payload, lastMetadata, lastControllerState)
         val metadata = result.metadata
         val state = result.state
         val controllerState = result.controllerState
@@ -528,17 +550,8 @@ abstract class SendSpinProtocolHandler(
         }
 
         if (controllerState != null) {
-            // Merge with previous: server may omit repeat/shuffle from a partial
-            // controller update, which the parser flattens to null. Without
-            // merging, consumers of onControllerStateUpdate would see those
-            // fields wiped to null even though the previous controller state
-            // had real values.
-            val merged = controllerState.copy(
-                repeat = controllerState.repeat ?: lastControllerState?.repeat,
-                shuffle = controllerState.shuffle ?: lastControllerState?.shuffle,
-            )
-            lastControllerState = merged
-            onControllerStateUpdate(merged)
+            lastControllerState = controllerState
+            onControllerStateUpdate(controllerState)
         }
 
         if (colorState != null && colorState != lastColorState) {
@@ -642,6 +655,13 @@ abstract class SendSpinProtocolHandler(
         Log.i(tag, "Stream end - server terminated playback (roles=${roles ?: "all"})")
         _streamActive = false
         _currentStreamConfig = null
+        // Clear accumulated metadata / playback state so a subsequent partial
+        // metadata update on the next track does not merge against this
+        // track's fields. Without this, artist/album/artwork/year/queue can
+        // leak into the new track until a fully-populated update arrives.
+        // Same rationale as the post-handshake clear in handleServerHello.
+        lastMetadata = null
+        lastPlaybackState = null
         onStreamEnd()
     }
 

@@ -317,8 +317,15 @@ data class ControllerState(
  * because the server may emit a partial palette (only the colors it could
  * extract for the current artwork). [timestamp] is the server-side capture
  * time in microseconds.
+ *
+ * Equality intentionally excludes [timestamp]: the server regenerates the
+ * timestamp on every color emission (typically once per metadata or artwork
+ * tick), but the palette itself rarely changes within a track. Consumers
+ * compare ColorStates for change-detection dedup, and including timestamp
+ * would defeat that dedup and trigger spurious downstream work (ShaderBrush
+ * re-allocation, ambient repaint).
  */
-data class ColorState(
+class ColorState(
     val timestamp: Long = 0L,
     val backgroundDark: List<Int>? = null,
     val backgroundLight: List<Int>? = null,
@@ -326,7 +333,38 @@ data class ColorState(
     val accent: List<Int>? = null,
     val onDark: List<Int>? = null,
     val onLight: List<Int>? = null,
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is ColorState) return false
+        return backgroundDark == other.backgroundDark &&
+            backgroundLight == other.backgroundLight &&
+            primary == other.primary &&
+            accent == other.accent &&
+            onDark == other.onDark &&
+            onLight == other.onLight
+    }
+
+    override fun hashCode(): Int {
+        var result = backgroundDark?.hashCode() ?: 0
+        result = 31 * result + (backgroundLight?.hashCode() ?: 0)
+        result = 31 * result + (primary?.hashCode() ?: 0)
+        result = 31 * result + (accent?.hashCode() ?: 0)
+        result = 31 * result + (onDark?.hashCode() ?: 0)
+        result = 31 * result + (onLight?.hashCode() ?: 0)
+        return result
+    }
+
+    fun copy(
+        timestamp: Long = this.timestamp,
+        backgroundDark: List<Int>? = this.backgroundDark,
+        backgroundLight: List<Int>? = this.backgroundLight,
+        primary: List<Int>? = this.primary,
+        accent: List<Int>? = this.accent,
+        onDark: List<Int>? = this.onDark,
+        onLight: List<Int>? = this.onLight,
+    ): ColorState = ColorState(timestamp, backgroundDark, backgroundLight, primary, accent, onDark, onLight)
+}
 
 /**
  * Result from parsing server/state message.

@@ -386,6 +386,20 @@ class SendspinTimeFilter {
         synchronized(lock) {
             val frozen = frozenState ?: return false
 
+            // Treat null/empty serverId on either side as "unknown identity"
+            // and refuse to thaw. Without this guard, two different servers
+            // that both omit `server_id` collapse onto the same identity, and
+            // we thaw the prior server's clock-offset against the new
+            // server's timebase — producing an audible sync glitch while the
+            // filter re-converges. The cost of being conservative here is a
+            // fresh resync (a few seconds) on reconnect to a server that
+            // does not advertise an id at all; the cost of being permissive
+            // is a glitch on every dev/test instance migration.
+            if (serverId.isNullOrEmpty() || frozen.serverId.isNullOrEmpty()) {
+                frozenState = null
+                return false
+            }
+
             if (frozen.serverName != serverName || frozen.serverId != serverId) {
                 frozenState = null
                 return false
