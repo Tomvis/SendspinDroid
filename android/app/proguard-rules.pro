@@ -60,6 +60,17 @@
     <init>(...);
     <fields>;
 }
+# Keep every constructor on @JsonClass-annotated data classes. Codegen-generated
+# adapters look up the synthetic default constructor via
+#   getDeclaredConstructor(<field-types>..., Int, DefaultConstructorMarker)
+# for data classes with default-valued params. R8 doesn't trace those
+# reflection lookups, so without this rule it strips the synthetic ctor and
+# parsing fails with a NoSuchMethodException-style error mentioning the
+# obfuscated parameter types (e.g. `WireMetadata.<init> [class ka.f, ...]`).
+-if @com.squareup.moshi.JsonClass class *
+-keepclassmembers class <1> {
+    <init>(...);
+}
 # Reflection fallback (KotlinJsonAdapterFactory) reads kotlin.Metadata; without
 # it, constructor-parameter names are unrecoverable and adapter creation throws.
 -keep class kotlin.Metadata { *; }
