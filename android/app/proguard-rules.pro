@@ -43,6 +43,29 @@
 -dontnote kotlinx.serialization.AnnotationsKt
 
 # ============================================================================
+# Moshi (SendSpin protocol JSON parsing / building)
+#
+# Moshi resolves codegen-generated adapters reflectively as
+#   <ClassName>JsonAdapter via Class.forName, so R8 can't see them as
+# referenced and strips them. Without the adapter, Moshi falls back to
+# KotlinJsonAdapterFactory and fails on Kotlin data classes whose
+# constructor-parameter metadata has been minified out, throwing
+#   "No property for required constructor parameter #N <name>" on (de)serialize.
+# This first manifested as a hello-message send failure against the MA-backed
+# SendSpin server after the Moshi+KSP migration.
+# ============================================================================
+-keep,allowobfuscation,allowshrinking @com.squareup.moshi.JsonClass class *
+-if @com.squareup.moshi.JsonClass class *
+-keep class <1>JsonAdapter {
+    <init>(...);
+    <fields>;
+}
+# Reflection fallback (KotlinJsonAdapterFactory) reads kotlin.Metadata; without
+# it, constructor-parameter names are unrecoverable and adapter creation throws.
+-keep class kotlin.Metadata { *; }
+-keepattributes RuntimeVisibleAnnotations, AnnotationDefault
+
+# ============================================================================
 # AndroidX Media3 (MediaSession, MediaController)
 # ============================================================================
 -keep class androidx.media3.** { *; }
