@@ -655,13 +655,22 @@ abstract class SendSpinProtocolHandler(
         Log.i(tag, "Stream end - server terminated playback (roles=${roles ?: "all"})")
         _streamActive = false
         _currentStreamConfig = null
-        // Clear accumulated metadata / playback state so a subsequent partial
-        // metadata update on the next track does not merge against this
-        // track's fields. Without this, artist/album/artwork/year/queue can
-        // leak into the new track until a fully-populated update arrives.
-        // Same rationale as the post-handshake clear in handleServerHello.
-        lastMetadata = null
-        lastPlaybackState = null
+        // Do NOT clear lastMetadata here. The Sendspin server/state stream is
+        // diff-style (see JsonOptional doc): clients are expected to carry
+        // unchanged fields across updates, and on pause MA emits a
+        // progress-only server/state right after stream/end (title / artist /
+        // album / artwork_url all Absent). With lastMetadata cleared, the
+        // parser has nothing to inherit from, collapses Absent to "" for
+        // strings, and downstream withMetadata interprets the empty
+        // artwork_url as an explicit clear -- the NowPlaying screen's
+        // artwork-zombie safeguard then flips metadata to EMPTY after ~1.7 s
+        // and the user lands on the standby idle screen mid-pause.
+        //
+        // On a real track change, MA includes every field that actually
+        // changed in the next server/state, so the carryover from the prior
+        // track is correct (same artist/album when staying on an album, fresh
+        // values when crossing albums). Cross-server leakage is still guarded
+        // by the post-handshake clear in handleServerHello.
         onStreamEnd()
     }
 
