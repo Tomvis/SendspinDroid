@@ -1382,6 +1382,16 @@ class PlaybackService : MediaLibraryService() {
                     syncAudioPlayer?.resume()
                     sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
                     acquirePlaybackLocks()
+                    // Invalidate the session-extras dedup so the next broadcast
+                    // pushes through even when the bundle content is byte-
+                    // identical to the last paused-state broadcast. After a
+                    // long pause, the VM's idle watchdog clears its local
+                    // metadata; the SendSpin playback state (PAUSED/PLAYING)
+                    // isn't in the extras bundle, so the dedup would otherwise
+                    // skip the resume broadcast and the now-playing screen
+                    // would stay on the idle layout. See onGroupUpdate PLAYING
+                    // branch for the mirrored invalidation.
+                    lastSessionExtrasFingerprint = Long.MIN_VALUE
                 }
 
                 _playbackState.value = _playbackState.value.copy(playbackState = newState)
@@ -1435,6 +1445,12 @@ class PlaybackService : MediaLibraryService() {
                             syncAudioPlayer?.resume()
                             sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
                             acquirePlaybackLocks()
+                            // Invalidate the session-extras dedup -- see the
+                            // onStateChanged PLAYING branch for the rationale.
+                            // After a long pause the watchdog clears the VM
+                            // state but the service-side extras are unchanged,
+                            // and the dedup would skip the resume broadcast.
+                            lastSessionExtrasFingerprint = Long.MIN_VALUE
                         }
                         else -> { /* No action needed */ }
                     }
