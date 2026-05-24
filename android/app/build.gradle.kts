@@ -192,6 +192,11 @@ dependencies {
 
     // Lifecycle Runtime KTX - Lifecycle-aware components and coroutine support
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
+    // ProcessLifecycleOwner - app-wide foreground/background detection used by
+    // PlaybackService to suppress hardware media-button events when none of
+    // our activities is visible (so the foreground app's keys aren't echoed
+    // into SendSpinDroid in the background).
+    implementation("androidx.lifecycle:lifecycle-process:2.9.0")
 
     // Kotlin Coroutines for Android - Structured concurrency primitives
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")

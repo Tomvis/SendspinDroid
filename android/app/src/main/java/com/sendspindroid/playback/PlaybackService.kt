@@ -305,6 +305,13 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var isDestroyed = false
 
+    // Tracks whether any of our activities is currently visible (Lifecycle
+    // STARTED or above). Updated by an observer on ProcessLifecycleOwner.
+    // Read from onMediaButtonEvent on the session callback thread, so
+    // @Volatile to publish writes across threads.
+    @Volatile
+    private var appInForeground: Boolean = false
+
     // Guards against race condition: onAudioChunk runs on WebSocket thread but
     // decoder creation is posted to mainHandler. Chunks arriving before the new
     // decoder is ready would hit the old (released) decoder and throw.
@@ -654,6 +661,27 @@ class PlaybackService : MediaLibraryService() {
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "PlaybackService.onCreate() started")
+
+        // Track app foreground/background via ProcessLifecycleOwner. Used by
+        // onMediaButtonEvent to drop hardware media-key events while none of
+        // our activities is visible -- otherwise SendSpinDroid (running in
+        // the background with audio focus) and whatever foreground app the
+        // user is interacting with both react to the same remote Play press.
+        // Initialize the field synchronously before installing the observer
+        // so the gate behaves correctly even before the first state
+        // transition is reported.
+        appInForeground = androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.currentState
+            .isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(
+            object : androidx.lifecycle.DefaultLifecycleObserver {
+                override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
+                    appInForeground = true
+                }
+                override fun onStop(owner: androidx.lifecycle.LifecycleOwner) {
+                    appInForeground = false
+                }
+            }
+        )
 
         // Create notification channel for foreground service
         NotificationHelper.createNotificationChannel(this)
@@ -3409,6 +3437,38 @@ class PlaybackService : MediaLibraryService() {
 
             Log.i(TAG, "Suppressing PLAY_PAUSE from ${controller.packageName} (no audio focus, isOwnUi=$isOwnUi)")
             return SessionResult.RESULT_ERROR_INVALID_STATE
+        }
+
+        // Hardware media keys (TV remote, Bluetooth headset) bypass
+        // onPlayerCommandRequest entirely: Media3 routes them through
+        // MediaSessionService.dispatchMediaKeyEvent, translates them to
+        // Player.play()/pause() (or next/previous/etc.), and invokes those
+        // methods directly on the player. We confirmed this in logcat -- a
+        // KEYCODE_MEDIA_PLAY_PAUSE dispatch is immediately followed by
+        // SendSpinPlayer.setPlayWhenReady with no callback in between.
+        //
+        // onMediaButtonEvent is the only place to intercept that path. The
+        // gate is foreground state (not audio focus): when SendSpinDroid is
+        // playing in the background with audio focus and the user opens a
+        // video app, hasAudioFocus is still true on the first key press, so
+        // a focus-only gate lets the event through. Use ProcessLifecycleOwner
+        // to detect whether any of our activities is visible. If none is,
+        // drop the event so the foreground app's own dispatchKeyEvent path
+        // can handle it alone. The own-package short-circuit is kept for
+        // safety -- in-app controllers binding via MediaController shouldn't
+        // travel through media-button dispatch in practice, but if they do,
+        // they should be allowed.
+        @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+        override fun onMediaButtonEvent(
+            session: MediaSession,
+            controllerInfo: MediaSession.ControllerInfo,
+            intent: Intent
+        ): Boolean {
+            val isOwnUi = controllerInfo.packageName == applicationContext.packageName
+            if (isOwnUi) return false
+            if (appInForeground) return false
+            Log.i(TAG, "Suppressing media button from ${controllerInfo.packageName} (app not in foreground)")
+            return true
         }
 
         override fun onCustomCommand(
