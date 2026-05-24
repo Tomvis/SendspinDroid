@@ -3393,17 +3393,21 @@ class PlaybackService : MediaLibraryService() {
             if (playerCommand != Player.COMMAND_PLAY_PAUSE) return SessionResult.RESULT_SUCCESS
             if (hasAudioFocus) return SessionResult.RESULT_SUCCESS
 
-            // No focus: try to re-acquire regardless of caller. This self-heals
-            // our own UI, the TV remote's hardware media keys (which arrive
-            // routed through "android" / the SystemUI MediaButtonReceiver, not
-            // our package), and lock-screen controls. If another app legitimately
-            // owns focus, requestAudioFocus() will be denied and we fall through
-            // to suppress so we don't toggle the SendSpin server in the
-            // background.
-            requestAudioFocus()
-            if (hasAudioFocus) return SessionResult.RESULT_SUCCESS
+            // No focus: opportunistically re-acquire only when the request
+            // came from our own in-app UI. System-forwarded media keys (TV
+            // remote, Bluetooth headset) arrive with packageName "android";
+            // Android Auto and other external controllers use their own
+            // package. Letting those grab focus would make SendSpinDroid
+            // respond to remote Play/Pause in the background while the user
+            // is interacting with a different foreground media app -- the
+            // user's Play press toggles both their video app and us.
+            val isOwnUi = controller.packageName == applicationContext.packageName
+            if (isOwnUi) {
+                requestAudioFocus()
+                if (hasAudioFocus) return SessionResult.RESULT_SUCCESS
+            }
 
-            Log.i(TAG, "Suppressing PLAY_PAUSE from ${controller.packageName} (no audio focus)")
+            Log.i(TAG, "Suppressing PLAY_PAUSE from ${controller.packageName} (no audio focus, isOwnUi=$isOwnUi)")
             return SessionResult.RESULT_ERROR_INVALID_STATE
         }
 
