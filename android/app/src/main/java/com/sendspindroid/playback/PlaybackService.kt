@@ -1314,8 +1314,22 @@ class PlaybackService : MediaLibraryService() {
         override fun onBufferExhausted() {
             Log.e(TAG, "Buffer exhausted during reconnection - stopping playback")
             mainHandler.post {
-                // Stop audio playback and release playback locks
+                // Tear down the audio player completely. stop() alone parks the
+                // playback coroutine and flushes AudioTrack but leaves audioSink
+                // alive and the field non-null; the onStreamStart reuse path at
+                // line ~1720 (`existingPlayer != null && matchesFormat`) would
+                // then take the clearBuffer-only branch on the next stream, find
+                // the playback loop gone, and silently produce no audio. Mirror
+                // the Idle / Failed(Exhausted) disconnect branches so the next
+                // onStreamStart constructs a fresh player.
                 syncAudioPlayer?.stop()
+                syncAudioPlayer?.release()
+                syncAudioPlayer = null
+                sendSpinPlayer?.setSyncAudioPlayer(null)
+                // Close the chunk fast-path gate so any chunks still in the WS
+                // receive queue post-exhaustion drop before being launched into
+                // the (now released) decode pipeline.
+                decoderReady = false
                 releasePlaybackLocks()
 
                 // Broadcast state after buffer exhausted
