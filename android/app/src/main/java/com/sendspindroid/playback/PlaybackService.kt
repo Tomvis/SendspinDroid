@@ -312,6 +312,12 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var appInForeground: Boolean = false
 
+    // Held so onDestroy can removeObserver it. ProcessLifecycleOwner is a
+    // process-singleton: without explicit removal each service create/destroy
+    // cycle leaks one observer plus the service instance it captures via the
+    // appInForeground closure.
+    private var appLifecycleObserver: androidx.lifecycle.DefaultLifecycleObserver? = null
+
     // Guards against race condition: onAudioChunk runs on WebSocket thread but
     // decoder creation is posted to mainHandler. Chunks arriving before the new
     // decoder is ready would hit the old (released) decoder and throw.
@@ -672,16 +678,14 @@ class PlaybackService : MediaLibraryService() {
         // transition is reported.
         appInForeground = androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.currentState
             .isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
-        androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(
-            object : androidx.lifecycle.DefaultLifecycleObserver {
-                override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
-                    appInForeground = true
-                }
-                override fun onStop(owner: androidx.lifecycle.LifecycleOwner) {
-                    appInForeground = false
-                }
+        appLifecycleObserver = object : androidx.lifecycle.DefaultLifecycleObserver {
+            override fun onStart(owner: androidx.lifecycle.LifecycleOwner) {
+                appInForeground = true
             }
-        )
+            override fun onStop(owner: androidx.lifecycle.LifecycleOwner) {
+                appInForeground = false
+            }
+        }.also { androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(it) }
 
         // Create notification channel for foreground service
         NotificationHelper.createNotificationChannel(this)
@@ -4597,6 +4601,15 @@ class PlaybackService : MediaLibraryService() {
 
         // Set destroyed flag first to prevent any pending callbacks from executing
         isDestroyed = true
+
+        // Detach the process-lifecycle observer before any other cleanup.
+        // ProcessLifecycleOwner is a process-singleton and would otherwise
+        // retain this anonymous observer (and the service instance it
+        // captures) across service re-creates.
+        appLifecycleObserver?.let {
+            androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(it)
+        }
+        appLifecycleObserver = null
 
         // Remove all pending callbacks from all handlers
         mainHandler.removeCallbacksAndMessages(null)
