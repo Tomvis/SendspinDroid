@@ -743,14 +743,16 @@ class MessageParserTest {
     }
 
     @Test
-    fun parseServerCommand_muteMissing_usesDefault() {
-        // When "mute" key is absent, booleanOrDefault should return the default (false)
+    fun parseServerCommand_muteMissing_returnsNullAsMalformed() {
+        // The `mute` field carries the desired state. Missing it is malformed:
+        // defaulting to false (unmute) would silently invert the user's intent
+        // on a "set mute on, drop the value" send. The parser rejects so the
+        // dispatcher logs/skips instead of issuing the wrong command.
         val payload = mapOf<String, Any?>(
             "player" to mapOf<String, Any?>("command" to "mute"),
         )
         val result = MessageParser.parseServerCommand(payload)
-        assertTrue(result is ServerCommandResult.Mute)
-        assertFalse((result as ServerCommandResult.Mute).muted)
+        assertNull(result)
     }
 
     @Test

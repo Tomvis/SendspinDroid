@@ -177,11 +177,19 @@ class SendSpinDisconnectTest {
     }
 
     // =========================================================================
-    // H-04: Proxy auth-ack must NOT be forwarded to protocol handler
+    // H-04 (post-audit-fix): Proxy auth handling forwards real protocol envelopes
+    //
+    // The original H-04 fix consumed *every* first message after auth (treating
+    // anything as an auth-ack). That dropped real `server/hello` envelopes when
+    // the proxy forwarded SendSpin server traffic without sending an explicit
+    // `auth_ok` -- per the docstring on WireProxyAuthResponse, success means
+    // "no ack, just forward". The current behaviour: consume auth-shaped
+    // envelopes (auth_ok, empty, non-protocol shapes) but forward anything
+    // with a SendSpin protocol type prefix (`server/`, `group/`, `stream/`).
     // =========================================================================
 
     @Test
-    fun `proxy auth-ack is consumed and not forwarded to handleTextMessage`() {
+    fun `proxy auth-ack with server-hello shape is forwarded to handler`() {
         // Set up the client in proxy mode with a mock transport.
         // We need to capture the TransportEventListener that gets set on the transport
         // when connectProxy() is called.
@@ -290,30 +298,28 @@ class SendSpinDisconnectTest {
         // Set this listener on our fake transport so send() works through it
         fakeTransport.setListener(listener)
 
-        // Now simulate the auth-ack being a server/hello message.
-        // This is the dangerous case: if the server sends back something that
-        // looks like server/hello as the auth response.
-        val serverHelloAuthAck = """{"type":"server/hello","payload":{"name":"TestServer","server_id":"test-id","protocol_version":1,"active_roles":["player"]}}"""
+        // Simulate the proxy forwarding a real server/hello as the first post-auth
+        // message (no explicit auth_ok). The handler must forward it so the upper
+        // layer learns the handshake completed; the previous "consume everything"
+        // behaviour silently dropped this message and the handshake never finished
+        // until the 15s connect timeout fired.
+        val serverHello = """{"type":"server/hello","payload":{"name":"TestServer","server_id":"test-id","protocol_version":1,"active_roles":["player"]}}"""
 
-        // Call onMessage with this auth-ack
-        listener.onMessage(serverHelloAuthAck)
+        listener.onMessage(serverHello)
 
-        // After the fix, the auth-ack should be consumed (return statement)
-        // and handleTextMessage should NOT be called, so handshakeComplete stays false
+        // The protocol envelope type contains '/' so the handler treats it as a
+        // real SendSpin message and forwards to handleTextMessage, which sets
+        // handshakeComplete.
         val handshakeComplete = stateField.get(client) as Boolean
-        assertFalse(
-            "Auth-ack must be consumed; handshake must NOT complete from auth-ack message",
+        assertTrue(
+            "server/hello-shaped first message must be forwarded so handshake completes",
             handshakeComplete
         )
 
-        // awaitingAuthResponse should be cleared
+        // awaitingAuthResponse should also be cleared so subsequent messages
+        // take the post-auth fast path.
         val stillAwaiting = awaitingField.get(client) as Boolean
-        assertFalse("awaitingAuthResponse should be cleared after auth-ack", stillAwaiting)
-
-        // sendClientHello should have been called (transport.send with client/hello)
-        verify(atLeast = 0) { mockTransport.send(any<String>()) }
-        // The actual send goes through the fakeTransport, not mockTransport,
-        // so we just verify the state is correct.
+        assertFalse("awaitingAuthResponse should be cleared after first post-auth message", stillAwaiting)
     }
 
     @Test

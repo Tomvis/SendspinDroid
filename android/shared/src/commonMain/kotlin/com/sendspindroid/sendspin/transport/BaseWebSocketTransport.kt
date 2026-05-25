@@ -59,6 +59,14 @@ abstract class BaseWebSocketTransport(
     override val state: TransportState get() = _state.load()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // @Volatile: connectionJob and outgoingChannel are written by connect()
+    // (caller thread), close() (caller thread), and the websocket coroutine's
+    // finally block (IO dispatcher). Plain `var` has no happens-before edge
+    // across those threads, so a send()/close() racing with the finally-null
+    // write may read a stale snapshot. AtomicReference would be heavier and
+    // gain nothing here; we only need read/write visibility, not CAS.
+    @Volatile
     private var connectionJob: Job? = null
 
     // @Volatile: setListener(null) must be visible on the IO-dispatcher receive
@@ -68,7 +76,8 @@ abstract class BaseWebSocketTransport(
     @Volatile
     private var listener: SendSpinTransport.Listener? = null
 
-    // Channel for outgoing messages (text or binary)
+    // Channel for outgoing messages (text or binary).
+    @Volatile
     private var outgoingChannel: Channel<OutgoingMessage>? = null
 
     // Close intent captured by close()/destroy() so the cancellation-catch path
@@ -274,6 +283,13 @@ abstract class BaseWebSocketTransport(
         Log.d(tag, "Closing WebSocket: code=$code reason=$reason")
         pendingCloseCode = code
         pendingCloseReason = reason
+        // Set state synchronously so a caller that immediately re-checks
+        // isConnected (or attempts to reuse this instance via connect()'s
+        // CAS chain that accepts Closed) sees the transition without
+        // having to wait for the IO-dispatcher cancellation-catch to run.
+        // The cancellation catch also stores Closed; the second write is
+        // a redundant no-op.
+        _state.store(TransportState.Closed)
         outgoingChannel?.close()
         connectionJob?.cancel()
         connectionJob = null

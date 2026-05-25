@@ -171,9 +171,25 @@ object MessageParser {
         return when (val cmd = player.command) {
             "volume" -> {
                 val v = player.volume
-                if (v != null && v in 0..100) ServerCommandResult.Volume(v) else null
+                if (v != null && v in 0..100) {
+                    ServerCommandResult.Volume(v)
+                } else {
+                    Log.w(TAG, "server/command.volume missing or out of range: $v -- ignoring")
+                    null
+                }
             }
-            "mute" -> ServerCommandResult.Mute(player.mute ?: false)
+            "mute" -> {
+                // `mute` carries the desired state. Missing field is malformed;
+                // defaulting to `false` (unmute) would silently invert the
+                // user's intent on a "set mute on, drop the value" send.
+                val muted = player.mute
+                if (muted == null) {
+                    Log.w(TAG, "server/command.mute missing 'mute' field -- ignoring as malformed")
+                    null
+                } else {
+                    ServerCommandResult.Mute(muted)
+                }
+            }
             null, "" -> null
             else -> ServerCommandResult.Unknown(cmd)
         }

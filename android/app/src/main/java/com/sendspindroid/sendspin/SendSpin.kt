@@ -637,6 +637,15 @@ class SendSpin(
             handshakeComplete = false
             stopTimeSync()
 
+            // Tear down the prior transport before creating a new one. Without
+            // this, createXxxTransport would overwrite the `transport` field
+            // and orphan the previous instance with its listener still wired
+            // and its HttpClient still open until GC eventually collects it.
+            // attemptReconnect (the timed path) already does this; the
+            // network-available immediate path was missing it.
+            transport?.destroy()
+            transport = null
+
             when (connectionMode) {
                 ConnectionMode.LOCAL -> {
                     val savedAddress = serverAddress ?: return@launch
@@ -803,7 +812,18 @@ class SendSpin(
         _connectionState.value = TransportState.Connecting
         handshakeComplete = false
         awaitingAuthResponse = false
-        timeFilter.reset()
+        // resetAndDiscard (not reset) so any frozen sync state from a previous
+        // server gets dropped here. reset() leaves frozenState intact, which
+        // would cause the next onHandshakeComplete to attempt thaw() against
+        // the new server -- relying on identity mismatch to reject is fragile
+        // (e.g., dev/prod migrations that reuse server_id).
+        timeFilter.resetAndDiscard()
+        // Identity from the prior session must not survive into this one. If
+        // the new transport drops before its server/hello arrives, freeze()
+        // would otherwise label the snapshot with the previous server's
+        // identity.
+        serverName = null
+        serverId = null
         resetSyncStateTracking()
 
         // Cancel any pending reconnect from previous connection attempt
@@ -1254,6 +1274,15 @@ class SendSpin(
         reconnecting.set(true)
         _connectionState.value = TransportState.Connecting
 
+        // Cancel any prior reconnect coroutine before launching the new one.
+        // Without this, racing onClosed/onFailure callbacks (e.g., the
+        // stall-watchdog force-close and a subsequent transport failure both
+        // landing in the listener within the same window) would each launch
+        // their own reconnect job, each creating a fresh transport that
+        // overwrites the other and orphans listeners against the wrong state.
+        // Only matters when selfReconnectEnabled=true; production sets it to
+        // false and runs reconnect through ConnectionCoordinator instead.
+        reconnectJob?.cancel()
         // Store the job so it can be cancelled if user disconnects during the delay
         reconnectJob = timerScope.launch {
             delay(delayMs)
@@ -1401,7 +1430,20 @@ class SendSpin(
 
         override fun onMessage(text: String) {
             lastByteReceivedAtMs.set(System.currentTimeMillis())
-            // Check for auth failure (server may send error if token is invalid)
+
+            // Proxy auth response handling. Two shapes can arrive as the first
+            // post-auth message:
+            //  * an explicit auth envelope (`{"type":"auth_ok"}`, or
+            //    `{"type":"auth_failed",...}` / `{"type":"error",...}` on failure);
+            //  * a real SendSpin protocol envelope (`{"type":"server/..."}`,
+            //    `{"type":"group/..."}`, `{"type":"stream/..."}`) -- some proxies
+            //    do not send an explicit auth_ok and just forward the SendSpin
+            //    server's traffic directly per the docstring on
+            //    WireProxyAuthResponse.
+            //
+            // The auth-failure check stays gated on `!handshakeComplete`
+            // (matching the previous behaviour) so a late-arriving
+            // `auth_failed` can still tear down the connection.
             if (connectionMode == ConnectionMode.PROXY && !handshakeComplete) {
                 val (msgType, message) = MessageParser.parseProxyAuthResponse(text)
                 if (msgType == "auth_failed" || msgType == "error") {
@@ -1411,17 +1453,25 @@ class SendSpin(
                     disconnect()
                     return
                 }
-            }
 
-            // After receiving first message post-auth, send client/hello
-            if (awaitingAuthResponse) {
-                Log.d(TAG, "Received auth-ack, sending client/hello")
-                awaitingAuthResponse = false
-                sendClientHello()
-                // Consume the auth-ack message; do NOT forward it to the protocol handler.
-                // If the auth-ack were forwarded, it could be misinterpreted as a protocol
-                // message (e.g., a server/hello arriving before client/hello is sent).
-                return
+                if (awaitingAuthResponse) {
+                    awaitingAuthResponse = false
+                    Log.d(TAG, "Proxy auth phase complete (first-msg type=${msgType ?: "<none>"}), sending client/hello")
+                    sendClientHello()
+
+                    // If the first post-auth message is itself a SendSpin protocol
+                    // envelope, the proxy skipped the explicit auth_ok step --
+                    // forward to the protocol handler so we don't lose it.
+                    // SendSpin envelope types all contain '/' (e.g., "server/hello");
+                    // auth-success envelopes do not. Empty/non-JSON responses
+                    // (msgType==null) are treated as consumed.
+                    val isProtocolMessage = msgType != null && msgType.contains('/')
+                    if (!isProtocolMessage) {
+                        return
+                    }
+                    // Fall through to handleTextMessage so server/hello (or whatever
+                    // the proxy forwarded) is processed normally.
+                }
             }
 
             handleTextMessage(text)

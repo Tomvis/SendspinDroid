@@ -354,8 +354,12 @@ class ConnectionCoordinator(
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
-                } catch (_: Exception) {
-                    // Continue to next method.
+                } catch (e: Exception) {
+                    // Continue to next method, but log so field triage can see
+                    // that the attempt threw rather than just returning false.
+                    // A silent swallow here masked NPEs / RuntimeExceptions
+                    // inside the connectAttempt closure during reconnect cycles.
+                    Log.w(TAG, "connectAttempt(${server.id}, $method) threw; trying next method", e)
                 }
             }
 
