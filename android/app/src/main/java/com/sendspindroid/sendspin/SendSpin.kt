@@ -1364,10 +1364,32 @@ class SendSpin(
         if (responseCode == 401 || responseCode == 403) {
             return FailureReason.AuthRejected
         }
-        if (throwable is javax.net.ssl.SSLException ||
-            throwable is java.net.UnknownHostException ||
-            throwable?.message?.contains("refused", ignoreCase = true) == true) {
-            return FailureReason.HandshakeFailed
+        if (throwable != null) {
+            // Walk the full cause chain rather than just `throwable.message` /
+            // `throwable is SSLException`. Ktor over OkHttp wraps the real
+            // cause 2-3 levels deep, and `responseCode` is never wired through
+            // at any call site -- so the only signal that a proxy upgrade got
+            // 401/403 lives in a nested exception message like
+            // "Expected HTTP 101 response but was '401 Unauthorized'".
+            // Without chain-walking, every auth rejection mis-classifies as
+            // TransientNetwork and the MA token-clear path never fires.
+            // take(16) guards against pathologically self-referencing causes.
+            val chain = generateSequence(throwable) { it.cause }.take(16).toList()
+            val combinedMessage = chain.mapNotNull { it.message }
+                .joinToString(" | ")
+                .lowercase()
+
+            if (combinedMessage.contains("401") ||
+                combinedMessage.contains("403") ||
+                combinedMessage.contains("unauthorized") ||
+                combinedMessage.contains("forbidden")) {
+                return FailureReason.AuthRejected
+            }
+            if (chain.any { it is javax.net.ssl.SSLException } ||
+                chain.any { it is java.net.UnknownHostException } ||
+                combinedMessage.contains("refused")) {
+                return FailureReason.HandshakeFailed
+            }
         }
         return FailureReason.TransientNetwork
     }
@@ -1400,16 +1422,21 @@ class SendSpin(
         override fun onConnected() {
             Log.d(TAG, "Transport connected")
 
-            if (connectionMode == ConnectionMode.PROXY && !authToken.isNullOrBlank()) {
+            // Snapshot the @Volatile authToken once: another thread (a fast
+            // user-initiated connectLocal / connectRemote that clears the
+            // field) could otherwise null it between the isNullOrBlank gate
+            // and a subsequent `!!` dereference, NPEing the IO dispatcher.
+            val token = authToken
+            if (connectionMode == ConnectionMode.PROXY && !token.isNullOrBlank()) {
                 // Proxy mode: send auth message first, then wait for auth_ok before hello.
                 // The SendSpin server protocol requires a JSON auth message as the first
                 // WebSocket message.
-                Log.d(TAG, "Sending proxy auth message (token ${authToken!!.length} chars)")
+                Log.d(TAG, "Sending proxy auth message (token ${token.length} chars)")
                 awaitingAuthResponse = true
-                val authMsg = MessageBuilder.buildProxyAuth(token = authToken!!, clientId = clientId)
+                val authMsg = MessageBuilder.buildProxyAuth(token = token, clientId = clientId)
                 val sent = transport?.send(authMsg)
                 Log.d(TAG, "Auth message send result: $sent")
-            } else if (connectionMode == ConnectionMode.PROXY && authToken.isNullOrBlank()) {
+            } else if (connectionMode == ConnectionMode.PROXY && token.isNullOrBlank()) {
                 // Proxy mode but no token available - auth will fail. Tear down
                 // the transport inline rather than calling disconnect(): the
                 // latter ends with _connectionState.value = TransportState.Idle,
@@ -1450,9 +1477,19 @@ class SendSpin(
                 val (msgType, message) = MessageParser.parseProxyAuthResponse(text)
                 if (msgType == "auth_failed" || msgType == "error") {
                     Log.e(TAG, "Proxy auth failed: ${message ?: "Authentication failed"}")
+                    // Tear down inline rather than calling disconnect(): the latter
+                    // ends with _connectionState.value = TransportState.Idle, which
+                    // clobbers the Failed(AuthRejected) signal that observers
+                    // (ConnectionCoordinator, MA token-clear path) need. Mirrors
+                    // the same pattern used in the missing-token branch of
+                    // onConnected above.
                     awaitingAuthResponse = false
+                    handshakeComplete = false
+                    reconnecting.set(false)
+                    transport?.setListener(null)
+                    transport?.destroy()
+                    transport = null
                     _connectionState.value = TransportState.Failed(FailureReason.AuthRejected)
-                    disconnect()
                     return
                 }
 
