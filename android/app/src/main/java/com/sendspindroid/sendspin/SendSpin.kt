@@ -243,27 +243,41 @@ class SendSpin(
     @Volatile
     var selfReconnectEnabled: Boolean = true
 
-    // Transport abstraction - can be WebSocket (local) or WebRTC (remote)
-    private var transport: SendSpinTransport? = null
-    private var connectionMode: ConnectionMode = ConnectionMode.LOCAL
+    // Transport abstraction - can be WebSocket (local) or WebRTC (remote).
+    // @Volatile: written on the caller thread (connect/disconnect) and on
+    // workScope/timerScope coroutines (reconnect, immediate-reconnect); read
+    // from the WebSocket IO dispatcher (TransportEventListener), the timer
+    // (checkStall), the UI thread (setVolume/setMuted → sendTextMessage), and
+    // the audio pipeline. Without volatility a write from one thread is not
+    // guaranteed to be visible to readers on another, so a setVolume right
+    // after a reconnect-driven swap can read a stale `null` and drop the wire
+    // send silently.
+    @Volatile private var transport: SendSpinTransport? = null
+    @Volatile private var connectionMode: ConnectionMode = ConnectionMode.LOCAL
 
-    // Connection info (stored for reconnection)
-    private var serverAddress: String? = null
-    private var serverPath: String? = null
-    private var remoteId: String? = null
-    private var serverName: String? = null
-    private var serverId: String? = null
+    // Connection info (stored for reconnection). Written on caller thread in
+    // connect{Local,Remote,Proxy}, read on the IO dispatcher in onClosed /
+    // onFailure / onConnected and on timerScope in attemptReconnect.
+    @Volatile private var serverAddress: String? = null
+    @Volatile private var serverPath: String? = null
+    @Volatile private var remoteId: String? = null
+    @Volatile private var serverName: String? = null
+    @Volatile private var serverId: String? = null
 
-    // Proxy authentication state
-    private var authToken: String? = null
-    private var awaitingAuthResponse = false
+    // Proxy authentication state. authToken is set on caller thread, read on
+    // IO dispatcher (onConnected). awaitingAuthResponse is written on IO
+    // (onConnected, onMessage) and on caller (prepareForConnection).
+    @Volatile private var authToken: String? = null
+    @Volatile private var awaitingAuthResponse = false
 
     // Optional PROXY fallback config. When set and the client is reconnecting in
     // LOCAL mode after [LOCAL_RECONNECT_FALLBACK_THRESHOLD] consecutive failures,
     // the client switches internally to PROXY using these values instead of
     // continuing to retry a dead LAN address. See setProxyFallback(). Issue #126.
-    private var proxyFallbackUrl: String? = null
-    private var proxyFallbackAuthToken: String? = null
+    // Written from any thread via setProxyFallback, read on timerScope inside
+    // attemptReconnect.
+    @Volatile private var proxyFallbackUrl: String? = null
+    @Volatile private var proxyFallbackAuthToken: String? = null
 
     // Client identity - persisted across app launches
     private val clientId = UserSettings.getPlayerId()
@@ -809,6 +823,18 @@ class SendSpin(
      * Common preparation for both local and remote connections.
      */
     private fun prepareForConnection() {
+        // Detach the old transport's listener BEFORE resetting any gate flags.
+        // An in-flight onClosed / onFailure from the previous transport (e.g.,
+        // one we never disconnect()ed because state was Connecting/Failed when
+        // the user retried) would otherwise observe userInitiatedDisconnect=
+        // false, reconnecting=false, hasConnectionInfo=true after the resets
+        // below and spawn an attemptReconnect() that competes with the fresh
+        // createXxxTransport call about to run -- two transports created in
+        // parallel, last write to the field wins, the other leaks with its
+        // listener still wired. setListener(null) makes subsequent callbacks
+        // on the old listener a no-op so the gate-flag values become moot.
+        transport?.setListener(null)
+
         _connectionState.value = TransportState.Connecting
         handshakeComplete = false
         awaitingAuthResponse = false
@@ -835,10 +861,7 @@ class SendSpin(
         reconnecting.set(false)
         waitingForNetwork.set(false)
 
-        // Clean up any existing transport.
-        // Clear the listener first to prevent stale callbacks (e.g., onOpen from
-        // a previous OkHttp WebSocket) from firing on the new transport's listener.
-        transport?.setListener(null)
+        // Tear down the detached transport.
         transport?.destroy()
         transport = null
     }
@@ -1418,10 +1441,20 @@ class SendSpin(
                 val sent = transport?.send(authMsg)
                 Log.d(TAG, "Auth message send result: $sent")
             } else if (connectionMode == ConnectionMode.PROXY && authToken.isNullOrBlank()) {
-                // Proxy mode but no token available - auth will fail
+                // Proxy mode but no token available - auth will fail. Tear down
+                // the transport inline rather than calling disconnect(): the
+                // latter ends with _connectionState.value = TransportState.Idle,
+                // which clobbers the Failed(AuthRejected) signal that observers
+                // (ConnectionCoordinator, UI status flow) need to react to.
+                // After this, they would only see Idle and never learn the
+                // proxy was unauthorized.
                 Log.e(TAG, "Proxy connection has no auth token - server will reject")
+                handshakeComplete = false
+                reconnecting.set(false)
+                transport?.setListener(null)
+                transport?.destroy()
+                transport = null
                 _connectionState.value = TransportState.Failed(FailureReason.AuthRejected)
-                disconnect()
             } else {
                 // Local/Remote mode: proceed directly with hello
                 sendClientHello()
