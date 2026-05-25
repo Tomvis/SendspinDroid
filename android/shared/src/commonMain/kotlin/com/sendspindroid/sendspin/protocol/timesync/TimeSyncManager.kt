@@ -103,14 +103,26 @@ class TimeSyncManager(
             running = false
             syncJob?.cancel()
             syncJob = null
-        }
-        synchronized(pendingBurstMeasurements) {
-            pendingBurstMeasurements.clear()
-            burstInProgress = false
-            rttHistoryIndex = 0
-            rttHistoryCount = 0
-            currentBurstCount = SendSpinProtocol.TimeSync.BURST_COUNT
-            currentIntervalMs = SendSpinProtocol.TimeSync.INTERVAL_MS
+            // Reset burst state under the same lock so a re-handshake racing
+            // stop() cannot wedge new burst state. Previously the two
+            // synchronized blocks were sequential: stop() released
+            // lifecycleLock between running=false and the burst cleanup,
+            // letting a concurrent start() acquire lifecycleLock, set
+            // running=true, and launch a syncJob whose first burst set
+            // burstInProgress=true and pushed measurements into the list --
+            // then stop()'s second block ran and wiped that fresh state,
+            // re-clearing burstInProgress and the rtt history so the new
+            // burst's replies took the immediate-update path instead of
+            // best-of-RTT. Nesting under lifecycleLock makes the start/stop
+            // pair atomic. No deadlock risk: nothing else takes both locks.
+            synchronized(pendingBurstMeasurements) {
+                pendingBurstMeasurements.clear()
+                burstInProgress = false
+                rttHistoryIndex = 0
+                rttHistoryCount = 0
+                currentBurstCount = SendSpinProtocol.TimeSync.BURST_COUNT
+                currentIntervalMs = SendSpinProtocol.TimeSync.INTERVAL_MS
+            }
         }
     }
 

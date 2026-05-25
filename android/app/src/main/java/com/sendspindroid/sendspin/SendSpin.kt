@@ -601,21 +601,34 @@ class SendSpin(
     }
 
     /**
-     * Called when the network changes.
-     * During reconnection, we preserve the frozen sync state to maintain playback continuity.
+     * Called when the network changes (transport identity change or link-address
+     * change while the WebSocket is still alive).
+     *
+     * Does NOT touch the time filter. A hard `timeFilter.reset()` here used to
+     * wipe offset/drift/measurements and flip sync state to "error", muting
+     * audio for the ~5-10 s reconvergence window even when the underlying
+     * server-clock-vs-client-clock relationship was unchanged (e.g.
+     * LinkAddressesChanged on a DHCP renewal, where no reconnect is triggered).
+     * The filter's adaptive forgetting (covariance inflation on residuals >
+     * threshold) already handles route-change step changes, and the burst loop
+     * keeps measuring on the live socket. For IdentityChanged the upper layer
+     * follows up with disconnectForReselection() which reaches
+     * prepareForConnection() and calls resetAndDiscard() anyway, so the inline
+     * reset here was either redundant or actively muting audio.
+     *
+     * The callback (`syncAudioPlayer.clearBuffer()` in PlaybackService) still
+     * fires so a route flip drops any in-flight packets that would now race
+     * against the new path's pacing -- that's the buffer-side reanchor.
      */
     fun onNetworkChanged() {
         if (!isConnected) return
 
-        // If we're actively reconnecting, preserve the frozen sync state
-        // This allows playback to continue from buffer without losing clock sync
         if (reconnecting.get() || timeFilter.isFrozen) {
             Log.i(TAG, "Network changed during reconnection - preserving frozen sync state")
             return
         }
 
-        Log.i(TAG, "Network changed - resetting time filter for re-sync")
-        timeFilter.reset()
+        Log.i(TAG, "Network changed - relying on adaptive forgetting for re-sync")
         callback.onNetworkChanged()
     }
 
