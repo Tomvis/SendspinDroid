@@ -425,9 +425,14 @@ class SyncAudioPlayer(
     private var firstServerTimestampUs: Long? = null     // First chunk's server timestamp
     private var lastReanchorTimeUs: Long = 0             // Cooldown tracking for reanchor
 
-    // DAC timestamp stability tracking for start gating
-    private var consecutiveValidTimestamps = 0       // counts consecutive valid getTimestamp() reads
-    private var dacTimestampsStable = false           // true once TIMESTAMP_STABLE_READS reached
+    // DAC timestamp stability tracking for start gating.
+    // @Volatile: written under stateLock from resume/stop/enterIdle/clearBuffer/
+    // triggerReanchor (main + WS threads), read on the playback coroutine without
+    // stateLock. Without volatility a stale `true` can persist mid-iteration after
+    // a reset, sending the loop down DAC-timestamp-dependent paths whose backing
+    // timestamps were just invalidated.
+    @Volatile private var consecutiveValidTimestamps = 0       // counts consecutive valid getTimestamp() reads
+    @Volatile private var dacTimestampsStable = false           // true once TIMESTAMP_STABLE_READS reached
 
     // DAC-aware alignment wait: rate-limit the per-iteration "waiting for alignment"
     // log so a 2-12s wait emits ~3-13 lines instead of 200-1200. Entry log fires once
@@ -2117,8 +2122,14 @@ class SyncAudioPlayer(
                 // AudioTrack ring buffer at a target depth. This replaces the old
                 // effectiveLead scheduling which drifted due to Kalman offset changes
                 // between chunk-queue time and chunk-play time.
-                val pendingToDacUs = if (audioSink != null && dacTimestampsStable)
-                    getPendingToDacUs(audioSink!!) else 0L
+                //
+                // Snapshot audioSink into a local: release() can null the field
+                // between the non-null check and a `!!` dereference (it runs on
+                // another thread and only awaits the playback loop cancellation
+                // with a timeout), so the second read could fault.
+                val sinkForPacing = audioSink
+                val pendingToDacUs = if (sinkForPacing != null && dacTimestampsStable)
+                    getPendingToDacUs(sinkForPacing) else 0L
 
                 // Rate-limited DAC pacing diagnostics. The watchdog shares this
                 // cadence so stuck-state warnings come out on the same log tick.
