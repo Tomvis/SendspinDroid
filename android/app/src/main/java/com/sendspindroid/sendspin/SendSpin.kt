@@ -33,13 +33,9 @@ import java.util.concurrent.Executors
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import com.sendspindroid.sendspin.protocol.message.MessageParser
-import java.net.SocketException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-import javax.net.ssl.SSLHandshakeException
 
 /**
  * Native Kotlin SendSpin client.
@@ -1344,33 +1340,6 @@ class SendSpin(
                         createProxyTransport(url)
                     }
                 }
-            }
-        }
-    }
-
-    /**
-     * Check if an error is recoverable (should trigger reconnection).
-     */
-    private fun isRecoverableError(t: Throwable): Boolean {
-        val cause = t.cause ?: t
-        val message = t.message?.lowercase() ?: ""
-
-        return when {
-            cause is SocketException -> true
-            cause is java.io.EOFException -> true
-            message.contains("reset") -> true
-            message.contains("abort") -> true
-            message.contains("broken pipe") -> true
-            message.contains("connection closed") -> true
-            cause is SocketTimeoutException -> true
-            cause is UnknownHostException -> false
-            cause is SSLHandshakeException -> false
-            message.contains("refused") -> false
-            else -> {
-                // Default to NOT recoverable. A leaked programming bug (NPE, parser
-                // RuntimeException, etc.) must not trigger endless reconnect loops.
-                Log.d(TAG, "isRecoverableError: unrecognized throwable ${cause::class.simpleName} msg='$message' -> unrecoverable")
-                false
             }
         }
     }

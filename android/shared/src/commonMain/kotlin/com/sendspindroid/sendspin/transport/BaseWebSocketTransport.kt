@@ -124,33 +124,47 @@ abstract class BaseWebSocketTransport(
      * misbehaving client from pinging forever.
      */
     protected open fun isRecoverableError(t: Throwable): Boolean {
-        val cause = t.cause ?: t
+        // Walk the full cause chain rather than just `t.cause`. Ktor over OkHttp
+        // wraps exceptions 2-3 levels deep (e.g., WebSocketException → IOException
+        // → SocketException, or IOException → IOException → UnknownHostException);
+        // checking only the immediate cause misses the real root and falls through
+        // to the "unrecognized" branch, mis-classifying transient errors as
+        // unrecoverable and -- worse -- mis-classifying DNS / SSL / connection-
+        // refused failures as transient when wrapped in a generic IO/Socket
+        // exception. take(16) is cheap cycle protection against pathologically
+        // self-referencing causes.
+        val chain = generateSequence(t) { it.cause }.take(16).toList()
+        val causeNames = chain.map { it::class.simpleName?.lowercase() ?: "" }
         val message = t.message?.lowercase() ?: ""
-        val causeName = cause::class.simpleName?.lowercase() ?: ""
 
         return when {
-            // Network errors that might resolve themselves
-            causeName.contains("socketexception") -> true
-            causeName.contains("eofexception") -> true
-            causeName.contains("sockettimeoutexception") -> true
-            causeName.contains("timeoutexception") -> true
+            // Configuration errors come first so they win when a wrapper layer
+            // ALSO matches one of the transient categories below. Example:
+            // [SocketException → UnknownHostException]. Old single-level logic
+            // returned false correctly only by luck of which level the check
+            // hit first; chain-walking makes both visible, and "unrecoverable"
+            // is the right answer.
+            causeNames.any { it.contains("unknownhostexception") } -> false
+            causeNames.any { it.contains("sslhandshakeexception") } -> false
+            causeNames.any { it.contains("connectexception") } -> false
+            causeNames.any { it.contains("noroutetohostexception") } -> false
+            message.contains("refused") -> false
+            message.contains("unknown host") -> false
+            message.contains("no route") -> false
+
+            // Transient network errors.
+            causeNames.any { it.contains("socketexception") } -> true
+            causeNames.any { it.contains("eofexception") } -> true
+            causeNames.any { it.contains("sockettimeoutexception") } -> true
+            causeNames.any { it.contains("timeoutexception") } -> true
             message.contains("reset") -> true
             message.contains("abort") -> true
             message.contains("broken pipe") -> true
             message.contains("connection closed") -> true
             message.contains("timeout") -> true
 
-            // Configuration errors that won't fix themselves
-            causeName.contains("unknownhostexception") -> false
-            causeName.contains("sslhandshakeexception") -> false
-            causeName.contains("connectexception") -> false
-            causeName.contains("noroutetohostexception") -> false
-            message.contains("refused") -> false
-            message.contains("unknown host") -> false
-            message.contains("no route") -> false
-
             else -> {
-                Log.d(tag, "isRecoverableError: unrecognized throwable $causeName msg='$message' -> treating as unrecoverable")
+                Log.d(tag, "isRecoverableError: unrecognized chain=$causeNames msg='$message' -> treating as unrecoverable")
                 false
             }
         }

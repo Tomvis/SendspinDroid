@@ -48,6 +48,15 @@ class TimeSyncManager(
         private const val LOW_JITTER_THRESHOLD_US = 5_000L
     }
 
+    // Lifecycle lock: serialises start/stop so the "is it running already?"
+    // check + flag set + syncJob assign happen atomically relative to a
+    // concurrent stop(). Two simultaneous start() calls (rare but legal,
+    // e.g., re-handshake while the previous handshake's startTimeSync is
+    // still on the call stack) used to both pass the bare `if (running)
+    // return` check and launch a second syncJob, which then ran in parallel
+    // with the first burst-loop, double-sending client/time messages until
+    // the next stop().
+    private val lifecycleLock = Any()
     @Volatile
     private var running = false
     private var syncJob: Job? = null
@@ -72,25 +81,29 @@ class TimeSyncManager(
     internal val testRttHistoryCount: Int get() = synchronized(pendingBurstMeasurements) { rttHistoryCount }
 
     fun start(scope: CoroutineScope) {
-        if (running) return
-        running = true
+        synchronized(lifecycleLock) {
+            if (running) return
+            running = true
 
-        syncJob = scope.launch {
-            sendTimeSyncBurst()
+            syncJob = scope.launch {
+                sendTimeSyncBurst()
 
-            while (running && isActive) {
-                delay(currentIntervalMs)
-                if (running) {
-                    sendTimeSyncBurst()
+                while (running && isActive) {
+                    delay(currentIntervalMs)
+                    if (running) {
+                        sendTimeSyncBurst()
+                    }
                 }
             }
         }
     }
 
     fun stop() {
-        running = false
-        syncJob?.cancel()
-        syncJob = null
+        synchronized(lifecycleLock) {
+            running = false
+            syncJob?.cancel()
+            syncJob = null
+        }
         synchronized(pendingBurstMeasurements) {
             pendingBurstMeasurements.clear()
             burstInProgress = false

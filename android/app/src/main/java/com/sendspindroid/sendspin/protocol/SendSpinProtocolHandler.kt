@@ -709,8 +709,21 @@ abstract class SendSpinProtocolHandler(
 
     /**
      * Handle binary message from the transport.
+     *
+     * Gated on [handshakeComplete]: the Sendspin protocol guarantees
+     * `server/hello` and `stream/start` precede any audio frames, so binary
+     * data arriving before the handshake either indicates a misbehaving
+     * server or a late frame from a previous (already-torn-down) session
+     * crossing the new connection's setup window. Either way, feeding such
+     * a chunk into the audio sink before the codec / sample-rate / bit-depth
+     * are known is at best wasted work and at worst a mis-decoded burst.
+     * Drop with a warn so server bugs surface in field logs.
      */
     protected fun handleBinaryMessage(bytes: ByteArray) {
+        if (!handshakeComplete) {
+            Log.w(tag, "Dropping ${bytes.size}-byte binary frame: received before handshake complete")
+            return
+        }
         val message = BinaryMessageParser.parse(bytes)
         if (message != null) {
             dispatchBinaryMessage(message)

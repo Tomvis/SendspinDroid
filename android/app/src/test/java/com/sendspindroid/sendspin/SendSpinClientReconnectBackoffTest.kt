@@ -188,42 +188,11 @@ class SendSpinReconnectBackoffTest {
         )
     }
 
-    @Test
-    fun `isRecoverableError returns false for unknown throwables`() {
-        val method = SendSpin::class.java.getDeclaredMethod("isRecoverableError", Throwable::class.java)
-        method.isAccessible = true
-
-        // A totally generic RuntimeException (the shape a parser bug or NPE takes)
-        // must not be treated as recoverable, to avoid infinite reconnect on
-        // programmer errors.
-        val unknown = RuntimeException("something strange nobody has matched")
-        assertEquals(false, method.invoke(client, unknown))
-    }
-
-    @Test
-    fun `isRecoverableError returns true for known network glitches`() {
-        val method = SendSpin::class.java.getDeclaredMethod("isRecoverableError", Throwable::class.java)
-        method.isAccessible = true
-
-        // Sanity: known-recoverable errors still resolve to recoverable.
-        val socketErr = java.net.SocketException("Connection reset by peer")
-        val eofErr = java.io.EOFException("unexpected eof")
-        val timeoutErr = java.net.SocketTimeoutException("read timed out")
-        assertEquals(true, method.invoke(client, socketErr))
-        assertEquals(true, method.invoke(client, eofErr))
-        assertEquals(true, method.invoke(client, timeoutErr))
-    }
-
-    @Test
-    fun `isRecoverableError returns false for known permanent errors`() {
-        val method = SendSpin::class.java.getDeclaredMethod("isRecoverableError", Throwable::class.java)
-        method.isAccessible = true
-
-        val unknownHost = java.net.UnknownHostException("no such host")
-        val refused = java.io.IOException("connection refused")
-        assertEquals(false, method.invoke(client, unknownHost))
-        assertEquals(false, method.invoke(client, refused))
-    }
+    // The isRecoverableError tests that used to live here reflected into a
+    // duplicate classifier on SendSpin that has been deleted. The live
+    // classifier lives on BaseWebSocketTransport; coverage moved to
+    // shared/.../transport/IsRecoverableErrorTest.kt (which also exercises
+    // chain-walked unwrap cases the reflective test couldn't reach).
 
     @Test
     fun `normal mode uses 30s steady-state delay after attempt 5`() {
