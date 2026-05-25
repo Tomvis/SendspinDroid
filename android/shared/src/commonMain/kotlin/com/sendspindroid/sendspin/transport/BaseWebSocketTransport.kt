@@ -60,10 +60,25 @@ abstract class BaseWebSocketTransport(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var connectionJob: Job? = null
+
+    // @Volatile: setListener(null) must be visible on the IO-dispatcher receive
+    // thread before the next callback fires. A caller that clears the listener
+    // and then calls close() relies on the cancellation-catch path below not
+    // dispatching against a now-stale reference.
+    @Volatile
     private var listener: SendSpinTransport.Listener? = null
 
     // Channel for outgoing messages (text or binary)
     private var outgoingChannel: Channel<OutgoingMessage>? = null
+
+    // Close intent captured by close()/destroy() so the cancellation-catch path
+    // can deliver the right code/reason to the listener (e.g., 1001 from the
+    // stall watchdog must reach onClosed so the upper layer drops to Idle and
+    // the Coordinator-driven reconnect kicks in).
+    @Volatile
+    private var pendingCloseCode: Int = 1000
+    @Volatile
+    private var pendingCloseReason: String = "cancelled"
 
     private sealed class OutgoingMessage {
         data class Text(val text: String) : OutgoingMessage()
@@ -215,8 +230,17 @@ abstract class BaseWebSocketTransport(
                     listener?.onClosed(code, msg)
                 }
             } catch (e: CancellationException) {
-                // Intentional close via destroy()/close()
+                // Intentional close via destroy()/close(). The webSocket block
+                // never reached its post-loop listener?.onClosed(...) call
+                // because closeReason.await() re-threw the cancellation.
+                // Deliver the close to the listener here with the code/reason
+                // captured by close(); without this, callers that drive close()
+                // expecting an onClosed callback (notably the stall watchdog)
+                // never learn the connection died and the upper-layer reconnect
+                // path is never invoked.
                 Log.d(tag, "WebSocket cancelled")
+                _state.store(TransportState.Closed)
+                listener?.onClosed(pendingCloseCode, pendingCloseReason)
             } catch (e: Exception) {
                 Log.e(tag, "WebSocket failure: ${e.message}")
                 _state.store(TransportState.Failed)
@@ -248,6 +272,8 @@ abstract class BaseWebSocketTransport(
 
     override fun close(code: Int, reason: String) {
         Log.d(tag, "Closing WebSocket: code=$code reason=$reason")
+        pendingCloseCode = code
+        pendingCloseReason = reason
         outgoingChannel?.close()
         connectionJob?.cancel()
         connectionJob = null

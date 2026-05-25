@@ -492,19 +492,30 @@ abstract class SendSpinProtocolHandler(
 
         handshakeComplete = true
 
-        // Clear cached values so the first post-handshake messages always propagate.
-        // lastColorState in particular MUST be cleared: on reconnect or switch
-        // to a different server, the dedup check `colorState != lastColorState`
-        // in handleServerState would otherwise suppress the first color update
-        // from the new server (if it happened to be byte-identical) or, worse,
-        // leave the previous server's palette in place when the new server
-        // does not advertise color@v1 at all.
+        // Clear cached values that gate on equality-dedup so the first
+        // post-handshake message always propagates. lastColorState MUST be
+        // cleared: on reconnect or server switch, the dedup check
+        // `colorState != lastColorState` in handleServerState would otherwise
+        // suppress the first color update from the new server (if it happened
+        // to be byte-identical) or, worse, leave the previous server's palette
+        // in place when the new server does not advertise color@v1 at all.
+        //
+        // Do NOT clear lastMetadata or lastControllerState here. The Sendspin
+        // server/state stream is diff-style (see JsonOptional doc) and the
+        // parser merges Absent fields against the previous value. After a
+        // reconnect, MA may send a progress-only or volume-only update first;
+        // with lastMetadata cleared, every Absent field collapses to "" / 0,
+        // the NowPlaying screen interprets the empty artwork_url as an
+        // explicit clear, and the artwork-zombie safeguard flips metadata to
+        // EMPTY after ~1.7 s -- the user lands on the standby idle screen mid-
+        // playback. The dedup concern doesn't apply to metadata or controller:
+        // handleServerState fires onMetadataUpdate / onControllerStateUpdate
+        // unconditionally on every non-null parse, so retaining the prior
+        // value does not suppress the post-handshake refresh.
         _streamActive = false
         _currentStreamConfig = null
-        lastMetadata = null
         lastPlaybackState = null
         lastGroupInfo = null
-        lastControllerState = null
         if (lastColorState != null) {
             lastColorState = null
             onColorStateCleared()

@@ -928,10 +928,12 @@ class SendSpin(
         // GoodbyeReason enum and made the server drop the connection with a
         // noisy ValueError trace.
         sendGoodbye(SendSpinProtocol.GoodbyeReason.RESTART)
-        // Clear the transport listener BEFORE closing to prevent the async onClosed
+        // Clear the transport listener BEFORE tearing down to prevent the async onClosed
         // callback from firing a second onDisconnected after we fire one synchronously below.
+        // destroy() (not close()) closes the underlying HttpClient too -- close() alone
+        // leaks the OkHttp engine + ping thread until the next connect cycle.
         transport?.setListener(null)
-        transport?.close(1000, "Reselection")
+        transport?.destroy()
         transport = null
         handshakeComplete = false
         _connectionState.value = TransportState.Idle
@@ -953,10 +955,12 @@ class SendSpin(
         reconnecting.set(false)
         waitingForNetwork.set(false)
         sendGoodbye(SendSpinProtocol.GoodbyeReason.USER_REQUEST)
-        // Clear the transport listener BEFORE closing to prevent the async onClosed
+        // Clear the transport listener BEFORE tearing down to prevent the async onClosed
         // callback from firing a second onDisconnected after we fire one synchronously below.
+        // destroy() (not close()) closes the underlying HttpClient too -- close() alone
+        // leaks the OkHttp engine + ping thread until the next connect cycle.
         transport?.setListener(null)
-        transport?.close(1000, "User disconnect")
+        transport?.destroy()
         transport = null
         handshakeComplete = false
         _connectionState.value = TransportState.Idle

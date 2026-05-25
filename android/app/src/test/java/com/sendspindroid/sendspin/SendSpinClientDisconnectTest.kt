@@ -92,7 +92,7 @@ class SendSpinDisconnectTest {
     // =========================================================================
 
     @Test
-    fun `disconnect clears transport listener before closing`() {
+    fun `disconnect clears transport listener before tearing down`() {
         // Use a mock transport that we can inject via the connect flow
         val mockTransport = mockk<SendSpinTransport>(relaxed = true)
         every { mockTransport.state } returns TransportState.Connected
@@ -106,10 +106,13 @@ class SendSpinDisconnectTest {
         // Call disconnect
         client.disconnect()
 
-        // Verify setListener(null) is called BEFORE close()
+        // Verify setListener(null) is called BEFORE destroy(). disconnect() must
+        // call destroy() (not close()) so the underlying HttpClient is released --
+        // close() alone leaks the OkHttp engine + ping thread until the next
+        // connect cycle.
         verify(ordering = Ordering.ORDERED) {
             mockTransport.setListener(null)
-            mockTransport.close(1000, "User disconnect")
+            mockTransport.destroy()
         }
     }
 

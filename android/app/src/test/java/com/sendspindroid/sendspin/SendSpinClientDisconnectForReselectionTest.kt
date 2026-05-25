@@ -35,6 +35,7 @@ class SendSpinDisconnectForReselectionTest {
     private class FakeTransport : SendSpinTransport {
         var closeCalled = false
         var closeCode: Int = -1
+        var destroyCalled = false
         var listenerCleared = false
         override val state = TransportState.Connected
         override val isConnected = true
@@ -48,7 +49,9 @@ class SendSpinDisconnectForReselectionTest {
             closeCalled = true
             closeCode = code
         }
-        override fun destroy() {}
+        override fun destroy() {
+            destroyCalled = true
+        }
     }
 
     @Before
@@ -114,11 +117,13 @@ class SendSpinDisconnectForReselectionTest {
     }
 
     @Test
-    fun `disconnectForReselection closes the transport`() {
+    fun `disconnectForReselection tears down the transport`() {
         client.disconnectForReselection()
 
-        assertTrue("Transport close should be called", fakeTransport.closeCalled)
-        assertEquals(1000, fakeTransport.closeCode)
+        // destroy() (not close()) is the correct teardown path: it releases the
+        // underlying HttpClient as well, preventing the OkHttp engine leak that
+        // would otherwise persist until the next connect cycle.
+        assertTrue("Transport destroy should be called", fakeTransport.destroyCalled)
     }
 
     @Test
