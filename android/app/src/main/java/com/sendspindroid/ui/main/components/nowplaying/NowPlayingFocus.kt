@@ -1,5 +1,6 @@
 package com.sendspindroid.ui.main.components.nowplaying
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -21,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -109,17 +111,30 @@ fun NowPlayingFocus(
     // real user-initiated pause.
     val effectivePaused = paused && !isBuffering
 
-    // Accent snap. animateColorAsState produced a new Color object on every
-    // frame for the duration of the tween, and the downstream halo + wash +
-    // progress-fill brushes all re-keyed their `remember(accent, ...)` slot
-    // on each frame -- meaning a fresh ShaderBrush + backing Shader was
-    // allocated ~15 times per track change. On the Shield Tegra that
-    // showed up as GC pressure during exactly the moment the art crossfade
-    // also fires. Snapping instead of tweening eliminates the brush churn;
-    // the simultaneous 100ms art crossfade in ArtworkRequest hides the
-    // colour pop and the audible track change makes any residual snap read
-    // as intentional.
-    val animatedAccent = accent
+    // Accent tween + quantization.
+    //
+    // animateColorAsState gives the smooth 250ms colour transition across the
+    // halo + wash + progress-fill brushes (matches the 100ms art crossfade
+    // with a small tail). Naively, the raw tween emits a fresh Color every
+    // frame, and the downstream `remember(accent, ...)` brush caches re-key
+    // 15x per track change -- each one a fresh ShaderBrush + backing Shader.
+    // On the Shield Tegra that showed up as GC pressure during exactly the
+    // moment the art crossfade also fires.
+    //
+    // Quantizing the tween output to a coarse RGB grid stabilises the cache
+    // key across most frames: a 250ms tween between two arbitrary accents
+    // typically traverses 4-8 distinct quantized values total. Each brush
+    // site then re-allocates 4-8 times per track change instead of 15, and
+    // the children skip recomposition entirely between quantization steps
+    // thanks to derivedStateOf's structural-equality emit.
+    val rawAccent by animateColorAsState(
+        targetValue = accent,
+        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
+        label = "np-accent",
+    )
+    val animatedAccent by remember {
+        derivedStateOf { rawAccent.quantizeAccent() }
+    }
 
     // Sticky queue position. server/state and the track-info frame arrive on
     // separate WebSocket messages, so on a fresh play we can momentarily
@@ -467,4 +482,25 @@ private fun InfoColumn(
             SpecChips(spec = audioSpec)
         }
     }
+}
+
+/**
+ * Snap each RGB channel to the nearest of [steps] levels. 24 steps per channel
+ * yields ~10.6 units of separation on a 0-255 scale -- below the just-
+ * noticeable difference for radial gradients with alpha < 0.3 and the
+ * [accent, White] horizontal gradient on the progress fill, where the gradient
+ * itself smears far more colour than this quantization removes.
+ *
+ * Used to stabilise the cache key of the brush `remember(accent, ...)` slots
+ * downstream of the 250ms animateColorAsState tween in NowPlayingFocus. Alpha
+ * is preserved verbatim (the brush sites apply their own alpha at construction
+ * via accent.copy(alpha = ...), so quantizing it here would break those).
+ */
+private fun Color.quantizeAccent(steps: Int = 24): Color {
+    val s = steps.coerceAtLeast(2)
+    val denom = (s - 1).toFloat()
+    val r = ((red * denom + 0.5f).toInt().coerceIn(0, s - 1)) / denom
+    val g = ((green * denom + 0.5f).toInt().coerceIn(0, s - 1)) / denom
+    val b = ((blue * denom + 0.5f).toInt().coerceIn(0, s - 1)) / denom
+    return Color(red = r, green = g, blue = b, alpha = alpha)
 }
