@@ -145,8 +145,11 @@ class TimeSyncManager(
             }
         }
 
-        if (measurement.rtt > MAX_ACCEPTABLE_RTT_US) {
-            Log.v(tag, "Ignoring stale time response: RTT=${measurement.rtt / 1_000_000}s")
+        if (measurement.rtt <= 0 || measurement.rtt > MAX_ACCEPTABLE_RTT_US) {
+            // Non-positive RTT (clock skew / suspend-resume / hostile server) would
+            // collapse computeMaxError to 1us and dominate the Kalman filter as a
+            // "super-confident" garbage measurement.
+            Log.v(tag, "Ignoring time response with implausible RTT=${measurement.rtt}us")
             return false
         }
 
@@ -193,9 +196,11 @@ class TimeSyncManager(
                 return
             }
 
-            val validMeasurements = pendingBurstMeasurements.filter { it.rtt < MAX_ACCEPTABLE_RTT_US }
+            val validMeasurements = pendingBurstMeasurements.filter {
+                it.rtt > 0 && it.rtt < MAX_ACCEPTABLE_RTT_US
+            }
             if (validMeasurements.isEmpty()) {
-                Log.w(tag, "All ${pendingBurstMeasurements.size} responses had RTT > ${MAX_ACCEPTABLE_RTT_US / 1_000_000}s - skipping burst")
+                Log.w(tag, "All ${pendingBurstMeasurements.size} responses had implausible RTT - skipping burst")
                 pendingBurstMeasurements.clear()
                 return
             }

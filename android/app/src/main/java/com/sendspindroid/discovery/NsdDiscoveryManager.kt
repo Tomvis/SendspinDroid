@@ -199,6 +199,8 @@ class NsdDiscoveryManager(
                 synchronized(resolvingServices) {
                     resolvingServices.remove(serviceName)
                 }
+                // Registration failed -- onServiceInfoCallbackUnregistered will not fire.
+                executor.shutdown()
             }
 
             override fun onServiceUpdated(resolvedInfo: NsdServiceInfo) {
@@ -226,7 +228,9 @@ class NsdDiscoveryManager(
             }
 
             override fun onServiceInfoCallbackUnregistered() {
-                // No-op; cleanup already handled in onServiceUpdated
+                // No more callbacks will fire on the executor -- release the worker
+                // thread it owns (one is created per resolve call).
+                executor.shutdown()
             }
         }
 
@@ -237,6 +241,9 @@ class NsdDiscoveryManager(
             synchronized(resolvingServices) {
                 resolvingServices.remove(serviceName)
             }
+            // registerServiceInfoCallback threw -- no callback will ever fire to clean
+            // up the executor, so release it here.
+            executor.shutdown()
         }
     }
 

@@ -32,6 +32,14 @@ abstract class MediaCodecDecoder(
          * the codec time to free a buffer by processing output.
          */
         private const val MAX_INPUT_RETRIES = 3
+
+        /**
+         * Maximum iterations through the drain loop per call. A well-behaved codec
+         * produces 1-4 output buffers per input chunk, so this is a safety cap to
+         * stop a misbehaving codec that keeps returning INFO_OUTPUT_FORMAT_CHANGED
+         * or zero-byte buffers in a tight loop from hanging the decode dispatcher.
+         */
+        private const val MAX_DRAIN_ITERATIONS = 1024
     }
 
     protected var mediaCodec: MediaCodec? = null
@@ -135,7 +143,7 @@ abstract class MediaCodecDecoder(
     private fun drainOutput(codec: MediaCodec, outputBuffer: ByteArrayOutputStream) {
         val bufferInfo = MediaCodec.BufferInfo()
 
-        while (true) {
+        repeat(MAX_DRAIN_ITERATIONS) { iteration ->
             val outputIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
 
             when {
@@ -164,8 +172,11 @@ abstract class MediaCodecDecoder(
 
                 else -> {
                     // INFO_TRY_AGAIN_LATER or any unknown negative value: done
-                    break
+                    return
                 }
+            }
+            if (iteration == MAX_DRAIN_ITERATIONS - 1) {
+                Log.w(TAG, "drainOutput hit MAX_DRAIN_ITERATIONS=$MAX_DRAIN_ITERATIONS; codec may be misbehaving")
             }
         }
     }

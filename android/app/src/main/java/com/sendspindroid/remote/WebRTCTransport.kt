@@ -234,7 +234,15 @@ class WebRTCTransport(
 
         val buffer = ByteBuffer.wrap(text.toByteArray(Charsets.UTF_8))
         val dataBuffer = DataChannel.Buffer(buffer, false) // false = text
-        return dc.send(dataBuffer)
+        // cleanup() can free the native channel concurrently with this call;
+        // the OPEN check is not atomic with the send. Treat any throw from the
+        // JNI binding as a failed send rather than propagating a crash.
+        return try {
+            dc.send(dataBuffer)
+        } catch (e: Exception) {
+            Log.w(TAG, "DataChannel.send(text) threw during teardown", e)
+            false
+        }
     }
 
     override fun send(bytes: ByteArray): Boolean {
@@ -246,7 +254,12 @@ class WebRTCTransport(
 
         val buffer = ByteBuffer.wrap(bytes)
         val dataBuffer = DataChannel.Buffer(buffer, true) // true = binary
-        return dc.send(dataBuffer)
+        return try {
+            dc.send(dataBuffer)
+        } catch (e: Exception) {
+            Log.w(TAG, "DataChannel.send(bytes) threw during teardown", e)
+            false
+        }
     }
 
     override fun close(code: Int, reason: String) {
@@ -274,6 +287,19 @@ class WebRTCTransport(
     }
 
     private fun cleanup() {
+        // PeerConnection.close()/DataChannel.close() can re-enter the libwebrtc
+        // worker thread; calling them from a WebRTC observer callback (e.g.
+        // PeerConnectionObserver.onIceConnectionChange -> handleError -> cleanup)
+        // risks deadlocking that worker. Hop to the main looper to guarantee
+        // cleanup never runs on an observer thread.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            cleanupOnMainThread()
+        } else {
+            iceRecoveryHandler.post { cleanupOnMainThread() }
+        }
+    }
+
+    private fun cleanupOnMainThread() {
         iceRecoveryHandler.removeCallbacks(iceRecoveryRunnable)
 
         dataChannel?.close()

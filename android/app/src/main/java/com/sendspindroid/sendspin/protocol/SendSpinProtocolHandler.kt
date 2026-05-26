@@ -57,6 +57,11 @@ abstract class SendSpinProtocolHandler(
     private var lastGroupInfo: GroupInfo? = null
     private var lastColorState: ColorState? = null
     private var lastControllerState: ControllerState? = null
+    // Server identity of the most recent handshake. Used to decide whether the
+    // diff-merge anchors (lastMetadata, lastControllerState) are still valid:
+    // they must be cleared when switching to a different server, but preserved
+    // across a reconnect to the same server (see handleServerHello).
+    private var lastServerId: String? = null
 
     // Time sync manager (lazy initialized by subclass)
     protected var timeSyncManager: TimeSyncManager? = null
@@ -500,18 +505,24 @@ abstract class SendSpinProtocolHandler(
         // to be byte-identical) or, worse, leave the previous server's palette
         // in place when the new server does not advertise color@v1 at all.
         //
-        // Do NOT clear lastMetadata or lastControllerState here. The Sendspin
-        // server/state stream is diff-style (see JsonOptional doc) and the
-        // parser merges Absent fields against the previous value. After a
-        // reconnect, MA may send a progress-only or volume-only update first;
-        // with lastMetadata cleared, every Absent field collapses to "" / 0,
-        // the NowPlaying screen interprets the empty artwork_url as an
-        // explicit clear, and the artwork-zombie safeguard flips metadata to
-        // EMPTY after ~1.7 s -- the user lands on the standby idle screen mid-
-        // playback. The dedup concern doesn't apply to metadata or controller:
-        // handleServerState fires onMetadataUpdate / onControllerStateUpdate
-        // unconditionally on every non-null parse, so retaining the prior
-        // value does not suppress the post-handshake refresh.
+        // Preserve lastMetadata / lastControllerState ONLY across reconnects
+        // to the same server. The Sendspin server/state stream is diff-style:
+        // after a reconnect MA may send a progress-only or volume-only update
+        // first, and clearing the anchors would collapse every Absent field
+        // to "" / 0, sending the NowPlaying screen to standby mid-playback.
+        // But on a *different* server, preserving these would bleed the prior
+        // server's title/artist/artwork into the new session until the new
+        // server happens to send a fully-populated update.
+        val incomingServerId = result.serverId
+        val sameServer = lastServerId != null &&
+            incomingServerId.isNotEmpty() &&
+            lastServerId == incomingServerId
+        if (!sameServer) {
+            lastMetadata = null
+            lastControllerState = null
+        }
+        lastServerId = incomingServerId.ifEmpty { lastServerId }
+
         _streamActive = false
         _currentStreamConfig = null
         lastPlaybackState = null
@@ -693,6 +704,11 @@ abstract class SendSpinProtocolHandler(
         }
 
         Log.i(tag, "client/sync_offset: offset=${result.offsetMs}ms from ${result.source}")
+
+        if (result.offsetMs.isNaN() || result.offsetMs.isInfinite()) {
+            Log.w(tag, "client/sync_offset: rejecting non-finite offset ${result.offsetMs}")
+            return
+        }
 
         val clampedOffset = result.offsetMs.coerceIn(-5000.0, 5000.0)
         if (clampedOffset != result.offsetMs) {

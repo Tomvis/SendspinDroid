@@ -23,6 +23,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -642,8 +643,11 @@ class SendSpin(
 
         Log.i(TAG, "Network available during reconnection - attempting immediate reconnect")
 
-        // Cancel any pending backoff delay
-        reconnectJob?.cancel()
+        // Snapshot and detach the timed reconnect job; we'll await its cancellation
+        // inside the new coroutine. Cancelling here without awaiting raced with the
+        // timed path inside createXxxTransport and left the loser's transport
+        // listener wired against an orphaned transport.
+        val priorJob = reconnectJob
         reconnectJob = null
 
         // Reset backoff counter for faster retry if this fails too
@@ -652,6 +656,7 @@ class SendSpin(
 
         // Immediately try to reconnect using the appropriate mode
         workScope.launch {
+            priorJob?.cancelAndJoin()
             if (userInitiatedDisconnect.get() || !reconnecting.get()) {
                 Log.d(TAG, "Reconnection cancelled before immediate retry")
                 return@launch

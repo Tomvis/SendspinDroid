@@ -111,6 +111,9 @@ class RemoteConnection(private val context: Context) {
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    // @Volatile: read from WebRTC observer threads by listener identity guards
+    // to ignore stale callbacks from an already-discarded transport.
+    @Volatile
     private var currentTransport: WebRTCTransport? = null
 
     /**
@@ -140,7 +143,14 @@ class RemoteConnection(private val context: Context) {
         currentTransport = transport
 
         transport.setListener(object : SendSpinTransport.Listener {
+            // Guard: a discarded transport (after disconnect()/re-pair) can still
+            // fire async callbacks from its WebRTC observer threads. Ignore any
+            // callback whose source no longer matches the active transport, else
+            // we'd clobber the new connection's state with stale events.
+            private fun isStale(): Boolean = currentTransport !== transport
+
             override fun onConnected() {
+                if (isStale()) return
                 Log.i(TAG, "Remote connection established")
                 _state.value = State.Connected(cleanedId, transport)
                 onTransportReady?.invoke(transport)
@@ -155,15 +165,18 @@ class RemoteConnection(private val context: Context) {
             }
 
             override fun onClosing(code: Int, reason: String) {
+                if (isStale()) return
                 Log.d(TAG, "Remote connection closing: $code $reason")
             }
 
             override fun onClosed(code: Int, reason: String) {
+                if (isStale()) return
                 Log.i(TAG, "Remote connection closed: $code $reason")
                 _state.value = State.Idle
             }
 
             override fun onFailure(error: Throwable, isRecoverable: Boolean) {
+                if (isStale()) return
                 Log.e(TAG, "Remote connection failed: ${error.message}")
                 _state.value = State.Failed(cleanedId, error.message ?: "Connection failed")
             }

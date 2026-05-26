@@ -3659,9 +3659,8 @@ class MainActivity : AppCompatActivity() {
      * Order matters: Release MediaController before cleaning up other resources
      */
     override fun onDestroy() {
-        super.onDestroy()
-
-        // Cancel any pending handler callbacks
+        // Cancel pending callbacks BEFORE super.onDestroy() so messages
+        // dispatched mid-teardown don't target a half-destroyed activity.
         handler.removeCallbacksAndMessages(null)
 
         // Release MediaController connection to service
@@ -3686,6 +3685,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
         chargingReceiver = null
+
+        super.onDestroy()
     }
 
     // ============================================================================

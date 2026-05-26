@@ -271,6 +271,9 @@ class ConnectionCoordinator(
     }
 
     fun disconnect() {
+        // Cancel any in-flight reconnect first so a user-initiated disconnect
+        // isn't silently overridden by a backoff attempt that completes seconds later.
+        cancelReconnect()
         onDisconnectRequested()
     }
 
@@ -286,7 +289,10 @@ class ConnectionCoordinator(
     }
 
     fun cancelReconnect() {
-        if (!isReconnecting.get()) return
+        // Always cancel any held job reference: runReconnectLoop clears isReconnecting
+        // on Succeeded/Failed before returning, leaving a brief window where this
+        // flag-only early-return would skip the cancel and leave a still-running
+        // (or still-referenced) job behind.
         reconnectJob?.cancel()
         reconnectJob = null
         skipDelay = null

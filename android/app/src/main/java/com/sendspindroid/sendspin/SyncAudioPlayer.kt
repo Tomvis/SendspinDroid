@@ -323,6 +323,11 @@ class SyncAudioPlayer(
         // Gap/overlap detection
         private const val GAP_THRESHOLD_US = 10_000L  // 10ms minimum gap before filling with silence
         private const val DISCONTINUITY_THRESHOLD_US = 100_000L  // 100ms gap indicates discontinuity (for logging)
+        // Upper bound on gaps we'll bridge with silence. Larger gaps (typically from
+        // a stale expectedNextTimestampUs after a long DRAINING / disconnect) would
+        // allocate megabytes of silence and inject multi-second muted audio — instead
+        // we discard the stale anchor and let this chunk re-seed the timeline.
+        private const val MAX_SILENCE_GAP_US = 2_000_000L  // 2s cap on silence insertion
 
         // Symmetric crossfade window around each correction (frames before + after)
         private const val CROSSFADE_FRAMES = 4  // 4 frames each side = 83µs at 48kHz
@@ -406,8 +411,11 @@ class SyncAudioPlayer(
         nowNs = nowNs,
     )
 
-    // Audio output
-    private var audioSink: AudioSink? = null
+    // Audio output. @Volatile: nulled by release() (which awaits playback-loop
+    // cancellation only with a 250ms timeout) and read from the playback loop on
+    // every iteration. Without the barrier, a stale non-null read after the
+    // timeout fires can land on a released AudioSink and throw ISE from write().
+    @Volatile private var audioSink: AudioSink? = null
     private val isPlaying = AtomicBoolean(false)
     private val isPaused = AtomicBoolean(false)
 
@@ -761,6 +769,10 @@ class SyncAudioPlayer(
             pausedAtUs = nowNs() / 1000
             audioSink?.pause()
             audioSink?.flush()
+            // AudioTrack.flush() resets hardware framePosition to 0; forget the
+            // pre-pause high-water mark so the wrap detector doesn't reject every
+            // post-resume getTimestamp() until framePosition climbs past it.
+            lastValidFramePosition = 0L
             AppLog.Audio.d("Playback paused")
         }
     }
@@ -988,6 +1000,11 @@ class SyncAudioPlayer(
 
             // Reset gap/overlap tracking
             expectedNextTimestampUs = null
+
+            // The deferred (or direct) flush below resets AudioTrack framePosition to 0;
+            // forget the pre-idle high-water mark so the wrap detector doesn't reject
+            // every getTimestamp() until framePosition climbs past it.
+            lastValidFramePosition = 0L
 
             // Signal the playback loop to flush AudioTrack before its next write.
             // We must NOT flush here because the playback loop may be mid-write()
@@ -1367,8 +1384,18 @@ class SyncAudioPlayer(
             if (serverTimeMicros > expectedNext) {
                 val gapUs = serverTimeMicros - expectedNext
 
-                // Only fill gaps larger than threshold (small gaps are normal network jitter)
-                if (gapUs > GAP_THRESHOLD_US) {
+                if (gapUs > MAX_SILENCE_GAP_US) {
+                    // Gap is too large to bridge with silence (likely a stale
+                    // expectedNextTimestampUs after a long disconnect/drain).
+                    // Discard the stale anchor and let this chunk re-seed.
+                    AppLog.Audio.w(
+                        "Gap ${gapUs / 1000}ms exceeds MAX_SILENCE_GAP_US " +
+                            "(${MAX_SILENCE_GAP_US / 1000}ms); reseeding timeline " +
+                            "without silence insertion"
+                    )
+                    expectedNextTimestampUs = serverTimeMicros
+                } else if (gapUs > GAP_THRESHOLD_US) {
+                    // Only fill gaps larger than threshold (small gaps are normal network jitter)
                     val gapFrames = ((gapUs * sampleRate) / 1_000_000).toInt()
                     val silenceBytes = gapFrames * bytesPerFrame
                     val silenceData = ByteArray(silenceBytes)  // Zeros = silence
@@ -1416,6 +1443,28 @@ class SyncAudioPlayer(
             }
         }
 
+        // Calculate sample count for the (possibly trimmed) chunk
+        val sampleCount = workingPcmData.size / bytesPerFrame
+
+        // Skip empty chunks. Two legitimate sources:
+        //   1. Opus/FLAC decoder produces no PCM on its first few frames while
+        //      it buffers internally.
+        //   2. Trim leaves a partial-frame remainder smaller than one frame.
+        // We still must advance expectedNextTimestampUs so the next chunk
+        // isn't treated as a one-chunk-sized gap and inject spurious silence;
+        // estimate this chunk's duration from server-time cadence (delta from
+        // the previous chunk's start, which is still in lastChunkServerTime).
+        if (sampleCount == 0 || workingPcmData.isEmpty()) {
+            val estimatedDurationUs = if (lastChunkServerTime in 1 until serverTimeMicros) {
+                serverTimeMicros - lastChunkServerTime
+            } else {
+                0L
+            }
+            expectedNextTimestampUs = workingServerTimeMicros + estimatedDurationUs
+            lastChunkServerTime = serverTimeMicros
+            return
+        }
+
         // Check for large discontinuity (new stream or seek) - for logging only
         if (lastChunkServerTime > 0) {
             val serverGap = serverTimeMicros - lastChunkServerTime
@@ -1427,14 +1476,6 @@ class SyncAudioPlayer(
             }
         }
         lastChunkServerTime = serverTimeMicros
-
-        // Calculate sample count for the (possibly trimmed) chunk
-        val sampleCount = workingPcmData.size / bytesPerFrame
-
-        // Skip empty chunks (can happen after trimming)
-        if (sampleCount == 0 || workingPcmData.isEmpty()) {
-            return
-        }
 
         val clientPlayTime = timeFilter.serverToClient(workingServerTimeMicros)
 

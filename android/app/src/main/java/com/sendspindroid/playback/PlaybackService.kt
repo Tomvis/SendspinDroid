@@ -668,6 +668,12 @@ class PlaybackService : MediaLibraryService() {
         super.onCreate()
         Log.i(TAG, "PlaybackService.onCreate() started")
 
+        // Reset companion-object relays so a recreated service doesn't inherit
+        // the previous instance's last broadcast network/reconnect state. The
+        // service's own collectors will overwrite with live values shortly.
+        _networkState.value = NetworkState()
+        _reconnectStatusRelay.value = ReconnectStatus.Idle
+
         // Track app foreground/background via ProcessLifecycleOwner. Used by
         // onMediaButtonEvent to drop hardware media-key events while none of
         // our activities is visible -- otherwise SendSpinDroid (running in
@@ -845,13 +851,16 @@ class PlaybackService : MediaLibraryService() {
             sendSpinClient?.connectionState?.collect { state ->
                 when {
                     state is TransportState.Ready && prevSendSpinState !is TransportState.Ready -> {
-                        // PORTED FROM onConnected + onReconnected:
-                        // onReconnected ran first (set pendingExitDraining = true) then
-                        // onConnected ran. We combine them: if previous state was Connecting
-                        // we were reconnecting, so set pendingExitDraining first.
-                        val wasReconnecting = prevSendSpinState is TransportState.Connecting
+                        // PORTED FROM onConnected + onReconnected. The original wasReconnecting
+                        // check (prev is Connecting) was always true because Connecting is the
+                        // only legal predecessor of Ready, so the fresh-connect vs reconnect
+                        // distinction was lost. The real signal is whether the audio player is
+                        // currently DRAINING: only a connection that dropped mid-playback enters
+                        // DRAINING, and only that case needs the deferred exitDraining handoff.
+                        val isRecoveringFromDrain =
+                            syncAudioPlayer?.getPlaybackState() == SyncPlaybackState.DRAINING
                         val serverName = sendSpinClient?.getServerName() ?: ""
-                        if (wasReconnecting) {
+                        if (isRecoveringFromDrain) {
                             // Deferred exitDraining so first server/state or group/update
                             // message is processed while still in DRAINING state.
                             pendingExitDraining = true
@@ -4521,6 +4530,10 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand: action=${intent?.action}, flags=$flags")
+        // Must call startForeground within 5s when launched via startForegroundService(),
+        // regardless of action or intent validity (Android 8+). handleAutoConnect() may
+        // refresh the notification text later once the server is resolved.
+        startForegroundServiceWithNotification()
         super.onStartCommand(intent, flags, startId)
 
         if (intent?.action == ACTION_AUTO_CONNECT) {
