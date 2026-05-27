@@ -467,13 +467,12 @@ class SyncAudioPlayer(
     private var lastBufferWarningTimeUs: Long = 0        // Rate limiting for buffer warnings
     private var lastDacPacingLogTimeUs: Long = 0         // Rate limiting for DAC pacing diagnostics
     private var stateBeforeDraining: PlaybackState? = null  // State to restore if exitDraining during non-PLAYING
-    // @Volatile: written on Main under stateLock by exitDraining() (line 3254);
-    // read off-lock by updateCorrectionSchedule() on the playback coroutine (line
-    // 2387) to enforce the post-reconnect stabilization window. Without the
-    // barrier the audio loop keeps observing the pre-reconnect 0L, skipping the
-    // RECONNECT_STABILIZATION_US guard and firing insert/drop on the Kalman
-    // filter while it is still re-converging -- the exact glitch the window exists
-    // to suppress.
+    // @Volatile: written on Main under stateLock by exitDraining(); read off-lock
+    // by updateCorrectionSchedule() on the playback coroutine to enforce the
+    // post-reconnect stabilization window. Without the barrier the audio loop
+    // keeps observing the pre-reconnect 0L, skipping the RECONNECT_STABILIZATION_US
+    // guard and firing insert/drop on the Kalman filter while it is still
+    // re-converging -- the exact glitch the window exists to suppress.
     @Volatile private var reconnectedAtUs: Long = 0L
 
     // Chunk queue
@@ -519,29 +518,31 @@ class SyncAudioPlayer(
     private var playbackStartTimeUs = 0L          // When playback started (for stats display)
     // @Volatile: written on Main under stateLock by resume()/clearBuffer()/
     // enterIdle() and on the playback coroutine by triggerReanchor() (under
-    // stateLock) and the calibration block at line 2902 (no lock). Read off-lock
-    // by updateCorrectionSchedule() (line 2368) and the reanchor check (line
-    // 2215). Without the barrier the audio loop can observe a stale `true`
-    // after resume()/clearBuffer() zero the baselines and apply sync corrections
+    // stateLock), resetSyncBaselines() (no lock, from start-gating paths), and
+    // the calibration block in playChunkWithCorrection (no lock). Read off-lock
+    // by updateCorrectionSchedule() and the reanchor check in startPlaybackLoop.
+    // Without the barrier the audio loop can observe a stale `true` after
+    // resume()/clearBuffer() zero the baselines and apply sync corrections
     // against just-reset state -- feeding garbage into the Kalman filter.
     @Volatile private var startTimeCalibrated = false
 
     // Server-time baseline tracking for absolute sync error calculation.
-    // @Volatile: same access pattern as startTimeCalibrated -- written by
-    // Main resets (resume/clearBuffer/enterIdle under stateLock), by the
-    // playback coroutine in triggerReanchor() (under stateLock) and in the
-    // calibration / baseline-refresh blocks (no lock, lines 2903-2904 and
-    // 2950-2951). Reads at lines 2946-2947 must not see stale pre-reset
-    // values that would feed a wrong shiftUs into baseline refresh logging
-    // and the subsequent sync-error measurement.
+    // @Volatile: writers are Main under stateLock (resume() resets
+    // baselineFramePosition/baselineServerTimeUs only; clearBuffer/enterIdle
+    // reset all three; resume does NOT reset lastBaselineRefreshUs), playback
+    // coroutine in triggerReanchor() (under stateLock) and in the calibration
+    // and periodic baseline-refresh blocks in playChunkWithCorrection (no
+    // lock). The refresh block reads its own previous baseline value to log
+    // shiftUs; without the barrier that read can see a stale pre-reset value
+    // and feed a wrong shiftUs into the subsequent sync-error measurement.
     @Volatile private var baselineFramePosition = 0L
     @Volatile private var baselineServerTimeUs = 0L
     @Volatile private var lastBaselineRefreshUs = 0L
-    // @Volatile: written by Main under stateLock at clearBuffer/enterIdle/
-    // triggerReanchor and incremented on the playback coroutine at line 2468.
-    // Read on Main via getStats() at line 3314 -- without the barrier the
-    // stats reader can observe a stale cached value indefinitely and any
-    // rate-derived diagnostic stalls.
+    // @Volatile: written under stateLock at clearBuffer/enterIdle/triggerReanchor
+    // and by resetSyncBaselines() (no lock, on the playback coroutine);
+    // incremented on the playback coroutine in playChunkWithCorrection. Read on
+    // Main via getStats() -- without the barrier the stats reader can observe a
+    // stale cached value indefinitely and any rate-derived diagnostic stalls.
     @Volatile private var samplesReadSinceStart = 0L
     @Volatile private var syncErrorUs = 0L        // Current sync error (for display)
 
@@ -582,20 +583,21 @@ class SyncAudioPlayer(
 
     // Startup grace period tracking (Windows SDK style).
     // No corrections applied until STARTUP_GRACE_PERIOD_US after entering PLAYING.
-    // @Volatile: written on Main under stateLock by resume()/enterIdle()/
-    // clearBuffer() and by setPlaybackState() (which all callers may invoke from
-    // any thread); written on the playback coroutine by triggerReanchor() under
-    // stateLock. Read off-lock by updateCorrectionSchedule() (line 2376) and by
-    // getGracePeriodRemainingUs() on Main (lines 3170, 3172) which reads the
-    // field twice and would otherwise observe two different values mid-write.
+    // @Volatile: written under stateLock by resume()/enterIdle()/clearBuffer()
+    // (Main) and triggerReanchor() (playback coroutine); also written by
+    // setPlaybackState(), which is called from Main and from the playback
+    // coroutine (handleStartGatingDacAware/handleStartGatingKalman). Read
+    // off-lock by updateCorrectionSchedule() on the playback coroutine and by
+    // getGracePeriodRemainingUs() on Main, which reads the field twice and would
+    // otherwise observe two different values mid-write.
     @Volatile private var playingStateEnteredAtUs = 0L
 
     // Statistics - @Volatile because incremented on the playback loop / decode
     // dispatcher and read on Main via getStats(). Single-thread RMW counters can
     // stay @Volatile (Long); chunksDropped is incremented from BOTH the decode
-    // dispatcher (line 1328, full-buffer drop) and the playback loop (lines 1725,
-    // 1805, stale-chunk drops in handleStartGating*), so it needs AtomicLong to
-    // avoid losing increments under concurrent RMW.
+    // dispatcher (queueChunk's pending-buffer-full branch) and the playback loop
+    // (stale-chunk drops in handleStartGatingDacAware/handleStartGatingKalman),
+    // so it needs AtomicLong to avoid losing increments under concurrent RMW.
     @Volatile private var chunksReceived = 0L
     @Volatile private var chunksPlayed = 0L
     private val chunksDropped = AtomicLong(0)
@@ -631,10 +633,14 @@ class SyncAudioPlayer(
     // after a Main-thread reset and compute spurious gap/overlap stats at
     // the splice point.
     @Volatile private var expectedNextTimestampUs: Long? = null  // Expected server timestamp of next chunk
-    private var gapsFilled = 0L           // Count of gaps filled with silence
-    private var gapSilenceMs = 0L         // Total milliseconds of silence inserted
-    private var overlapsTrimmed = 0L      // Count of overlaps trimmed
-    private var overlapTrimmedMs = 0L     // Total milliseconds of audio trimmed
+    // @Volatile: incremented on the decode dispatcher in processChunk (single-
+    // thread RMW, so atomicity is fine) and read on Main via getStats() for the
+    // stats sheet. Without the barrier the Main reader can observe stale cached
+    // values indefinitely and the gap/overlap diagnostics stop updating.
+    @Volatile private var gapsFilled = 0L         // Count of gaps filled with silence
+    @Volatile private var gapSilenceMs = 0L       // Total milliseconds of silence inserted
+    @Volatile private var overlapsTrimmed = 0L    // Count of overlaps trimmed
+    @Volatile private var overlapTrimmedMs = 0L   // Total milliseconds of audio trimmed
 
     // Bytes per sample (e.g., 2 channels * 2 bytes = 4 bytes per sample frame)
     private val bytesPerFrame = channels * (bitDepth / 8)
