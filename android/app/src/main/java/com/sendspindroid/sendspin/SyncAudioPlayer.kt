@@ -435,11 +435,12 @@ class SyncAudioPlayer(
     // Playback state machine (from Python reference)
     @Volatile private var playbackState = PlaybackState.INITIALIZING
     @Volatile private var stateCallback: SyncAudioPlayerCallback? = null
-    // @Volatile: written under stateLock from processChunk on the WebSocket
-    // thread, read off-lock from handleStartGatingKalman/handleStartGatingDacAware
-    // on the playback coroutine -- without the barrier, the playback loop can
-    // observe a stale null and stall in WAITING_FOR_START indefinitely, or read
-    // a stale value and transition to PLAYING with the wrong scheduled start.
+    // @Volatile: written under stateLock from processChunk on PlaybackService's
+    // decodeDispatcher (Dispatchers.IO.limitedParallelism(1)), read off-lock from
+    // handleStartGatingKalman/handleStartGatingDacAware on the playback coroutine.
+    // Without the barrier, the playback loop can observe a stale null and stall in
+    // WAITING_FOR_START indefinitely, or read a stale value and transition to
+    // PLAYING with the wrong scheduled start.
     @Volatile private var scheduledStartLoopTimeUs: Long? = null   // When to start in loop time
     @Volatile private var firstServerTimestampUs: Long? = null     // First chunk's server timestamp
     private var lastReanchorTimeUs: Long = 0             // Cooldown tracking for reanchor (single-thread)
@@ -466,20 +467,28 @@ class SyncAudioPlayer(
     private var lastBufferWarningTimeUs: Long = 0        // Rate limiting for buffer warnings
     private var lastDacPacingLogTimeUs: Long = 0         // Rate limiting for DAC pacing diagnostics
     private var stateBeforeDraining: PlaybackState? = null  // State to restore if exitDraining during non-PLAYING
-    private var reconnectedAtUs: Long = 0L               // When exitDraining() was called (for stabilization)
+    // @Volatile: written on Main under stateLock by exitDraining() (line 3254);
+    // read off-lock by updateCorrectionSchedule() on the playback coroutine (line
+    // 2387) to enforce the post-reconnect stabilization window. Without the
+    // barrier the audio loop keeps observing the pre-reconnect 0L, skipping the
+    // RECONNECT_STABILIZATION_US guard and firing insert/drop on the Kalman
+    // filter while it is still re-converging -- the exact glitch the window exists
+    // to suppress.
+    @Volatile private var reconnectedAtUs: Long = 0L
 
     // Chunk queue
     private val chunkQueue = ConcurrentLinkedQueue<AudioChunk>()
     private val totalQueuedSamples = AtomicLong(0)
     private var queueCapDrops = 0  // Counter for capacity-based drops (diagnostics)
 
-    // Sync tracking. @Volatile because exitDraining()/enterIdle()/clearBuffer()/
-    // triggerReanchor() write 0L under stateLock on the main thread, while
-    // processChunk() reads and writes this on the WebSocket thread BEFORE
-    // acquiring stateLock (the empty-chunk cadence-estimator block and
-    // discontinuity-log block run outside the stateLock region). Without the
-    // barrier, the WS thread can see a stale pre-disconnect value and the
-    // estimator pushes expectedNextTimestampUs seconds ahead.
+    // Sync tracking. @Volatile because exitDraining()/enterIdle()/clearBuffer()
+    // write 0L under stateLock on Main and triggerReanchor() writes 0L under
+    // stateLock on the playback coroutine, while processChunk() reads and writes
+    // this on PlaybackService's decodeDispatcher BEFORE acquiring stateLock (the
+    // empty-chunk cadence-estimator block and discontinuity-log block run outside
+    // the stateLock region). Without the barrier, the decode dispatcher can see a
+    // stale pre-disconnect value and the estimator pushes expectedNextTimestampUs
+    // seconds ahead.
     @Volatile private var lastChunkServerTime = 0L
     @Volatile private var streamGeneration = 0  // Incremented on stream/clear to invalidate old chunks
 
@@ -508,15 +517,32 @@ class SyncAudioPlayer(
     //   Negative = DAC behind expected (playing slow) -> need INSERT
     //
     private var playbackStartTimeUs = 0L          // When playback started (for stats display)
-    private var startTimeCalibrated = false       // Has playback start been calibrated from AudioTimestamp?
+    // @Volatile: written on Main under stateLock by resume()/clearBuffer()/
+    // enterIdle() and on the playback coroutine by triggerReanchor() (under
+    // stateLock) and the calibration block at line 2902 (no lock). Read off-lock
+    // by updateCorrectionSchedule() (line 2368) and the reanchor check (line
+    // 2215). Without the barrier the audio loop can observe a stale `true`
+    // after resume()/clearBuffer() zero the baselines and apply sync corrections
+    // against just-reset state -- feeding garbage into the Kalman filter.
+    @Volatile private var startTimeCalibrated = false
 
-    // Server-time baseline tracking for absolute sync error calculation
-    // At calibration, we capture the relationship between DAC frame position and server time.
-    // The baseline is periodically refreshed as the Kalman filter converges (see BASELINE_REFRESH_INTERVAL_US).
-    private var baselineFramePosition = 0L        // DAC frame position at calibration
-    private var baselineServerTimeUs = 0L         // Corresponding server time at calibration
-    private var lastBaselineRefreshUs = 0L        // When baseline was last refreshed
-    private var samplesReadSinceStart = 0L        // Total samples consumed since playback started
+    // Server-time baseline tracking for absolute sync error calculation.
+    // @Volatile: same access pattern as startTimeCalibrated -- written by
+    // Main resets (resume/clearBuffer/enterIdle under stateLock), by the
+    // playback coroutine in triggerReanchor() (under stateLock) and in the
+    // calibration / baseline-refresh blocks (no lock, lines 2903-2904 and
+    // 2950-2951). Reads at lines 2946-2947 must not see stale pre-reset
+    // values that would feed a wrong shiftUs into baseline refresh logging
+    // and the subsequent sync-error measurement.
+    @Volatile private var baselineFramePosition = 0L
+    @Volatile private var baselineServerTimeUs = 0L
+    @Volatile private var lastBaselineRefreshUs = 0L
+    // @Volatile: written by Main under stateLock at clearBuffer/enterIdle/
+    // triggerReanchor and incremented on the playback coroutine at line 2468.
+    // Read on Main via getStats() at line 3314 -- without the barrier the
+    // stats reader can observe a stale cached value indefinitely and any
+    // rate-derived diagnostic stalls.
+    @Volatile private var samplesReadSinceStart = 0L
     @Volatile private var syncErrorUs = 0L        // Current sync error (for display)
 
     @Volatile private var syncMuted: Boolean = false
@@ -554,15 +580,25 @@ class SyncAudioPlayer(
 
     private enum class CrossfadeState { IDLE, FADING_IN, FADING_OUT }
 
-    // Startup grace period tracking (Windows SDK style)
-    // No corrections applied until STARTUP_GRACE_PERIOD_US after entering PLAYING state
-    private var playingStateEnteredAtUs = 0L     // When we transitioned to PLAYING state
+    // Startup grace period tracking (Windows SDK style).
+    // No corrections applied until STARTUP_GRACE_PERIOD_US after entering PLAYING.
+    // @Volatile: written on Main under stateLock by resume()/enterIdle()/
+    // clearBuffer() and by setPlaybackState() (which all callers may invoke from
+    // any thread); written on the playback coroutine by triggerReanchor() under
+    // stateLock. Read off-lock by updateCorrectionSchedule() (line 2376) and by
+    // getGracePeriodRemainingUs() on Main (lines 3170, 3172) which reads the
+    // field twice and would otherwise observe two different values mid-write.
+    @Volatile private var playingStateEnteredAtUs = 0L
 
-    // Statistics - @Volatile because written from playback loop / WebSocket thread
-    // and read from main thread via getStats()
+    // Statistics - @Volatile because incremented on the playback loop / decode
+    // dispatcher and read on Main via getStats(). Single-thread RMW counters can
+    // stay @Volatile (Long); chunksDropped is incremented from BOTH the decode
+    // dispatcher (line 1328, full-buffer drop) and the playback loop (lines 1725,
+    // 1805, stale-chunk drops in handleStartGating*), so it needs AtomicLong to
+    // avoid losing increments under concurrent RMW.
     @Volatile private var chunksReceived = 0L
     @Volatile private var chunksPlayed = 0L
-    @Volatile private var chunksDropped = 0L
+    private val chunksDropped = AtomicLong(0)
     @Volatile private var syncCorrections = 0L
     @Volatile private var framesInserted = 0L
     @Volatile private var framesDropped = 0L
@@ -1325,9 +1361,9 @@ class SyncAudioPlayer(
                         AppLog.Audio.d("Buffering chunks while waiting for time sync...")
                     }
                 } else {
-                    chunksDropped++  // Only drop if buffer is full
-                    if (chunksDropped % CHUNK_DROP_LOG_INTERVAL == 1L) {
-                        AppLog.Audio.w("Pending buffer full, dropping chunk (dropped: $chunksDropped)")
+                    val dropped = chunksDropped.incrementAndGet()  // Only drop if buffer is full
+                    if (dropped % CHUNK_DROP_LOG_INTERVAL == 1L) {
+                        AppLog.Audio.w("Pending buffer full, dropping chunk (dropped: $dropped)")
                     }
                 }
             }
@@ -1722,7 +1758,7 @@ class SyncAudioPlayer(
                 totalQueuedSamples.addAndGet(-chunk.sampleCount.toLong())
                 droppedFrames += chunk.sampleCount
                 droppedChunks++
-                chunksDropped++
+                chunksDropped.incrementAndGet()
             }
 
             framesDropped += droppedFrames.toLong()
@@ -1802,7 +1838,7 @@ class SyncAudioPlayer(
                         chunkQueue.poll()
                         totalQueuedSamples.addAndGet(-chunk.sampleCount.toLong())
                         droppedFrames += chunkFrames
-                        chunksDropped++
+                        chunksDropped.incrementAndGet()
                     } else {
                         break
                     }
@@ -3299,7 +3335,7 @@ class SyncAudioPlayer(
         return SyncStats(
             chunksReceived = chunksReceived,
             chunksPlayed = chunksPlayed,
-            chunksDropped = chunksDropped,
+            chunksDropped = chunksDropped.get(),
             syncCorrections = syncCorrections,
             queuedSamples = totalQueuedSamples.get(),
             isPlaying = isPlaying.get(),
