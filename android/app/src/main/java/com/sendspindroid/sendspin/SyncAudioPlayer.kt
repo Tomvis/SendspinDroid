@@ -328,6 +328,12 @@ class SyncAudioPlayer(
         // allocate megabytes of silence and inject multi-second muted audio — instead
         // we discard the stale anchor and let this chunk re-seed the timeline.
         private const val MAX_SILENCE_GAP_US = 2_000_000L  // 2s cap on silence insertion
+        // Upper bound on a single audio chunk's duration. Used to cap the empty-chunk
+        // cadence estimate so a stale lastChunkServerTime (e.g. surviving a DRAINING
+        // / exitDraining cycle) can't push expectedNextTimestampUs seconds ahead.
+        // Opus tops out at 60ms per packet; FLAC chunks here run shorter. 200ms is
+        // a comfortable upper bound for any future codec.
+        private const val MAX_PLAUSIBLE_CHUNK_US = 200_000L
 
         // Symmetric crossfade window around each correction (frames before + after)
         private const val CROSSFADE_FRAMES = 4  // 4 frames each side = 83µs at 48kHz
@@ -1454,9 +1460,16 @@ class SyncAudioPlayer(
         // isn't treated as a one-chunk-sized gap and inject spurious silence;
         // estimate this chunk's duration from server-time cadence (delta from
         // the previous chunk's start, which is still in lastChunkServerTime).
+        // Cap the estimate: after a large gap (the MAX_SILENCE_GAP_US reseed
+        // above, or a DRAINING/exitDraining transition that leaves
+        // lastChunkServerTime pointing pre-disconnect), the raw delta would
+        // push expectedNextTimestampUs seconds ahead and cause real follow-on
+        // chunks to be overlap-trimmed to zero -- dropping seconds of audio.
         if (sampleCount == 0 || workingPcmData.isEmpty()) {
-            val estimatedDurationUs = if (lastChunkServerTime in 1 until serverTimeMicros) {
-                serverTimeMicros - lastChunkServerTime
+            val deltaUs = serverTimeMicros - lastChunkServerTime
+            val estimatedDurationUs = if (lastChunkServerTime in 1 until serverTimeMicros &&
+                deltaUs <= MAX_PLAUSIBLE_CHUNK_US) {
+                deltaUs
             } else {
                 0L
             }

@@ -226,38 +226,28 @@ class WebRTCTransport(
     }
 
     override fun send(text: String): Boolean {
+        val buffer = ByteBuffer.wrap(text.toByteArray(Charsets.UTF_8))
+        return sendBuffer(DataChannel.Buffer(buffer, false), "text")
+    }
+
+    override fun send(bytes: ByteArray): Boolean {
+        val buffer = ByteBuffer.wrap(bytes)
+        return sendBuffer(DataChannel.Buffer(buffer, true), "bytes")
+    }
+
+    private fun sendBuffer(dataBuffer: DataChannel.Buffer, kind: String): Boolean {
         val dc = dataChannel
         if (dc == null || dc.state() != DataChannel.State.OPEN) {
-            Log.w(TAG, "Cannot send text: DataChannel not open")
+            Log.w(TAG, "Cannot send $kind: DataChannel not open")
             return false
         }
-
-        val buffer = ByteBuffer.wrap(text.toByteArray(Charsets.UTF_8))
-        val dataBuffer = DataChannel.Buffer(buffer, false) // false = text
         // cleanup() can free the native channel concurrently with this call;
         // the OPEN check is not atomic with the send. Treat any throw from the
         // JNI binding as a failed send rather than propagating a crash.
         return try {
             dc.send(dataBuffer)
         } catch (e: Exception) {
-            Log.w(TAG, "DataChannel.send(text) threw during teardown", e)
-            false
-        }
-    }
-
-    override fun send(bytes: ByteArray): Boolean {
-        val dc = dataChannel
-        if (dc == null || dc.state() != DataChannel.State.OPEN) {
-            Log.w(TAG, "Cannot send bytes: DataChannel not open")
-            return false
-        }
-
-        val buffer = ByteBuffer.wrap(bytes)
-        val dataBuffer = DataChannel.Buffer(buffer, true) // true = binary
-        return try {
-            dc.send(dataBuffer)
-        } catch (e: Exception) {
-            Log.w(TAG, "DataChannel.send(bytes) threw during teardown", e)
+            Log.w(TAG, "DataChannel.send($kind) threw during teardown", e)
             false
         }
     }
@@ -287,36 +277,34 @@ class WebRTCTransport(
     }
 
     private fun cleanup() {
+        // Snapshot and clear references synchronously so the caller (and any
+        // listener observing onClosed/onFailure fired immediately after cleanup())
+        // cannot see live native handles through this transport's fields.
+        // The JNI close() calls themselves are deferred to the main looper:
         // PeerConnection.close()/DataChannel.close() can re-enter the libwebrtc
-        // worker thread; calling them from a WebRTC observer callback (e.g.
-        // PeerConnectionObserver.onIceConnectionChange -> handleError -> cleanup)
-        // risks deadlocking that worker. Hop to the main looper to guarantee
-        // cleanup never runs on an observer thread.
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            cleanupOnMainThread()
-        } else {
-            iceRecoveryHandler.post { cleanupOnMainThread() }
-        }
-    }
-
-    private fun cleanupOnMainThread() {
-        iceRecoveryHandler.removeCallbacks(iceRecoveryRunnable)
-
-        dataChannel?.close()
-        dataChannel = null
-
-        maApiDataChannel?.close()
-        maApiDataChannel = null
-
-        peerConnection?.close()
-        peerConnection = null
-
-        signalingClient?.destroy()
-        signalingClient = null
-
+        // worker thread, so invoking them from an observer callback
+        // (e.g. PeerConnectionObserver.onIceConnectionChange -> handleError
+        // -> cleanup) risks deadlocking that worker.
+        val dc = dataChannel; dataChannel = null
+        val maDc = maApiDataChannel; maApiDataChannel = null
+        val pc = peerConnection; peerConnection = null
+        val sc = signalingClient; signalingClient = null
         pendingIceCandidates.clear()
         maApiMessageBuffer.clear()
         remoteDescriptionSet = false
+
+        val closeNative = Runnable {
+            iceRecoveryHandler.removeCallbacks(iceRecoveryRunnable)
+            dc?.close()
+            maDc?.close()
+            pc?.close()
+            sc?.destroy()
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            closeNative.run()
+        } else {
+            iceRecoveryHandler.post(closeNative)
+        }
     }
 
     // ========== SignalingClient.Listener ==========

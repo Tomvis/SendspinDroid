@@ -208,11 +208,14 @@ class NsdDiscoveryManager(
                     resolvingServices.remove(serviceName)
                 }
 
-                // Unregister after first successful resolution -- we only need one result
+                // Unregister after first successful resolution -- we only need one result.
+                // If unregister throws, onServiceInfoCallbackUnregistered will never fire,
+                // so release the executor here directly.
                 try {
                     nsdManager?.unregisterServiceInfoCallback(this)
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to unregister ServiceInfoCallback", e)
+                    executor.shutdown()
                 }
 
                 val host = resolvedInfo.hostAddresses.firstOrNull()?.hostAddress
@@ -224,6 +227,15 @@ class NsdDiscoveryManager(
                 Log.d(TAG, "Service lost during resolution: $serviceName")
                 synchronized(resolvingServices) {
                     resolvingServices.remove(serviceName)
+                }
+                // No further callbacks expected for a lost service; unregister so the
+                // executor gets released via onServiceInfoCallbackUnregistered. If the
+                // unregister itself fails, fall back to direct shutdown.
+                try {
+                    nsdManager?.unregisterServiceInfoCallback(this)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to unregister ServiceInfoCallback after onServiceLost", e)
+                    executor.shutdown()
                 }
             }
 

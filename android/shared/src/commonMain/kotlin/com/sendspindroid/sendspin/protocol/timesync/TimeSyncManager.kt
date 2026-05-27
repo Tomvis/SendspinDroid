@@ -197,7 +197,7 @@ class TimeSyncManager(
             }
 
             val validMeasurements = pendingBurstMeasurements.filter {
-                it.rtt > 0 && it.rtt < MAX_ACCEPTABLE_RTT_US
+                it.rtt > 0 && it.rtt <= MAX_ACCEPTABLE_RTT_US
             }
             if (validMeasurements.isEmpty()) {
                 Log.w(tag, "All ${pendingBurstMeasurements.size} responses had implausible RTT - skipping burst")

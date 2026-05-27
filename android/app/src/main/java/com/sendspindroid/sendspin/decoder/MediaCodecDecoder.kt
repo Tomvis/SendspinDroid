@@ -143,7 +143,7 @@ abstract class MediaCodecDecoder(
     private fun drainOutput(codec: MediaCodec, outputBuffer: ByteArrayOutputStream) {
         val bufferInfo = MediaCodec.BufferInfo()
 
-        repeat(MAX_DRAIN_ITERATIONS) { iteration ->
+        repeat(MAX_DRAIN_ITERATIONS) {
             val outputIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
 
             when {
@@ -175,10 +175,11 @@ abstract class MediaCodecDecoder(
                     return
                 }
             }
-            if (iteration == MAX_DRAIN_ITERATIONS - 1) {
-                Log.w(TAG, "drainOutput hit MAX_DRAIN_ITERATIONS=$MAX_DRAIN_ITERATIONS; codec may be misbehaving")
-            }
         }
+        // Falling through means we exhausted MAX_DRAIN_ITERATIONS without seeing
+        // INFO_TRY_AGAIN_LATER -- codec is stuck in a tight FORMAT_CHANGED / valid-buffer
+        // loop and may have buffers still queued. Caller will pick them up on the next call.
+        Log.w(TAG, "drainOutput hit MAX_DRAIN_ITERATIONS=$MAX_DRAIN_ITERATIONS; codec may be misbehaving")
     }
 
     /**

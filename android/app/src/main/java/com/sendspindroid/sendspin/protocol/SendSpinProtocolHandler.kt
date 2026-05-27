@@ -513,10 +513,15 @@ abstract class SendSpinProtocolHandler(
         // But on a *different* server, preserving these would bleed the prior
         // server's title/artist/artwork into the new session until the new
         // server happens to send a fully-populated update.
+        //
+        // An empty incomingServerId means the server omitted server_id from its
+        // hello (the wire field is optional; the parser maps absent/null to "").
+        // We cannot prove it is a different server, so preserve the anchors --
+        // clearing them would silently reintroduce the standby-mid-playback bug
+        // for any server that does not populate server_id.
         val incomingServerId = result.serverId
-        val sameServer = lastServerId != null &&
-            incomingServerId.isNotEmpty() &&
-            lastServerId == incomingServerId
+        val sameServer = incomingServerId.isEmpty() ||
+            (lastServerId != null && lastServerId == incomingServerId)
         if (!sameServer) {
             lastMetadata = null
             lastControllerState = null
