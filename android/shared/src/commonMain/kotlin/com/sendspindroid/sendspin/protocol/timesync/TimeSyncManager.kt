@@ -188,9 +188,16 @@ class TimeSyncManager(
     }
 
     private fun processBurstResults() {
-        // burstInProgress is cleared by sendTimeSyncBurst's finally block after
-        // this returns; clearing it here as well is redundant.
+        // Clear burstInProgress under the lock while we drain the list. If we
+        // leave it true and rely solely on sendTimeSyncBurst's finally block,
+        // there is a window after this synchronized block exits and before the
+        // finally re-acquires the lock where onMeasurementApplied() runs without
+        // the lock (line 230 below). A server/time reply arriving in that window
+        // sees burstInProgress=true, appends to the just-cleared pendingBurst-
+        // Measurements, and is then silently discarded by the next burst's clear().
         synchronized(pendingBurstMeasurements) {
+            burstInProgress = false
+
             if (pendingBurstMeasurements.isEmpty()) {
                 Log.w(tag, "No time sync responses received in burst")
                 return

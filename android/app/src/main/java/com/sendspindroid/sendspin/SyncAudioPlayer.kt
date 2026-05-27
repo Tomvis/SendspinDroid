@@ -468,8 +468,14 @@ class SyncAudioPlayer(
     private val totalQueuedSamples = AtomicLong(0)
     private var queueCapDrops = 0  // Counter for capacity-based drops (diagnostics)
 
-    // Sync tracking
-    private var lastChunkServerTime = 0L
+    // Sync tracking. @Volatile because exitDraining() writes 0L under stateLock
+    // on the main thread, while processChunk() reads and writes this on the
+    // decode-worker dispatcher BEFORE acquiring stateLock (lines 1469-1491
+    // execute outside the stateLock block at 1522). Without the barrier, the
+    // worker can see a stale pre-disconnect value and the empty-chunk cadence
+    // estimator pushes expectedNextTimestampUs seconds ahead -- exactly the
+    // bug the exitDraining reset is meant to fix.
+    @Volatile private var lastChunkServerTime = 0L
     @Volatile private var streamGeneration = 0  // Incremented on stream/clear to invalidate old chunks
 
     // Sync error tracking

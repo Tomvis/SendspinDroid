@@ -676,7 +676,7 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(50_000L, 1_000_000L)
         syncErrorFilter.update(50_000L, 2_000_000L)
 
-        method.invoke(player, 0L)
+        method.invoke(player, System.nanoTime() / 1000)
 
         assertEquals(0, getField<Int>("dropEveryNFrames"))
         assertEquals(0, getField<Int>("insertEveryNFrames"))

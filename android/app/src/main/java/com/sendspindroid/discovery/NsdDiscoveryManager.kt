@@ -55,7 +55,10 @@ class NsdDiscoveryManager(
         fun onDiscoveryError(error: String)
     }
 
-    private var nsdManager: NsdManager? = null
+    // nsdManager is written on the main thread (start/cleanup) and read from
+    // the NSD executor thread inside tryUnregisterServiceInfoCallback, so it
+    // needs the same cross-thread visibility guarantee as the flags below.
+    @Volatile private var nsdManager: NsdManager? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var multicastLock: WifiManager.MulticastLock? = null
 
