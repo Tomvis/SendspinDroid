@@ -188,9 +188,9 @@ class TimeSyncManager(
     }
 
     private fun processBurstResults() {
+        // burstInProgress is cleared by sendTimeSyncBurst's finally block after
+        // this returns; clearing it here as well is redundant.
         synchronized(pendingBurstMeasurements) {
-            burstInProgress = false
-
             if (pendingBurstMeasurements.isEmpty()) {
                 Log.w(tag, "No time sync responses received in burst")
                 return

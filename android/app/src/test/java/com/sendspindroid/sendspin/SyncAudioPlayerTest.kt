@@ -263,7 +263,8 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(100_000L, 2_000_000L)
         syncErrorFilter.update(100_000L, 3_000_000L)
 
-        method.invoke(player, 0L)
+        // nowUs is well past playingStateEnteredAtUs (1L) so grace period is over.
+        method.invoke(player, System.nanoTime() / 1000)
 
         val dropEvery: Int = getField("dropEveryNFrames")
         val insertEvery: Int = getField("insertEveryNFrames")
@@ -295,7 +296,8 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(-100_000L, 2_000_000L)
         syncErrorFilter.update(-100_000L, 3_000_000L)
 
-        method.invoke(player, 0L)
+        // nowUs is well past playingStateEnteredAtUs (1L) so grace period is over.
+        method.invoke(player, System.nanoTime() / 1000)
 
         val dropEvery: Int = getField("dropEveryNFrames")
         val insertEvery: Int = getField("insertEveryNFrames")
@@ -332,7 +334,7 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(50_000L, 1_000_000L)
         syncErrorFilter.update(50_000L, 2_000_000L)
 
-        method.invoke(player, 0L)
+        method.invoke(player, nowUs)
 
         val dropEvery: Int = getField("dropEveryNFrames")
         val insertEvery: Int = getField("insertEveryNFrames")
@@ -363,7 +365,7 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(50_000L, 1_000_000L)
         syncErrorFilter.update(50_000L, 2_000_000L)
 
-        method.invoke(player, 0L)
+        method.invoke(player, nowUs)
 
         val dropEvery: Int = getField("dropEveryNFrames")
         val insertEvery: Int = getField("insertEveryNFrames")
@@ -391,7 +393,7 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(50_000L, 2_000_000L)
         syncErrorFilter.update(50_000L, 3_000_000L)
 
-        method.invoke(player, 0L)
+        method.invoke(player, nowUs)
 
         val dropEvery: Int = getField("dropEveryNFrames")
 

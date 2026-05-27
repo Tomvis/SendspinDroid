@@ -46,6 +46,11 @@ abstract class MediaCodecDecoder(
     protected var outputFormat: MediaFormat? = null
     private var _isConfigured = false
 
+    // Reused across drainOutput() calls. MediaCodec is single-threaded per
+    // instance and dequeueOutputBuffer overwrites every field, so reusing the
+    // same BufferInfo avoids allocating one per decode() call on the audio path.
+    private val bufferInfo = MediaCodec.BufferInfo()
+
     override val isConfigured: Boolean
         get() = _isConfigured
 
@@ -141,8 +146,6 @@ abstract class MediaCodecDecoder(
      * - INFO_TRY_AGAIN_LATER: No more output available, stop draining
      */
     private fun drainOutput(codec: MediaCodec, outputBuffer: ByteArrayOutputStream) {
-        val bufferInfo = MediaCodec.BufferInfo()
-
         repeat(MAX_DRAIN_ITERATIONS) {
             val outputIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
 

@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
@@ -209,14 +210,7 @@ class NsdDiscoveryManager(
                 }
 
                 // Unregister after first successful resolution -- we only need one result.
-                // If unregister throws, onServiceInfoCallbackUnregistered will never fire,
-                // so release the executor here directly.
-                try {
-                    nsdManager?.unregisterServiceInfoCallback(this)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to unregister ServiceInfoCallback", e)
-                    executor.shutdown()
-                }
+                tryUnregisterServiceInfoCallback(this, executor, failContext = "")
 
                 val host = resolvedInfo.hostAddresses.firstOrNull()?.hostAddress
                 val port = resolvedInfo.port
@@ -229,14 +223,8 @@ class NsdDiscoveryManager(
                     resolvingServices.remove(serviceName)
                 }
                 // No further callbacks expected for a lost service; unregister so the
-                // executor gets released via onServiceInfoCallbackUnregistered. If the
-                // unregister itself fails, fall back to direct shutdown.
-                try {
-                    nsdManager?.unregisterServiceInfoCallback(this)
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to unregister ServiceInfoCallback after onServiceLost", e)
-                    executor.shutdown()
-                }
+                // executor gets released via onServiceInfoCallbackUnregistered.
+                tryUnregisterServiceInfoCallback(this, executor, failContext = " after onServiceLost")
             }
 
             override fun onServiceInfoCallbackUnregistered() {
@@ -255,6 +243,35 @@ class NsdDiscoveryManager(
             }
             // registerServiceInfoCallback threw -- no callback will ever fire to clean
             // up the executor, so release it here.
+            executor.shutdown()
+        }
+    }
+
+    /**
+     * Best-effort unregister of an API 34+ ServiceInfoCallback.
+     *
+     * If [nsdManager] has already been nulled by [cleanup], the null-safe call
+     * would silently skip the unregister and [onServiceInfoCallbackUnregistered]
+     * would never fire -- leaking the executor's worker thread. Snapshot the
+     * reference and shutdown directly in that case. If the unregister itself
+     * throws, also shutdown directly: onServiceInfoCallbackUnregistered will
+     * not fire when unregister fails.
+     */
+    @android.annotation.TargetApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private fun tryUnregisterServiceInfoCallback(
+        callback: NsdManager.ServiceInfoCallback,
+        executor: ExecutorService,
+        failContext: String,
+    ) {
+        val nm = nsdManager
+        if (nm == null) {
+            executor.shutdown()
+            return
+        }
+        try {
+            nm.unregisterServiceInfoCallback(callback)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to unregister ServiceInfoCallback$failContext", e)
             executor.shutdown()
         }
     }

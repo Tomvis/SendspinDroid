@@ -520,8 +520,15 @@ abstract class SendSpinProtocolHandler(
         // clearing them would silently reintroduce the standby-mid-playback bug
         // for any server that does not populate server_id.
         val incomingServerId = result.serverId
-        val sameServer = incomingServerId.isEmpty() ||
-            (lastServerId != null && lastServerId == incomingServerId)
+        // Kotlin == on String? is null-safe: null == "x" is false without a
+        // separate null check on lastServerId.
+        val sameServer = incomingServerId.isEmpty() || lastServerId == incomingServerId
+        if (incomingServerId.isEmpty() && lastServerId != null) {
+            // Server omitted server_id; we are preserving the prior server's
+            // metadata anchors. Surface this so a "wrong metadata after server
+            // switch" report has a signal in field logs.
+            Log.w(tag, "server/hello: server_id missing - preserving metadata anchors from lastServerId=$lastServerId")
+        }
         if (!sameServer) {
             lastMetadata = null
             lastControllerState = null

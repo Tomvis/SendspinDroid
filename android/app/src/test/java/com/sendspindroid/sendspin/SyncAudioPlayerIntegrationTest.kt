@@ -274,11 +274,11 @@ class SyncAudioPlayerIntegrationTest {
         )
     }
 
-    /** Invoke the private parameterless checkStuckState() method. */
+    /** Invoke the private checkStuckState(nowUs) method using the mocked clock. */
     private fun invokeCheckStuckState(player: SyncAudioPlayer) {
-        val method = SyncAudioPlayer::class.java.getDeclaredMethod("checkStuckState")
+        val method = SyncAudioPlayer::class.java.getDeclaredMethod("checkStuckState", Long::class.java)
         method.isAccessible = true
-        method.invoke(player)
+        method.invoke(player, now / 1000)
     }
 
     @Test

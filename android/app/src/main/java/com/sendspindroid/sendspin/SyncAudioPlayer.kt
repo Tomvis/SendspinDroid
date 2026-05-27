@@ -2188,7 +2188,7 @@ class SyncAudioPlayer(
                 // Rate-limited DAC pacing diagnostics. The watchdog shares this
                 // cadence so stuck-state warnings come out on the same log tick.
                 val nowMicros = nowNs() / 1000
-                checkStuckState()
+                checkStuckState(nowMicros)
                 if (dacTimestampsStable && nowMicros - lastDacPacingLogTimeUs > DAC_PACING_LOG_INTERVAL_US) {
                     lastDacPacingLogTimeUs = nowMicros
                     AppLog.Sync.d("DAC pacing: pending=${pendingToDacUs/1000}ms, syncErr=${syncErrorUs/1000}ms")
@@ -2209,7 +2209,7 @@ class SyncAudioPlayer(
                 }
 
                 // Normal playback: update correction schedule and write chunk
-                updateCorrectionSchedule(0)  // param unused, reads syncErrorFilter
+                updateCorrectionSchedule(nowMicros)
                 playChunkWithCorrection(chunk)
             }
 
@@ -2225,8 +2225,7 @@ class SyncAudioPlayer(
      *
      * Diagnostic only -- no recovery action.
      */
-    private fun checkStuckState() {
-        val nowUs = nowNs() / 1000
+    private fun checkStuckState(nowUs: Long) {
         val state = playbackState
 
         if (state != lastObservedState) {
@@ -2349,10 +2348,11 @@ class SyncAudioPlayer(
      * - **Negative error** = ahead of schedule (DAC behind read cursor)
      *   -> INSERT duplicate frames to slow down (output more, effective slowdown)
      *
-     * @param processingTimeErrorUs Unused - kept for API compatibility.
-     *        Sync error is obtained from [syncErrorFilter] (Kalman-filtered).
+     * @param nowUs Caller-captured wall clock (us) reused for the grace-period
+     *        guards. Avoids two extra nowNs() syscalls on the per-chunk hot path.
+     *        Sync error itself is obtained from [syncErrorFilter] (Kalman-filtered).
      */
-    private fun updateCorrectionSchedule(@Suppress("UNUSED_PARAMETER") processingTimeErrorUs: Long) {
+    private fun updateCorrectionSchedule(nowUs: Long) {
         // Guard: Skip corrections until DAC calibration provides reliable sync error
         if (!startTimeCalibrated) {
             insertEveryNFrames = 0
@@ -2363,7 +2363,6 @@ class SyncAudioPlayer(
         // Guard: Skip corrections during startup grace period (500ms)
         // AudioTimestamp needs time to stabilize after playback starts
         if (playingStateEnteredAtUs > 0) {
-            val nowUs = nowNs() / 1000
             val timeSincePlayingUs = nowUs - playingStateEnteredAtUs
             if (timeSincePlayingUs < STARTUP_GRACE_PERIOD_US) {
                 insertEveryNFrames = 0
@@ -2375,7 +2374,6 @@ class SyncAudioPlayer(
         // Guard: Skip corrections during reconnection stabilization period (2s)
         // After reconnection, the Kalman filter needs time to re-converge with new measurements
         if (reconnectedAtUs > 0) {
-            val nowUs = nowNs() / 1000
             val timeSinceReconnectUs = nowUs - reconnectedAtUs
             if (timeSinceReconnectUs < RECONNECT_STABILIZATION_US) {
                 insertEveryNFrames = 0
@@ -3243,6 +3241,13 @@ class SyncAudioPlayer(
 
             // Mark reconnection time for stabilization period (skip sync corrections while Kalman re-converges)
             reconnectedAtUs = nowNs() / 1000
+
+            // Reset lastChunkServerTime so the empty-chunk cadence estimator in
+            // processChunk() starts fresh on the new stream. Without this, the
+            // pre-disconnect timestamp survives and pushes expectedNextTimestampUs
+            // seconds ahead -- the MAX_PLAUSIBLE_CHUNK_US cap is a backstop, this
+            // is the root-cause reset.
+            lastChunkServerTime = 0L
 
             // Transition back to PLAYING (the normal state for active playback)
             setPlaybackState(PlaybackState.PLAYING)
