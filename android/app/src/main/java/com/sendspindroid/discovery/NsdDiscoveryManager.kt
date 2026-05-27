@@ -59,8 +59,16 @@ class NsdDiscoveryManager(
     // the NSD executor thread inside tryUnregisterServiceInfoCallback, so it
     // needs the same cross-thread visibility guarantee as the flags below.
     @Volatile private var nsdManager: NsdManager? = null
+    // multicastLock is acquired/released from main (start/stop), from the NSD
+    // binder thread (onDiscoveryStopped -> releaseMulticastLock), and from
+    // refreshMulticastLockIfActive on a network-callback thread. Without
+    // @Volatile, the binder thread can see a stale null and skip the release
+    // (leaking the lock) or a stale non-null after release and double-release.
+    @Volatile private var multicastLock: WifiManager.MulticastLock? = null
+    // discoveryListener is only read on the main thread (start/stop/cleanup);
+    // the NSD framework holds its own reference for callback dispatch, so this
+    // field never crosses threads and does not need @Volatile.
     private var discoveryListener: NsdManager.DiscoveryListener? = null
-    private var multicastLock: WifiManager.MulticastLock? = null
 
     // These flags are accessed from both the main thread (start/stop calls) and the
     // NSD binder thread (callbacks). @Volatile ensures cross-thread visibility (C-15).

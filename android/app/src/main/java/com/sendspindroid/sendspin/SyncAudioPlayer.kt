@@ -435,9 +435,14 @@ class SyncAudioPlayer(
     // Playback state machine (from Python reference)
     @Volatile private var playbackState = PlaybackState.INITIALIZING
     @Volatile private var stateCallback: SyncAudioPlayerCallback? = null
-    private var scheduledStartLoopTimeUs: Long? = null   // When to start in loop time
-    private var firstServerTimestampUs: Long? = null     // First chunk's server timestamp
-    private var lastReanchorTimeUs: Long = 0             // Cooldown tracking for reanchor
+    // @Volatile: written under stateLock from processChunk on the WebSocket
+    // thread, read off-lock from handleStartGatingKalman/handleStartGatingDacAware
+    // on the playback coroutine -- without the barrier, the playback loop can
+    // observe a stale null and stall in WAITING_FOR_START indefinitely, or read
+    // a stale value and transition to PLAYING with the wrong scheduled start.
+    @Volatile private var scheduledStartLoopTimeUs: Long? = null   // When to start in loop time
+    @Volatile private var firstServerTimestampUs: Long? = null     // First chunk's server timestamp
+    private var lastReanchorTimeUs: Long = 0             // Cooldown tracking for reanchor (single-thread)
 
     // DAC timestamp stability tracking for start gating.
     // @Volatile: written under stateLock from resume/stop/enterIdle/clearBuffer/
@@ -468,13 +473,13 @@ class SyncAudioPlayer(
     private val totalQueuedSamples = AtomicLong(0)
     private var queueCapDrops = 0  // Counter for capacity-based drops (diagnostics)
 
-    // Sync tracking. @Volatile because exitDraining() writes 0L under stateLock
-    // on the main thread, while processChunk() reads and writes this on the
-    // decode-worker dispatcher BEFORE acquiring stateLock (lines 1469-1491
-    // execute outside the stateLock block at 1522). Without the barrier, the
-    // worker can see a stale pre-disconnect value and the empty-chunk cadence
-    // estimator pushes expectedNextTimestampUs seconds ahead -- exactly the
-    // bug the exitDraining reset is meant to fix.
+    // Sync tracking. @Volatile because exitDraining()/enterIdle()/clearBuffer()/
+    // triggerReanchor() write 0L under stateLock on the main thread, while
+    // processChunk() reads and writes this on the WebSocket thread BEFORE
+    // acquiring stateLock (the empty-chunk cadence-estimator block and
+    // discontinuity-log block run outside the stateLock region). Without the
+    // barrier, the WS thread can see a stale pre-disconnect value and the
+    // estimator pushes expectedNextTimestampUs seconds ahead.
     @Volatile private var lastChunkServerTime = 0L
     @Volatile private var streamGeneration = 0  // Incremented on stream/clear to invalidate old chunks
 

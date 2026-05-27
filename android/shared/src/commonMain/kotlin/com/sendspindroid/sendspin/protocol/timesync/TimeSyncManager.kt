@@ -69,8 +69,13 @@ class TimeSyncManager(
     private var rttHistoryIndex = 0
     private var rttHistoryCount = 0
 
-    private var currentBurstCount = SendSpinProtocol.TimeSync.BURST_COUNT
-    private var currentIntervalMs = SendSpinProtocol.TimeSync.INTERVAL_MS
+    // Burst strategy values are written under synchronized(pendingBurstMeasurements)
+    // from updateBurstStrategy()/stop(), but the burst-loop coroutine reads them
+    // bare in `delay(currentIntervalMs)` and `repeat(currentBurstCount)`. Without
+    // @Volatile, the loop can keep using a stale converged-mode interval after a
+    // stop/start that should have reset to the high-jitter cadence.
+    @Volatile private var currentBurstCount = SendSpinProtocol.TimeSync.BURST_COUNT
+    @Volatile private var currentIntervalMs = SendSpinProtocol.TimeSync.INTERVAL_MS
 
     val isRunning: Boolean
         get() = running
@@ -188,13 +193,12 @@ class TimeSyncManager(
     }
 
     private fun processBurstResults() {
-        // Clear burstInProgress under the lock while we drain the list. If we
-        // leave it true and rely solely on sendTimeSyncBurst's finally block,
-        // there is a window after this synchronized block exits and before the
-        // finally re-acquires the lock where onMeasurementApplied() runs without
-        // the lock (line 230 below). A server/time reply arriving in that window
-        // sees burstInProgress=true, appends to the just-cleared pendingBurst-
-        // Measurements, and is then silently discarded by the next burst's clear().
+        // Clear burstInProgress under the lock while we drain the list. The
+        // finally block in sendTimeSyncBurst also clears it, but only after this
+        // function returns -- onMeasurementApplied() at the tail runs outside the
+        // lock, and a server/time reply arriving in that window would otherwise
+        // see burstInProgress=true, append to the just-cleared list, and be
+        // silently discarded by the next burst's clear().
         synchronized(pendingBurstMeasurements) {
             burstInProgress = false
 
