@@ -446,11 +446,13 @@ class SyncAudioPlayer(
     private var lastReanchorTimeUs: Long = 0             // Cooldown tracking for reanchor (single-thread)
 
     // DAC timestamp stability tracking for start gating.
-    // @Volatile: written under stateLock from resume/stop/enterIdle/clearBuffer/
-    // triggerReanchor (main + WS threads), read on the playback coroutine without
-    // stateLock. Without volatility a stale `true` can persist mid-iteration after
-    // a reset, sending the loop down DAC-timestamp-dependent paths whose backing
-    // timestamps were just invalidated.
+    // @Volatile: written under stateLock by resume/stop/enterIdle/clearBuffer
+    // (Main) and triggerReanchor (playback coroutine); written off-lock on the
+    // playback coroutine by preCalibrateDacTiming() as samples accumulate.
+    // Read on the playback coroutine without stateLock. Without volatility a
+    // stale `true` can persist mid-iteration after a reset, sending the loop
+    // down DAC-timestamp-dependent paths whose backing timestamps were just
+    // invalidated.
     @Volatile private var consecutiveValidTimestamps = 0       // counts consecutive valid getTimestamp() reads
     @Volatile private var dacTimestampsStable = false           // true once TIMESTAMP_STABLE_READS reached
 
@@ -519,22 +521,25 @@ class SyncAudioPlayer(
     // @Volatile: written on Main under stateLock by resume()/clearBuffer()/
     // enterIdle() and on the playback coroutine by triggerReanchor() (under
     // stateLock), resetSyncBaselines() (no lock, from start-gating paths), and
-    // the calibration block in playChunkWithCorrection (no lock). Read off-lock
-    // by updateCorrectionSchedule() and the reanchor check in startPlaybackLoop.
-    // Without the barrier the audio loop can observe a stale `true` after
-    // resume()/clearBuffer() zero the baselines and apply sync corrections
-    // against just-reset state -- feeding garbage into the Kalman filter.
+    // the calibration block in updateSyncError() (no lock). Read off-lock by
+    // updateCorrectionSchedule() and the reanchor check in startPlaybackLoop,
+    // and on Main by getStats(). Without the barrier the audio loop can observe
+    // a stale `true` after resume()/clearBuffer() zero the baselines and apply
+    // sync corrections against just-reset state -- feeding garbage into the
+    // Kalman filter.
     @Volatile private var startTimeCalibrated = false
 
     // Server-time baseline tracking for absolute sync error calculation.
     // @Volatile: writers are Main under stateLock (resume() resets
     // baselineFramePosition/baselineServerTimeUs only; clearBuffer/enterIdle
-    // reset all three; resume does NOT reset lastBaselineRefreshUs), playback
-    // coroutine in triggerReanchor() (under stateLock) and in the calibration
-    // and periodic baseline-refresh blocks in playChunkWithCorrection (no
-    // lock). The refresh block reads its own previous baseline value to log
-    // shiftUs; without the barrier that read can see a stale pre-reset value
-    // and feed a wrong shiftUs into the subsequent sync-error measurement.
+    // reset all three; resume does NOT reset lastBaselineRefreshUs); playback
+    // coroutine in triggerReanchor() (under stateLock), resetSyncBaselines()
+    // (no lock; writes baselineFramePosition/baselineServerTimeUs only, NOT
+    // lastBaselineRefreshUs), and in the calibration and periodic baseline-
+    // refresh blocks in updateSyncError() (no lock). The refresh block reads
+    // its own previous baseline value to log shiftUs; without the barrier that
+    // read can see a stale pre-reset value and feed a wrong shiftUs into the
+    // subsequent sync-error measurement.
     @Volatile private var baselineFramePosition = 0L
     @Volatile private var baselineServerTimeUs = 0L
     @Volatile private var lastBaselineRefreshUs = 0L
@@ -566,9 +571,17 @@ class SyncAudioPlayer(
     // frame position so we can detect and reject wrapped values.
     private var lastValidFramePosition = 0L
 
-    // Sample insert/drop correction state (from Python reference)
-    private var insertEveryNFrames: Int = 0      // Insert duplicate frame every N frames (slow down)
-    private var dropEveryNFrames: Int = 0        // Drop frame every N frames (speed up)
+    // Sample insert/drop correction state (from Python reference).
+    // @Volatile on the *EveryNFrames pair: written from Main under stateLock by
+    // resume()/enterIdle()/clearBuffer(), from the playback coroutine under
+    // stateLock by triggerReanchor(), and off-lock from the playback coroutine
+    // by updateCorrectionSchedule(). Read on Main via getStats() and on the
+    // playback coroutine to decide whether to take the corrected-write path.
+    // Without the barrier the stats reader can observe stale cached values
+    // indefinitely and the rate-derived diagnostics stall. The framesUntil*
+    // countdowns are single-thread on the playback coroutine and don't need it.
+    @Volatile private var insertEveryNFrames: Int = 0  // Insert duplicate frame every N frames (slow down)
+    @Volatile private var dropEveryNFrames: Int = 0    // Drop frame every N frames (speed up)
     private var framesUntilNextInsert: Int = 0   // Countdown to next insert
     private var framesUntilNextDrop: Int = 0     // Countdown to next drop
     private var lastOutputFrame: ByteArray = ByteArray(0)  // Last frame written (for duplication)
@@ -633,10 +646,9 @@ class SyncAudioPlayer(
     // after a Main-thread reset and compute spurious gap/overlap stats at
     // the splice point.
     @Volatile private var expectedNextTimestampUs: Long? = null  // Expected server timestamp of next chunk
-    // @Volatile: incremented on the decode dispatcher in processChunk (single-
-    // thread RMW, so atomicity is fine) and read on Main via getStats() for the
-    // stats sheet. Without the barrier the Main reader can observe stale cached
-    // values indefinitely and the gap/overlap diagnostics stop updating.
+    // Gap/overlap counters: same @Volatile contract as the stats group above
+    // (incremented on the decode dispatcher in processChunk, read on Main via
+    // getStats(); never reset, so single-thread RMW is safe).
     @Volatile private var gapsFilled = 0L         // Count of gaps filled with silence
     @Volatile private var gapSilenceMs = 0L       // Total milliseconds of silence inserted
     @Volatile private var overlapsTrimmed = 0L    // Count of overlaps trimmed
