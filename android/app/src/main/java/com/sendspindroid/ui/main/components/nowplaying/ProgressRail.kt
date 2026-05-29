@@ -58,9 +58,22 @@ fun ProgressRail(
     trackNumber: Int,
     trackTotal: Int,
     accent: Color,
+    trackKey: String,
+    isBuffering: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val paused = !isPlaying
+    // Treat "buffering while intending to play" as playing. The audio engine
+    // enters REANCHORING (sync drift > 500ms) and WAITING_FOR_START (track
+    // start) during normal playback; SendSpinPlayer maps both to Media3
+    // STATE_BUFFERING, which the pipeline surfaces as isPlaying=false even
+    // though audio is physically playing from the buffer. Keying the paused
+    // look and the interpolation freeze on raw isPlaying made every reanchor
+    // flip the rail to its paused treatment (dim + pause glyph) and freeze the
+    // playhead, then lurch on recovery. Gating on (isPlaying || isBuffering)
+    // mirrors NowPlayingFocus.effectivePaused so the rail keeps advancing
+    // through transient buffering and only shows paused on a real user pause.
+    val playing = isPlaying || isBuffering
+    val paused = !playing
     val safeDuration = durationMs.coerceAtLeast(1L)
 
     // Allocate all remember slots unconditionally so the slot table is stable
@@ -79,22 +92,34 @@ fun ProgressRail(
     // The next server/state will replace this local anchor with the authoritative
     // one.
     var playSince by remember { mutableLongStateOf(0L) }
-    var wasPlaying by remember { mutableStateOf(isPlaying) }
+    var wasPlaying by remember { mutableStateOf(playing) }
+
+    // Reset the rail the instant the track identity changes, regardless of
+    // play/pause state. This replaces the old magnitude heuristic
+    // (positionMs < 2000 && displayPositionMs > 5000), which missed track
+    // changes that happened while paused early in a track (prior position
+    // never crossed 5s) and could false-fire on a transient low position
+    // within a track. The track's metadata and position arrive in the same
+    // server broadcast, so positionMs is already the new track's start value
+    // by the time trackKey changes.
+    LaunchedEffect(trackKey) {
+        anchorPositionMs = positionMs
+        anchorTime = positionUpdatedAt
+        displayPositionMs = positionMs
+    }
 
     LaunchedEffect(positionMs, positionUpdatedAt) {
         anchorPositionMs = positionMs
         anchorTime = positionUpdatedAt
-        // Snap displayPositionMs only when actively playing OR when the new
-        // server position represents a clear track change (positionMs reset
-        // near 0 while displayPositionMs was deep into the previous track).
+        // Snap displayPositionMs to the server position only while playing.
         // While paused mid-track the server's snapshot of "where the track
         // currently is" routinely trails local interpolation by a beat, and
         // snapping would visibly jerk the playhead backward right as the
         // pause animation is firing. Preserve the local value; the resume
         // path re-anchors to displayPositionMs so the bar continues forward
-        // from where the user saw it freeze.
-        val isTrackChange = positionMs < 2000L && displayPositionMs > 5000L
-        if (isPlaying || isTrackChange) {
+        // from where the user saw it freeze. Track changes are handled by the
+        // trackKey effect above, so a paused track change still resets.
+        if (playing) {
             displayPositionMs = positionMs
         }
     }
@@ -107,10 +132,10 @@ fun ProgressRail(
     // interpolation loop ran with stale anchors and the playhead could lurch
     // forward by however long we were paused. Merging the work eliminates
     // the inter-effect race.
-    LaunchedEffect(isPlaying, anchorPositionMs, anchorTime, durationMs) {
+    LaunchedEffect(playing, anchorPositionMs, anchorTime, durationMs) {
         // Apply the resume re-anchor synchronously at the top of the effect
         // so the per-frame loop below sees fresh values.
-        val localPlaySince = if (isPlaying && !wasPlaying) {
+        val localPlaySince = if (playing && !wasPlaying) {
             val now = SystemClock.elapsedRealtime()
             playSince = now
             // Re-anchor to the value the rail showed during pause so the
@@ -122,7 +147,7 @@ fun ProgressRail(
             wasPlaying = true
             now
         } else {
-            wasPlaying = isPlaying
+            wasPlaying = playing
             playSince
         }
         // anchorTime == 0L means the VM hasn't applied a real server frame yet.
@@ -132,7 +157,7 @@ fun ProgressRail(
             displayPositionMs = anchorPositionMs
             return@LaunchedEffect
         }
-        if (!isPlaying) {
+        if (!playing) {
             // Pause: freeze displayPositionMs at its current value rather than
             // snapping back to anchorPositionMs. The interpolation loop has been
             // advancing past the anchor; snapping back would jerk the bar

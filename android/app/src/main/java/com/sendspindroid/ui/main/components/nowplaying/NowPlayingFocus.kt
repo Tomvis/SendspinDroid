@@ -167,6 +167,14 @@ fun NowPlayingFocus(
         }
     }
 
+    // Authoritative track-change signal for the progress rail. This composite
+    // changes exactly on a track transition, so the rail resets its
+    // interpolation on a real track change rather than guessing from position
+    // magnitude. Recomputed only when the identity fields change, not per frame.
+    val trackKey = remember(metadata.title, metadata.artist, metadata.album) {
+        metadata.title + "\n" + metadata.artist + "\n" + metadata.album
+    }
+
     // Now Playing is a passive view; no interactive elements on-screen. Park
     // initial focus on an invisible anchor so the Activity still gets D-pad
     // key events (e.g. BACK).
@@ -241,9 +249,11 @@ fun NowPlayingFocus(
                 durationMs = durationMs,
                 positionUpdatedAt = positionUpdatedAt,
                 isPlaying = isPlaying,
+                isBuffering = isBuffering,
                 trackNumber = stickyTrackNumber,
                 trackTotal = stickyTrackTotal,
                 accent = animatedAccent,
+                trackKey = trackKey,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
