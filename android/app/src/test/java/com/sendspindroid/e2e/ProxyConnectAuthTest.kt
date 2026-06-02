@@ -233,9 +233,23 @@ class ProxyConnectAuthTest : E2ETestBase() {
         )
 
         verify {
+            // Match the same fields the positional verify asserted (timestamp
+            // was never part of the callback, so it stays unasserted).
             mockCallback.onMetadataUpdate(
-                "Proxy Track", "Remote Artist", "", "Cloud Album",
-                "", 0, 0, 0, 0, 200000, 0, 1000
+                match {
+                    it.title == "Proxy Track" &&
+                        it.artist == "Remote Artist" &&
+                        it.albumArtist == "" &&
+                        it.album == "Cloud Album" &&
+                        it.artworkUrl == "" &&
+                        it.year == 0 &&
+                        it.albumTrack == 0 &&
+                        it.queueTrack == 0 &&
+                        it.totalTracks == 0 &&
+                        it.durationMs == 200000L &&
+                        it.positionMs == 0L &&
+                        it.progress.playbackSpeed == 1000
+                }
             )
         }
     }

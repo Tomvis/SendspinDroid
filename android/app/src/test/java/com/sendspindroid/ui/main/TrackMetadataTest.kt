@@ -58,7 +58,7 @@ class TrackMetadataTest {
     }
 
     // -----------------------------------------------------------------------
-    // mergeTrackMetadata — Media3 sync frankenmetadata fix
+    // mergeTrackMetadata -- Media3 sync frankenmetadata fix
     // -----------------------------------------------------------------------
 
     @Test
@@ -66,7 +66,7 @@ class TrackMetadataTest {
         // The SendSpin broadcast has already populated queueTrack/totalTracks
         // from the authoritative state/metadata frame. A subsequent Media3
         // refresh (artwork URL change, etc.) fires onMediaMetadataChanged
-        // with the same title/artist/album but no queue info — we keep prev.
+        // with the same title/artist/album but no queue info -- we keep prev.
         val prev = TrackMetadata(
             "Song", "Artist", "Album",
             albumArtist = "Album Artist", year = 2024,
@@ -147,8 +147,8 @@ class TrackMetadataTest {
     @Test
     fun `merge from EMPTY initial state clears nulls`() {
         // First metadata emission. prev is EMPTY (all blank/0). isNewTrack=true.
-        // Aux fields with no value should be 0/"" — not inherited from EMPTY
-        // (which is also 0/"" — but the logic must work either way).
+        // Aux fields with no value should be 0/"" -- not inherited from EMPTY
+        // (which is also 0/"" -- but the logic must work either way).
         val merged = mergeTrackMetadata(
             prev = TrackMetadata.EMPTY,
             title = "First", artist = "First", album = "First"

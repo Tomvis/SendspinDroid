@@ -354,16 +354,6 @@ class ColorState(
         result = 31 * result + (onLight?.hashCode() ?: 0)
         return result
     }
-
-    fun copy(
-        timestamp: Long = this.timestamp,
-        backgroundDark: List<Int>? = this.backgroundDark,
-        backgroundLight: List<Int>? = this.backgroundLight,
-        primary: List<Int>? = this.primary,
-        accent: List<Int>? = this.accent,
-        onDark: List<Int>? = this.onDark,
-        onLight: List<Int>? = this.onLight,
-    ): ColorState = ColorState(timestamp, backgroundDark, backgroundLight, primary, accent, onDark, onLight)
 }
 
 /**

@@ -116,20 +116,7 @@ class SendSpin(
         fun onServerDiscovered(name: String, address: String)
         fun onStateChanged(state: String)
         fun onGroupUpdate(groupId: String, groupName: String, playbackState: String)
-        fun onMetadataUpdate(
-            title: String,
-            artist: String,
-            albumArtist: String,
-            album: String,
-            artworkUrl: String,
-            year: Int,
-            albumTrack: Int,
-            queueTrack: Int,
-            totalTracks: Int,
-            durationMs: Long,
-            positionMs: Long,
-            playbackSpeed: Int = 1000
-        )
+        fun onMetadataUpdate(metadata: TrackMetadata)
         fun onArtwork(imageData: ByteArray)
         fun onArtworkCleared()
         fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?)
@@ -470,20 +457,7 @@ class SendSpin(
     }
 
     override fun onMetadataUpdate(metadata: TrackMetadata) {
-        callback.onMetadataUpdate(
-            metadata.title,
-            metadata.artist,
-            metadata.albumArtist,
-            metadata.album,
-            metadata.artworkUrl,
-            metadata.year,
-            metadata.albumTrack,
-            metadata.queueTrack,
-            metadata.totalTracks,
-            metadata.durationMs,
-            metadata.positionMs,
-            metadata.progress.playbackSpeed
-        )
+        callback.onMetadataUpdate(metadata)
     }
 
     override fun onPlaybackStateChanged(state: String) {
@@ -1437,6 +1411,22 @@ class SendSpin(
      */
     private inner class TransportEventListener : SendSpinTransport.Listener {
 
+        /**
+         * Tear down the transport inline and surface Failed(AuthRejected) instead
+         * of routing through disconnect(), which ends on TransportState.Idle and
+         * would clobber the auth-rejection signal that observers (ConnectionCoordinator,
+         * MA token-clear path, UI status flow) need. Shared by the missing-token
+         * (onConnected) and auth_failed (onMessage) proxy-auth failure paths.
+         */
+        private fun failProxyAuthAndTeardown() {
+            handshakeComplete = false
+            reconnecting.set(false)
+            transport?.setListener(null)
+            transport?.destroy()
+            transport = null
+            _connectionState.value = TransportState.Failed(FailureReason.AuthRejected)
+        }
+
         override fun onConnected() {
             Log.d(TAG, "Transport connected")
 
@@ -1463,12 +1453,7 @@ class SendSpin(
                 // After this, they would only see Idle and never learn the
                 // proxy was unauthorized.
                 Log.e(TAG, "Proxy connection has no auth token - server will reject")
-                handshakeComplete = false
-                reconnecting.set(false)
-                transport?.setListener(null)
-                transport?.destroy()
-                transport = null
-                _connectionState.value = TransportState.Failed(FailureReason.AuthRejected)
+                failProxyAuthAndTeardown()
             } else {
                 // Local/Remote mode: proceed directly with hello
                 sendClientHello()
@@ -1495,19 +1480,11 @@ class SendSpin(
                 val (msgType, message) = MessageParser.parseProxyAuthResponse(text)
                 if (msgType == "auth_failed" || msgType == "error") {
                     Log.e(TAG, "Proxy auth failed: ${message ?: "Authentication failed"}")
-                    // Tear down inline rather than calling disconnect(): the latter
-                    // ends with _connectionState.value = TransportState.Idle, which
-                    // clobbers the Failed(AuthRejected) signal that observers
-                    // (ConnectionCoordinator, MA token-clear path) need. Mirrors
-                    // the same pattern used in the missing-token branch of
-                    // onConnected above.
+                    // Same inline teardown as the missing-token branch of
+                    // onConnected (see failProxyAuthAndTeardown); clear the
+                    // pending-auth flag first since we reached the response.
                     awaitingAuthResponse = false
-                    handshakeComplete = false
-                    reconnecting.set(false)
-                    transport?.setListener(null)
-                    transport?.destroy()
-                    transport = null
-                    _connectionState.value = TransportState.Failed(FailureReason.AuthRejected)
+                    failProxyAuthAndTeardown()
                     return
                 }
 

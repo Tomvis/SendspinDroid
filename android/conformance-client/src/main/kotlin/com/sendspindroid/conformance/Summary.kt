@@ -1,6 +1,5 @@
 package com.sendspindroid.conformance
 
-import com.squareup.moshi.JsonClass
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 
@@ -11,8 +10,10 @@ import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
  * and the scenario-specific echo fields (scenarioId, preferredCodec).
  *
  * Field names are snake_case to match the Python harness's expected keys.
+ *
+ * Serialized via the reflective [KotlinJsonAdapterFactory] below; this module
+ * applies no Moshi codegen (KSP), so no @JsonClass annotation is used.
  */
-@JsonClass(generateAdapter = true)
 data class Summary(
     val scenarioId: String,
     val preferredCodec: String,

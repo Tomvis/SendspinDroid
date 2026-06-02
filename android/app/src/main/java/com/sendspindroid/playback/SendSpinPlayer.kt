@@ -227,8 +227,8 @@ class SendSpinPlayer : Player {
     fun updateConnectionState(connected: Boolean, serverName: String? = null) {
         if (!connected) {
             // Fire listener callbacks in Media3's conventional order:
-            //   onPlayWhenReadyChanged → onPlaybackStateChanged → onTimelineChanged
-            //     → onMediaItemTransition → onIsPlayingChanged
+            //   onPlayWhenReadyChanged -> onPlaybackStateChanged -> onTimelineChanged
+            //     -> onMediaItemTransition -> onIsPlayingChanged
             // so that controllers (Android Auto, AVRCP, lock screen) never see
             // an intermediate state where STATE_IDLE has been reported but the
             // timeline / current item still reference the prior session.

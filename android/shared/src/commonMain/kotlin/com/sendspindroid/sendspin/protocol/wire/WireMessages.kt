@@ -139,6 +139,16 @@ internal data class WireSyncOffsetPayload(
     @Json(name = "source") val source: String? = null,
 )
 
+// Shared `roles` field carried by stream/end and stream/clear. The element
+// type is Any? (not String) so a non-string array entry is dropped rather than
+// failing the whole decode -- matching the prior raw-cast mapNotNull { it as?
+// String } behavior. A missing `roles` key decodes to null ("all roles"); an
+// empty array decodes to an empty list.
+@JsonClass(generateAdapter = true)
+internal data class WireRoles(
+    @Json(name = "roles") val roles: List<Any?>? = null,
+)
+
 // ── Outgoing ──────────────────────────────────────────────────────────────
 
 @JsonClass(generateAdapter = true)

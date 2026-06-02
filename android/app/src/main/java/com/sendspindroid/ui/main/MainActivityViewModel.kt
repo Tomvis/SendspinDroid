@@ -197,7 +197,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         if (isPlaying && state == PlaybackState.READY) {
             idleTimeoutJob?.cancel()
             idleTimeoutJob = null
-        } else if (idleTimeoutJob == null && _metadata.value != TrackMetadata.EMPTY) {
+        } else if (idleTimeoutJob == null && !_metadata.value.isEmpty) {
             idleTimeoutJob = viewModelScope.launch {
                 delay(IDLE_TIMEOUT_MS)
                 // ensureActive() so a cancel issued during the delay window

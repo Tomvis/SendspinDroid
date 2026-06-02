@@ -150,7 +150,7 @@ class TimeSyncManager(
             }
         }
 
-        if (measurement.rtt <= 0 || measurement.rtt > MAX_ACCEPTABLE_RTT_US) {
+        if (!isPlausibleRtt(measurement.rtt)) {
             // Non-positive RTT (clock skew / suspend-resume / hostile server) would
             // collapse computeMaxError to 1us and dominate the Kalman filter as a
             // "super-confident" garbage measurement.
@@ -207,9 +207,7 @@ class TimeSyncManager(
                 return
             }
 
-            val validMeasurements = pendingBurstMeasurements.filter {
-                it.rtt > 0 && it.rtt <= MAX_ACCEPTABLE_RTT_US
-            }
+            val validMeasurements = pendingBurstMeasurements.filter { isPlausibleRtt(it.rtt) }
             if (validMeasurements.isEmpty()) {
                 Log.w(tag, "All ${pendingBurstMeasurements.size} responses had implausible RTT - skipping burst")
                 pendingBurstMeasurements.clear()
@@ -240,6 +238,11 @@ class TimeSyncManager(
         }
         onMeasurementApplied()
     }
+
+    // A non-positive RTT (clock skew / suspend-resume / hostile server) or one
+    // above the ceiling is rejected as a measurement. 1..MAX is exactly
+    // rtt > 0 && rtt <= MAX_ACCEPTABLE_RTT_US since the bound is inclusive.
+    private fun isPlausibleRtt(rtt: Long): Boolean = rtt in 1..MAX_ACCEPTABLE_RTT_US
 
     private fun computeMaxError(rtt: Long): Long = (rtt / 2L).coerceAtLeast(1L)
 

@@ -155,15 +155,17 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
 
 /**
  * Separable box blur run N times on a decoded bitmap. Three iterations of a
- * box blur is a cheap approximation of a Gaussian blur. The 96x96 input is
- * small enough that this is ~1ms on any recent CPU.
+ * box blur is a cheap approximation of a Gaussian blur. The sole caller blurs a
+ * downscaled 384x384 ambient cover at radius 24 over 3 iterations; transform()
+ * is suspend and runs on Coil's background dispatcher, so the cost stays off
+ * the UI path.
  *
  * Used instead of Modifier.blur because that modifier requires API 31+ and
  * this app targets Android TV 11 (API 30).
  */
 private class BoxBlurTransformation(
-    private val radius: Int = 6,
-    private val iterations: Int = 3,
+    private val radius: Int,
+    private val iterations: Int,
 ) : Transformation {
     override val cacheKey: String = "sendspin-boxblur-r${radius}-i${iterations}"
 
@@ -265,30 +267,38 @@ private fun AccentWash(accent: Color, paused: Boolean) {
     }
 }
 
+/**
+ * Radial darken-to-edges vignette. [radiusFactor] scales the gradient radius
+ * relative to the larger screen dimension (smaller = tighter/darker). Shared by
+ * AmbientBg (0.75) and the idle screen (0.8).
+ */
 @Composable
-private fun Vignette() {
+internal fun Vignette(radiusFactor: Float = 0.75f) {
     // BoxWithConstraints reads layout size so the brush radius can be
     // computed and applied via Modifier.background. Shield Tegra renders
     // drawRect(brush=...) as black; Modifier.background works.
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val w = constraints.maxWidth.toFloat()
         val h = constraints.maxHeight.toFloat()
-        val brush = remember(w, h) {
+        val brush = remember(w, h, radiusFactor) {
             Brush.radialGradient(
                 colorStops = arrayOf(
                     0.35f to Color.Transparent,
                     1.0f to Color.Black,
                 ),
                 center = Offset(w * 0.5f, h * 0.5f),
-                radius = maxOf(w, h) * 0.75f,
+                radius = maxOf(w, h) * radiusFactor,
             )
         }
         Box(modifier = Modifier.fillMaxSize().background(brush))
     }
 }
 
+/**
+ * Faint repeating-noise grain overlay. Shared by AmbientBg and the idle screen.
+ */
 @Composable
-private fun GrainOverlay() {
+internal fun GrainOverlay() {
     val grain = SharedGrainBitmap
     val brush = remember(grain) {
         ShaderBrush(ImageShader(grain, TileMode.Repeated, TileMode.Repeated))

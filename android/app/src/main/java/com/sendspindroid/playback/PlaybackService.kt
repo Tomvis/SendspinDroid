@@ -76,6 +76,7 @@ import com.sendspindroid.sendspin.SyncAudioPlayerCallback
 import com.sendspindroid.sendspin.PlaybackState as SyncPlaybackState
 import com.sendspindroid.sendspin.decoder.AudioDecoder
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
+import com.sendspindroid.sendspin.protocol.TrackMetadata
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.NetworkEvaluator
@@ -453,7 +454,7 @@ class PlaybackService : MediaLibraryService() {
     // True between requestAudioFocus() and abandonAudioFocus(), independent of
     // whether the system has currently granted focus. AUDIOFOCUS_LOSS_TRANSIENT
     // flips hasAudioFocus to false (so we suppress media-button presses) but
-    // the listener is still registered with AudioManager — we must still
+    // the listener is still registered with AudioManager -- we must still
     // abandon on teardown or the listener (capturing this service) leaks.
     @Volatile
     private var audioFocusRegistered: Boolean = false
@@ -910,128 +911,13 @@ class PlaybackService : MediaLibraryService() {
                         // selfReconnectEnabled=false, DRAINING is never entered via
                         // onReconnecting so isDraining is always false here.
                         Log.d(TAG, "Disconnected from server")
-
-                        // Stop debug logging session
-                        stopDebugLogging()
-                        AppLog.session.end()
-
-                        // Any active reconnect overlay is no longer meaningful once we've
-                        // transitioned out of Reconnecting into a terminal state. Issue #132.
-                        forwardingPlayer?.clearReconnectingOverlay()
-
-                        // Stop audio playback and release playback locks (CPU/WiFi)
-                        syncAudioPlayer?.stop()
-                        syncAudioPlayer?.release()
-                        syncAudioPlayer = null
-                        sendSpinPlayer?.setSyncAudioPlayer(null)
-                        // Close the chunk fast-path gate so any chunks still in
-                        // the WS receive queue post-disconnect drop before being
-                        // launched into the decode pipeline.
-                        decoderReady = false
-                        releasePlaybackLocks()
-                        releaseHighPowerLocks()
-                        // Stop the foreground notification since we're fully disconnecting
-                        stopForegroundNotification()
-
-                        sendSpinPlayer?.updateConnectionState(false, null)
-                        // Clear any stale error that a prior Failed transition
-                        // set on SendSpinPlayer. The Connected branch already
-                        // clears it on reconnect, but Failed (non-Exhausted) ->
-                        // Idle (user disconnect) would otherwise leave the
-                        // error stuck until the next successful Connect.
-                        sendSpinPlayer?.clearError()
-
-                        // Refresh browse tree root so "Connect" reappears
-                        mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
-
-                        // Clear all per-track state BEFORE the disconnection
-                        // broadcast. broadcastSessionExtras reads _playbackState
-                        // and currentCodec/SampleRate/Channels/BitDepth at send
-                        // time; without clearing first, the STATE_DISCONNECTED
-                        // bundle carries the prior track's title/artist/album/
-                        // year/track and MainActivity.processSessionExtras
-                        // re-populates the just-cleared VM (and triggers a
-                        // stale Coil artwork fetch) before the next event
-                        // arrives.
-                        clearAudioStreamSpec()
-                        // Preserve volume/muted across the disconnect: the
-                        // device's STREAM_MUSIC volume hasn't changed, but a
-                        // fresh PlaybackState() defaults volume back to 100,
-                        // which would broadcast a wrong volume to the
-                        // MediaController slider until the next connect reads
-                        // the actual device volume.
-                        _playbackState.value = PlaybackState(
-                            volume = _playbackState.value.volume,
-                            muted = _playbackState.value.muted,
-                        )
-                        lastArtworkUrl = null
-                        lastTrackTitle = null
-                        urlArtwork = null
-                        binaryArtwork = null
-                        ++artworkGeneration
-                        forwardingPlayer?.clearMetadata()
-
-                        // Broadcast disconnection to controllers (MainActivity)
-                        broadcastConnectionState()
-
-                        // Notify MusicAssistant of disconnection
-                        MusicAssistant.onServerDisconnected()
-                        currentServerId = null
+                        tearDownConnection(error = null, preserveVolume = true)
                     }
                     state is TransportState.Failed -> {
                         if (state.reason is FailureReason.Exhausted) {
                             // PORTED FROM onDisconnected(wasReconnectExhausted = true):
                             Log.d(TAG, "Reconnect exhausted - disconnecting with error")
-
-                            // Stop debug logging session
-                            stopDebugLogging()
-                            AppLog.session.end()
-
-                            // Any active reconnect overlay is no longer meaningful.
-                            // Issue #132.
-                            forwardingPlayer?.clearReconnectingOverlay()
-
-                            // Stop audio playback and release all locks
-                            syncAudioPlayer?.stop()
-                            syncAudioPlayer?.release()
-                            syncAudioPlayer = null
-                            sendSpinPlayer?.setSyncAudioPlayer(null)
-                            // Close the chunk fast-path gate (see Idle branch).
-                            decoderReady = false
-                            releasePlaybackLocks()
-                            releaseHighPowerLocks()
-                            stopForegroundNotification()
-
-                            sendSpinPlayer?.updateConnectionState(false, null)
-
-                            // Show error on Android Auto since reconnect attempts were exhausted
-                            sendSpinPlayer?.setError("Connection lost")
-
-                            // Refresh browse tree root so "Connect" reappears
-                            mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
-
-                            // Clear all per-track state BEFORE the disconnection
-                            // broadcast. See the Idle branch above for the full
-                            // rationale: broadcastSessionExtras reads
-                            // _playbackState and currentCodec/SampleRate/
-                            // Channels/BitDepth at send time, so the
-                            // STATE_DISCONNECTED bundle would carry stale
-                            // metadata back to MainActivity.
-                            clearAudioStreamSpec()
-                            _playbackState.value = PlaybackState()
-                            lastArtworkUrl = null
-                            lastTrackTitle = null
-                            urlArtwork = null
-                            binaryArtwork = null
-                            ++artworkGeneration
-                            forwardingPlayer?.clearMetadata()
-
-                            // Broadcast disconnection to controllers (MainActivity)
-                            broadcastConnectionState()
-
-                            // Notify MusicAssistant of disconnection
-                            MusicAssistant.onServerDisconnected()
-                            currentServerId = null
+                            tearDownConnection(error = "Connection lost", preserveVolume = false)
                         } else {
                             // PORTED FROM onError(message). Use the same mapping that
                             // broadcastSessionExtras feeds to MainActivity so the
@@ -1511,20 +1397,24 @@ class PlaybackService : MediaLibraryService() {
         }
 
         @OptIn(UnstableApi::class)
-        override fun onMetadataUpdate(
-            title: String,
-            artist: String,
-            albumArtist: String,
-            album: String,
-            artworkUrl: String,
-            year: Int,
-            albumTrack: Int,
-            queueTrack: Int,
-            totalTracks: Int,
-            durationMs: Long,
-            positionMs: Long,
-            playbackSpeed: Int
-        ) {
+        override fun onMetadataUpdate(metadata: TrackMetadata) {
+            // Unpack the value object into the raw locals the body below was
+            // written against, so the downstream withMetadata / updateMediaItem /
+            // artwork-generation logic is unchanged. durationMs / positionMs are
+            // TrackMetadata convenience props (progress.trackDuration /
+            // progress.trackProgress); playbackSpeed lives on progress.
+            val title = metadata.title
+            val artist = metadata.artist
+            val albumArtist = metadata.albumArtist
+            val album = metadata.album
+            val artworkUrl = metadata.artworkUrl
+            val year = metadata.year
+            val albumTrack = metadata.albumTrack
+            val queueTrack = metadata.queueTrack
+            val totalTracks = metadata.totalTracks
+            val durationMs = metadata.durationMs
+            val positionMs = metadata.positionMs
+            val playbackSpeed = metadata.progress.playbackSpeed
             mainHandler.post {
                 Log.d(TAG, "Metadata update: $title / $artist / $album")
                 Log.d(TAG, "  extra fields: albumArtist=$albumArtist year=$year albumTrack=$albumTrack queueTrack=$queueTrack totalTracks=$totalTracks")
@@ -1549,14 +1439,23 @@ class PlaybackService : MediaLibraryService() {
                 // server-provided value through unchanged so a server-pushed
                 // track without artwork actually clears, rather than
                 // leaking the prior track's image into a new track.
+                // These six mapped values feed both withMetadata and the
+                // sendSpinPlayer.updateMediaItem call below; compute once so the
+                // two argument lists cannot drift.
+                val titleOrNull = title.ifEmpty { null }
+                val artistOrNull = artist.ifEmpty { null }
+                val albumOrNull = album.ifEmpty { null }
+                val albumArtistOrNull = albumArtist.ifEmpty { null }
+                val yearOrNull = year.takeIf { it > 0 }
+                val albumTrackOrNull = albumTrack.takeIf { it > 0 }
                 _playbackState.value = _playbackState.value.withMetadata(
-                    title = title.ifEmpty { null },
-                    artist = artist.ifEmpty { null },
-                    albumArtist = albumArtist.ifEmpty { null },
-                    album = album.ifEmpty { null },
+                    title = titleOrNull,
+                    artist = artistOrNull,
+                    albumArtist = albumArtistOrNull,
+                    album = albumOrNull,
                     artworkUrl = effectiveArtworkUrl,
-                    year = year.takeIf { it > 0 },
-                    albumTrack = albumTrack.takeIf { it > 0 },
+                    year = yearOrNull,
+                    albumTrack = albumTrackOrNull,
                     queueTrack = queueTrack.takeIf { it > 0 },
                     totalTracks = totalTracks.takeIf { it > 0 },
                     durationMs = durationMs,
@@ -1611,13 +1510,13 @@ class PlaybackService : MediaLibraryService() {
 
                 // Update the player's media item for lock screen/notification
                 sendSpinPlayer?.updateMediaItem(
-                    title = title.ifEmpty { null },
-                    artist = artist.ifEmpty { null },
-                    album = album.ifEmpty { null },
+                    title = titleOrNull,
+                    artist = artistOrNull,
+                    album = albumOrNull,
                     durationMs = durationMs,
-                    albumArtist = albumArtist.ifEmpty { null },
-                    year = year.takeIf { it > 0 },
-                    albumTrack = albumTrack.takeIf { it > 0 }
+                    albumArtist = albumArtistOrNull,
+                    year = yearOrNull,
+                    albumTrack = albumTrackOrNull
                 )
 
                 // Update the player's position so MediaSession reports it
@@ -1667,7 +1566,7 @@ class PlaybackService : MediaLibraryService() {
                         // Only push to MediaSession if we don't already have URL-based
                         // artwork; URL is preferred (see urlArtwork field comment).
                         if (urlArtwork == null) {
-                            updateMediaSessionArtwork(scaled)
+                            updateMediaMetadata()
                         }
                     }
                 } catch (e: Exception) {
@@ -2069,7 +1968,7 @@ class PlaybackService : MediaLibraryService() {
                         urlArtwork = scaled
                         // URL is preferred over binary; push this to MediaSession
                         // unconditionally.
-                        updateMediaSessionArtwork(scaled)
+                        updateMediaMetadata()
                     }
                     null
                 } else {
@@ -2166,35 +2065,92 @@ class PlaybackService : MediaLibraryService() {
         return Uri.parse(url)
     }
 
+    /**
+     * Shared teardown for the two terminal transport states observed by the
+     * connection-state collector: Idle (user-initiated or coordinator-managed,
+     * non-exhausted drop) and Failed(Exhausted) (self-reconnect gave up). Stops
+     * and releases the audio player, closes the chunk fast-path gate, releases
+     * locks, tears down the foreground notification, then clears all per-track
+     * state BEFORE the disconnection broadcast -- broadcastSessionExtras reads
+     * _playbackState and the codec spec at send time, so a stale bundle would
+     * otherwise re-populate MainActivity's VM (and trigger a stale Coil artwork
+     * fetch) before the next event arrives.
+     *
+     * @param error null clears any stale SendSpinPlayer error (Idle: a prior
+     *   Failed -> Idle user disconnect must not leave an error stuck until the
+     *   next connect); non-null shows it on Android Auto (Exhausted: "Connection
+     *   lost").
+     * @param preserveVolume true keeps the current volume/muted in the reset
+     *   PlaybackState (Idle: the device STREAM_MUSIC volume hasn't changed, and a
+     *   bare PlaybackState() would broadcast volume=100 to the slider until the
+     *   next connect reads the real device volume). Exhausted uses a bare reset.
+     */
     @OptIn(UnstableApi::class)
-    private fun updateMediaSessionArtwork(bitmap: Bitmap) {
-        val state = _playbackState.value
+    private fun tearDownConnection(error: String?, preserveVolume: Boolean) {
+        // Stop debug logging session
+        stopDebugLogging()
+        AppLog.session.end()
 
-        // Ancillary fields use the "" / 0 clear sentinel rather than null when
-        // syncing the cache to state. MetadataForwardingPlayer treats null as
-        // "preserve prior value" (useful for partial track updates), but here
-        // we want it to mirror state exactly — null in state means "the new
-        // track has no value for this field" and the cache must clear, not
-        // leak the previous track's albumArtist / year / albumTrack.
-        forwardingPlayer?.updateMetadata(
-            title = state.title,
-            artist = state.artist,
-            album = state.album,
-            artwork = bitmap,
-            artworkUri = externalArtworkUri(state.artworkUrl),
-            albumArtist = state.albumArtist ?: "",
-            year = state.year ?: 0,
-            albumTrack = state.albumTrack ?: 0
-        )
+        // Any active reconnect overlay is no longer meaningful once we've
+        // transitioned out of Reconnecting into a terminal state. Issue #132.
+        forwardingPlayer?.clearReconnectingOverlay()
 
-        broadcastSessionExtras()
+        // Stop audio playback and release playback locks (CPU/WiFi)
+        syncAudioPlayer?.stop()
+        syncAudioPlayer?.release()
+        syncAudioPlayer = null
+        sendSpinPlayer?.setSyncAudioPlayer(null)
+        // Close the chunk fast-path gate so any chunks still in the WS receive
+        // queue post-disconnect drop before being launched into the decode pipeline.
+        decoderReady = false
+        releasePlaybackLocks()
+        releaseHighPowerLocks()
+        // Stop the foreground notification since we're fully disconnecting
+        stopForegroundNotification()
+
+        sendSpinPlayer?.updateConnectionState(false, null)
+        if (error == null) sendSpinPlayer?.clearError() else sendSpinPlayer?.setError(error)
+
+        // Refresh browse tree root so "Connect" reappears
+        mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
+
+        // Clear all per-track state BEFORE the disconnection broadcast (see the
+        // KDoc above for why ordering matters).
+        clearAudioStreamSpec()
+        _playbackState.value = if (preserveVolume) {
+            PlaybackState(
+                volume = _playbackState.value.volume,
+                muted = _playbackState.value.muted,
+            )
+        } else {
+            PlaybackState()
+        }
+        lastArtworkUrl = null
+        lastTrackTitle = null
+        urlArtwork = null
+        binaryArtwork = null
+        ++artworkGeneration
+        forwardingPlayer?.clearMetadata()
+
+        // Broadcast disconnection to controllers (MainActivity)
+        broadcastConnectionState()
+
+        // Notify MusicAssistant of disconnection
+        MusicAssistant.onServerDisconnected()
+        currentServerId = null
     }
 
     @OptIn(UnstableApi::class)
     private fun updateMediaMetadata() {
         val state = _playbackState.value
 
-        // See updateMediaSessionArtwork for why ancillaries use "" / 0 here.
+        // Ancillary fields use the "" / 0 clear sentinel rather than null when
+        // syncing the cache to state. MetadataForwardingPlayer treats null as
+        // "preserve prior value" (useful for partial track updates), but here we
+        // want it to mirror state exactly -- null in state means "the new track
+        // has no value for this field" and the cache must clear, not leak the
+        // previous track's albumArtist / year / albumTrack.
+        //
         // clearArtwork = (effectiveArtwork == null) so a track change that has
         // wiped urlArtwork / binaryArtwork actually drops the prior bitmap from
         // the forwarding-player cache. Without it MetadataForwardingPlayer's
@@ -2352,9 +2308,10 @@ class PlaybackService : MediaLibraryService() {
 
     /**
      * Build a 64-bit fingerprint over the fields of a session-extras bundle so
-     * we can skip identical re-broadcasts. Order-sensitive on purpose: the
-     * bundle is always populated in the same order in broadcastSessionExtras,
-     * and changing that order would correctly invalidate the cache.
+     * we can skip identical re-broadcasts. Keys are sorted before hashing so the
+     * fingerprint depends only on key/value contents, not on Bundle key-iteration
+     * order (which is not guaranteed stable across API levels). Good enough to
+     * detect identical contents without allocating a diff structure each call.
      */
     @Suppress("DEPRECATION") // Bundle.get(key) for mixed-type fingerprinting
     private fun fingerprintSessionExtras(extras: Bundle): Long {
@@ -2598,10 +2555,21 @@ class PlaybackService : MediaLibraryService() {
         }
 
         return withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+            // Idle is terminal here too. connect() above set the transport to
+            // Connecting synchronously before this collector subscribes, so the
+            // pre-connect Idle is never matched -- only a *later* Idle counts.
+            // With selfReconnectEnabled=false a recoverable mid-handshake drop
+            // (SocketTimeout/EOF/abnormal close) emits Idle, not Failed, because
+            // Idle is the signal the PlaybackService observer + MainActivity use
+            // to drive coordinator-managed auto-reconnect. Without Idle in this
+            // predicate the await never matches and burns the full 15s timeout
+            // per attempt; the Coordinator only needs to know the attempt did
+            // not reach Ready, which a terminal Idle conveys immediately.
             val terminal = client.connectionState
                 .first {
                     it is TransportState.Ready ||
-                    it is TransportState.Failed
+                    it is TransportState.Failed ||
+                    it is TransportState.Idle
                 }
             terminal is TransportState.Ready
         } ?: run {
@@ -2946,7 +2914,7 @@ class PlaybackService : MediaLibraryService() {
      *
      * Gated on audioFocusRegistered (not hasAudioFocus) so a service teardown
      * during AUDIOFOCUS_LOSS_TRANSIENT still releases the AudioManager
-     * listener — otherwise the lambda captures this service and the system
+     * listener -- otherwise the lambda captures this service and the system
      * keeps it alive past onDestroy().
      */
     private fun abandonAudioFocus() {
@@ -2989,7 +2957,7 @@ class PlaybackService : MediaLibraryService() {
                     // Android Auto, AVRCP and the in-app UI all flip back to
                     // "playing" together. Using *FromServer because we don't
                     // want to round-trip through SendSpin (the server already
-                    // thinks we're playing — focus loss was a local-only pause).
+                    // thinks we're playing -- focus loss was a local-only pause).
                     sendSpinPlayer?.updatePlayWhenReadyFromServer(true)
                 }
             }
@@ -3004,7 +2972,20 @@ class PlaybackService : MediaLibraryService() {
                 // 16-bit stereo. Disconnect symmetric with the user-initiated
                 // disconnect path so the server tears down the stream.
                 synchronized(audioFocusLock) { hasAudioFocus = false }
-                disconnectFromServer()
+                // Mirror the COMMAND_DISCONNECT handler exactly so this is a
+                // genuine "final, do not reconnect" disconnect:
+                //   1. lastDisconnectUserInitiated=true makes the resulting
+                //      STATE_DISCONNECTED broadcast carry WAS_USER_INITIATED=
+                //      true, so MainActivity does NOT fire COMMAND_CONNECT_AUTO.
+                //      A bare disconnectFromServer() leaves the flag false and
+                //      the UI auto-reconnects within seconds -- which would
+                //      either steal focus back from the foreground app or
+                //      stream silently in the background, contradicting the
+                //      rationale above.
+                //   2. coordinator.disconnect() cancels any in-flight reconnect
+                //      attempt; disconnectFromServer() alone would not.
+                lastDisconnectUserInitiated = true
+                coordinator.disconnect()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 Log.d(TAG, "Audio focus lost transiently")

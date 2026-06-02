@@ -477,14 +477,6 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    /** Extract `roles` from a Map-shaped payload, as a list of strings.
-     *  Returns null when the field is absent (treat as "all roles"). */
-    private fun extractRoles(payload: Any?): List<String>? {
-        val map = payload as? Map<*, *> ?: return null
-        val raw = map["roles"] as? List<*> ?: return null
-        return raw.mapNotNull { it as? String }
-    }
-
     protected open fun handleServerHello(payload: Any?) {
         val result = MessageParser.parseServerHello(payload, "Unknown")
         if (result == null) {
@@ -651,7 +643,7 @@ abstract class SendSpinProtocolHandler(
         // (STREAM_CLEAR_ROLE_FAMILIES = {"player", "visualizer"}). If the field
         // is present and "player" is not in it, the clear targets a role we
         // don't host (e.g. visualizer-only) and must not wipe our audio buffer.
-        val roles = extractRoles(payload)
+        val roles = MessageParser.parseRoles(payload)
 
         if (roles != null && SendSpinProtocol.RoleFamily.PLAYER !in roles) {
             Log.d(tag, "Stream clear for non-player roles: $roles - ignoring")
@@ -669,7 +661,7 @@ abstract class SendSpinProtocolHandler(
         // Compare against the family name, not the versioned [Roles.PLAYER]
         // (= "player@v1"); the latter never matches and silently swallows
         // every stream/end the server emits.
-        val roles = extractRoles(payload)
+        val roles = MessageParser.parseRoles(payload)
 
         // Color role: clears any cached palette regardless of which other roles
         // are ending. Independent of the player-end branch below because a

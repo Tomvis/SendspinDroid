@@ -50,9 +50,23 @@ class DiscoverConnectPlayDisconnectTest : E2ETestBase() {
             positionMs = 5000
         )
         verify {
+            // Match the same fields the positional verify asserted (timestamp
+            // was never part of the callback, so it stays unasserted).
             mockCallback.onMetadataUpdate(
-                "Test Song", "Test Artist", "", "Test Album",
-                "", 0, 0, 0, 0, 180000, 5000, 1000
+                match {
+                    it.title == "Test Song" &&
+                        it.artist == "Test Artist" &&
+                        it.albumArtist == "" &&
+                        it.album == "Test Album" &&
+                        it.artworkUrl == "" &&
+                        it.year == 0 &&
+                        it.albumTrack == 0 &&
+                        it.queueTrack == 0 &&
+                        it.totalTracks == 0 &&
+                        it.durationMs == 180000L &&
+                        it.positionMs == 5000L &&
+                        it.progress.playbackSpeed == 1000
+                }
             )
         }
         verify { mockCallback.onStateChanged("playing") }

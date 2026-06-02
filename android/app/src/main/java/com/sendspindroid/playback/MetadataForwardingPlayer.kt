@@ -222,11 +222,7 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         if (reconnectingOverlay == serverName) return
         reconnectingOverlay = serverName
         rebuildMetadata()
-        val newState = getPlaybackState()
-        listeners.forEach { listener ->
-            listener.onMediaMetadataChanged(cachedMetadata)
-            listener.onPlaybackStateChanged(newState)
-        }
+        notifyMetadataAndState()
     }
 
     /**
@@ -240,11 +236,7 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         if (reconnectingOverlay == null) return
         reconnectingOverlay = null
         rebuildMetadata()
-        val newState = getPlaybackState()
-        listeners.forEach { listener ->
-            listener.onMediaMetadataChanged(cachedMetadata)
-            listener.onPlaybackStateChanged(newState)
-        }
+        notifyMetadataAndState()
     }
 
     /**
@@ -266,6 +258,15 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         reconnectingOverlay = null
         cachedMetadata = MediaMetadata.EMPTY
 
+        notifyMetadataAndState()
+    }
+
+    /**
+     * Re-fetch the current playback state and push both the cached metadata and
+     * that state to every registered listener. Shared by the overlay set/clear
+     * and metadata-clear paths so the notification contract lives in one place.
+     */
+    private fun notifyMetadataAndState() {
         val newState = getPlaybackState()
         listeners.forEach { listener ->
             listener.onMediaMetadataChanged(cachedMetadata)

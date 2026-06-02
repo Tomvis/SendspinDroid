@@ -30,6 +30,7 @@ import com.sendspindroid.network.TransportType
 import com.sendspindroid.remote.RemoteConnection
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.SendSpinEndpoint
+import com.sendspindroid.sendspin.protocol.TrackMetadata
 import com.sendspindroid.musicassistant.MaAuthHelper
 import com.sendspindroid.musicassistant.transport.MaApiTransport
 import com.sendspindroid.ui.remote.QrScannerDialog
@@ -77,11 +78,7 @@ class AddServerWizardActivity : FragmentActivity() {
         override fun onServerDiscovered(name: String, address: String) {}
         override fun onStateChanged(state: String) {}
         override fun onGroupUpdate(groupId: String, groupName: String, playbackState: String) {}
-        override fun onMetadataUpdate(
-            title: String, artist: String, albumArtist: String, album: String,
-            artworkUrl: String, year: Int, albumTrack: Int, queueTrack: Int,
-            totalTracks: Int, durationMs: Long, positionMs: Long, playbackSpeed: Int
-        ) {}
+        override fun onMetadataUpdate(metadata: TrackMetadata) {}
         override fun onArtwork(imageData: ByteArray) {}
         override fun onArtworkCleared() {}
         override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {}

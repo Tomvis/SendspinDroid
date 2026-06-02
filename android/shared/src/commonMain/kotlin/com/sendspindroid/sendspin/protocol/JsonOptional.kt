@@ -57,15 +57,16 @@ sealed class JsonOptional<out T> {
 
 /**
  * Returns the present value (which may be null) when this is [JsonOptional.Present],
- * or [fallback] when this is [JsonOptional.Absent].
+ * or [fallback] when the field is absent. A null receiver is treated as [JsonOptional.Absent]
+ * so a nullable wire field (e.g. `wire.metadata?.legacyRepeat`) can resolve directly.
  *
  * Common pattern for non-nullable fields where present-null means "clear to empty":
  * ```
  * val title: String = jsonOptional.orElse(previousTitle) ?: ""
  * ```
  */
-fun <T> JsonOptional<T>.orElse(fallback: T?): T? = when (this) {
-    is JsonOptional.Absent -> fallback
+fun <T> JsonOptional<T>?.orElse(fallback: T?): T? = when (this) {
+    null, JsonOptional.Absent -> fallback
     is JsonOptional.Present -> value
 }
 

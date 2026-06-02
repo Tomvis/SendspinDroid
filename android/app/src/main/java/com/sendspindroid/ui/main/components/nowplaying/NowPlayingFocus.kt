@@ -5,7 +5,6 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -32,8 +31,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -50,7 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.sendspindroid.R
-import com.sendspindroid.ui.adaptive.TvInitialFocus
+import com.sendspindroid.ui.adaptive.TvPassiveFocusAnchor
 import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.main.AudioStreamSpec
@@ -175,12 +172,6 @@ fun NowPlayingFocus(
         metadata.title + "\n" + metadata.artist + "\n" + metadata.album
     }
 
-    // Now Playing is a passive view; no interactive elements on-screen. Park
-    // initial focus on an invisible anchor so the Activity still gets D-pad
-    // key events (e.g. BACK).
-    val focusAnchor = remember { FocusRequester() }
-    TvInitialFocus(focusAnchor)
-
     // Black backdrop on the root so any uncovered gap during a track-change
     // recomposition reads as black rather than as the Scaffold background
     // (which on a light system theme would flash white). AmbientBg's
@@ -192,12 +183,7 @@ fun NowPlayingFocus(
         // critical sits there.
         AmbientBg(artworkSource = artworkSource, accent = animatedAccent, paused = effectivePaused)
 
-        Box(
-            modifier = Modifier
-                .size(1.dp)
-                .focusRequester(focusAnchor)
-                .focusable(),
-        )
+        TvPassiveFocusAnchor()
 
         // Foreground stack rides inside the overscan-safe inset. The design's
         // spec margins (54dp top/bottom, 96dp sides) are split: 48dp comes from

@@ -11,7 +11,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,13 +26,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.ImageShader
-import androidx.compose.ui.graphics.ShaderBrush
-import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -44,11 +39,8 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.focusable
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import com.sendspindroid.model.AppConnectionState
-import com.sendspindroid.ui.adaptive.TvInitialFocus
+import com.sendspindroid.ui.adaptive.TvPassiveFocusAnchor
 import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.theme.NpFrauncesFamily
 import com.sendspindroid.ui.theme.NpInterFamily
@@ -91,8 +83,6 @@ fun NowPlayingIdleScreen(
     connectionState: AppConnectionState? = null,
     modifier: Modifier = Modifier,
 ) {
-    val focusAnchor = remember { FocusRequester() }
-    TvInitialFocus(focusAnchor)
     val status = connectionState.toIdleStatus()
 
     Box(
@@ -110,16 +100,11 @@ fun NowPlayingIdleScreen(
                 .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen },
         ) {
             IdleBlobs(accent = accent)
-            IdleVignette()
-            IdleGrain()
+            Vignette(radiusFactor = 0.8f)
+            GrainOverlay()
         }
 
-        Box(
-            modifier = Modifier
-                .size(1.dp)
-                .focusRequester(focusAnchor)
-                .focusable(),
-        )
+        TvPassiveFocusAnchor()
 
         Column(
             modifier = Modifier
@@ -250,43 +235,6 @@ private fun Blob(
                 .background(blobBrush),
         )
     }
-}
-
-@Composable
-private fun IdleVignette() {
-    // BoxWithConstraints reads the layout size so the brush radius can be
-    // computed once and applied via Modifier.background. Shield Tegra
-    // renders drawRect(brush=...) as black; Modifier.background works.
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val w = constraints.maxWidth.toFloat()
-        val h = constraints.maxHeight.toFloat()
-        val brush = remember(w, h) {
-            Brush.radialGradient(
-                colorStops = arrayOf(
-                    0.35f to Color.Transparent,
-                    1.0f to Color.Black,
-                ),
-                center = Offset(w * 0.5f, h * 0.5f),
-                radius = maxOf(w, h) * 0.8f,
-            )
-        }
-        Box(modifier = Modifier.fillMaxSize().background(brush))
-    }
-}
-
-@Composable
-private fun IdleGrain() {
-    val grain = SharedGrainBitmap
-    val brush = remember(grain) {
-        ShaderBrush(ImageShader(grain, TileMode.Repeated, TileMode.Repeated))
-    }
-    // See GrainOverlay (AmbientBg.kt) for why this uses Modifier.background
-    // rather than drawRect inside drawWithCache. Same Shield rendering caveat.
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(brush = brush, alpha = 0.012f),
-    )
 }
 
 @Composable

@@ -3,7 +3,9 @@ package com.sendspindroid.ui.adaptive
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -101,6 +103,25 @@ fun TvInitialFocus(focusRequester: FocusRequester) {
             focusRequester.requestFocus()
         }
     }
+}
+
+/**
+ * Park initial focus on an invisible 1dp anchor for a passive screen that has
+ * no interactive elements of its own, so the host Activity still receives D-pad
+ * key events (e.g. BACK). Creates the anchor, requests focus via [TvInitialFocus],
+ * and emits the focusable Box at the call site -- place it inside the screen's
+ * root container.
+ */
+@Composable
+fun TvPassiveFocusAnchor() {
+    val focusAnchor = remember { FocusRequester() }
+    TvInitialFocus(focusAnchor)
+    Box(
+        modifier = Modifier
+            .size(1.dp)
+            .focusRequester(focusAnchor)
+            .focusable(),
+    )
 }
 
 /**

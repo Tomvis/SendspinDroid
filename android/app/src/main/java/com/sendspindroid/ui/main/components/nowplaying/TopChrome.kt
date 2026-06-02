@@ -37,8 +37,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.util.lerp
 import com.sendspindroid.ui.theme.NpInterFamily
-import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.Locale
 
@@ -63,47 +63,36 @@ fun SourceBadge(
     // along, so the badge reads as "actively working" without changing color
     // or label vocabulary.
     //
-    // Driven by two Animatables and a LaunchedEffect rather than
-    // rememberInfiniteTransition: the latter captures `initialValue` once at
-    // first composition, so when isBuffering later flips false->true the
-    // pulse would continue from its current value (1.0) toward 1.18 instead
-    // of restarting from 0.85 -- the first half-cycle of every buffering
-    // start was visibly off. With Animatable we snap to the start value and
-    // launch a fresh infinite animation each time isBuffering goes true, and
-    // snap back to rest (1f) when it goes false.
-    val pulseScaleAnim = remember { Animatable(1f) }
-    val pulseAlphaAnim = remember { Animatable(1f) }
+    // Driven by a single Animatable on a 0f..1f fraction and a LaunchedEffect
+    // rather than rememberInfiniteTransition: the latter captures `initialValue`
+    // once at first composition, so when isBuffering later flips false->true the
+    // pulse would continue from its current value toward the end instead of
+    // restarting from 0 -- the first half-cycle of every buffering start was
+    // visibly off. With Animatable we snap the fraction to 0 and launch a fresh
+    // infinite animation each time isBuffering goes true.
+    //
+    // Scale and alpha share identical 1100ms LinearEasing Reverse timing, so one
+    // fraction drives both via lerp. The rest state (scale=1f, alpha=1f) is NOT
+    // on the pulse's linear line, so both outputs are gated on isBuffering and
+    // forced to 1f at rest -- the fraction value is then irrelevant.
+    val pulseAnim = remember { Animatable(0f) }
     LaunchedEffect(isBuffering) {
         if (isBuffering) {
-            pulseScaleAnim.snapTo(0.85f)
-            pulseAlphaAnim.snapTo(0.55f)
-            kotlinx.coroutines.coroutineScope {
-                launch {
-                    pulseScaleAnim.animateTo(
-                        targetValue = 1.18f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 1100, easing = LinearEasing),
-                            repeatMode = RepeatMode.Reverse,
-                        ),
-                    )
-                }
-                launch {
-                    pulseAlphaAnim.animateTo(
-                        targetValue = 1f,
-                        animationSpec = infiniteRepeatable(
-                            animation = tween(durationMillis = 1100, easing = LinearEasing),
-                            repeatMode = RepeatMode.Reverse,
-                        ),
-                    )
-                }
-            }
+            pulseAnim.snapTo(0f)
+            pulseAnim.animateTo(
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 1100, easing = LinearEasing),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+            )
         } else {
-            pulseScaleAnim.snapTo(1f)
-            pulseAlphaAnim.snapTo(1f)
+            pulseAnim.snapTo(0f)
         }
     }
-    val pulseScale = pulseScaleAnim.value
-    val pulseAlpha = pulseAlphaAnim.value
+    val frac = pulseAnim.value
+    val pulseScale = if (isBuffering) lerp(0.85f, 1.18f, frac) else 1f
+    val pulseAlpha = if (isBuffering) lerp(0.55f, 1f, frac) else 1f
     val label = buildString {
         append(
             when {

@@ -5,6 +5,7 @@ import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.JsonOptional
 import com.sendspindroid.sendspin.protocol.MoshiInstance
+import com.sendspindroid.sendspin.protocol.orElse
 import com.sendspindroid.sendspin.protocol.ServerCommandResult
 import com.sendspindroid.sendspin.protocol.ServerHelloResult
 import com.sendspindroid.sendspin.protocol.ServerStateResult
@@ -19,6 +20,7 @@ import com.sendspindroid.sendspin.protocol.wire.WireGroupUpdatePayload
 import com.sendspindroid.sendspin.protocol.wire.WireMetadata
 import com.sendspindroid.sendspin.protocol.wire.WireProgress
 import com.sendspindroid.sendspin.protocol.wire.WireProxyAuthResponse
+import com.sendspindroid.sendspin.protocol.wire.WireRoles
 import com.sendspindroid.sendspin.protocol.wire.WireServerCommandPayload
 import com.sendspindroid.sendspin.protocol.wire.WireServerHelloPayload
 import com.sendspindroid.sendspin.protocol.wire.WireServerStatePayload
@@ -69,6 +71,9 @@ object MessageParser {
     }
     private val proxyAuthResponseAdapter by lazy {
         MoshiInstance.moshi.adapter(WireProxyAuthResponse::class.java)
+    }
+    private val rolesAdapter by lazy {
+        MoshiInstance.moshi.adapter(WireRoles::class.java)
     }
 
     private fun <T : Any> decode(payload: Any?, adapter: JsonAdapter<T>): T? {
@@ -149,14 +154,8 @@ object MessageParser {
             // muted / commands to construct a fresh one from scratch).
             previousController != null &&
                 (legacyRepeat is JsonOptional.Present || legacyShuffle is JsonOptional.Present) -> {
-                val r: String? = when (val l = legacyRepeat) {
-                    is JsonOptional.Present -> l.value
-                    null, JsonOptional.Absent -> previousController.repeat
-                }
-                val s: Boolean? = when (val l = legacyShuffle) {
-                    is JsonOptional.Present -> l.value
-                    null, JsonOptional.Absent -> previousController.shuffle
-                }
+                val r: String? = legacyRepeat.orElse(previousController.repeat)
+                val s: Boolean? = legacyShuffle.orElse(previousController.shuffle)
                 previousController.copy(repeat = r, shuffle = s)
             }
             else -> null
@@ -236,6 +235,19 @@ object MessageParser {
             offset,
             wire.source ?: "unknown",
         )
+    }
+
+    /**
+     * Parses the `roles` array shared by stream/end and stream/clear payloads.
+     * Returns null when the payload is not an object, the `roles` key is absent,
+     * or `roles` is not an array -- the caller treats null as "all roles". A
+     * present array yields its string entries (non-string entries are dropped;
+     * an empty array stays an empty list).
+     */
+    fun parseRoles(payload: Any?): List<String>? {
+        val wire = decode(payload, rolesAdapter) ?: return null
+        val raw = wire.roles ?: return null
+        return raw.mapNotNull { it as? String }
     }
 
     /**
@@ -369,17 +381,11 @@ object MessageParser {
         //  - Absent:        try the legacy field; otherwise inherit from previous
         val repeatValue: String? = when (val r = repeat) {
             is JsonOptional.Present -> r.value
-            JsonOptional.Absent -> when (val l = legacyRepeat) {
-                is JsonOptional.Present -> l.value
-                null, JsonOptional.Absent -> previous?.repeat
-            }
+            JsonOptional.Absent -> legacyRepeat.orElse(previous?.repeat)
         }
         val shuffleValue: Boolean? = when (val s = shuffle) {
             is JsonOptional.Present -> s.value
-            JsonOptional.Absent -> when (val l = legacyShuffle) {
-                is JsonOptional.Present -> l.value
-                null, JsonOptional.Absent -> previous?.shuffle
-            }
+            JsonOptional.Absent -> legacyShuffle.orElse(previous?.shuffle)
         }
         return ControllerState(
             supportedCommands = cmds,

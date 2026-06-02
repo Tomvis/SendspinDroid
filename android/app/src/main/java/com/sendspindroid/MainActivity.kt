@@ -71,6 +71,7 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import com.sendspindroid.databinding.ActivityMainBinding
 import com.sendspindroid.discovery.NsdDiscoveryManager
+import com.sendspindroid.coordinator.ConnectionCoordinator
 import com.sendspindroid.coordinator.ReconnectStatus
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.playback.PlaybackService
@@ -590,23 +591,7 @@ class MainActivity : AppCompatActivity() {
                 enablePlaybackControls(true)
                 // Re-apply any cached metadata/artwork from media controller
                 mediaController?.let { controller ->
-                    val metadata = controller.mediaMetadata
-                    val restoreTitle = metadata.title?.toString() ?: ""
-                    val restoreArtist = metadata.artist?.toString() ?: ""
-                    val restoreAlbum = metadata.albumTitle?.toString() ?: ""
-                    if (restoreTitle.isNotEmpty() || restoreArtist.isNotEmpty() || restoreAlbum.isNotEmpty()) {
-                        updateMetadata(
-                            title = restoreTitle,
-                            artist = restoreArtist,
-                            album = restoreAlbum,
-                            albumArtist = metadata.albumArtist?.toString(),
-                            // Filter 0 sentinels from Media3 — see comment on the
-                            // matching call in onMediaMetadataChanged.
-                            year = metadata.releaseYear?.takeIf { it > 0 },
-                            albumTrack = metadata.trackNumber?.takeIf { it > 0 }
-                        )
-                    }
-                    updateAlbumArt(metadata)
+                    applyControllerMetadata(controller.mediaMetadata)
                     // Restore play/pause button state
                     updatePlayPauseButton(controller.isPlaying)
                 }
@@ -713,7 +698,7 @@ class MainActivity : AppCompatActivity() {
         if (modes.isEmpty()) return
         val current = display.mode
         val best = modes.maxWithOrNull(
-            compareBy<android.view.Display.Mode>(
+            compareBy<Display.Mode>(
                 { it.physicalWidth.toLong() * it.physicalHeight },
                 { -kotlin.math.abs(it.refreshRate - current.refreshRate) }
             )
@@ -2221,29 +2206,11 @@ class MainActivity : AppCompatActivity() {
                 val artist = mediaMetadata.artist?.toString() ?: ""
                 val album = mediaMetadata.albumTitle?.toString() ?: ""
                 Log.d(TAG, "Metadata from service: $title / $artist / $album")
-                // Skip blank emissions: Media3's controller can fire these
-                // between tracks and on state transitions. Overwriting the VM
-                // with empty strings would briefly flip the TV NowPlaying
-                // screen into the Idle layout. Authoritative clears run through
-                // resetPlaybackState() on disconnect.
-                if (title.isNotEmpty() || artist.isNotEmpty() || album.isNotEmpty()) {
-                    updateMetadata(
-                        title = title,
-                        artist = artist,
-                        album = album,
-                        albumArtist = mediaMetadata.albumArtist?.toString(),
-                        // Media3 returns Integer? where 0 means "no value" for
-                        // releaseYear/trackNumber. mergeTrackMetadata uses `?:`
-                        // so a non-null 0 would override the preserved value;
-                        // filter 0 out here to match the SendSpin-broadcast
-                        // path (which uses takeIf { it > 0 }).
-                        year = mediaMetadata.releaseYear?.takeIf { it > 0 },
-                        albumTrack = mediaMetadata.trackNumber?.takeIf { it > 0 }
-                    )
-                }
-
-                // Load album art from MediaMetadata
-                updateAlbumArt(mediaMetadata)
+                // Blank emissions are skipped inside applyControllerMetadata:
+                // Media3's controller fires these between tracks and on state
+                // transitions, and overwriting the VM with empty strings would
+                // briefly flip the TV NowPlaying screen into the Idle layout.
+                applyControllerMetadata(mediaMetadata)
 
                 // Announce new track for accessibility
                 if (title.isNotEmpty() && artist.isNotEmpty()) {
@@ -2311,23 +2278,7 @@ class MainActivity : AppCompatActivity() {
                 updateKeepScreenOn(isPlaying)
 
                 // Sync metadata and artwork
-                val metadata = controller.mediaMetadata
-                val syncTitle = metadata.title?.toString() ?: ""
-                val syncArtist = metadata.artist?.toString() ?: ""
-                val syncAlbum = metadata.albumTitle?.toString() ?: ""
-                if (syncTitle.isNotEmpty() || syncArtist.isNotEmpty() || syncAlbum.isNotEmpty()) {
-                    updateMetadata(
-                        title = syncTitle,
-                        artist = syncArtist,
-                        album = syncAlbum,
-                        albumArtist = metadata.albumArtist?.toString(),
-                        // Filter 0 sentinels from Media3 — see comment on the
-                        // matching call in onMediaMetadataChanged.
-                        year = metadata.releaseYear?.takeIf { it > 0 },
-                        albumTrack = metadata.trackNumber?.takeIf { it > 0 }
-                    )
-                }
-                updateAlbumArt(metadata)
+                applyControllerMetadata(controller.mediaMetadata)
             }
         }
     }
@@ -3127,23 +3078,51 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * UI representation of the next reconnect delay. Mirrors SendSpin's actual
-     * schedule (see SendSpin.kt: INITIAL_RECONNECT_DELAY_MS=500ms, doubled per
-     * attempt, capped at MAX_RECONNECT_DELAY_MS=10s for the first 5 attempts,
-     * then HIGH_POWER_RECONNECT_DELAY_MS=30s steady-state). Rounded UP to the
-     * next second so the banner never reads "0s" on the 500ms first attempt.
+     * UI representation of the next reconnect delay. Keyed to the schedule that
+     * actually governs the attempt: ConnectionCoordinator owns the reconnect
+     * loop, and its per-attempt wait is BACKOFF_DELAYS.getOrElse(attempt - 1).
+     * We read that exact value via backoffDelayMsForAttempt(attempt) so the
+     * countdown can never drift from the real schedule. Rounded UP to the next
+     * second (min 1s) so the banner never reads "0s" on the 500ms first attempt.
      *
-     * Kept in sync manually; if SendSpin's reconnect constants change, update
-     * this function to match. The previous formula (`1 shl (attempt - 1)`)
-     * over-stated every value by 2x because it ignored the 500ms initial
-     * delay.
+     * [attempt] is the 1-based attempt number broadcast in
+     * EXTRA_RECONNECT_ATTEMPT (= ReconnectStatus.Attempting.attempt). The prior
+     * formula re-derived SendSpin's self-reconnect schedule instead, which the
+     * Coordinator no longer drives -- so attempts past the 5th read wrong.
      */
     private fun computeReconnectSecondsForUi(attempt: Int): Int {
-        if (attempt > 5) return 30
-        val shift = (attempt - 1).coerceIn(0, 4)
-        val delayMs = (500L shl shift).coerceAtMost(10_000L)
+        val delayMs = ConnectionCoordinator.backoffDelayMsForAttempt(attempt)
         // Ceiling division so 500ms -> 1s, 1000ms -> 1s, 2000ms -> 2s, etc.
         return ((delayMs + 999L) / 1000L).coerceAtLeast(1L).toInt()
+    }
+
+    /**
+     * Apply a Media3 controller [MediaMetadata] to the now-playing UI: forward
+     * title/artist/album (skipping blank emissions, which Media3 fires between
+     * tracks and would briefly flip the TV screen into the Idle layout) plus the
+     * 0-sentinel-filtered year / track number through [updateMetadata], then
+     * refresh album art. Shared by the Connected-restore, onMediaMetadataChanged,
+     * and play-state-sync paths so the Media3 sentinel handling lives in one place.
+     */
+    private fun applyControllerMetadata(metadata: MediaMetadata) {
+        val title = metadata.title?.toString() ?: ""
+        val artist = metadata.artist?.toString() ?: ""
+        val album = metadata.albumTitle?.toString() ?: ""
+        if (title.isNotEmpty() || artist.isNotEmpty() || album.isNotEmpty()) {
+            updateMetadata(
+                title = title,
+                artist = artist,
+                album = album,
+                albumArtist = metadata.albumArtist?.toString(),
+                // Media3 returns Integer? where 0 means "no value" for releaseYear/
+                // trackNumber. mergeTrackMetadata uses `?:` so a non-null 0 would
+                // override the preserved value; filter 0 out here to match the
+                // SendSpin-broadcast path (which uses takeIf { it > 0 }).
+                year = metadata.releaseYear?.takeIf { it > 0 },
+                albumTrack = metadata.trackNumber?.takeIf { it > 0 },
+            )
+        }
+        updateAlbumArt(metadata)
     }
 
     private fun updateMetadata(
