@@ -9,6 +9,7 @@ import io.ktor.websocket.readBytes
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.Job
@@ -312,6 +313,11 @@ abstract class BaseWebSocketTransport(
     override fun destroy() {
         close(1000, "Transport destroyed")
         _state.store(TransportState.Closed)
+        // Cancel the transport's coroutine scope so its SupervisorJob (and any
+        // straggler child coroutines) are torn down with the instance, rather
+        // than leaking one rooted SupervisorJob per reconnect for the lifetime
+        // of the process.
+        scope.cancel()
         httpClient.close()
     }
 }

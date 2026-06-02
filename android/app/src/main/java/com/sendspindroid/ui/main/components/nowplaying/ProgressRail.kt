@@ -189,8 +189,17 @@ fun ProgressRail(
     // duration; remember slots above stay stable across this gate.
     if (durationMs <= 0L) return
 
-    val remainingMs = (durationMs - displayPositionMs).coerceAtLeast(0L)
     val progress = (displayPositionMs.toFloat() / safeDuration).coerceIn(0f, 1f)
+
+    // Time labels change only once per second; gate the String.format work on
+    // the whole-second value so it runs ~1x/sec instead of ~60x/sec. The bar
+    // fill below keeps reading displayPositionMs raw to stay smooth at frame
+    // rate. formatRailTime already floors to seconds, so the text is identical.
+    val displaySeconds = displayPositionMs / 1000L
+    val elapsedLabel = remember(displaySeconds) { formatRailTime(displaySeconds * 1000L) }
+    val remainingLabel = remember(displaySeconds, durationMs) {
+        "−" + formatRailTime((durationMs - displaySeconds * 1000L).coerceAtLeast(0L))
+    }
 
     val elapsedColor by animateColorAsState(
         targetValue = if (paused) RailFgDim else RailFg,
@@ -222,7 +231,7 @@ fun ProgressRail(
             ) {
                 StatusGlyph(paused = paused, color = elapsedColor)
                 Text(
-                    text = formatRailTime(displayPositionMs),
+                    text = elapsedLabel,
                     fontFamily = NpMonoFamily,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.W600,
@@ -231,7 +240,7 @@ fun ProgressRail(
                 )
             }
             Text(
-                text = "−" + formatRailTime(remainingMs),
+                text = remainingLabel,
                 fontFamily = NpMonoFamily,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.W500,

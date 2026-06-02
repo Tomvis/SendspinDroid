@@ -58,6 +58,16 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
+    // "Intent to play" -- the Media3 playWhenReady flag. Unlike isPlaying (which
+    // the player bridge forces false for every BUFFERING state), this stays TRUE
+    // through a mid-track sync reanchor and only flips false on a real pause/stop.
+    // It is the signal that distinguishes a reanchor (audio still playing, show
+    // the playing/buffering look) from a pause (show the paused look) -- the
+    // BUFFERING playbackState alone cannot, because both surface as BUFFERING with
+    // isPlaying=false.
+    private val _playWhenReady = MutableStateFlow(false)
+    val playWhenReady: StateFlow<Boolean> = _playWhenReady.asStateFlow()
+
     private val _playbackState = MutableStateFlow(PlaybackState.IDLE)
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
 
@@ -185,6 +195,11 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     // audio). 60 s is comfortably longer than MA's 30 s pause auto-stop, so
     // a short paused interval stays as "Paused" with the last track visible.
     private var idleTimeoutJob: Job? = null
+
+    /** Feed the raw Media3 play-intent (playWhenReady) from the player bridge. */
+    fun updatePlayWhenReady(value: Boolean) {
+        _playWhenReady.value = value
+    }
 
     fun updatePlaybackState(isPlaying: Boolean, state: PlaybackState) {
         _isPlaying.value = isPlaying
@@ -383,6 +398,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         idleTimeoutJob?.cancel()
         idleTimeoutJob = null
         _isPlaying.value = false
+        _playWhenReady.value = false
         _playbackState.value = PlaybackState.IDLE
         _metadata.value = TrackMetadata.EMPTY
         _groupName.value = ""

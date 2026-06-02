@@ -90,21 +90,25 @@ fun SourceBadge(
             pulseAnim.snapTo(0f)
         }
     }
-    val frac = pulseAnim.value
-    val pulseScale = if (isBuffering) lerp(0.85f, 1.18f, frac) else 1f
-    val pulseAlpha = if (isBuffering) lerp(0.55f, 1f, frac) else 1f
-    val label = buildString {
-        append(
-            when {
-                isBuffering -> "Buffering"
-                paused -> "Paused"
-                else -> "Now Playing"
+    // Build the label once per state change and do NOT read pulseAnim.value at
+    // composable scope -- reading it here would recompose the whole badge every
+    // frame while buffering, rebuilding the string and re-running uppercase().
+    // The per-frame fraction is read inside the dot/halo graphicsLayer lambdas
+    // below, which run in the draw phase and don't invalidate composition.
+    val label = remember(isBuffering, paused, groupLabel) {
+        buildString {
+            append(
+                when {
+                    isBuffering -> "Buffering"
+                    paused -> "Paused"
+                    else -> "Now Playing"
+                }
+            )
+            if (groupLabel.isNotBlank()) {
+                append(" · ")
+                append(groupLabel)
             }
-        )
-        if (groupLabel.isNotBlank()) {
-            append(" · ")
-            append(groupLabel)
-        }
+        }.uppercase(Locale.getDefault())
     }
 
     // Use Modifier.background for the glow halo rather than a Canvas-style
@@ -144,9 +148,11 @@ fun SourceBadge(
                 modifier = Modifier
                     .size(20.dp)
                     .graphicsLayer {
-                        scaleX = pulseScale
-                        scaleY = pulseScale
-                        alpha = pulseAlpha
+                        val frac = pulseAnim.value
+                        val s = if (isBuffering) lerp(0.85f, 1.18f, frac) else 1f
+                        scaleX = s
+                        scaleY = s
+                        alpha = if (isBuffering) lerp(0.55f, 1f, frac) else 1f
                     }
                     .background(glowBrush, CircleShape),
             )
@@ -154,14 +160,15 @@ fun SourceBadge(
                 modifier = Modifier
                     .size(8.dp)
                     .graphicsLayer {
-                        scaleX = pulseScale
-                        scaleY = pulseScale
+                        val s = if (isBuffering) lerp(0.85f, 1.18f, pulseAnim.value) else 1f
+                        scaleX = s
+                        scaleY = s
                     }
                     .background(dotColor, CircleShape),
             )
         }
         Text(
-            text = label.uppercase(Locale.getDefault()),
+            text = label,
             fontFamily = NpInterFamily,
             fontSize = 16.sp,
             fontWeight = FontWeight.W500,

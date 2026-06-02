@@ -66,14 +66,13 @@ class FakeTransport : SendSpinTransport {
 
     override fun destroy() {
         destroyed = true
-        // Mirror BaseWebSocketTransport.destroy(), which calls close() internally
-        // before tearing down the HttpClient. Tests that check `closed`/`closeCode`
-        // should observe both flags get set when destroy() is the entry point.
-        if (!closed) {
-            closed = true
-            closeCode = 1000
-            closeReason = "Transport destroyed"
-        }
+        // Mirror BaseWebSocketTransport.destroy(), which calls close(1000,
+        // "Transport destroyed") UNCONDITIONALLY (last-writer-wins) before
+        // tearing down the HttpClient -- so an earlier close(code, ...) must not
+        // suppress these values on the fake either.
+        closed = true
+        closeCode = 1000
+        closeReason = "Transport destroyed"
         _state = TransportState.Closed
     }
 

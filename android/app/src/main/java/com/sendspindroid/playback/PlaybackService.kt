@@ -932,8 +932,18 @@ class PlaybackService : MediaLibraryService() {
                             // Terminal error supersedes any reconnecting overlay. Issue #132.
                             forwardingPlayer?.clearReconnectingOverlay()
 
-                            // Broadcast error to controllers (MainActivity)
-                            broadcastConnectionState()
+                            // Broadcast error to controllers (MainActivity). Force
+                            // STATE_ERROR + the message explicitly: the derived
+                            // coordinator.sessionState can lag the synchronous
+                            // transport Failed we already hold here, so an
+                            // un-forced broadcast may re-derive STATE_CONNECTING
+                            // and the extras-fingerprint dedup would then suppress
+                            // the correction permanently (terminal failures like
+                            // AuthRejected never trigger a later re-broadcast).
+                            broadcastConnectionState(
+                                forceState = STATE_ERROR,
+                                forceErrorMessage = message,
+                            )
                         }
                     }
                     state is TransportState.Connecting && prevSendSpinState !is TransportState.Connecting -> {
@@ -1308,6 +1318,13 @@ class PlaybackService : MediaLibraryService() {
                 }
 
                 _playbackState.value = _playbackState.value.copy(playbackState = newState)
+
+                // Broadcast the state change to controllers (MainActivity). The
+                // PLAYING branch above resets the extras fingerprint to force a
+                // resume push through the dedup; mirror onGroupUpdate by actually
+                // issuing the broadcast here instead of relying on an unrelated
+                // later event to carry the forced push.
+                broadcastSessionExtras()
 
                 // Complete deferred DRAINING exit after processing state
                 completePendingExitDraining()

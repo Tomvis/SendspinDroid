@@ -89,6 +89,7 @@ fun NowPlayingScreen(
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
+    val playWhenReady by viewModel.playWhenReady.collectAsStateWithLifecycle()
     val playbackState by viewModel.playbackState.collectAsStateWithLifecycle()
     val metadata by viewModel.metadata.collectAsStateWithLifecycle()
     val groupName by viewModel.groupName.collectAsStateWithLifecycle()
@@ -136,9 +137,18 @@ fun NowPlayingScreen(
             // recover until the 60 s pause watchdog finally nulls everything.
             // Wait another 1.2 s after the artwork is confirmed gone; if it
             // hasn't come back, signal the metadata effect to flip to EMPTY.
-            if (isActivelyConnected && stickyArtworkSource == null) {
+            // Narrow the safeguard to a genuinely STOPPED track. The original
+            // guard fired for any actively-connected track that merely lacked
+            // cover art, which flipped art-less but actively PLAYING tracks
+            // (radio, podcasts, local files) to the idle clock ~1.7s in. Require
+            // the track to not be playing -- and not merely mid-reanchor, which
+            // surfaces as BUFFERING with isPlaying=false -- so only the
+            // stuck-metadata-after-stop case trips the clear.
+            if (isActivelyConnected && stickyArtworkSource == null &&
+                !isPlaying && playbackState != PlaybackState.BUFFERING) {
                 kotlinx.coroutines.delay(1200)
-                if (stickyArtworkSource == null) {
+                if (stickyArtworkSource == null &&
+                    !isPlaying && playbackState != PlaybackState.BUFFERING) {
                     artworkZombieClear = true
                 }
             }
@@ -214,18 +224,24 @@ fun NowPlayingScreen(
     }
 
     // "Audio is loading" signal -- not the same as playbackState==BUFFERING,
-    // because SendSpin's mapping marks a real pause as BUFFERING too. We
-    // need to distinguish:
+    // because SendSpin's mapping marks a real pause as BUFFERING too. We need
+    // to distinguish three cases that all surface as playbackState==BUFFERING
+    // with isPlaying=false (the player bridge forces isPlaying false for every
+    // BUFFERING state):
     //   - track start / mid-skip buffer fill  -> show the buffering look
+    //   - mid-track sync reanchor             -> show the playing look
     //   - user pressed pause                  -> show the paused look
-    // We disambiguate by position: a track that's been playing for >2.5s
-    // before its audio engine drops out is a pause; <=2.5s is the load
-    // window that follows a stream/start. This also keeps the badge calm
-    // when paused mid-song -- only the initial seconds of playback can
-    // ever trip the pulse.
+    // playWhenReady is the discriminator: it stays TRUE for a start/reanchor
+    // (audio is meant to keep playing) and flips FALSE only on a real pause/stop.
+    // Gating on playWhenReady (instead of the old positionMs < 2500L proxy) keeps
+    // the buffering/playing look for a reanchor at ANY track position and never
+    // trips it on a pause, so downstream consumers (ProgressRail
+    // playing = isPlaying || isBuffering; NowPlayingFocus
+    // effectivePaused = paused && !isBuffering; SourceBadge) read playing during
+    // a reanchor and paused on a real pause.
     val isBuffering = playbackState == PlaybackState.BUFFERING &&
         !metadata.isEmpty &&
-        positionMs < 2500L
+        playWhenReady
     val controlsEnabled = playbackState == PlaybackState.READY || playbackState == PlaybackState.BUFFERING
 
     // Get server name from connection state

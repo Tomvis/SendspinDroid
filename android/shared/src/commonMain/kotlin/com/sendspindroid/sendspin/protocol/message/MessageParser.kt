@@ -145,13 +145,18 @@ object MessageParser {
         val state = wire.state?.takeIf { it.isNotEmpty() }
         val legacyRepeat = wire.metadata?.legacyRepeat
         val legacyShuffle = wire.metadata?.legacyShuffle
-        val controllerState = when {
-            wire.controller != null ->
-                wire.controller.toControllerState(legacyRepeat, legacyShuffle, previousController)
-            // Legacy-only path: no controller object on the wire, but metadata
-            // carries legacy repeat/shuffle. Surface those as a partial update
-            // on top of the previous controller state (we don't have volume /
-            // muted / commands to construct a fresh one from scratch).
+        // Prefer a valid controller object; but if one is present yet fails
+        // validation (toControllerState returns null, e.g. out-of-range volume
+        // or missing-required-fields with no previous), still fall through to
+        // the legacy repeat/shuffle path so a legacy update riding alongside an
+        // unusable controller object is not silently dropped.
+        val fromController = wire.controller
+            ?.toControllerState(legacyRepeat, legacyShuffle, previousController)
+        val controllerState = fromController ?: when {
+            // Legacy-only path: no usable controller object, but metadata carries
+            // legacy repeat/shuffle. Surface those as a partial update on top of
+            // the previous controller state (we don't have volume / muted /
+            // commands to construct a fresh one from scratch).
             previousController != null &&
                 (legacyRepeat is JsonOptional.Present || legacyShuffle is JsonOptional.Present) -> {
                 val r: String? = legacyRepeat.orElse(previousController.repeat)
@@ -259,6 +264,7 @@ object MessageParser {
         val wire = try {
             proxyAuthResponseAdapter.fromJson(text)
         } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse proxy auth response (${e.message}): ${text.take(200)}")
             null
         }
         return (wire?.type to wire?.message)
@@ -317,7 +323,8 @@ object MessageParser {
             }
             JsonOptional.Absent -> {
                 if (legacyPositionMs is JsonOptional.Present ||
-                    legacyDurationMs is JsonOptional.Present
+                    legacyDurationMs is JsonOptional.Present ||
+                    legacyPlaybackSpeed is JsonOptional.Present
                 ) {
                     TrackProgress(
                         trackProgress = (legacyPositionMs as? JsonOptional.Present)?.value

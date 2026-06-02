@@ -70,5 +70,12 @@ kotlin {
 afterEvaluate {
     dependencies {
         add("kspAndroidMainProcessorClasspath", "com.squareup.moshi:moshi-kotlin-codegen:1.15.1")
+        // The jvm() target (reused by :conformance-client) needs the same Moshi
+        // codegen, otherwise the conformance harness validates reflective
+        // (KotlinJsonAdapterFactory) adapters instead of the production
+        // KSP-generated ones. The processor must be added to the RESOLVABLE
+        // processor classpath kspKotlinJvmProcessorClasspath; the friendly
+        // declarable bucket kspJvm does not feed it (no extendsFrom wiring).
+        add("kspKotlinJvmProcessorClasspath", "com.squareup.moshi:moshi-kotlin-codegen:1.15.1")
     }
 }

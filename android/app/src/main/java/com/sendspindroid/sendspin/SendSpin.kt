@@ -273,7 +273,10 @@ class SendSpin(
     private val userInitiatedDisconnect = AtomicBoolean(false)
     private val reconnectAttempts = AtomicInteger(0)
     private val reconnecting = AtomicBoolean(false)
-    private var reconnectJob: Job? = null  // Pending reconnect coroutine - cancelled on disconnect
+    // @Volatile to match the sibling connection fields: reconnectJob is snapshot
+    // on the network-callback thread (onNetworkAvailable) and cancelled/assigned
+    // on timerScope, so it needs the same cross-thread read/write visibility.
+    @Volatile private var reconnectJob: Job? = null  // Pending reconnect coroutine - cancelled on disconnect
 
     // Network awareness for smart reconnection
     // When network is unavailable, reconnect attempts are paused (not wasted)
@@ -1371,16 +1374,22 @@ class SendSpin(
                 .joinToString(" | ")
                 .lowercase()
 
-            if (combinedMessage.contains("401") ||
-                combinedMessage.contains("403") ||
-                combinedMessage.contains("unauthorized") ||
-                combinedMessage.contains("forbidden")) {
-                return FailureReason.AuthRejected
-            }
+            // Network/handshake failures are classified first so a connection
+            // refused / DNS / SSL error is never misread as auth just because a
+            // host:port or message happens to contain the digits 401/403.
             if (chain.any { it is javax.net.ssl.SSLException } ||
                 chain.any { it is java.net.UnknownHostException } ||
                 combinedMessage.contains("refused")) {
                 return FailureReason.HandshakeFailed
+            }
+            // Auth rejection: the OkHttp upgrade failure carries the HTTP reason
+            // phrase ("Expected HTTP 101 response but was '401 Unauthorized'").
+            // Match the reason words, or a STANDALONE 401/403 status token -- the
+            // word boundary keeps ":8403"-style host/port numbers from matching.
+            if (combinedMessage.contains("unauthorized") ||
+                combinedMessage.contains("forbidden") ||
+                Regex("""\b(401|403)\b""").containsMatchIn(combinedMessage)) {
+                return FailureReason.AuthRejected
             }
         }
         return FailureReason.TransientNetwork

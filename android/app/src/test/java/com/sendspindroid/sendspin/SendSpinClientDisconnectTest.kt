@@ -133,14 +133,16 @@ class SendSpinDisconnectTest {
                 capturedListener = listener
             }
 
-            override fun close(code: Int, reason: String) {
-                // Simulate the race: onClosed fires synchronously during close()
-                // After the fix, setListener(null) is called before close(),
-                // so capturedListener should be null here.
-                capturedListener?.onClosed(code, reason)
-            }
+            override fun close(code: Int, reason: String) {}
 
-            override fun destroy() {}
+            override fun destroy() {
+                // Simulate the H-02 race against the CURRENT teardown path:
+                // disconnect() now calls destroy() (not close()), so fire onClosed
+                // synchronously here. disconnect() calls setListener(null) before
+                // destroy(), so capturedListener is null and onClosed must not
+                // write a second Idle -- StateFlow dedup keeps it Idle exactly once.
+                capturedListener?.onClosed(1000, "destroyed")
+            }
         }
 
         // Register a listener (as the real code does during connect)

@@ -685,11 +685,17 @@ class MainActivity : AppCompatActivity() {
      * instead of being upscaled by the TV's hardware scaler. No-op if a
      * larger mode isn't available or the platform refuses the switch.
      *
-     * Selection rule: maximum pixel count wins; refresh rate proximity to the
-     * current mode is only a tiebreaker. The previous implementation filtered
-     * to "same refresh rate first" which silently skipped 4K modes only
-     * offered at 30/24 Hz on TVs that boot at 60 Hz -- the upgrade promised
-     * by the comment never fired on those panels.
+     * Selection rule: candidates are first floored to refreshRate >=
+     * current.refreshRate (minus a 1 Hz epsilon for reported-rate jitter);
+     * among those, maximum pixel count wins, with refresh-rate proximity to the
+     * current mode as a tiebreaker. The floor matters because some 4K panels
+     * only offer 2160p at 30/24 Hz while booting at 1080p@60: promoting
+     * resolution there would halve the refresh rate, dropping the 60fps
+     * ProgressRail interpolation to 30 Hz and risking an HDMI re-sync audio
+     * blank. We keep 1080p@60 in that case and only upgrade resolution when a
+     * same-or-higher-refresh larger mode exists. The current mode always passes
+     * its own floor, so the candidate set is never empty and we never select a
+     * mode worse than current.
      */
     private fun requestLargestDisplayMode() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
@@ -697,12 +703,19 @@ class MainActivity : AppCompatActivity() {
         val modes = display.supportedModes
         if (modes.isEmpty()) return
         val current = display.mode
-        val best = modes.maxWithOrNull(
-            compareBy<Display.Mode>(
-                { it.physicalWidth.toLong() * it.physicalHeight },
-                { -kotlin.math.abs(it.refreshRate - current.refreshRate) }
-            )
-        ) ?: return
+        // Refresh-rate floor: never trade refresh rate for resolution. The 1 Hz
+        // epsilon absorbs reported-rate jitter (e.g. 59.94 vs 60). The current
+        // mode is always a member of supportedModes and trivially clears its own
+        // floor, so this filtered set is guaranteed non-empty.
+        val minRefresh = current.refreshRate - 1f
+        val best = modes
+            .filter { it.refreshRate >= minRefresh }
+            .maxWithOrNull(
+                compareBy<Display.Mode>(
+                    { it.physicalWidth.toLong() * it.physicalHeight },
+                    { -kotlin.math.abs(it.refreshRate - current.refreshRate) }
+                )
+            ) ?: return
         val bestPixels = best.physicalWidth.toLong() * best.physicalHeight
         val currentPixels = current.physicalWidth.toLong() * current.physicalHeight
         if (bestPixels <= currentPixels) {
@@ -2125,6 +2138,16 @@ class MainActivity : AppCompatActivity() {
                 // Update play/pause button text and content description based on current state
                 updatePlayPauseButton(isPlaying)
                 updateKeepScreenOn(isPlaying)
+            }
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            runOnUiThread {
+                // Feed the VM the raw play-intent so the now-playing UI can tell a
+                // mid-track sync reanchor (playWhenReady stays true, surfaces as
+                // BUFFERING + isPlaying=false) apart from a real pause (playWhenReady
+                // flips false). See NowPlayingScreen.isBuffering.
+                viewModel.updatePlayWhenReady(playWhenReady)
             }
         }
 

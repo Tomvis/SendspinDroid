@@ -1538,7 +1538,13 @@ class SyncAudioPlayer(
             } else {
                 0L
             }
-            expectedNextTimestampUs = workingServerTimeMicros + estimatedDurationUs
+            // Base the prediction on the ORIGINAL (untrimmed) serverTimeMicros,
+            // not workingServerTimeMicros: an overlap-trim above may have bumped
+            // workingServerTimeMicros forward to expectedNext, and the cadence
+            // delta was measured against the original server timeline. Using the
+            // trimmed value double-counts the overlap and spuriously trims the
+            // next real chunk.
+            expectedNextTimestampUs = serverTimeMicros + estimatedDurationUs
             lastChunkServerTime = serverTimeMicros
             return
         }

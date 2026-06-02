@@ -263,8 +263,9 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(100_000L, 2_000_000L)
         syncErrorFilter.update(100_000L, 3_000_000L)
 
-        // nowUs is well past playingStateEnteredAtUs (1L) so grace period is over.
-        method.invoke(player, System.nanoTime() / 1000)
+        // nowUs (fixed, deterministic) is well past playingStateEnteredAtUs (1L)
+        // so the startup grace period is over regardless of the platform clock.
+        method.invoke(player, 1_000_000L)
 
         val dropEvery: Int = getField("dropEveryNFrames")
         val insertEvery: Int = getField("insertEveryNFrames")
@@ -296,8 +297,9 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(-100_000L, 2_000_000L)
         syncErrorFilter.update(-100_000L, 3_000_000L)
 
-        // nowUs is well past playingStateEnteredAtUs (1L) so grace period is over.
-        method.invoke(player, System.nanoTime() / 1000)
+        // nowUs (fixed, deterministic) is well past playingStateEnteredAtUs (1L)
+        // so the startup grace period is over regardless of the platform clock.
+        method.invoke(player, 1_000_000L)
 
         val dropEvery: Int = getField("dropEveryNFrames")
         val insertEvery: Int = getField("insertEveryNFrames")
@@ -384,8 +386,10 @@ class SyncAudioPlayerTest {
         setField("startTimeCalibrated", true)
         setField("playingStateEnteredAtUs", 1L)
 
-        // Set reconnectedAtUs to 3 seconds ago (stabilization is 2 seconds)
-        val nowUs = System.nanoTime() / 1000
+        // Set reconnectedAtUs to 3 seconds ago (stabilization is 2 seconds).
+        // Use a fixed clock so the startup-grace check (nowUs - 1L) is
+        // deterministically past the grace window regardless of System.nanoTime().
+        val nowUs = 5_000_000L
         setField("reconnectedAtUs", nowUs - 3_000_000L)
 
         val syncErrorFilter: SyncErrorFilter = getField("syncErrorFilter")

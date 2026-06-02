@@ -66,6 +66,14 @@ class NsdDiscoveryManager(
     // @Volatile, the binder thread can see a stale null and skip the release
     // (leaking the lock) or a stale non-null after release and double-release.
     @Volatile private var multicastLock: WifiManager.MulticastLock? = null
+
+    // Serializes the multicast-lock check-then-act. @Volatile alone gives the
+    // field reference visibility but not atomicity: acquire/release/refresh run
+    // on both Main (start/stop/link-change) and the NSD binder thread
+    // (onDiscoveryStopped), and a concurrent release/release would underflow the
+    // reference-counted lock (RuntimeException) while a concurrent acquire/acquire
+    // would leak one. Guard both lifecycle methods on this monitor.
+    private val multicastLockGuard = Any()
     // discoveryListener is only read on the main thread (start/stop/cleanup);
     // the NSD framework holds its own reference for callback dispatch, so this
     // field never crosses threads and does not need @Volatile.
@@ -399,24 +407,28 @@ class NsdDiscoveryManager(
      * mDNS requires receiving multicast packets on 224.0.0.251.
      */
     private fun acquireMulticastLock() {
-        if (multicastLock == null) {
-            val wifiManager = context.applicationContext
-                .getSystemService(Context.WIFI_SERVICE) as WifiManager
-            multicastLock = wifiManager.createMulticastLock("SendSpinDroid_NSD").apply {
-                setReferenceCounted(true)
-                acquire()
+        synchronized(multicastLockGuard) {
+            if (multicastLock == null) {
+                val wifiManager = context.applicationContext
+                    .getSystemService(Context.WIFI_SERVICE) as WifiManager
+                multicastLock = wifiManager.createMulticastLock("SendSpinDroid_NSD").apply {
+                    setReferenceCounted(true)
+                    acquire()
+                }
+                Log.d(TAG, "Multicast lock acquired")
             }
-            Log.d(TAG, "Multicast lock acquired")
         }
     }
 
     private fun releaseMulticastLock() {
-        multicastLock?.let {
-            if (it.isHeld) {
-                it.release()
-                Log.d(TAG, "Multicast lock released")
+        synchronized(multicastLockGuard) {
+            multicastLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    Log.d(TAG, "Multicast lock released")
+                }
+                multicastLock = null
             }
-            multicastLock = null
         }
     }
 

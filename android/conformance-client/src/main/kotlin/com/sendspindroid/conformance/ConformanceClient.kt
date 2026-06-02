@@ -58,7 +58,10 @@ internal class ConformanceClient(private val args: CliArgs) {
     private val streamEndCount = AtomicInteger(0)
     private val streamClearCount = AtomicInteger(0)
     private val clockMeasurements = AtomicInteger(0)
-    private val errors = mutableListOf<String>()
+    // Thread-safe: appended from the OkHttp reader-thread callbacks (onFailure/
+    // onClosed) and snapshotted via toList() on the runBlocking thread at
+    // shutdown, so a plain ArrayList would risk a ConcurrentModificationException.
+    private val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
 
     // Lazily wired once the transport is connected.
     private var transport: SendSpinTransport? = null
@@ -187,7 +190,7 @@ internal class ConformanceClient(private val args: CliArgs) {
                 timeSyncManager?.onServerTime(measurement)
             }
             SendSpinProtocol.MessageType.SERVER_STATE -> {
-                val result = MessageParser.parseServerState(payload, previousMetadata)
+                val result = MessageParser.parseServerState(payload, previousMetadata, previousController)
                 val metadata = result.metadata
                 if (metadata != null) {
                     previousMetadata = metadata
@@ -198,6 +201,7 @@ internal class ConformanceClient(private val args: CliArgs) {
                 if (result.state != null) lastPlaybackStateRef.set(result.state)
                 val controller = result.controllerState
                 if (controller != null) {
+                    previousController = controller
                     controllerUpdateCount.incrementAndGet()
                     lastControllerVolumeRef.set(controller.volume)
                     lastControllerRepeatRef.set(controller.repeat)
@@ -235,6 +239,7 @@ internal class ConformanceClient(private val args: CliArgs) {
     }
 
     @Volatile private var previousMetadata: com.sendspindroid.sendspin.protocol.TrackMetadata? = null
+    @Volatile private var previousController: com.sendspindroid.sendspin.protocol.ControllerState? = null
 
     private fun handleBinaryMessage(bytes: ByteArray) {
         val msg = BinaryMessageParser.parse(bytes) ?: return
