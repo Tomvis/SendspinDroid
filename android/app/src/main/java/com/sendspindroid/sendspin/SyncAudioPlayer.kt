@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import com.sendspindroid.logging.AppLog
+import com.sendspindroid.logging.throwableSummary
 import com.sendspindroid.sendspin.audio.AudioSink
 import com.sendspindroid.sendspin.audio.AudioTrackSink
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
@@ -186,6 +187,14 @@ private fun defaultSinkFactory(
         .setTransferMode(AudioTrack.MODE_STREAM)
         .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
         .build()
+    // build() does not always throw on a quirky HAL (e.g. HDMI-audio route mid-
+    // renegotiation): it can hand back an uninitialized, silent track. Reject it
+    // here so the caller's existing try/catch nulls the sink and retries, rather
+    // than calling play()/write() on a dead track.
+    if (track.state != AudioTrack.STATE_INITIALIZED) {
+        track.release()
+        throw IllegalStateException("AudioTrack init failed: state=${track.state}")
+    }
     return AudioTrackSink(track, bytesPerFrame)
 }
 
@@ -285,6 +294,13 @@ class SyncAudioPlayer(
 
         // Buffer configuration
         private const val BUFFER_SIZE_MULTIPLIER = 4  // Multiplier for minimum buffer size
+
+        // AudioTrack failure recovery. After this many consecutive failing writes
+        // (negative AudioTrack.write() codes such as ERROR_DEAD_OBJECT, returned when
+        // the HDMI/AVR audio route renegotiates mid-stream), release and recreate the
+        // sink instead of spinning forever on a dead track. Capped to avoid storms.
+        private const val SINK_FAILURE_RECOVERY_THRESHOLD = 50  // ~0.5s of failing silence writes
+        private const val MAX_SINK_RECOVERIES = 10
 
         // Sync error Kalman filter parameters
         // Expected measurement noise in microseconds (5ms jitter)
@@ -431,6 +447,15 @@ class SyncAudioPlayer(
     // clicks/pops and incorrect frame accounting.
     private val isFlushPending = AtomicBoolean(false)
     @Volatile private var pausedAtUs: Long = 0L  // Timestamp when pause() was called, for long-pause detection
+
+    // AudioTrack write-failure recovery state. consecutiveWriteFailures and
+    // sinkRecoveryCount are touched only on the playback thread (writeToSink and
+    // recoverFromSinkFailure, the latter invoked at the loop top), so they need no
+    // volatility. audioBufferSize is written once in initialize() (caller thread)
+    // and read by recovery (playback thread), so it stays @Volatile.
+    private var consecutiveWriteFailures = 0
+    private var sinkRecoveryCount = 0
+    @Volatile private var audioBufferSize = 0
 
     // Playback state machine (from Python reference)
     @Volatile private var playbackState = PlaybackState.INITIALIZING
@@ -714,6 +739,7 @@ class SyncAudioPlayer(
         val minBufferSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig, encoding)
         // Use larger buffer for scheduling headroom
         val bufferSize = maxOf(minBufferSize * BUFFER_SIZE_MULTIPLIER, sampleRate * bytesPerFrame) // ~1 second
+        audioBufferSize = bufferSize  // captured so recoverFromSinkFailure() can rebuild the same-size sink
 
         try {
             audioSink = sinkFactory(sampleRate, channels, bitDepth, bufferSize)
@@ -816,6 +842,10 @@ class SyncAudioPlayer(
             // THREAD_PRIORITY_URGENT_AUDIO so the write loop keeps its audio
             // deadline even when the app is backgrounded.
             scope = CoroutineScope(SupervisorJob() + audioDispatcher)
+
+            // Fresh sink-failure recovery budget per playback session.
+            consecutiveWriteFailures = 0
+            sinkRecoveryCount = 0
 
             isPlaying.set(true)
             isPaused.set(false)
@@ -1940,7 +1970,7 @@ class SyncAudioPlayer(
         // Write pre-allocated silence (10ms = 480 frames at 48kHz)
         val silenceBytes = silenceBuffer.size
         val silenceWriteTimeNs = nowNs()
-        val written = track.write(silenceBuffer, 0, silenceBytes)
+        val written = writeToSink(track, silenceBuffer, 0, silenceBytes)
         if (written <= 0) return
 
         // CRITICAL: Track silence frames so sync error calculation is accurate
@@ -1996,10 +2026,139 @@ class SyncAudioPlayer(
 
         // Write pre-allocated silence (10ms) to top up the buffer
         val keepAliveWriteTimeNs = nowNs()
-        val written = track.write(silenceBuffer, 0, silenceBuffer.size)
+        val written = writeToSink(track, silenceBuffer, 0, silenceBuffer.size)
         if (written > 0) {
             totalFramesWritten.addAndGet((written / bytesPerFrame).toLong())
             latencyEstimator.recordWrite(totalFramesWritten.get(), keepAliveWriteTimeNs)
+        }
+    }
+
+    /**
+     * Reset all playback timing/sync/DAC state to a fresh-start baseline.
+     *
+     * Must be called under stateLock. The caller owns AudioTrack handling and the
+     * surrounding state transitions; this only clears the software-side timing
+     * state. Shared by [triggerReanchor] (same track) and [recoverFromSinkFailure]
+     * (new track).
+     */
+    private fun resetPlaybackTimingState() {
+        // Clear queued audio - its server timestamps predate the reset.
+        chunkQueue.clear()
+        totalQueuedSamples.set(0)
+
+        // Reset start gating state
+        scheduledStartLoopTimeUs = null
+        firstServerTimestampUs = null
+
+        // Reset sync tracking (simplified)
+        lastChunkServerTime = 0L
+        insertEveryNFrames = 0
+        dropEveryNFrames = 0
+        crossfadeState = CrossfadeState.IDLE
+        crossfadeProgress = 0
+
+        // Reset sync error state (decoupled architecture)
+        syncUpdateCounter = 0
+        totalFramesWritten.set(0)
+        serverTimelineCursor = 0L
+        serverTimelineCursorRemainder = 0L
+        playbackStartTimeUs = 0L
+        startTimeCalibrated = false
+        baselineFramePosition = 0L       // Reset server-time baseline
+        baselineServerTimeUs = 0L
+        lastBaselineRefreshUs = 0L
+        samplesReadSinceStart = 0L
+        syncErrorUs = 0L
+        syncErrorFilter.reset()
+        clearDacCalibrations()  // Clear DAC calibration history
+        playingStateEnteredAtUs = 0L  // Reset grace period
+
+        // Reset DAC timestamp stability tracking
+        consecutiveValidTimestamps = 0
+        dacTimestampsStable = false
+        lastValidFramePosition = 0L  // Reset frame position wrap detection
+    }
+
+    /**
+     * Write to the sink, converting any thrown exception into a negative result so
+     * a transiently bad AudioTrack (HAL fault) cannot kill the playback loop.
+     *
+     * Tracks consecutive write failures (negative return codes such as
+     * ERROR_DEAD_OBJECT) so the loop can decide to recreate the sink. The recreate
+     * itself runs at the loop top via [recoverFromSinkFailure] -- a safe point with
+     * no captured track reference -- never from inside a write.
+     *
+     * Playback-thread only.
+     */
+    private fun writeToSink(sink: AudioSink, buffer: ByteArray, offset: Int, size: Int): Int {
+        val written = try {
+            sink.write(buffer, offset, size)
+        } catch (e: Exception) {
+            AppLog.Audio.e("AudioTrack write threw: " + throwableSummary(e))
+            AudioTrack.ERROR_DEAD_OBJECT
+        }
+        if (written > 0) {
+            consecutiveWriteFailures = 0
+        } else if (written < 0) {
+            consecutiveWriteFailures++
+        }
+        return written
+    }
+
+    /**
+     * Release and recreate the AudioTrack after repeated write failures.
+     *
+     * Adapted from sendspinlite's dead-track release+recreate: on Shield the
+     * HDMI/AVR audio HAL can fault mid-stream (format/surround renegotiation) and
+     * return ERROR_DEAD_OBJECT, which the old code only logged while the loop spun
+     * forever on a dead track. Invoked from the playback loop top under tryLock so
+     * the audio thread never blocks; on lock contention it retries next iteration.
+     * Recovery count is capped to avoid recreate storms.
+     */
+    private fun recoverFromSinkFailure() {
+        if (isReleased.get()) return
+        if (!stateLock.tryLock()) return
+        try {
+            if (isReleased.get() || !isPlaying.get()) return
+            if (sinkRecoveryCount >= MAX_SINK_RECOVERIES) {
+                AppLog.Audio.e("AudioTrack recovery cap reached ($MAX_SINK_RECOVERIES); leaving sink as-is")
+                consecutiveWriteFailures = 0  // stop re-triggering; per-write logs still report failures
+                return
+            }
+            sinkRecoveryCount++
+            AppLog.Audio.e(
+                "Recreating AudioTrack after $consecutiveWriteFailures consecutive write failures " +
+                    "(recovery $sinkRecoveryCount/$MAX_SINK_RECOVERIES)"
+            )
+
+            val old = audioSink
+            audioSink = null
+            if (old != null) {
+                try { old.stop() } catch (_: Exception) {}
+                try { old.release() } catch (_: Exception) {}
+            }
+
+            val rebuilt = try {
+                sinkFactory(sampleRate, channels, bitDepth, audioBufferSize)
+            } catch (e: Exception) {
+                AppLog.Audio.e("AudioTrack recreate failed: " + throwableSummary(e))
+                return  // audioSink stays null; loop early-returns on null sink until the next attempt
+            }
+
+            try {
+                rebuilt.play()
+            } catch (e: Exception) {
+                AppLog.Audio.e("AudioTrack recreate play() failed: " + throwableSummary(e))
+                try { rebuilt.release() } catch (_: Exception) {}
+                return
+            }
+
+            audioSink = rebuilt
+            resetPlaybackTimingState()
+            setPlaybackState(PlaybackState.INITIALIZING)
+            consecutiveWriteFailures = 0
+        } finally {
+            stateLock.unlock()
         }
     }
 
@@ -2033,11 +2192,8 @@ class SyncAudioPlayer(
             lastReanchorTimeUs = nowMicros
             setPlaybackState(PlaybackState.REANCHORING)
 
-            // Clear audio state but keep AudioTrack playing
-            chunkQueue.clear()
-            totalQueuedSamples.set(0)
-
-            // Safely flush the AudioTrack
+            // Flush the AudioTrack (keep the same device -- a reanchor recovers
+            // timing, not the sink), then reset all timing/sync/DAC state.
             val track = audioSink
             if (track != null) {
                 try {
@@ -2049,37 +2205,7 @@ class SyncAudioPlayer(
                 }
             }
 
-            // Reset start gating state
-            scheduledStartLoopTimeUs = null
-            firstServerTimestampUs = null
-
-            // Reset sync tracking (simplified)
-            lastChunkServerTime = 0L
-            insertEveryNFrames = 0
-            dropEveryNFrames = 0
-            crossfadeState = CrossfadeState.IDLE
-            crossfadeProgress = 0
-
-            // Reset sync error state (decoupled architecture)
-            syncUpdateCounter = 0
-            totalFramesWritten.set(0)
-            serverTimelineCursor = 0L
-            serverTimelineCursorRemainder = 0L
-            playbackStartTimeUs = 0L
-            startTimeCalibrated = false
-            baselineFramePosition = 0L       // Reset server-time baseline
-            baselineServerTimeUs = 0L
-            lastBaselineRefreshUs = 0L
-            samplesReadSinceStart = 0L
-            syncErrorUs = 0L
-            syncErrorFilter.reset()
-            clearDacCalibrations()  // Clear DAC calibration history
-            playingStateEnteredAtUs = 0L  // Reset grace period
-
-            // Reset DAC timestamp stability tracking
-            consecutiveValidTimestamps = 0
-            dacTimestampsStable = false
-            lastValidFramePosition = 0L  // Reset frame position wrap detection
+            resetPlaybackTimingState()
 
             // Transition to INITIALIZING to wait for new chunks
             setPlaybackState(PlaybackState.INITIALIZING)
@@ -2136,6 +2262,15 @@ class SyncAudioPlayer(
                             AppLog.Audio.w("Failed to flush AudioTrack (deferred)", e)
                         }
                     }
+                }
+
+                // Recreate the AudioTrack if writes have been failing (dead HAL).
+                // Done at the loop top -- a safe point with no captured track
+                // reference -- never from inside a write.
+                if (consecutiveWriteFailures >= SINK_FAILURE_RECOVERY_THRESHOLD) {
+                    recoverFromSinkFailure()
+                    delay(STATE_POLL_DELAY_MS)
+                    continue
                 }
 
                 // State machine for synchronized playback
@@ -2537,7 +2672,7 @@ class SyncAudioPlayer(
             writeWithCorrection(track, chunk.pcmData)
         } else {
             // Fast path: write entire chunk at once
-            val result = track.write(chunk.pcmData, 0, chunk.pcmData.size)
+            val result = writeToSink(track, chunk.pcmData, 0, chunk.pcmData.size)
             // Store last two frames for potential future interpolation
             if (chunk.pcmData.size >= bytesPerFrame) {
                 // Update secondLastOutputFrame from the previous lastOutputFrame
@@ -2676,7 +2811,7 @@ class SyncAudioPlayer(
                 if (alpha >= 1.0) {
                     // Fade complete - write the target frame
                     crossfadeState = CrossfadeState.IDLE
-                    return track.write(crossfadeTargetFrame, 0, bytesPerFrame)
+                    return writeToSink(track, crossfadeTargetFrame, 0, bytesPerFrame)
                 }
                 // Blend: normalFrame*(1-alpha) + targetFrame*alpha
                 blendFrames(
@@ -2685,7 +2820,7 @@ class SyncAudioPlayer(
                     1.0 - alpha, alpha,
                     crossfadeScratchBuf, 0
                 )
-                return track.write(crossfadeScratchBuf, 0, bytesPerFrame)
+                return writeToSink(track, crossfadeScratchBuf, 0, bytesPerFrame)
             }
             CrossfadeState.FADING_OUT -> {
                 crossfadeProgress++
@@ -2693,7 +2828,7 @@ class SyncAudioPlayer(
                 if (alpha <= 0.0) {
                     // Fade complete - write normal frame
                     crossfadeState = CrossfadeState.IDLE
-                    return track.write(normalFrame, normalOff, bytesPerFrame)
+                    return writeToSink(track, normalFrame, normalOff, bytesPerFrame)
                 }
                 // Blend: targetFrame*alpha + normalFrame*(1-alpha)
                 blendFrames(
@@ -2702,10 +2837,10 @@ class SyncAudioPlayer(
                     alpha, 1.0 - alpha,
                     crossfadeScratchBuf, 0
                 )
-                return track.write(crossfadeScratchBuf, 0, bytesPerFrame)
+                return writeToSink(track, crossfadeScratchBuf, 0, bytesPerFrame)
             }
             CrossfadeState.IDLE -> {
-                return track.write(normalFrame, normalOff, bytesPerFrame)
+                return writeToSink(track, normalFrame, normalOff, bytesPerFrame)
             }
         }
     }
@@ -2865,13 +3000,13 @@ class SyncAudioPlayer(
                     framesUntilNextInsert = insertEveryNFrames
                     framesInserted++
                     // Write a duplicate of the last output frame
-                    val insertWritten = track.write(lastOutputFrame, 0, bytesPerFrame)
+                    val insertWritten = writeToSink(track, lastOutputFrame, 0, bytesPerFrame)
                     if (insertWritten > 0) totalWritten += insertWritten
                 }
             }
 
             // --- Normal frame output ---
-            val written = track.write(pcmData, inputOffset, bytesPerFrame)
+            val written = writeToSink(track, pcmData, inputOffset, bytesPerFrame)
             if (written > 0) {
                 totalWritten += written
                 System.arraycopy(lastOutputFrame, 0, secondLastOutputFrame, 0, bytesPerFrame)

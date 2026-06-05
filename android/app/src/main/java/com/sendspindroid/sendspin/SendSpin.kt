@@ -5,6 +5,7 @@ import android.os.Build
 import android.util.Log
 import com.sendspindroid.UserSettings
 import com.sendspindroid.logging.AppLog
+import com.sendspindroid.logging.throwableSummary
 import com.sendspindroid.remote.WebRTCTransport
 import com.sendspindroid.sendspin.transport.ProxyWebSocketTransport
 import com.sendspindroid.sendspin.protocol.GroupInfo
@@ -1577,7 +1578,10 @@ class SendSpin(
         }
 
         override fun onFailure(error: Throwable, isRecoverable: Boolean) {
-            Log.e(TAG, "Transport failure", error)
+            // Reconnect hot path: log a bounded summary, not the full Throwable, to
+            // avoid getStackTraceString() heap spikes under memory pressure. The
+            // error class+message are preserved below via recordDisconnectTelemetry.
+            Log.e(TAG, "Transport failure: " + throwableSummary(error))
 
             // Record telemetry for the stats screen + emit the structured [disconnect]
             // log line. onFailure has no WebSocket close code -- use `null` code and

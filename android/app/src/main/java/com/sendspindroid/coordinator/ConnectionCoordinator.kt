@@ -8,6 +8,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.util.Log
+import com.sendspindroid.logging.throwableSummary
 import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.network.ConnectionSelector
@@ -377,7 +378,9 @@ class ConnectionCoordinator(
                     // that the attempt threw rather than just returning false.
                     // A silent swallow here masked NPEs / RuntimeExceptions
                     // inside the connectAttempt closure during reconnect cycles.
-                    Log.w(TAG, "connectAttempt(${server.id}, $method) threw; trying next method", e)
+                    // Reconnect retry loop: bounded summary, not the full Throwable,
+                    // to avoid getStackTraceString() allocation on every failed method.
+                    Log.w(TAG, "connectAttempt(${server.id}, $method) threw; trying next method: " + throwableSummary(e))
                 }
             }
 
