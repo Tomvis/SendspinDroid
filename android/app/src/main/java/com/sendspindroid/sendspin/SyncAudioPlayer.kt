@@ -295,12 +295,25 @@ class SyncAudioPlayer(
         // Buffer configuration
         private const val BUFFER_SIZE_MULTIPLIER = 4  // Multiplier for minimum buffer size
 
-        // AudioTrack failure recovery. After this many consecutive failing writes
-        // (negative AudioTrack.write() codes such as ERROR_DEAD_OBJECT, returned when
-        // the HDMI/AVR audio route renegotiates mid-stream), release and recreate the
-        // sink instead of spinning forever on a dead track. Capped to avoid storms.
-        private const val SINK_FAILURE_RECOVERY_THRESHOLD = 50  // ~0.5s of failing silence writes
+        // AudioTrack failure recovery. After this many consecutive failing
+        // writeToSink() CALLS (negative AudioTrack.write() codes such as
+        // ERROR_DEAD_OBJECT, returned when the HDMI/AVR audio route renegotiates
+        // mid-stream), release and recreate the sink instead of spinning forever on
+        // a dead track. This is a count of failed write CALLS, not a duration: the
+        // silence/keepalive path writes once per ~10ms loop, but the per-frame
+        // correction path can issue hundreds of writes per chunk, so the wall-clock
+        // time to reach the threshold varies with the active write path.
+        private const val SINK_FAILURE_RECOVERY_THRESHOLD = 50
+        // Recreate attempts are spaced by SINK_RECOVERY_BACKOFF_US (a renegotiating
+        // HAL needs ~1-3s to settle, and the spacing stops a failing rebuild from
+        // re-firing every loop tick). At most MAX_SINK_RECOVERIES attempts are
+        // allowed within a rolling SINK_RECOVERY_WINDOW_US; recoveries older than the
+        // window no longer count, so well-spaced faults over a long session never
+        // exhaust the budget, while a tight recreate storm still gives up and
+        // escalates via onBufferExhausted().
         private const val MAX_SINK_RECOVERIES = 10
+        private const val SINK_RECOVERY_BACKOFF_US = 1_000_000L   // 1s between recreate attempts
+        private const val SINK_RECOVERY_WINDOW_US = 60_000_000L   // 60s rolling budget window
 
         // Sync error Kalman filter parameters
         // Expected measurement noise in microseconds (5ms jitter)
@@ -448,13 +461,18 @@ class SyncAudioPlayer(
     private val isFlushPending = AtomicBoolean(false)
     @Volatile private var pausedAtUs: Long = 0L  // Timestamp when pause() was called, for long-pause detection
 
-    // AudioTrack write-failure recovery state. consecutiveWriteFailures and
-    // sinkRecoveryCount are touched only on the playback thread (writeToSink and
-    // recoverFromSinkFailure, the latter invoked at the loop top), so they need no
-    // volatility. audioBufferSize is written once in initialize() (caller thread)
-    // and read by recovery (playback thread), so it stays @Volatile.
+    // AudioTrack write-failure recovery state. These counters are mutated on the
+    // playback thread (writeToSink and recoverFromSinkFailure at the loop top) and
+    // reset in start() on the caller thread under stateLock. start() runs that reset
+    // only after the previous playback loop has been awaited/cancelled and launches
+    // the new loop afterward, so the lock plus that happens-before ordering -- not
+    // pure thread confinement -- is what keeps them safe without @Volatile.
+    // audioBufferSize is written once in initialize() (caller thread) and read by
+    // recovery (playback thread), so it stays @Volatile.
     private var consecutiveWriteFailures = 0
     private var sinkRecoveryCount = 0
+    private var lastSinkRecoveryUs = 0L          // wall-clock of last recovery, for the windowed budget
+    private var lastSinkRecoveryAttemptUs = 0L   // wall-clock of last recreate attempt, for backoff
     @Volatile private var audioBufferSize = 0
 
     // Playback state machine (from Python reference)
@@ -846,6 +864,8 @@ class SyncAudioPlayer(
             // Fresh sink-failure recovery budget per playback session.
             consecutiveWriteFailures = 0
             sinkRecoveryCount = 0
+            lastSinkRecoveryUs = 0L
+            lastSinkRecoveryAttemptUs = 0L
 
             isPlaying.set(true)
             isPaused.set(false)
@@ -2052,8 +2072,11 @@ class SyncAudioPlayer(
 
         // Reset sync tracking (simplified)
         lastChunkServerTime = 0L
+        expectedNextTimestampUs = null   // drop the pre-reset chunk-gap anchor
         insertEveryNFrames = 0
         dropEveryNFrames = 0
+        framesUntilNextInsert = 0        // clear in-flight correction countdowns too,
+        framesUntilNextDrop = 0          // matching the other full-reset sites
         crossfadeState = CrossfadeState.IDLE
         crossfadeProgress = 0
 
@@ -2123,9 +2146,45 @@ class SyncAudioPlayer(
         if (!stateLock.tryLock()) return
         try {
             if (isReleased.get() || !isPlaying.get()) return
+
+            // Preserve the macro-state across recovery: a fault during DRAINING must
+            // stay in DRAINING so exitDraining()'s reconnect-splice precondition
+            // still holds (DRAINING is only entered on connection loss). Every other
+            // state parks in INITIALIZING (silence keepalive) so the loop never
+            // polls+discards real chunks on a dead/null sink.
+            val priorState = playbackState
+            val restState =
+                if (priorState == PlaybackState.DRAINING) PlaybackState.DRAINING
+                else PlaybackState.INITIALIZING
+
+            val nowUs = nowNs() / 1000
+
+            // Backoff: a renegotiating HDMI/AVR HAL takes ~1-3s to settle. Spacing
+            // attempts gives it time and stops a failing rebuild from re-firing every
+            // loop tick (which would otherwise burn the whole budget in ~100ms).
+            if (nowUs - lastSinkRecoveryAttemptUs < SINK_RECOVERY_BACKOFF_US) {
+                setPlaybackState(restState)
+                return
+            }
+            lastSinkRecoveryAttemptUs = nowUs
+
+            // Windowed budget: recoveries older than the window no longer count, so a
+            // long healthy stretch restores the budget and well-spaced faults over a
+            // multi-hour session never exhaust it.
+            if (nowUs - lastSinkRecoveryUs > SINK_RECOVERY_WINDOW_US) {
+                sinkRecoveryCount = 0
+            }
+            lastSinkRecoveryUs = nowUs
+
             if (sinkRecoveryCount >= MAX_SINK_RECOVERIES) {
-                AppLog.Audio.e("AudioTrack recovery cap reached ($MAX_SINK_RECOVERIES); leaving sink as-is")
-                consecutiveWriteFailures = 0  // stop re-triggering; per-write logs still report failures
+                // Persistent fault (too many recreates within the window). Give up and
+                // surface it: onBufferExhausted() tears the player down and builds a
+                // fresh one on the next stream (which resets this budget), instead of
+                // wedging silently in PLAYING and discarding chunks forever.
+                AppLog.Audio.e("AudioTrack recovery cap reached ($MAX_SINK_RECOVERIES within window); giving up")
+                consecutiveWriteFailures = 0
+                setPlaybackState(PlaybackState.INITIALIZING)
+                stateCallback?.onBufferExhausted()
                 return
             }
             sinkRecoveryCount++
@@ -2145,7 +2204,12 @@ class SyncAudioPlayer(
                 sinkFactory(sampleRate, channels, bitDepth, audioBufferSize)
             } catch (e: Exception) {
                 AppLog.Audio.e("AudioTrack recreate failed: " + throwableSummary(e))
-                return  // audioSink stays null; loop early-returns on null sink until the next attempt
+                // audioSink stays null. Park in restState (not PLAYING) so the loop
+                // writes silence keepalive instead of polling+discarding chunks, and
+                // retry after the backoff interval; consecutiveWriteFailures stays
+                // high so the loop re-enters here, paced by the backoff gate above.
+                setPlaybackState(restState)
+                return
             }
 
             try {
@@ -2153,12 +2217,19 @@ class SyncAudioPlayer(
             } catch (e: Exception) {
                 AppLog.Audio.e("AudioTrack recreate play() failed: " + throwableSummary(e))
                 try { rebuilt.release() } catch (_: Exception) {}
+                setPlaybackState(restState)
                 return
             }
 
             audioSink = rebuilt
+            // The new track's frame counter restarts at 0; cancel any in-flight
+            // latency measurement so its ring (keyed on the OLD cumulative frame
+            // count) cannot mis-pair stale writes with new DAC timestamps. A
+            // converged estimate is left untouched -- cancel() is a no-op unless the
+            // estimator is still measuring -- matching the reanchor path.
+            latencyEstimator.cancel()
             resetPlaybackTimingState()
-            setPlaybackState(PlaybackState.INITIALIZING)
+            setPlaybackState(restState)
             consecutiveWriteFailures = 0
         } finally {
             stateLock.unlock()
@@ -2653,10 +2724,14 @@ class SyncAudioPlayer(
      * or skip frames. When no corrections are needed, writes in bulk for efficiency.
      */
     private fun playChunkWithCorrection(chunk: AudioChunk) {
+        // Resolve the sink before dequeuing. audioSink can be nulled by a concurrent
+        // release() (it awaits loop cancellation only with a timeout) or by recovery
+        // on this thread; returning before poll() leaves the chunk queued instead of
+        // silently dropping it and decrementing the count for audio never written.
+        val track = audioSink ?: return
+
         chunkQueue.poll() // Remove from queue
         totalQueuedSamples.addAndGet(-chunk.sampleCount.toLong())
-
-        val track = audioSink ?: return
 
         if (syncMuted && chunk.pcmData.isNotEmpty()) {
             chunk.pcmData.fill(0)
