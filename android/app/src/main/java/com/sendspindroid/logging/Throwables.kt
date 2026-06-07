@@ -14,6 +14,6 @@ package com.sendspindroid.logging
  */
 fun throwableSummary(t: Throwable, maxChars: Int = 180): String {
     val type = t.javaClass.simpleName.ifBlank { t.javaClass.name }
-    val msg = t.message?.substringBefore('\n')?.take(maxChars).orEmpty()
-    return if (msg.isBlank()) type else "$type: $msg"
+    val msg = t.message?.substringBefore('\n')?.take(maxChars)
+    return if (msg.isNullOrBlank()) type else "$type: $msg"
 }

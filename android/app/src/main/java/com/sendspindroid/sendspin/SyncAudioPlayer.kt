@@ -2095,7 +2095,10 @@ class SyncAudioPlayer(
             sink.write(buffer, offset, size)
         } catch (e: Exception) {
             AppLog.Audio.e("AudioTrack write threw: " + throwableSummary(e))
-            AudioTrack.ERROR_DEAD_OBJECT
+            // Any negative result counts as a write failure below. A thrown write is
+            // not necessarily a dead object, so don't borrow AudioTrack.ERROR_DEAD_OBJECT
+            // here -- the player operates over the AudioSink abstraction.
+            -1
         }
         if (written > 0) {
             consecutiveWriteFailures = 0
