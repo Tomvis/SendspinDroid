@@ -5,6 +5,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -54,28 +55,31 @@ class MessageBuilderTest {
     @Test
     fun buildPlayerState_hasPlayerObjectWithFields() {
         val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(75, true, "error")).jsonObject
-        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
+        val payload = msg["payload"]!!.jsonObject
+        val player = payload["player"]!!.jsonObject
         assertEquals(75, player["volume"]?.jsonPrimitive?.int)
         assertTrue(player["muted"]?.jsonPrimitive?.boolean ?: false)
-        assertEquals("error", player["state"]?.jsonPrimitive?.content)
+        // Per spec, `state` is a top-level payload field, not part of the
+        // player object.
+        assertEquals("error", payload["state"]?.jsonPrimitive?.content)
+        assertNull("state must not be nested in player", player["state"])
     }
 
     @Test
     fun buildPlayerState_defaultSyncState() {
         val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false)).jsonObject
-        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals("synchronized", player["state"]?.jsonPrimitive?.content)
+        val payload = msg["payload"]!!.jsonObject
+        assertEquals("synchronized", payload["state"]?.jsonPrimitive?.content)
     }
 
     @Test
-    fun buildPlayerState_includesStaticDelayMs() {
-        // Per spec the wire field is unsigned int; the builder emits int even
-        // for values that arrive rounded from a Double caller.
+    fun buildPlayerState_staticDelayMsRoundedToInt() {
+        // Spec: static_delay_ms is an integer.
         val msg = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "synchronized", 12)
+            MessageBuilder.buildPlayerState(50, false, "synchronized", 12.5)
         ).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(12, player["static_delay_ms"]?.jsonPrimitive?.int)
+        assertEquals(13, player["static_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
@@ -88,36 +92,42 @@ class MessageBuilderTest {
     }
 
     @Test
-    fun buildPlayerState_staticDelayMsClampsNegative() {
-        // The time filter tracks signed Double internally (negative user
-        // offsets are valid). The wire requires [0, 5000]; a negative slip
-        // through used to drop the connection with a ValueError.
-        val msg = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "synchronized", -42)
-        ).jsonObject
-        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(0, player["static_delay_ms"]?.jsonPrimitive?.int)
+    fun buildPlayerState_staticDelayMsClampedToSpecRange() {
+        // Spec: 0-5000, negative values not supported. A negative user sync
+        // offset is applied locally but reported as 0.
+        val negative = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, "synchronized", -120.0)
+        ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
+        assertEquals(0, negative["static_delay_ms"]?.jsonPrimitive?.int)
+
+        val huge = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, "synchronized", 9999.0)
+        ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
+        assertEquals(5000, huge["static_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
-    fun buildPlayerState_staticDelayMsClampsAboveMax() {
-        val msg = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "synchronized", 6000)
-        ).jsonObject
+    fun buildPlayerState_declaresSetStaticDelaySupport() {
+        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false)).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(5000, player["static_delay_ms"]?.jsonPrimitive?.int)
+        val commands = player["supported_commands"]!!.jsonArray.map { it.jsonPrimitive.content }
+        assertEquals(listOf("set_static_delay"), commands)
     }
 
     @Test
-    fun buildPlayerState_emitsStateAtTopLevel() {
-        // Spec PR-50 moved `state` from inside `player` to the top of the
-        // payload. We emit at both locations for back-compat, but the
-        // top-level emission is what newer servers consume.
-        val msg = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "error")
-        ).jsonObject
-        val payload = msg["payload"]!!.jsonObject
-        assertEquals("error", payload["state"]?.jsonPrimitive?.content)
+    fun buildPlayerState_includesRequiredTimingFields() {
+        // Spec: required_lead_time_ms and min_buffer_ms are always required
+        // for players.
+        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false)).jsonObject
+        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
+        assertEquals(
+            SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS,
+            player["required_lead_time_ms"]?.jsonPrimitive?.int
+        )
+        assertEquals(
+            SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS,
+            player["min_buffer_ms"]?.jsonPrimitive?.int
+        )
     }
 
     // --- buildCommand ---
@@ -133,6 +143,60 @@ class MessageBuilderTest {
         val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("next")).jsonObject
         val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
         assertEquals("next", controller["command"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun buildCommand_volumeCommandIncludesVolume() {
+        val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("volume", volume = 65)).jsonObject
+        val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
+        assertEquals("volume", controller["command"]?.jsonPrimitive?.content)
+        assertEquals(65, controller["volume"]?.jsonPrimitive?.int)
+        assertNull(controller["mute"])
+    }
+
+    @Test
+    fun buildCommand_muteCommandIncludesMute() {
+        val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("mute", mute = true)).jsonObject
+        val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
+        assertEquals("mute", controller["command"]?.jsonPrimitive?.content)
+        assertEquals(true, controller["mute"]?.jsonPrimitive?.boolean)
+        assertNull(controller["volume"])
+    }
+
+    @Test
+    fun buildCommand_plainCommandOmitsOptionalParams() {
+        val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("repeat_all")).jsonObject
+        val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
+        assertEquals("repeat_all", controller["command"]?.jsonPrimitive?.content)
+        assertNull(controller["volume"])
+        assertNull(controller["mute"])
+    }
+
+    // --- buildStreamRequestFormat ---
+
+    @Test
+    fun buildStreamRequestFormat_includesOnlyProvidedFields() {
+        val msg = Json.parseToJsonElement(
+            MessageBuilder.buildStreamRequestFormat(codec = "flac")
+        ).jsonObject
+        assertEquals("stream/request-format", msg["type"]?.jsonPrimitive?.content)
+        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
+        assertEquals("flac", player["codec"]?.jsonPrimitive?.content)
+        assertNull(player["sample_rate"])
+        assertNull(player["channels"])
+        assertNull(player["bit_depth"])
+    }
+
+    @Test
+    fun buildStreamRequestFormat_allFields() {
+        val msg = Json.parseToJsonElement(
+            MessageBuilder.buildStreamRequestFormat("pcm", 48000, 2, 24)
+        ).jsonObject
+        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
+        assertEquals("pcm", player["codec"]?.jsonPrimitive?.content)
+        assertEquals(48000, player["sample_rate"]?.jsonPrimitive?.int)
+        assertEquals(2, player["channels"]?.jsonPrimitive?.int)
+        assertEquals(24, player["bit_depth"]?.jsonPrimitive?.int)
     }
 
     // --- buildSupportedFormats ---
@@ -332,56 +396,6 @@ class MessageBuilderTest {
         val payload = Json.parseToJsonElement(text).jsonObject["payload"]!!.jsonObject
         val playerSupport = payload["player@v1_support"]!!.jsonObject
         assertEquals(6_720_000, playerSupport["buffer_capacity"]?.jsonPrimitive?.int)
-    }
-
-    @Test
-    fun buildClientHello_advertisesColorAndControllerRoles() {
-        // color@v1 + controller@v1 + metadata@v1 are advertised alongside
-        // player@v1 / artwork@v1. Test pins this so the role list cannot
-        // silently regress (the server only sends server/state.color to
-        // clients that explicitly advertise the color@v1 role).
-        val formats = listOf(MessageBuilder.FormatEntry("pcm", 48000, 2, 16))
-        val text = MessageBuilder.buildClientHello(
-            clientId = "test-id",
-            deviceName = "Test Device",
-            bufferCapacity = 6_720_000,
-            manufacturer = "Test",
-            supportedFormats = formats
-        )
-        val payload = Json.parseToJsonElement(text).jsonObject["payload"]!!.jsonObject
-        val roles = payload["supported_roles"]!!
-            .let { it as kotlinx.serialization.json.JsonArray }
-            .map { it.jsonPrimitive.content }
-        assertTrue("color@v1 must be advertised", "color@v1" in roles)
-        assertTrue("controller@v1 must be advertised", "controller@v1" in roles)
-        assertTrue("metadata@v1 must be advertised", "metadata@v1" in roles)
-        assertTrue("player@v1 must be advertised", "player@v1" in roles)
-        assertTrue("artwork@v1 must be advertised (non-lowMem)", "artwork@v1" in roles)
-        // Capability objects are emitted for each advertised role.
-        assertNotNull(payload["color@v1_support"])
-        assertNotNull(payload["controller@v1_support"])
-        assertNotNull(payload["metadata@v1_support"])
-    }
-
-    @Test
-    fun buildClientHello_lowMemoryDropsArtworkOnly() {
-        // Low-memory mode strips the artwork role but keeps color/controller/metadata.
-        val formats = listOf(MessageBuilder.FormatEntry("pcm", 48000, 2, 16))
-        val text = MessageBuilder.buildClientHello(
-            clientId = "test-id",
-            deviceName = "Test Device",
-            bufferCapacity = 1_920_000,
-            manufacturer = "Test",
-            supportedFormats = formats,
-            lowMemoryMode = true
-        )
-        val payload = Json.parseToJsonElement(text).jsonObject["payload"]!!.jsonObject
-        val roles = payload["supported_roles"]!!
-            .let { it as kotlinx.serialization.json.JsonArray }
-            .map { it.jsonPrimitive.content }
-        assertFalse("artwork@v1 must be omitted in lowMem", "artwork@v1" in roles)
-        assertTrue("color@v1 must still be advertised", "color@v1" in roles)
-        assertNull(payload["artwork@v1_support"])
     }
 
     // --- No serialize needed (returns String directly) ---

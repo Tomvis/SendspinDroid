@@ -40,6 +40,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         const val EXTRA_LOG_LEVEL = "log_level"
         const val ACTION_HIGH_POWER_MODE_CHANGED = "com.sendspindroid.ACTION_HIGH_POWER_MODE_CHANGED"
         const val EXTRA_HIGH_POWER_MODE_ENABLED = "high_power_mode_enabled"
+        const val ACTION_PREFERRED_CODEC_CHANGED = "com.sendspindroid.ACTION_PREFERRED_CODEC_CHANGED"
+        const val EXTRA_PREFERRED_CODEC = "preferred_codec"
     }
 
     private val prefs = PreferenceManager.getDefaultSharedPreferences(application)
@@ -80,6 +82,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _autoStartOnBoot = MutableStateFlow(UserSettings.autoStartOnBoot)
     val autoStartOnBoot: StateFlow<Boolean> = _autoStartOnBoot.asStateFlow()
+
+    private val _searchLibraryOnly = MutableStateFlow(UserSettings.searchLibraryOnly)
+    val searchLibraryOnly: StateFlow<Boolean> = _searchLibraryOnly.asStateFlow()
 
     private val _hasDefaultServer = MutableStateFlow(UnifiedServerRepository.getDefaultServer() != null)
     val hasDefaultServer: StateFlow<Boolean> = _hasDefaultServer.asStateFlow()
@@ -178,6 +183,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setPreferredCodec(codec: String) {
         UserSettings.setPreferredCodec(codec)
         _preferredCodec.value = codec
+
+        // Tell PlaybackService so a live session can switch via
+        // stream/request-format instead of waiting for the next connect.
+        val intent = Intent(ACTION_PREFERRED_CODEC_CHANGED).apply {
+            putExtra(EXTRA_PREFERRED_CODEC, codec)
+        }
+        LocalBroadcastManager.getInstance(getApplication()).sendBroadcast(intent)
     }
 
     // Performance settings
@@ -205,6 +217,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setAutoStartOnBoot(enabled: Boolean) {
         prefs.edit().putBoolean(UserSettings.KEY_AUTO_START_ON_BOOT, enabled).apply()
         _autoStartOnBoot.value = enabled
+    }
+
+    fun setSearchLibraryOnly(libraryOnly: Boolean) {
+        UserSettings.searchLibraryOnly = libraryOnly
+        _searchLibraryOnly.value = libraryOnly
     }
 
     /**

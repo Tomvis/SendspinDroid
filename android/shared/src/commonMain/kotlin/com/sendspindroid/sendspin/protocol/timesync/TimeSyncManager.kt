@@ -32,7 +32,7 @@ import kotlinx.coroutines.launch
 class TimeSyncManager(
     private val timeFilter: SendspinTimeFilter,
     private val sendClientTime: () -> Unit,
-    private val onMeasurementApplied: () -> Unit = {},
+    private val onMeasurementApplied: (rttMicros: Long) -> Unit = {},
     private val tag: String = "TimeSyncManager"
 ) {
     companion object {
@@ -165,7 +165,7 @@ class TimeSyncManager(
             Log.v(tag, "Time sync: offset=${timeFilter.offsetMicros}μs, error=${timeFilter.errorMicros}μs")
         }
 
-        onMeasurementApplied()
+        onMeasurementApplied(measurement.rtt)
         return false
     }
 
@@ -199,6 +199,7 @@ class TimeSyncManager(
         // lock, and a server/time reply arriving in that window would otherwise
         // see burstInProgress=true, append to the just-cleared list, and be
         // silently discarded by the next burst's clear().
+        var bestRttMicros = 0L
         synchronized(pendingBurstMeasurements) {
             burstInProgress = false
 
@@ -215,6 +216,7 @@ class TimeSyncManager(
             }
 
             val best = validMeasurements.minByOrNull { it.rtt }!!
+            bestRttMicros = best.rtt
 
             val maxError = computeMaxError(best.rtt)
 
@@ -236,7 +238,7 @@ class TimeSyncManager(
 
             pendingBurstMeasurements.clear()
         }
-        onMeasurementApplied()
+        onMeasurementApplied(bestRttMicros)
     }
 
     // A non-positive RTT (clock skew / suspend-resume / hostile server) or one

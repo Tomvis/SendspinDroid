@@ -55,6 +55,7 @@ import android.net.Uri
 import androidx.compose.ui.platform.LocalContext
 import com.sendspindroid.R
 import com.sendspindroid.UserSettings
+import com.sendspindroid.diagnostics.Telemetry
 import com.sendspindroid.logging.LogLevel
 import com.sendspindroid.ui.theme.SendSpinTheme
 
@@ -64,6 +65,7 @@ import com.sendspindroid.ui.theme.SendSpinTheme
  * @param viewModel SettingsViewModel for state management
  * @param onNavigateBack Called when back navigation is triggered
  * @param onExportLogs Called when export logs is clicked
+ * @param onReportProblem Called when "Report a problem" is clicked
  * @param onRestartApp Called when app restart is confirmed
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -72,6 +74,7 @@ fun SettingsScreen(
     viewModel: SettingsViewModel,
     onNavigateBack: () -> Unit,
     onExportLogs: () -> Unit,
+    onReportProblem: () -> Unit,
     onRestartApp: () -> Unit
 ) {
     val playerName by viewModel.playerName.collectAsStateWithLifecycle()
@@ -85,6 +88,7 @@ fun SettingsScreen(
     val lowMemoryMode by viewModel.lowMemoryMode.collectAsStateWithLifecycle()
     val highPowerMode by viewModel.highPowerMode.collectAsStateWithLifecycle()
     val autoStartOnBoot by viewModel.autoStartOnBoot.collectAsStateWithLifecycle()
+    val searchLibraryOnly by viewModel.searchLibraryOnly.collectAsStateWithLifecycle()
     val hasDefaultServer by viewModel.hasDefaultServer.collectAsStateWithLifecycle()
     val defaultServerName by viewModel.defaultServerName.collectAsStateWithLifecycle()
     val batteryOptExempt by viewModel.batteryOptExempt.collectAsStateWithLifecycle()
@@ -234,8 +238,34 @@ fun SettingsScreen(
                 }
             )
 
+            SwitchPreference(
+                title = stringResource(R.string.pref_search_library_only_title),
+                summary = stringResource(R.string.pref_search_library_only_summary),
+                checked = searchLibraryOnly,
+                onCheckedChange = { viewModel.setSearchLibraryOnly(it) }
+            )
+
             // Debug Category
             PreferenceCategory(title = stringResource(R.string.pref_category_debug))
+
+            // Anonymous, opt-in telemetry (off by default).
+            var telemetryEnabled by remember { mutableStateOf(Telemetry.isEnabled()) }
+            SwitchPreference(
+                title = stringResource(R.string.pref_telemetry_title),
+                summary = stringResource(R.string.pref_telemetry_summary),
+                checked = telemetryEnabled,
+                onCheckedChange = {
+                    telemetryEnabled = it
+                    Telemetry.setEnabled(it)
+                }
+            )
+            if (telemetryEnabled) {
+                TextPreference(
+                    title = stringResource(R.string.pref_telemetry_reset_title),
+                    summary = stringResource(R.string.pref_telemetry_reset_summary),
+                    onClick = { Telemetry.resetInstallId() }
+                )
+            }
 
             // Log level selector (6-option segmented row)
             val levels = listOf(
@@ -285,6 +315,12 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+
+            TextPreference(
+                title = stringResource(R.string.pref_report_problem_title),
+                summary = stringResource(R.string.pref_report_problem_summary),
+                onClick = onReportProblem
+            )
 
             TextPreference(
                 title = stringResource(R.string.pref_export_logs_title),

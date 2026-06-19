@@ -21,38 +21,6 @@ object SendSpinProtocol {
         const val AUDIO = 4
         const val ARTWORK_BASE = 8  // 8-11 for channels 0-3
         const val VISUALIZER = 16
-        const val VISUALIZER_BEAT = 17
-    }
-
-    /**
-     * Valid values for the `static_delay_ms` wire field. Per spec, this is an
-     * unsigned millisecond integer in [0, 5000]. Negative offsets must be
-     * applied client-side only.
-     */
-    object StaticDelay {
-        const val MIN_MS = 0
-        const val MAX_MS = 5000
-    }
-
-    /**
-     * Valid values for the top-level `state` field on `client/state` messages.
-     */
-    object ClientState {
-        const val SYNCHRONIZED = "synchronized"
-        const val ERROR = "error"
-        const val EXTERNAL_SOURCE = "external_source"
-    }
-
-    /**
-     * Valid values for the `reason` field on `client/goodbye` messages.
-     * The server validates this against an enum; any other value drops the
-     * connection with a noisy exception trace.
-     */
-    object GoodbyeReason {
-        const val ANOTHER_SERVER = "another_server"
-        const val SHUTDOWN = "shutdown"
-        const val RESTART = "restart"
-        const val USER_REQUEST = "user_request"
     }
 
     /**
@@ -100,6 +68,23 @@ object SendSpinProtocol {
     }
 
     /**
+     * Player timing capabilities reported via client/state (spec 2026-06-01,
+     * "player timing capabilities"). Both fields are required for players;
+     * servers use max(required_lead_time_ms, min_buffer_ms) + static_delay_ms
+     * to compute per-player send-ahead, which matters most for live streams.
+     *
+     * Values are conservative static defaults for Android: AudioTrack warmup
+     * plus MediaCodec init is typically well under 500 ms, and 500 ms of
+     * jitter buffer comfortably absorbs Wi-Fi variance. The spec allows
+     * runtime (debounced) updates if we later measure these empirically.
+     * For comparison, aiosendspin defaults to 250/250 on desktop.
+     */
+    object PlayerTiming {
+        const val REQUIRED_LEAD_TIME_MS = 500
+        const val MIN_BUFFER_MS = 500
+    }
+
+    /**
      * Protocol message type identifiers.
      */
     object MessageType {
@@ -116,12 +101,12 @@ object SendSpinProtocol {
         const val STREAM_START = "stream/start"
         const val STREAM_END = "stream/end"
         const val STREAM_CLEAR = "stream/clear"
+        const val STREAM_REQUEST_FORMAT = "stream/request-format"
         const val CLIENT_SYNC_OFFSET = "client/sync_offset"
     }
 
     /**
-     * Supported client roles (versioned role IDs sent in client/hello.supported_roles
-     * and received in server/hello.active_roles).
+     * Supported client roles.
      */
     object Roles {
         const val PLAYER = "player@v1"
@@ -132,11 +117,10 @@ object SendSpinProtocol {
     }
 
     /**
-     * Unversioned role family names. The server emits these in role-scoped
-     * payloads such as `stream/end.roles` and `stream/clear.roles`, where the
-     * version is intentionally elided so a single message can target every
-     * version of a role family. Do NOT use [Roles] (which carries `@vN`) when
-     * comparing against those fields.
+     * Unversioned role-family names as they appear in the `roles` array of
+     * stream/end and stream/clear. The server emits the bare family ("player")
+     * rather than the versioned role ("player@v1"), so matching against
+     * [Roles] would never hit -- match against these instead.
      */
     object RoleFamily {
         const val PLAYER = "player"
@@ -145,15 +129,6 @@ object SendSpinProtocol {
         const val ARTWORK = "artwork"
         const val VISUALIZER = "visualizer"
         const val COLOR = "color"
-    }
-
-    /**
-     * Valid values for `controller.repeat` per spec.
-     */
-    object RepeatMode {
-        const val OFF = "off"
-        const val ONE = "one"
-        const val ALL = "all"
     }
 }
 
@@ -184,8 +159,6 @@ data class TrackProgress(
  * Track metadata from server/state messages.
  * Per spec: includes timestamp, nested progress, and optional fields.
  *
- * Integer fields use 0 to indicate "not set" / absent.
- *
  * @param timestamp Server timestamp when metadata was captured (microseconds)
  * @param title Track title
  * @param artist Track artist
@@ -193,9 +166,7 @@ data class TrackProgress(
  * @param album Album name
  * @param artworkUrl URL to album artwork
  * @param year Release year
- * @param albumTrack Track number within album (1-indexed)
- * @param queueTrack Position of the current track within the queue (1-indexed)
- * @param totalTracks Total number of tracks in the queue
+ * @param track Track number (1-indexed)
  * @param progress Progress information (position, duration, speed)
  */
 data class TrackMetadata(
@@ -206,14 +177,45 @@ data class TrackMetadata(
     val album: String,
     val artworkUrl: String,
     val year: Int,
-    val albumTrack: Int,
-    val queueTrack: Int,
-    val totalTracks: Int,
-    val progress: TrackProgress
+    val track: Int,
+    val progress: TrackProgress,
+    // Queue-position metadata (fork extension consumed by the now-playing UI
+    // and media notification). albumTrack is the track number within its
+    // album (wire `album_track`, falling back to legacy `track`); queueTrack /
+    // totalTracks describe the position within the active play queue. Default
+    // 0 = not reported.
+    val albumTrack: Int = 0,
+    val queueTrack: Int = 0,
+    val totalTracks: Int = 0
 ) {
     // Convenience properties for backwards compatibility
     val durationMs: Long get() = progress.trackDuration
     val positionMs: Long get() = progress.trackProgress
+
+    /**
+     * Current track position extrapolated from this metadata snapshot,
+     * using the spec formula:
+     *
+     *   progress + (server_now - timestamp) * playback_speed / 1_000_000
+     *
+     * clamped to [0, duration] (lower bound only when duration is 0 =
+     * unknown/unlimited). Falls back to the raw reported position when
+     * [timestamp] is missing (0), e.g. legacy servers.
+     *
+     * @param serverNowMicros current time on the server clock, in
+     *   microseconds (from the time filter's client->server mapping)
+     */
+    fun progressAtServerTime(serverNowMicros: Long): Long {
+        if (timestamp == 0L) return progress.trackProgress
+        val elapsedMicros = serverNowMicros - timestamp
+        val calculated = progress.trackProgress +
+                elapsedMicros * progress.playbackSpeed / 1_000_000L
+        return if (progress.trackDuration != 0L) {
+            calculated.coerceIn(0L, progress.trackDuration)
+        } else {
+            calculated.coerceAtLeast(0L)
+        }
+    }
 }
 
 /**
@@ -253,60 +255,44 @@ data class StreamConfig(
 }
 
 /**
- * Group information from group/update messages.
+ * Controller (group-level) state from the server/state `controller` object.
+ *
+ * Fields are nullable because server/state carries delta updates; null means
+ * "not included in this update". [com.sendspindroid.sendspin.protocol.SendSpinProtocolHandler]
+ * merges deltas into the current state before publishing.
+ *
+ * @param supportedCommands Subset of: play, pause, stop, next, previous,
+ *   volume, mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch
+ * @param volume Volume of the whole group, 0-100 (average of player volumes)
+ * @param muted Group mute state (true only when all players are muted)
+ * @param repeat Repeat mode: "off", "one", or "all"
+ * @param shuffle Shuffle mode enabled/disabled
  */
-data class GroupInfo(
-    val groupId: String,
-    val groupName: String,
-    val playbackState: String
-)
-
-/**
- * Result from parsing server/hello message.
- */
-data class ServerHelloResult(
-    val serverName: String,
-    val serverId: String,
-    val activeRoles: List<String>,
-    val connectionReason: String
-)
-
-/**
- * Result from parsing server/command message.
- */
-sealed class ServerCommandResult {
-    data class Volume(val volume: Int) : ServerCommandResult()
-    data class Mute(val muted: Boolean) : ServerCommandResult()
-    data class Unknown(val command: String) : ServerCommandResult()
+data class ControllerState(
+    val supportedCommands: List<String>? = null,
+    val volume: Int? = null,
+    val muted: Boolean? = null,
+    val repeat: String? = null,
+    val shuffle: Boolean? = null
+) {
+    /** Merge a delta update into this state, keeping known values. */
+    fun mergedWith(delta: ControllerState): ControllerState = ControllerState(
+        supportedCommands = delta.supportedCommands ?: supportedCommands,
+        volume = delta.volume ?: volume,
+        muted = delta.muted ?: muted,
+        repeat = delta.repeat ?: repeat,
+        shuffle = delta.shuffle ?: shuffle
+    )
 }
 
 /**
- * Group-level controller state from `server/state.controller`. Sent to clients
- * that advertise the `controller@v1` role. Reports which media commands the
- * application backing the group supports plus the group's current volume and
- * mute. Distinct from per-player volume/mute (which arrives via
- * `server/command`).
- *
- * @param supportedCommands MediaCommand string values the application accepts
- *     (e.g. "play", "pause", "next", "repeat_all"). Subset of the
- *     spec-defined MediaCommand enum.
- * @param volume Group volume, 0-100.
- * @param muted Group mute state.
- * @param repeat Repeat mode ("off"/"one"/"all"). Null means the server did not
- *     report a value (older server, or absent from this update). The wire
- *     position is `controller.repeat`; older servers emit it on
- *     `metadata.repeat` as a fallback. A future migration to JsonOptional&lt;T&gt;
- *     will distinguish "absent" from "explicit null".
- * @param shuffle Shuffle state. Null means the server did not report a value.
- *     Wire position is `controller.shuffle`; older servers emit on
- *     `metadata.shuffle`.
+ * Result of parsing a server/state message.
  */
-data class ControllerState(
-    val supportedCommands: List<String>,
-    val volume: Int,
-    val muted: Boolean,
-    val repeat: String? = null,
-    val shuffle: Boolean? = null,
+data class ServerStateResult(
+    val metadata: TrackMetadata?,
+    val playbackState: String?,
+    val controller: ControllerState?,
+    val colorState: ColorState? = null
 )
 
 /**
@@ -315,15 +301,13 @@ data class ControllerState(
  *
  * Each color is a list of three integers in 0..255 (RGB). Fields are nullable
  * because the server may emit a partial palette (only the colors it could
- * extract for the current artwork). [timestamp] is the server-side capture
- * time in microseconds.
+ * extract). [timestamp] is the server-side capture time in microseconds.
  *
- * Equality intentionally excludes [timestamp]: the server regenerates the
- * timestamp on every color emission (typically once per metadata or artwork
- * tick), but the palette itself rarely changes within a track. Consumers
- * compare ColorStates for change-detection dedup, and including timestamp
- * would defeat that dedup and trigger spurious downstream work (ShaderBrush
- * re-allocation, ambient repaint).
+ * Equality intentionally EXCLUDES [timestamp]: the server regenerates the
+ * timestamp on every color emission, but the palette itself rarely changes
+ * within a track. Consumers compare ColorStates for change-detection dedup,
+ * and including timestamp would defeat that dedup. (This is why it is a
+ * hand-written class rather than a data class.)
  */
 class ColorState(
     val timestamp: Long = 0L,
@@ -357,14 +341,33 @@ class ColorState(
 }
 
 /**
- * Result from parsing server/state message.
+ * Group information from group/update messages.
  */
-data class ServerStateResult(
-    val metadata: TrackMetadata?,
-    val state: String?,
-    val controllerState: ControllerState?,
-    val colorState: ColorState? = null,
+data class GroupInfo(
+    val groupId: String,
+    val groupName: String,
+    val playbackState: String
 )
+
+/**
+ * Result from parsing server/hello message.
+ */
+data class ServerHelloResult(
+    val serverName: String,
+    val serverId: String,
+    val activeRoles: List<String>,
+    val connectionReason: String
+)
+
+/**
+ * Result from parsing server/command message.
+ */
+sealed class ServerCommandResult {
+    data class Volume(val volume: Int) : ServerCommandResult()
+    data class Mute(val muted: Boolean) : ServerCommandResult()
+    data class SetStaticDelay(val delayMs: Int) : ServerCommandResult()
+    data class Unknown(val command: String) : ServerCommandResult()
+}
 
 /**
  * Result from parsing client/sync_offset message.

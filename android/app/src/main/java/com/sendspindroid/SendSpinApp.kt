@@ -5,6 +5,9 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.request.CachePolicy
 import com.google.android.material.color.DynamicColors
+import com.sendspindroid.diagnostics.Telemetry
+import com.sendspindroid.logging.AppLog
+import com.sendspindroid.logging.CrashHandler
 import com.sendspindroid.musicassistant.MaProxyImageFetcher
 import com.sendspindroid.musicassistant.MaSettings
 
@@ -13,6 +16,14 @@ class SendSpinApp : Application(), ImageLoaderFactory {
         super.onCreate()
         // Initialize MaSettings early so it is available before any Activity or Service.
         MaSettings.initialize(this)
+        // Initialize logging and install crash capture as early as possible, so
+        // startup-path issues are captured and an unexpected exit can be reported
+        // on the next launch. Runs the one-time log-level migration too.
+        AppLog.init(this)
+        CrashHandler.install(this)
+        // Opt-in telemetry (off by default). init() also flushes any queued
+        // handoff episodes from a previous run over an unmetered connection.
+        Telemetry.init(this)
         // On Android 12+, applies wallpaper-derived colors to all activities.
         // On older devices, falls back to the static theme colors.
         DynamicColors.applyToActivitiesIfAvailable(this)

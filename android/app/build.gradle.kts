@@ -74,15 +74,15 @@ android {
         // Ranges: MAJOR 0-9999, MINOR 0-99, PATCH 0-99
         // Example: 2.0.0 = 20000, 2.1.3 = 20103, 10.5.22 = 100522
         // Beta releases: bump by N from base, BetaN = base + N
-        // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta11 = 20011). Note this diverges
+        // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta13 = 20013). Note this diverges
         // from the global rule in CLAUDE.md ("pre-release shares the stable
         // versionCode"); this fork bumps each beta so internal users get the
         // newer build via Play.
-        versionCode = 20011
+        versionCode = 20013
 
         // versionName: User-visible version string
         // Follows semantic versioning (major.minor.patch[-prerelease])
-        versionName = "2.0.0-Beta11"
+        versionName = "2.0.0-Beta13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -149,8 +149,9 @@ android {
         // Used for Artist/Album detail screens (incremental migration)
         compose = true
 
-        // buildConfig = false (default in AGP 8.0+)
-        // Enable if you need BuildConfig.DEBUG or custom build config fields
+        // BuildConfig.VERSION_NAME is reported to SendSpin servers as
+        // device_info.software_version in the client/hello handshake.
+        buildConfig = true
     }
 
     // Enable android.jar method stubs to return defaults instead of throwing

@@ -8,6 +8,7 @@ import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.throwableSummary
 import com.sendspindroid.remote.WebRTCTransport
 import com.sendspindroid.sendspin.transport.ProxyWebSocketTransport
+import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.SendSpinProtocolHandler
@@ -228,11 +229,17 @@ class SendSpin(
     @Volatile
     var selfReconnectEnabled: Boolean = true
 
+    // Merged controller (group-level) state: supported_commands, group
+    // volume/mute, repeat, shuffle. Null until the server first sends a
+    // server/state controller object.
+    private val _controllerState = MutableStateFlow<ControllerState?>(null)
+    val controllerState: StateFlow<ControllerState?> = _controllerState.asStateFlow()
+
     // Transport abstraction - can be WebSocket (local) or WebRTC (remote).
     // @Volatile: written on the caller thread (connect/disconnect) and on
     // workScope/timerScope coroutines (reconnect, immediate-reconnect); read
     // from the WebSocket IO dispatcher (TransportEventListener), the timer
-    // (checkStall), the UI thread (setVolume/setMuted → sendTextMessage), and
+    // (checkStall), the UI thread (setVolume/setMuted -> sendTextMessage), and
     // the audio pipeline. Without volatility a write from one thread is not
     // guaranteed to be visible to readers on another, so a setVolume right
     // after a reconnect-driven swap can read a stale `null` and drop the wire
@@ -391,6 +398,8 @@ class SendSpin(
 
     override fun getManufacturer(): String = Build.MANUFACTURER ?: "Unknown"
 
+    override fun getSoftwareVersion(): String = com.sendspindroid.BuildConfig.VERSION_NAME
+
     override fun getSupportedFormats(): List<MessageBuilder.FormatEntry> {
         val bitDepths = if (isLowMemoryMode()) {
             listOf(16)
@@ -407,6 +416,10 @@ class SendSpin(
     override fun onHandshakeComplete(serverName: String, serverId: String) {
         this.serverName = serverName
         this.serverId = serverId
+
+        // Controller state belongs to the previous session; the handler's
+        // merged copy was reset, so reset the published flow too.
+        _controllerState.value = null
 
         // Check if this is a reconnection
         val wasReconnecting = timeFilter.isFrozen || reconnecting.get()
@@ -461,7 +474,22 @@ class SendSpin(
     }
 
     override fun onMetadataUpdate(metadata: TrackMetadata) {
-        callback.onMetadataUpdate(metadata)
+        // Per spec, extrapolate the reported position from the metadata's
+        // server timestamp to "now" before publishing. Without this, the
+        // position is stale by network latency plus however long the snapshot
+        // sat on the server. Requires a converged clock; fall back to the raw
+        // value until then. We keep the rich TrackMetadata object callback (the
+        // now-playing UI / media notification consume queue-position fields),
+        // substituting the extrapolated position into a copy.
+        val published = if (timeFilter.isReady) {
+            val pos = metadata.progressAtServerTime(
+                timeFilter.clientToServer(System.nanoTime() / 1000)
+            )
+            metadata.copy(progress = metadata.progress.copy(trackProgress = pos))
+        } else {
+            metadata
+        }
+        callback.onMetadataUpdate(published)
     }
 
     override fun onPlaybackStateChanged(state: String) {
@@ -481,10 +509,16 @@ class SendSpin(
     }
 
     override fun onControllerStateUpdate(state: com.sendspindroid.sendspin.protocol.ControllerState) {
+        // Publish to the StateFlow (observers) and forward the flattened
+        // fields to the Callback (the live UI path). ControllerState fields are
+        // nullable (delta semantics); coerce to neutral defaults for the
+        // flattened callback since the merged state carries forward prior
+        // values for anything the latest delta omitted.
+        _controllerState.value = state
         callback.onControllerStateUpdate(
-            state.supportedCommands,
-            state.volume,
-            state.muted,
+            state.supportedCommands ?: emptyList(),
+            state.volume ?: 0,
+            state.muted ?: false,
             state.repeat,
             state.shuffle,
         )
@@ -958,11 +992,12 @@ class SendSpin(
         stopTimeSync()
         reconnecting.set(false)
         waitingForNetwork.set(false)
-        // Use the spec-valid "restart" reason: the client is going to reconnect
-        // on a different transport. "network_type_changed" was not in the
-        // GoodbyeReason enum and made the server drop the connection with a
-        // noisy ValueError trace.
-        sendGoodbye(SendSpinProtocol.GoodbyeReason.RESTART)
+        // Spec reason enum is another_server | shutdown | restart |
+        // user_request. "restart" fits: the client will reconnect (after the
+        // outer loop re-selects the transport) and the server should
+        // auto-reconnect. (A non-enum value like "network_type_changed" makes
+        // the server drop the connection with a noisy ValueError trace.)
+        sendGoodbye("restart")
         // Clear the transport listener BEFORE tearing down to prevent the async onClosed
         // callback from firing a second onDisconnected after we fire one synchronously below.
         // destroy() (not close()) closes the underlying HttpClient too -- close() alone
@@ -989,7 +1024,7 @@ class SendSpin(
         stopTimeSync()
         reconnecting.set(false)
         waitingForNetwork.set(false)
-        sendGoodbye(SendSpinProtocol.GoodbyeReason.USER_REQUEST)
+        sendGoodbye("user_request")
         // Clear the transport listener BEFORE tearing down to prevent the async onClosed
         // callback from firing a second onDisconnected after we fire one synchronously below.
         // destroy() (not close()) closes the underlying HttpClient too -- close() alone
@@ -1003,9 +1038,29 @@ class SendSpin(
 
     fun play() = sendCommand("play")
     fun pause() = sendCommand("pause")
+    fun stop() = sendCommand("stop")
     fun next() = sendCommand("next")
     fun previous() = sendCommand("previous")
     fun switchGroup() = sendCommand("switch")
+
+    /** Set the volume of the whole group (0-100). */
+    fun setGroupVolume(volume: Int) = sendCommand("volume", volume = volume)
+
+    /** Set the mute state of the whole group. */
+    fun setGroupMute(muted: Boolean) = sendCommand("mute", mute = muted)
+
+    /** Set repeat mode: "off", "one", or "all". */
+    fun setRepeatMode(mode: String) {
+        when (mode) {
+            "off" -> sendCommand("repeat_off")
+            "one" -> sendCommand("repeat_one")
+            "all" -> sendCommand("repeat_all")
+            else -> Log.w(TAG, "Unknown repeat mode: $mode")
+        }
+    }
+
+    /** Enable or disable shuffle. */
+    fun setShuffle(enabled: Boolean) = sendCommand(if (enabled) "shuffle" else "unshuffle")
 
     /**
      * Clean up resources.

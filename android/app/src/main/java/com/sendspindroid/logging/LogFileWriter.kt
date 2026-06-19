@@ -88,18 +88,29 @@ internal class LogFileWriter(
         }
     }
 
-    fun shareIntent(context: Context): Intent? {
+    fun shareIntent(
+        context: Context,
+        redactor: RedactionFilter = RedactionFilter(),
+        prepend: String = "",
+    ): Intent? {
         synchronized(lock) {
             val files = currentFiles()
             if (files.isEmpty()) return null
 
             val combined = File(dir, "sendspin-log-combined.txt")
             return try {
+                // Header is device/version only (intentionally shared, not redacted).
                 combined.writeText(buildShareHeader(context))
+                // Optional diagnostic snapshot, redacted like the log bodies.
+                if (prepend.isNotBlank()) {
+                    combined.appendText("\n${redactor.redact(prepend)}\n")
+                }
                 for (f in files) {
                     if (f.exists()) {
                         combined.appendText("\n----- ${f.name} -----\n")
-                        combined.appendBytes(f.readBytes())
+                        // Redact log bodies: they can contain server addresses, URLs,
+                        // and tokens that must not leave the device.
+                        combined.appendText(redactor.redact(f.readText()))
                     }
                 }
 

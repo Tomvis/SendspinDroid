@@ -1,12 +1,19 @@
 package com.sendspindroid.sendspin.protocol
 
 import android.util.Log
+import com.sendspindroid.sendspin.AdaptiveBufferPolicy
 import com.sendspindroid.sendspin.SendspinTimeFilter
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import com.sendspindroid.sendspin.protocol.message.MessageParser
 import com.sendspindroid.sendspin.protocol.timesync.TimeSyncManager
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Abstract base class for SendSpin protocol handling.
@@ -28,24 +35,21 @@ abstract class SendSpinProtocolHandler(
     // Protocol state
     @Volatile
     protected var handshakeComplete = false
-    // Volatile: written from the WebSocket dispatcher thread (via
-    // handleServerCommand) and from the Main thread (via setVolume/setMuted).
-    // Without volatility, a write from one thread may not be observed by the
-    // other when sendPlayerStateUpdate composes the wire message.
-    @Volatile
     protected var currentVolume: Int = 100
-    @Volatile
     protected var currentMuted: Boolean = false
     // Per Sendspin spec, a client that has not yet synchronized to the
     // server timeline reports "error". Updated by [evaluateAndPublishSyncState].
-    // Volatile + guarded by [syncStateLock] for writes from setSyncState /
-    // evaluateAndPublishSyncState which can fire from different threads.
-    @Volatile
     protected var currentSyncState: String = "error"
 
     private val syncStateLock = Any()
     private var hasEverConverged: Boolean = false
     private var lastPublishedMute: Boolean = false
+
+    // True while the client's audio output is in use by an external system
+    // (e.g. another app holds audio focus). Overrides synchronized/error
+    // reporting until cleared. Per spec, the server reacts by parking this
+    // client in a solo group and ending its streams.
+    private var externalSourceActive: Boolean = false
 
     // Stream active tracking (mirrors CLI _stream_active)
     private var _streamActive = false
@@ -55,16 +59,26 @@ abstract class SendSpinProtocolHandler(
     private var lastMetadata: TrackMetadata? = null
     private var lastPlaybackState: String? = null
     private var lastGroupInfo: GroupInfo? = null
+
+    // Merged controller (group-level) state from server/state deltas.
+    private var currentControllerState: ControllerState? = null
+
+    // Last dispatched artwork color palette (color@v1). Used for
+    // timestamp-excluding change detection -- ColorState.equals ignores the
+    // timestamp, so a re-emitted identical palette does not re-fire.
     private var lastColorState: ColorState? = null
-    private var lastControllerState: ControllerState? = null
-    // Server identity of the most recent handshake. Used to decide whether the
-    // diff-merge anchors (lastMetadata, lastControllerState) are still valid:
-    // they must be cleared when switching to a different server, but preserved
-    // across a reconnect to the same server (see handleServerHello).
-    private var lastServerId: String? = null
 
     // Time sync manager (lazy initialized by subclass)
     protected var timeSyncManager: TimeSyncManager? = null
+
+    // Adaptive jitter-buffer policy: reports a generous min_buffer_ms by default
+    // and grows it on trouble (RTT spikes / sync loss), backing off slowly on a
+    // sustained-good link. Constructed by [initTimeSyncManager] with the
+    // memory-appropriate profile. Guarded by [adaptiveBufferLock] because the
+    // time-sync callback can fire from either the burst-loop or the receive thread.
+    private var adaptiveBuffer: AdaptiveBufferPolicy? = null
+    private val adaptiveBufferLock = Any()
+    private var lastReportedMinBufferMs: Int = SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS
 
     // ========== Abstract Transport Methods ==========
 
@@ -131,33 +145,6 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun onGroupUpdate(info: GroupInfo)
 
     /**
-     * Called when group-level controller state arrives via `server/state`.
-     * Reports the application's supported MediaCommand values and the
-     * group's current volume/mute. Only fires for clients that advertise the
-     * controller@v1 role.
-     *
-     * Default no-op for handlers that don't expose group-level controls.
-     */
-    protected open fun onControllerStateUpdate(state: ControllerState) {}
-
-    /**
-     * Called when artwork-derived color state arrives via `server/state.color`.
-     * Only fires for clients that advertise the `color@v1` role. Idempotent
-     * dedup is done by [handleServerState] -- only fires on changes.
-     *
-     * Default no-op for handlers that don't render color-based theming.
-     */
-    protected open fun onColorStateUpdate(state: ColorState) {}
-
-    /**
-     * Called when the artwork color stream ends and any prior color state
-     * should be cleared.
-     *
-     * Default no-op for handlers that don't render color-based theming.
-     */
-    protected open fun onColorStateCleared() {}
-
-    /**
      * Called when audio stream starts.
      */
     protected abstract fun onStreamStart(config: StreamConfig)
@@ -188,6 +175,24 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun onSyncOffsetApplied(offsetMs: Double, source: String)
 
     /**
+     * Called when the merged controller (group-level) state changes:
+     * supported_commands, group volume/mute, repeat, shuffle.
+     * Default no-op for handlers that don't surface controller state.
+     */
+    protected open fun onControllerStateUpdate(state: ControllerState) {}
+
+    /**
+     * Called when the artwork color palette (color@v1) changes. Default no-op.
+     */
+    protected open fun onColorStateUpdate(state: ColorState) {}
+
+    /**
+     * Called when the artwork color palette is cleared (handshake / stream end).
+     * Default no-op.
+     */
+    protected open fun onColorStateCleared() {}
+
+    /**
      * Called when the audio output should be silenced or unsilenced because
      * the client cannot maintain sync. Per Sendspin spec, clients in the
      * "error" state must mute their audio output and continue buffering
@@ -211,6 +216,11 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun getSupportedFormats(): List<MessageBuilder.FormatEntry>
 
     /**
+     * Get the client app version reported in device_info.software_version.
+     */
+    protected abstract fun getSoftwareVersion(): String
+
+    /**
      * Send client/hello message to start handshake.
      *
      * Buffer capacity is computed from the format list and target duration
@@ -229,7 +239,8 @@ abstract class SendSpinProtocolHandler(
             deviceName = getDeviceName(),
             bufferCapacity = bufferCapacity,
             manufacturer = getManufacturer(),
-            supportedFormats = formats
+            supportedFormats = formats,
+            softwareVersion = getSoftwareVersion()
         )
         sendTextMessage(text)
         Log.d(tag, "Sent client/hello: ${text.take(500)}")
@@ -255,13 +266,51 @@ abstract class SendSpinProtocolHandler(
      * Send player state update (volume/muted/sync state).
      */
     protected fun sendPlayerStateUpdate() {
-        // The filter tracks signed-Double ms (negative user offsets are valid
-        // internally). The wire requires unsigned int [0, 5000] — round and
-        // clamp here; buildPlayerState clamps again as a defence in depth.
         val delayMs = getTimeFilter().staticDelayMs
-            .let { kotlin.math.round(it).toInt() }
-            .coerceIn(SendSpinProtocol.StaticDelay.MIN_MS, SendSpinProtocol.StaticDelay.MAX_MS)
-        sendTextMessage(MessageBuilder.buildPlayerState(currentVolume, currentMuted, currentSyncState, delayMs))
+        val minBufferMs = synchronized(adaptiveBufferLock) {
+            val target = adaptiveBuffer?.currentTargetMs ?: SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS
+            lastReportedMinBufferMs = target
+            target
+        }
+        sendTextMessage(
+            MessageBuilder.buildPlayerState(
+                currentVolume, currentMuted, currentSyncState, delayMs,
+                minBufferMs = minBufferMs
+            )
+        )
+    }
+
+    /**
+     * Feed one time-sync measurement into the adaptive buffer policy and, if the
+     * learned `min_buffer_ms` target shifted, report it (debounced by the policy's
+     * own grow/shrink cooldowns). Also re-evaluates sync state, preserving the
+     * previous [onMeasurementApplied] behavior.
+     */
+    private fun onTimeMeasurement(rttMicros: Long) {
+        val filter = getTimeFilter()
+        val quality = when {
+            filter.isReady && filter.isConverged -> AdaptiveBufferPolicy.SyncQuality.GOOD
+            filter.isReady -> AdaptiveBufferPolicy.SyncQuality.DEGRADED
+            else -> AdaptiveBufferPolicy.SyncQuality.LOST
+        }
+        val changed = synchronized(adaptiveBufferLock) {
+            val policy = adaptiveBuffer
+            if (policy != null) {
+                policy.update(
+                    nowMs = android.os.SystemClock.elapsedRealtime(),
+                    rttMs = rttMicros / 1000.0,
+                    quality = quality
+                )
+                policy.currentTargetMs != lastReportedMinBufferMs
+            } else {
+                false
+            }
+        }
+        evaluateAndPublishSyncState()
+        if (changed && handshakeComplete) {
+            Log.d(tag, "Adaptive min_buffer_ms -> ${adaptiveBuffer?.currentTargetMs}")
+            sendPlayerStateUpdate()
+        }
     }
 
     /**
@@ -279,35 +328,49 @@ abstract class SendSpinProtocolHandler(
      * Set sync state and notify server.
      *
      * Per spec: report "synchronized" when locked to server timeline,
-     * "error" when unable to maintain sync, or "external_source" when audio
-     * output has been taken by another app and Sendspin cannot participate.
+     * report "error" when unable to maintain sync (buffer underrun, clock issues).
+     *
+     * @param syncState Either "synchronized" or "error"
      */
     fun setSyncState(syncState: String) {
-        when (syncState) {
-            SendSpinProtocol.ClientState.SYNCHRONIZED,
-            SendSpinProtocol.ClientState.ERROR,
-            SendSpinProtocol.ClientState.EXTERNAL_SOURCE -> Unit
-            else -> {
-                Log.w(tag, "Invalid sync state: $syncState")
-                return
+        if (syncState != "synchronized" && syncState != "error") {
+            Log.w(tag, "Invalid sync state: $syncState (must be 'synchronized' or 'error')")
+            return
+        }
+        if (currentSyncState != syncState) {
+            currentSyncState = syncState
+            Log.d(tag, "Sync state changed to: $syncState")
+            if (handshakeComplete) {
+                sendPlayerStateUpdate()
             }
         }
-        // Take syncStateLock so the compare-and-set is atomic relative to
-        // evaluateAndPublishSyncState (which writes the same field from
-        // inside the lock). Without the lock, an "external_source" call from
-        // the audio-focus path racing with the time-filter evaluator could
-        // lose the transition.
-        val shouldSend = synchronized(syncStateLock) {
-            if (currentSyncState != syncState) {
-                currentSyncState = syncState
-                Log.d(tag, "Sync state changed to: $syncState")
-                handshakeComplete
+    }
+
+    /**
+     * Report or clear the 'external_source' client state (spec: output is
+     * in use by an external system, e.g. another app holds audio focus).
+     *
+     * While active, [evaluateAndPublishSyncState] is suspended so the
+     * filter-derived synchronized/error states don't overwrite it. On
+     * clear, the state is recomputed from the time filter and republished.
+     *
+     * Safe to call from any thread.
+     */
+    fun setExternalSource(active: Boolean) {
+        val changed = synchronized(syncStateLock) {
+            if (externalSourceActive == active) return
+            externalSourceActive = active
+            if (active) {
+                currentSyncState = "external_source"
             } else {
-                false
+                val filter = getTimeFilter()
+                currentSyncState = if (filter.isReady && filter.isConverged) "synchronized" else "error"
             }
+            true
         }
-        if (shouldSend) {
-            sendPlayerStateUpdate()
+        if (changed) {
+            Log.i(tag, "External source ${if (active) "active" else "cleared"}: state=$currentSyncState")
+            if (handshakeComplete) sendPlayerStateUpdate()
         }
     }
 
@@ -325,6 +388,10 @@ abstract class SendSpinProtocolHandler(
      */
     fun evaluateAndPublishSyncState() {
         val muteChange: Boolean? = synchronized(syncStateLock) {
+            // While an external source owns the output, synchronized/error
+            // reporting (and its mute side effects) is suspended.
+            if (externalSourceActive) return
+
             val filter = getTimeFilter()
             val converged = filter.isReady && filter.isConverged
             if (converged) {
@@ -357,6 +424,7 @@ abstract class SendSpinProtocolHandler(
     fun resetSyncStateTracking() {
         val needsUnmute = synchronized(syncStateLock) {
             hasEverConverged = false
+            externalSourceActive = false
             currentSyncState = "error"
             if (lastPublishedMute) {
                 lastPublishedMute = false
@@ -371,10 +439,40 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Send a media command (play, pause, next, previous, switch).
+     * Send a controller command (play, pause, stop, next, previous, volume,
+     * mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch).
+     *
+     * Per spec, commands should be one of the server's advertised
+     * supported_commands; once the server has told us its set, anything
+     * outside it is dropped (the server would ignore it anyway).
+     *
+     * @param volume only used when [command] is "volume"
+     * @param mute only used when [command] is "mute"
      */
-    fun sendCommand(command: String) {
-        sendTextMessage(MessageBuilder.buildCommand(command))
+    fun sendCommand(command: String, volume: Int? = null, mute: Boolean? = null) {
+        val supported = currentControllerState?.supportedCommands
+        if (supported != null && command !in supported) {
+            Log.w(tag, "Dropping controller command '$command': not in server supported_commands $supported")
+            return
+        }
+        sendTextMessage(MessageBuilder.buildCommand(command, volume, mute))
+    }
+
+    /**
+     * Request a different stream format from the server (spec
+     * stream/request-format). Omitted fields keep their current value.
+     * The server responds with stream/start, which flows through the
+     * normal format-change reconfiguration path.
+     */
+    fun requestStreamFormat(
+        codec: String? = null,
+        sampleRate: Int? = null,
+        channels: Int? = null,
+        bitDepth: Int? = null
+    ) {
+        if (!handshakeComplete) return
+        Log.i(tag, "Requesting stream format: codec=$codec, rate=$sampleRate, ch=$channels, bits=$bitDepth")
+        sendTextMessage(MessageBuilder.buildStreamRequestFormat(codec, sampleRate, channels, bitDepth))
     }
 
     // ========== Player State Methods ==========
@@ -435,10 +533,17 @@ abstract class SendSpinProtocolHandler(
      * Initialize time sync manager.
      */
     protected fun initTimeSyncManager(timeFilter: SendspinTimeFilter) {
+        synchronized(adaptiveBufferLock) {
+            val policy = AdaptiveBufferPolicy(
+                if (isLowMemoryMode()) AdaptiveBufferPolicy.lowMemory() else AdaptiveBufferPolicy.generous()
+            )
+            adaptiveBuffer = policy
+            lastReportedMinBufferMs = policy.currentTargetMs
+        }
         timeSyncManager = TimeSyncManager(
             timeFilter = timeFilter,
             sendClientTime = { sendClientTime() },
-            onMeasurementApplied = { evaluateAndPublishSyncState() },
+            onMeasurementApplied = { rttMicros -> onTimeMeasurement(rttMicros) },
             tag = tag
         )
     }
@@ -447,18 +552,15 @@ abstract class SendSpinProtocolHandler(
 
     /**
      * Handle incoming text (JSON) message.
-     *
-     * Envelope decoding goes through Moshi's generic Map adapter (no
-     * kotlinx.serialization on this path). The envelope is `{type, payload}`;
-     * the payload value is forwarded to MessageParser as a raw Moshi JSON
-     * value (typically Map<String, Any?>), and MessageParser feeds it to the
-     * appropriate KSP-generated wire adapter via fromJsonValue.
+     * Dispatches to appropriate handler based on message type.
      */
     protected fun handleTextMessage(text: String) {
         Log.d(tag, "Received: ${text.take(500)}")
 
         try {
-            val (type, payload) = MessageParser.parseEnvelope(text) ?: return
+            val json = Json.parseToJsonElement(text).jsonObject
+            val type = json["type"]?.jsonPrimitive?.contentOrNull ?: return
+            val payload = json["payload"]?.jsonObject
 
             when (type) {
                 SendSpinProtocol.MessageType.SERVER_HELLO -> handleServerHello(payload)
@@ -477,7 +579,7 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    protected open fun handleServerHello(payload: Any?) {
+    protected open fun handleServerHello(payload: JsonObject?) {
         val result = MessageParser.parseServerHello(payload, "Unknown")
         if (result == null) {
             Log.e(tag, "Failed to parse server/hello")
@@ -489,48 +591,17 @@ abstract class SendSpinProtocolHandler(
 
         handshakeComplete = true
 
-        // Clear cached values that gate on equality-dedup so the first
-        // post-handshake message always propagates. lastColorState MUST be
-        // cleared: on reconnect or server switch, the dedup check
-        // `colorState != lastColorState` in handleServerState would otherwise
-        // suppress the first color update from the new server (if it happened
-        // to be byte-identical) or, worse, leave the previous server's palette
-        // in place when the new server does not advertise color@v1 at all.
-        //
-        // Preserve lastMetadata / lastControllerState ONLY across reconnects
-        // to the same server. The Sendspin server/state stream is diff-style:
-        // after a reconnect MA may send a progress-only or volume-only update
-        // first, and clearing the anchors would collapse every Absent field
-        // to "" / 0, sending the NowPlaying screen to standby mid-playback.
-        // But on a *different* server, preserving these would bleed the prior
-        // server's title/artist/artwork into the new session until the new
-        // server happens to send a fully-populated update.
-        //
-        // An empty incomingServerId means the server omitted server_id from its
-        // hello (the wire field is optional; the parser maps absent/null to "").
-        // We cannot prove it is a different server, so preserve the anchors --
-        // clearing them would silently reintroduce the standby-mid-playback bug
-        // for any server that does not populate server_id.
-        val incomingServerId = result.serverId
-        // Kotlin == on String? is null-safe: null == "x" is false without a
-        // separate null check on lastServerId.
-        val sameServer = incomingServerId.isEmpty() || lastServerId == incomingServerId
-        if (incomingServerId.isEmpty() && lastServerId != null) {
-            // Server omitted server_id; we are preserving the prior server's
-            // metadata anchors. Surface this so a "wrong metadata after server
-            // switch" report has a signal in field logs.
-            Log.w(tag, "server/hello: server_id missing - preserving metadata anchors from lastServerId=$lastServerId")
-        }
-        if (!sameServer) {
-            lastMetadata = null
-            lastControllerState = null
-        }
-        lastServerId = incomingServerId.ifEmpty { lastServerId }
-
+        // Clear cached values so the first post-handshake messages always propagate
         _streamActive = false
         _currentStreamConfig = null
+        lastMetadata = null
         lastPlaybackState = null
         lastGroupInfo = null
+        currentControllerState = null
+        // Always clear the color palette on handshake (unlike metadata, which
+        // is just nulled for dedup): a byte-identical first palette from the
+        // new server would otherwise be suppressed, and a stale prior-server
+        // palette would persist if the new server doesn't advertise color@v1.
         if (lastColorState != null) {
             lastColorState = null
             onColorStateCleared()
@@ -542,7 +613,7 @@ abstract class SendSpinProtocolHandler(
         startTimeSync()
     }
 
-    protected fun handleServerTime(payload: Any?) {
+    protected fun handleServerTime(payload: JsonObject?) {
         val clientReceived = System.nanoTime() / 1000
         val measurement = MessageParser.parseServerTime(payload, clientReceived)
 
@@ -551,19 +622,9 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    protected fun handleServerState(payload: Any?) {
-        // Pass the previous metadata + controller so the parser can merge
-        // partial updates. The server only sends fields that changed; without
-        // merging we'd wipe artist/album/artwork/progress on every title-only
-        // or progress-only update. The parser owns the tri-state distinction
-        // for repeat/shuffle (Absent inherits, Present(null) explicit clear,
-        // Present(v) wins) and for required fields (volume/muted/cmds inherit
-        // from previous when absent on a diff-style controller update).
-        val result = MessageParser.parseServerState(payload, lastMetadata, lastControllerState)
-        val metadata = result.metadata
-        val state = result.state
-        val controllerState = result.controllerState
-        val colorState = result.colorState
+    protected fun handleServerState(payload: JsonObject?) {
+        val result = MessageParser.parseServerState(payload)
+        val (metadata, state, controllerDelta) = result
 
         if (metadata != null) {
             lastMetadata = metadata
@@ -575,18 +636,24 @@ abstract class SendSpinProtocolHandler(
             onPlaybackStateChanged(state)
         }
 
-        if (controllerState != null) {
-            lastControllerState = controllerState
-            onControllerStateUpdate(controllerState)
+        if (controllerDelta != null) {
+            val merged = currentControllerState?.mergedWith(controllerDelta) ?: controllerDelta
+            if (merged != currentControllerState) {
+                currentControllerState = merged
+                onControllerStateUpdate(merged)
+            }
         }
 
+        // Artwork color palette (color@v1). Dedup uses ColorState.equals, which
+        // excludes the timestamp, so a re-emitted identical palette is skipped.
+        val colorState = result.colorState
         if (colorState != null && colorState != lastColorState) {
             lastColorState = colorState
             onColorStateUpdate(colorState)
         }
     }
 
-    protected fun handleServerCommand(payload: Any?) {
+    protected fun handleServerCommand(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleServerCommand ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
         when (val result = MessageParser.parseServerCommand(payload)) {
             is ServerCommandResult.Volume -> {
@@ -601,6 +668,15 @@ abstract class SendSpinProtocolHandler(
                 onMuteCommand(result.muted)
                 sendPlayerStateUpdate()
             }
+            is ServerCommandResult.SetStaticDelay -> {
+                Log.i(tag, "Server command: set static delay to ${result.delayMs}ms")
+                // Same application path as the client/sync_offset extension:
+                // a server-pushed correction on top of the auto-measured
+                // hardware latency.
+                getTimeFilter().setServerSyncOffsetMs(result.delayMs.toDouble())
+                onSyncOffsetApplied(result.delayMs.toDouble(), "server_command")
+                sendPlayerStateUpdate()
+            }
             is ServerCommandResult.Unknown -> {
                 Log.d(tag, "Unknown player command: ${result.command}")
             }
@@ -608,7 +684,7 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    protected fun handleGroupUpdate(payload: Any?) {
+    protected fun handleGroupUpdate(payload: JsonObject?) {
         val info = MessageParser.parseGroupUpdate(payload)
         if (info != null) {
             lastGroupInfo = info
@@ -617,7 +693,7 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    protected fun handleStreamStart(payload: Any?) {
+    protected fun handleStreamStart(payload: JsonObject?) {
         val config = MessageParser.parseStreamStart(payload)
         if (config == null) return
 
@@ -637,16 +713,27 @@ abstract class SendSpinProtocolHandler(
         onStreamStart(config)
     }
 
-    protected fun handleStreamClear(payload: Any?) {
+    protected fun handleStreamClear(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamClear ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
-        // `roles` field carries unversioned family names per spec
-        // (STREAM_CLEAR_ROLE_FAMILIES = {"player", "visualizer"}). If the field
-        // is present and "player" is not in it, the clear targets a role we
-        // don't host (e.g. visualizer-only) and must not wipe our audio buffer.
         val roles = MessageParser.parseRoles(payload)
 
-        if (roles != null && SendSpinProtocol.RoleFamily.PLAYER !in roles) {
-            Log.d(tag, "Stream clear for non-player roles: $roles - ignoring")
+        // Clear the color palette on a color-family clear, independently of the
+        // audio-buffer flush below.
+        val clearColor = roles == null ||
+            SendSpinProtocol.RoleFamily.COLOR in roles ||
+            SendSpinProtocol.Roles.COLOR in roles
+        if (clearColor && lastColorState != null) {
+            lastColorState = null
+            onColorStateCleared()
+        }
+
+        // Only flush the audio buffer for a player-role (or all-roles) clear.
+        // A visualizer/color-only clear must not wipe our PCM queue.
+        val clearPlayer = roles == null ||
+            SendSpinProtocol.RoleFamily.PLAYER in roles ||
+            SendSpinProtocol.Roles.PLAYER in roles
+        if (!clearPlayer) {
+            Log.d(tag, "Stream clear for non-player roles: $roles - not flushing audio")
             return
         }
 
@@ -654,26 +741,29 @@ abstract class SendSpinProtocolHandler(
         onStreamClear()
     }
 
-    protected fun handleStreamEnd(payload: Any?) {
+    protected fun handleStreamEnd(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamEnd ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
-        // `roles` field carries unversioned family names per spec
-        // (STREAM_END_ROLE_FAMILIES = {"player", "artwork", "visualizer", "color"}).
-        // Compare against the family name, not the versioned [Roles.PLAYER]
-        // (= "player@v1"); the latter never matches and silently swallows
-        // every stream/end the server emits.
+        // The server emits the unversioned role-family name ("player") in the
+        // stream/end roles array, NOT the versioned role ("player@v1"). Match
+        // against RoleFamily (accepting the versioned form too for forward
+        // compat); a null roles field means "all roles".
         val roles = MessageParser.parseRoles(payload)
 
-        // Color role: clears any cached palette regardless of which other roles
-        // are ending. Independent of the player-end branch below because a
-        // color-only end (just artwork swap with no audio change) should not
-        // tear down the audio stream.
-        val endColor = roles == null || SendSpinProtocol.RoleFamily.COLOR in roles
+        // Color teardown runs independently of (and before) the player-role
+        // early-return, so a color-only stream/end still clears the palette
+        // without tearing down audio.
+        val endColor = roles == null ||
+            SendSpinProtocol.RoleFamily.COLOR in roles ||
+            SendSpinProtocol.Roles.COLOR in roles
         if (endColor && lastColorState != null) {
             lastColorState = null
             onColorStateCleared()
         }
 
-        if (roles != null && SendSpinProtocol.RoleFamily.PLAYER !in roles) {
+        val endPlayer = roles == null ||
+            SendSpinProtocol.RoleFamily.PLAYER in roles ||
+            SendSpinProtocol.Roles.PLAYER in roles
+        if (!endPlayer) {
             Log.d(tag, "Stream end for non-player roles: $roles - ignoring")
             return
         }
@@ -681,26 +771,10 @@ abstract class SendSpinProtocolHandler(
         Log.i(tag, "Stream end - server terminated playback (roles=${roles ?: "all"})")
         _streamActive = false
         _currentStreamConfig = null
-        // Do NOT clear lastMetadata here. The Sendspin server/state stream is
-        // diff-style (see JsonOptional doc): clients are expected to carry
-        // unchanged fields across updates, and on pause MA emits a
-        // progress-only server/state right after stream/end (title / artist /
-        // album / artwork_url all Absent). With lastMetadata cleared, the
-        // parser has nothing to inherit from, collapses Absent to "" for
-        // strings, and downstream withMetadata interprets the empty
-        // artwork_url as an explicit clear -- the NowPlaying screen's
-        // artwork-zombie safeguard then flips metadata to EMPTY after ~1.7 s
-        // and the user lands on the standby idle screen mid-pause.
-        //
-        // On a real track change, MA includes every field that actually
-        // changed in the next server/state, so the carryover from the prior
-        // track is correct (same artist/album when staying on an album, fresh
-        // values when crossing albums). Cross-server leakage is still guarded
-        // by the post-handshake clear in handleServerHello.
         onStreamEnd()
     }
 
-    protected fun handleClientSyncOffset(payload: Any?) {
+    protected fun handleClientSyncOffset(payload: JsonObject?) {
         val result = MessageParser.parseSyncOffset(payload)
         if (result == null) {
             Log.w(tag, "client/sync_offset: missing or invalid payload")
@@ -709,8 +783,10 @@ abstract class SendSpinProtocolHandler(
 
         Log.i(tag, "client/sync_offset: offset=${result.offsetMs}ms from ${result.source}")
 
+        // Guard against a non-finite offset (NaN/Inf) before clamping --
+        // coerceIn(NaN) is undefined and would poison the time filter.
         if (result.offsetMs.isNaN() || result.offsetMs.isInfinite()) {
-            Log.w(tag, "client/sync_offset: rejecting non-finite offset ${result.offsetMs}")
+            Log.w(tag, "client/sync_offset: non-finite offset ${result.offsetMs} - ignoring")
             return
         }
 
@@ -729,21 +805,8 @@ abstract class SendSpinProtocolHandler(
 
     /**
      * Handle binary message from the transport.
-     *
-     * Gated on [handshakeComplete]: the Sendspin protocol guarantees
-     * `server/hello` and `stream/start` precede any audio frames, so binary
-     * data arriving before the handshake either indicates a misbehaving
-     * server or a late frame from a previous (already-torn-down) session
-     * crossing the new connection's setup window. Either way, feeding such
-     * a chunk into the audio sink before the codec / sample-rate / bit-depth
-     * are known is at best wasted work and at worst a mis-decoded burst.
-     * Drop with a warn so server bugs surface in field logs.
      */
     protected fun handleBinaryMessage(bytes: ByteArray) {
-        if (!handshakeComplete) {
-            Log.w(tag, "Dropping ${bytes.size}-byte binary frame: received before handshake complete")
-            return
-        }
         val message = BinaryMessageParser.parse(bytes)
         if (message != null) {
             dispatchBinaryMessage(message)
@@ -756,6 +819,12 @@ abstract class SendSpinProtocolHandler(
     private fun dispatchBinaryMessage(message: BinaryMessageParser.BinaryMessage) {
         when (message) {
             is BinaryMessageParser.BinaryMessage.Audio -> {
+                // Spec: binary messages should be rejected if there is no
+                // active stream (e.g. chunks in flight after stream/end).
+                if (!_streamActive) {
+                    Log.v(tag, "Dropping audio chunk: no active stream")
+                    return
+                }
                 onAudioChunk(message.timestampMicros, message.payload)
             }
             is BinaryMessageParser.BinaryMessage.Artwork -> {

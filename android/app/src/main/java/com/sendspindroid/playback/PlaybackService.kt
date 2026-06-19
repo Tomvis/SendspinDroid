@@ -51,6 +51,8 @@ import com.sendspindroid.coordinator.ConnectionCoordinator
 import com.sendspindroid.coordinator.FailureReason
 import com.sendspindroid.coordinator.ReconnectStatus
 import com.sendspindroid.coordinator.TransportState
+import com.sendspindroid.diagnostics.HandoffEpisodeRecorder
+import com.sendspindroid.diagnostics.Telemetry
 import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.LogLevel
 import com.sendspindroid.model.PlaybackState
@@ -85,6 +87,7 @@ import com.sendspindroid.network.TransportType
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.DefaultMediaNotificationProvider
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -177,6 +180,13 @@ class PlaybackService : MediaLibraryService() {
     private val _currentServerFlow = MutableStateFlow<UnifiedServer?>(null)
 
     private lateinit var coordinator: ConnectionCoordinator
+
+    // Records network-handoff episodes (drop + reconnect attempts + outcome) from
+    // the coordinator's reconnect status, surfaced in getStats() / bug reports and
+    // submitted to opt-in telemetry as each episode closes.
+    private val handoffRecorder = HandoffEpisodeRecorder().apply {
+        onEpisodeClosed = { episode -> Telemetry.submit(episode) }
+    }
 
     // mDNS discovery for Android Auto browse tree
     private var browseDiscoveryManager: NsdDiscoveryManager? = null
@@ -299,6 +309,22 @@ class PlaybackService : MediaLibraryService() {
             )
             Log.i(TAG, "High Power Mode changed: $enabled")
             onHighPowerModeChanged(enabled)
+        }
+    }
+
+    // BroadcastReceiver for preferred codec changes from settings: ask the
+    // server to switch the live stream via stream/request-format instead of
+    // waiting for the next connect. The server replies with stream/start,
+    // which flows through the normal format-change reconfiguration path.
+    private val preferredCodecReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val codec = intent.getStringExtra(SettingsViewModel.EXTRA_PREFERRED_CODEC) ?: return
+            if (!AudioDecoderFactory.isCodecSupported(codec)) {
+                Log.w(TAG, "Preferred codec changed to unsupported '$codec' - not requesting")
+                return
+            }
+            Log.i(TAG, "Preferred codec changed: $codec - requesting live format change")
+            sendSpinClient?.requestStreamFormat(codec = codec)
         }
     }
 
@@ -459,6 +485,12 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var audioFocusRegistered: Boolean = false
 
+    // Receiver for ACTION_AUDIO_BECOMING_NOISY: fired when the audio output is
+    // rerouting to the built-in speaker because an external output disconnected
+    // (wired headphones unplugged, Bluetooth/Android Auto disconnected). We pause
+    // local playback so we don't abruptly blast the phone speaker.
+    private var becomingNoisyReceiver: BroadcastReceiver? = null
+
     companion object {
         private const val TAG = "PlaybackService"
 
@@ -474,6 +506,10 @@ class PlaybackService : MediaLibraryService() {
 
         // Timeout for awaiting a terminal connection state in connectViaSelectedConnection.
         private const val CONNECT_TIMEOUT_MS = 15_000L
+
+        // How long boot auto-connect waits for mDNS to re-resolve a saved local
+        // server's current address before falling back to the stored one (#158).
+        private const val MDNS_AUTOCONNECT_TIMEOUT_MS = 5_000L
 
         // Custom session commands
         const val COMMAND_CANCEL_RECONNECT = "com.sendspindroid.CANCEL_RECONNECT"
@@ -741,6 +777,12 @@ class PlaybackService : MediaLibraryService() {
             IntentFilter(SettingsViewModel.ACTION_HIGH_POWER_MODE_CHANGED)
         )
 
+        // Register receiver for preferred codec changes from settings
+        LocalBroadcastManager.getInstance(this).registerReceiver(
+            preferredCodecReceiver,
+            IntentFilter(SettingsViewModel.ACTION_PREFERRED_CODEC_CHANGED)
+        )
+
         // Initialize Coil ImageLoader for artwork fetching (skip in low memory mode)
         if (!com.sendspindroid.UserSettings.lowMemoryMode) {
             imageLoader = ImageLoader.Builder(this)
@@ -815,6 +857,7 @@ class PlaybackService : MediaLibraryService() {
         serviceScope.launch {
             coordinator.reconnectStatus.collect { status ->
                 _reconnectStatusRelay.value = status
+                recordHandoff(status)
             }
         }
 
@@ -992,6 +1035,9 @@ class PlaybackService : MediaLibraryService() {
 
         // Initialize AudioManager for device volume control
         initializeVolumeControl()
+
+        // Pause local playback when the audio output device disconnects.
+        registerBecomingNoisyReceiver()
     }
 
     /**
@@ -2923,6 +2969,10 @@ class PlaybackService : MediaLibraryService() {
             // hasAudioFocus is false (e.g., after AUDIOFOCUS_LOSS_TRANSIENT).
             audioFocusRegistered = true
             Log.d(TAG, "Audio focus requested: ${if (hasAudioFocus) "granted" else "denied"}")
+            if (hasAudioFocus) {
+                // We own the output again: clear any 'external_source' report.
+                sendSpinClient?.setExternalSource(false)
+            }
         }
     }
 
@@ -2979,30 +3029,17 @@ class PlaybackService : MediaLibraryService() {
                 }
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
-                Log.d(TAG, "Audio focus lost permanently - disconnecting")
-                // Another app took focus permanently. We can't recover from
-                // this without a fresh AUDIOFOCUS_GAIN, which the system does
-                // NOT issue after a permanent loss. If we merely paused
-                // locally, the server would keep streaming PCM (server is
-                // unaware of focus loss) and the chunk queue inside
-                // SyncAudioPlayer would grow unbounded -- ~150 KB/s on 48 kHz
-                // 16-bit stereo. Disconnect symmetric with the user-initiated
-                // disconnect path so the server tears down the stream.
+                Log.d(TAG, "Audio focus lost permanently")
+                // Another app took focus permanently - pause playback and
+                // report 'external_source' per spec. The server parks this
+                // client in a solo group and ends its streams (so the chunk
+                // queue does not grow unbounded), and pressing play in our UI
+                // re-requests focus, which clears the state. hasAudioFocus is
+                // written under audioFocusLock to stay consistent with the
+                // GAIN / LOSS_TRANSIENT branches.
                 synchronized(audioFocusLock) { hasAudioFocus = false }
-                // Mirror the COMMAND_DISCONNECT handler exactly so this is a
-                // genuine "final, do not reconnect" disconnect:
-                //   1. lastDisconnectUserInitiated=true makes the resulting
-                //      STATE_DISCONNECTED broadcast carry WAS_USER_INITIATED=
-                //      true, so MainActivity does NOT fire COMMAND_CONNECT_AUTO.
-                //      A bare disconnectFromServer() leaves the flag false and
-                //      the UI auto-reconnects within seconds -- which would
-                //      either steal focus back from the foreground app or
-                //      stream silently in the background, contradicting the
-                //      rationale above.
-                //   2. coordinator.disconnect() cancels any in-flight reconnect
-                //      attempt; disconnectFromServer() alone would not.
-                lastDisconnectUserInitiated = true
-                coordinator.disconnect()
+                syncAudioPlayer?.pause()
+                sendSpinClient?.setExternalSource(true)
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 Log.d(TAG, "Audio focus lost transiently")
@@ -3022,6 +3059,48 @@ class PlaybackService : MediaLibraryService() {
                 // since ducking would desync volume with other clients
             }
         }
+    }
+
+    /**
+     * Register a receiver for ACTION_AUDIO_BECOMING_NOISY so we pause when the
+     * audio output device disconnects. Idempotent.
+     */
+    private fun registerBecomingNoisyReceiver() {
+        if (becomingNoisyReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                    handleBecomingNoisy()
+                }
+            }
+        }
+        becomingNoisyReceiver = receiver
+        // System-protected broadcast; not exported (constant value is inert on
+        // API < 33, the 3-arg overload exists since API 26).
+        registerReceiver(
+            receiver,
+            IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+            Context.RECEIVER_NOT_EXPORTED
+        )
+        Log.d(TAG, "Registered ACTION_AUDIO_BECOMING_NOISY receiver")
+    }
+
+    /**
+     * Handles ACTION_AUDIO_BECOMING_NOISY: the audio output is rerouting to the
+     * built-in speaker because an external output disconnected (wired headphones
+     * unplugged, Bluetooth/Android Auto disconnected). Pause local playback so we
+     * don't abruptly blast the phone speaker, matching standard media-app
+     * behavior. Pausing is local-only (we do not pause the MA group) so other
+     * grouped speakers keep playing.
+     *
+     * ACTION_AUDIO_BECOMING_NOISY is fired once by the system per transition, so
+     * it is inherently single-fire -- unlike AudioDeviceCallback.onAudioDevicesRemoved,
+     * which can fire several times for one Bluetooth device (A2DP + SCO) and
+     * would need debouncing.
+     */
+    private fun handleBecomingNoisy() {
+        Log.i(TAG, "Audio becoming noisy (output disconnected) - pausing local playback")
+        syncAudioPlayer?.pause()
     }
 
     /**
@@ -3642,6 +3721,21 @@ class PlaybackService : MediaLibraryService() {
      * Collects current stats from SyncAudioPlayer and SendSpin.
      * Returns a Bundle containing all stats for Stats for Nerds display.
      */
+    /** Translate a coordinator reconnect status into a handoff-episode event. */
+    private fun recordHandoff(status: ReconnectStatus) {
+        val transport = coordinator.networkState.value.transportType.name
+        val methods = coordinator.sessionState.value.server?.configuredMethods?.map { it.name } ?: emptyList()
+        val playing = syncAudioPlayer?.getStats()?.isPlaying ?: false
+        val phase = when (status) {
+            is ReconnectStatus.Attempting -> HandoffEpisodeRecorder.Phase.ATTEMPTING
+            is ReconnectStatus.Succeeded -> HandoffEpisodeRecorder.Phase.SUCCEEDED
+            is ReconnectStatus.Failed -> HandoffEpisodeRecorder.Phase.FAILED
+            ReconnectStatus.Idle -> HandoffEpisodeRecorder.Phase.IDLE
+        }
+        val method = (status as? ReconnectStatus.Attempting)?.method?.name
+        handoffRecorder.onReconnect(phase, method, transport, methods, playing)
+    }
+
     private fun getStats(): Bundle {
         val bundle = Bundle()
 
@@ -3655,6 +3749,9 @@ class PlaybackService : MediaLibraryService() {
             bundle.putString("connection_state", "Disconnected")
             bundle.putString("audio_codec", "--")
         }
+
+        // Network-handoff episodes (drop + reconnect outcomes) for bug reports.
+        bundle.putString("handoff_episodes", handoffRecorder.summary())
 
         // Get stats from SyncAudioPlayer
         val audioStats = syncAudioPlayer?.getStats()
@@ -3910,16 +4007,13 @@ class PlaybackService : MediaLibraryService() {
             MEDIA_ID_MA_RADIO -> getMaRadioStations()
             else -> when {
                 parentId.startsWith(MEDIA_ID_MA_PLAYLIST_PREFIX) -> {
-                    val playlistId = parentId.removePrefix(MEDIA_ID_MA_PLAYLIST_PREFIX)
-                    getMaPlaylistTracks(playlistId)
+                    getMaPlaylistTracks(parentId)
                 }
                 parentId.startsWith(MEDIA_ID_MA_ALBUM_PREFIX) -> {
-                    val albumId = parentId.removePrefix(MEDIA_ID_MA_ALBUM_PREFIX)
-                    getMaAlbumTracks(albumId)
+                    getMaAlbumTracks(parentId)
                 }
                 parentId.startsWith(MEDIA_ID_MA_ARTIST_PREFIX) -> {
-                    val artistId = parentId.removePrefix(MEDIA_ID_MA_ARTIST_PREFIX)
-                    getMaArtistAlbums(artistId)
+                    getMaArtistAlbums(parentId)
                 }
                 else -> {
                     Log.w(TAG, "Unknown parentId for MA children: $parentId")
@@ -4017,8 +4111,10 @@ class PlaybackService : MediaLibraryService() {
 
     private fun createMaPlaylistItem(playlist: MaPlaylist): MediaItem {
         val subtitle = if (playlist.trackCount > 0) "${playlist.trackCount} tracks" else null
+        // Encode provider in mediaId as: ma_playlist_ID~PROVIDER
+        val mediaId = "$MEDIA_ID_MA_PLAYLIST_PREFIX${MaMediaId.encode(playlist.playlistId, playlist.provider)}"
         return MediaItem.Builder()
-            .setMediaId("$MEDIA_ID_MA_PLAYLIST_PREFIX${playlist.playlistId}")
+            .setMediaId(mediaId)
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(playlist.name)
@@ -4042,8 +4138,10 @@ class PlaybackService : MediaLibraryService() {
                 append(it)
             }
         }.ifEmpty { null }
+        // Encode provider in mediaId as: ma_album_ID~PROVIDER
+        val mediaId = "$MEDIA_ID_MA_ALBUM_PREFIX${MaMediaId.encode(album.albumId, album.provider)}"
         return MediaItem.Builder()
-            .setMediaId("$MEDIA_ID_MA_ALBUM_PREFIX${album.albumId}")
+            .setMediaId(mediaId)
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(album.name)
@@ -4064,8 +4162,10 @@ class PlaybackService : MediaLibraryService() {
     }
 
     private fun createMaArtistItem(artist: MaArtist): MediaItem {
+        // Encode provider in mediaId as: ma_artist_ID~PROVIDER
+        val mediaId = "$MEDIA_ID_MA_ARTIST_PREFIX${MaMediaId.encode(artist.artistId, artist.provider)}"
         return MediaItem.Builder()
-            .setMediaId("$MEDIA_ID_MA_ARTIST_PREFIX${artist.artistId}")
+            .setMediaId(mediaId)
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(artist.name)
@@ -4165,36 +4265,51 @@ class PlaybackService : MediaLibraryService() {
     // Music Assistant Drill-Down Methods (suspend)
     // ========================================================================
 
-    private suspend fun getMaPlaylistTracks(playlistId: String): List<MediaItem> {
-        maPlaylistTracksCache[playlistId]
+    private suspend fun getMaPlaylistTracks(parentId: String): List<MediaItem> {
+        // Parse parentId: "ma_playlist_ID~PROVIDER" or fallback to "ma_playlist_ID"
+        val (actualPlaylistId, provider) =
+            MaMediaId.decode(parentId.removePrefix(MEDIA_ID_MA_PLAYLIST_PREFIX))
+
+        val cacheKey = MaMediaId.encode(actualPlaylistId, provider)
+        maPlaylistTracksCache[cacheKey]
             ?.takeUnless { it.expired(MA_DETAIL_CACHE_TTL_MS) }
             ?.let { return it.data }
 
-        val result = MusicAssistant.getPlaylistTracks(playlistId)
+        val result = MusicAssistant.getPlaylistTracks(actualPlaylistId, provider)
         val items = result.getOrNull()?.map { createMaTrackItem(it) } ?: emptyList()
-        maPlaylistTracksCache[playlistId] = CacheEntry(items)
+        maPlaylistTracksCache[cacheKey] = CacheEntry(items)
         return items
     }
 
-    private suspend fun getMaAlbumTracks(albumId: String): List<MediaItem> {
-        maAlbumTracksCache[albumId]
+    private suspend fun getMaAlbumTracks(parentId: String): List<MediaItem> {
+        // Parse parentId: "ma_album_ID~PROVIDER" or fallback to "ma_album_ID"
+        val (actualAlbumId, provider) =
+            MaMediaId.decode(parentId.removePrefix(MEDIA_ID_MA_ALBUM_PREFIX))
+
+        val cacheKey = MaMediaId.encode(actualAlbumId, provider)
+        maAlbumTracksCache[cacheKey]
             ?.takeUnless { it.expired(MA_DETAIL_CACHE_TTL_MS) }
             ?.let { return it.data }
 
-        val result = MusicAssistant.getAlbumTracks(albumId)
+        val result = MusicAssistant.getAlbumTracks(actualAlbumId, provider)
         val items = result.getOrNull()?.map { createMaTrackItem(it) } ?: emptyList()
-        maAlbumTracksCache[albumId] = CacheEntry(items)
+        maAlbumTracksCache[cacheKey] = CacheEntry(items)
         return items
     }
 
-    private suspend fun getMaArtistAlbums(artistId: String): List<MediaItem> {
-        maArtistAlbumsCache[artistId]
+    private suspend fun getMaArtistAlbums(parentId: String): List<MediaItem> {
+        // Parse parentId: "ma_artist_ID~PROVIDER" or fallback to "ma_artist_ID"
+        val (actualArtistId, provider) =
+            MaMediaId.decode(parentId.removePrefix(MEDIA_ID_MA_ARTIST_PREFIX))
+
+        val cacheKey = MaMediaId.encode(actualArtistId, provider)
+        maArtistAlbumsCache[cacheKey]
             ?.takeUnless { it.expired(MA_DETAIL_CACHE_TTL_MS) }
             ?.let { return it.data }
 
-        val result = MusicAssistant.getArtistDetails(artistId)
+        val result = MusicAssistant.getArtistDetails(actualArtistId, provider)
         val items = result.getOrNull()?.albums?.map { createMaAlbumItem(it) } ?: emptyList()
-        maArtistAlbumsCache[artistId] = CacheEntry(items)
+        maArtistAlbumsCache[cacheKey] = CacheEntry(items)
         return items
     }
 
@@ -4376,14 +4491,18 @@ class PlaybackService : MediaLibraryService() {
                         MusicAssistant.playMedia(uri, mediaType = "radio")
                     }
                     mediaId.startsWith(MEDIA_ID_MA_PLAYLIST_PREFIX) -> {
-                        val playlistId = mediaId.removePrefix(MEDIA_ID_MA_PLAYLIST_PREFIX)
-                        val uri = "library://playlist/$playlistId"
+                        // Parse mediaId: "ma_playlist_ID~PROVIDER" or fallback to "ma_playlist_ID"
+                        val (playlistId, provider) =
+                            MaMediaId.decode(mediaId.removePrefix(MEDIA_ID_MA_PLAYLIST_PREFIX))
+                        val uri = "$provider://playlist/$playlistId"
                         Log.d(TAG, "MA: Playing playlist uri=$uri")
                         MusicAssistant.playMedia(uri, mediaType = "playlist")
                     }
                     mediaId.startsWith(MEDIA_ID_MA_ALBUM_PREFIX) -> {
-                        val albumId = mediaId.removePrefix(MEDIA_ID_MA_ALBUM_PREFIX)
-                        val uri = "library://album/$albumId"
+                        // Parse mediaId: "ma_album_ID~PROVIDER" or fallback to "ma_album_ID"
+                        val (albumId, provider) =
+                            MaMediaId.decode(mediaId.removePrefix(MEDIA_ID_MA_ALBUM_PREFIX))
+                        val uri = "$provider://album/$albumId"
                         Log.d(TAG, "MA: Playing album uri=$uri")
                         MusicAssistant.playMedia(uri, mediaType = "album")
                     }
@@ -4567,8 +4686,9 @@ class PlaybackService : MediaLibraryService() {
         // Connect using the server's preferred method
         when {
             server.local != null -> {
-                Log.i(TAG, "Auto-connect: local connection to ${server.local!!.address}")
-                connectToServer(server.local!!.address, server.local!!.path)
+                // Re-resolve via mDNS first: a stored static IP can go stale
+                // (DHCP) and cause a refused connect on boot. See #158.
+                autoConnectLocalWithMdns(server)
             }
             server.remote != null -> {
                 Log.i(TAG, "Auto-connect: remote connection with ID ${server.remote!!.remoteId.take(8)}...")
@@ -4581,6 +4701,68 @@ class PlaybackService : MediaLibraryService() {
             else -> {
                 Log.w(TAG, "Auto-connect: server ${server.name} has no configured connection methods")
             }
+        }
+    }
+
+    /**
+     * Auto-connect to a saved local server, re-resolving its current address via
+     * mDNS first so a stale stored address (DHCP change) doesn't cause a failed
+     * connect on boot. Falls back to the stored address if mDNS doesn't find the
+     * server within [MDNS_AUTOCONNECT_TIMEOUT_MS] (server offline, or the network
+     * not yet up on boot). See #158.
+     */
+    private fun autoConnectLocalWithMdns(server: UnifiedServer) {
+        val local = server.local ?: return
+        serviceScope.launch {
+            val resolved = resolveLocalAddressViaMdns(server.name, MDNS_AUTOCONNECT_TIMEOUT_MS)
+            val address = resolved ?: local.address
+            when {
+                resolved == null ->
+                    // warn: on boot this correlates with a likely-failing connect
+                    // when the stored address has gone stale (the #158 scenario).
+                    Log.w(TAG, "Auto-connect: mDNS did not find '${server.name}'; using stored ${local.address}")
+                resolved != local.address ->
+                    Log.i(TAG, "Auto-connect: mDNS resolved '${server.name}' to $resolved (stored ${local.address})")
+                else ->
+                    Log.i(TAG, "Auto-connect: mDNS confirmed '${server.name}' at $resolved")
+            }
+            connectToServer(address, local.path)
+        }
+    }
+
+    /**
+     * Run a short, bounded mDNS discovery and return the current address of the
+     * discovered server whose friendly name (or, as a fallback, raw mDNS service
+     * name) equals [serverName], or null on timeout. Every result is fed to
+     * [UnifiedServerRepository.addDiscoveredServer], which also refreshes the
+     * matching saved server's stored address (by friendly name).
+     */
+    private suspend fun resolveLocalAddressViaMdns(serverName: String, timeoutMs: Long): String? {
+        val result = CompletableDeferred<String?>()
+        val manager = NsdDiscoveryManager(this, object : NsdDiscoveryManager.DiscoveryListener {
+            override fun onServerDiscovered(name: String, address: String, path: String, friendlyName: String) {
+                UnifiedServerRepository.addDiscoveredServer(friendlyName, address, path)
+                if (!result.isCompleted && (friendlyName == serverName || name == serverName)) {
+                    result.complete(address)
+                }
+            }
+            override fun onServerLost(name: String) {}
+            override fun onDiscoveryStarted() {}
+            override fun onDiscoveryStopped() {}
+            override fun onDiscoveryError(error: String) {
+                // Complete so we fall back to the stored address immediately
+                // instead of stalling for the full timeout.
+                Log.w(TAG, "Auto-connect: mDNS discovery error for '$serverName': $error")
+                if (!result.isCompleted) result.complete(null)
+            }
+        })
+        return try {
+            manager.startDiscovery()
+            withTimeoutOrNull(timeoutMs) { result.await() }
+        } finally {
+            // cleanup() (not stopDiscovery()) so the multicast lock is released
+            // even if onDiscoveryStarted never fired.
+            manager.cleanup()
         }
     }
 
@@ -4639,7 +4821,14 @@ class PlaybackService : MediaLibraryService() {
 
         // Unregister High Power Mode receiver and release locks
         LocalBroadcastManager.getInstance(this).unregisterReceiver(highPowerModeReceiver)
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(preferredCodecReceiver)
         releaseHighPowerLocks()
+
+        // Unregister the becoming-noisy receiver (system broadcast)
+        becomingNoisyReceiver?.let {
+            runCatching { unregisterReceiver(it) }
+            becomingNoisyReceiver = null
+        }
 
         // Unregister volume observer (only if it was registered)
         if (volumeObserverRegistered) {

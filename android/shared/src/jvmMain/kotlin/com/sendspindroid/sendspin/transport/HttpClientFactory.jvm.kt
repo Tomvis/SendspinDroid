@@ -8,12 +8,9 @@ import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
 /**
- * JVM `actual` for [createWebSocketHttpClient].
- *
- * Same OkHttp-backed configuration as the Android `actual`: ping interval is
- * set on the underlying [OkHttpClient] so dead-peer detection works (Ktor's
- * own `install(WebSockets) { pingIntervalMillis = ... }` is silently ignored
- * by the OkHttp engine).
+ * JVM `actual` for [createWebSocketHttpClient]. Same configuration as the
+ * Android actual: ping interval on the underlying OkHttpClient (the Ktor
+ * OkHttp engine ignores `pingIntervalMillis`).
  */
 internal actual fun createWebSocketHttpClient(
     pingIntervalSeconds: Long,
