@@ -3169,7 +3169,21 @@ class MainActivity : AppCompatActivity() {
                 albumTrack = metadata.trackNumber?.takeIf { it > 0 },
             )
         }
-        updateAlbumArt(metadata)
+        // Only refresh album art when the controller emission actually carries
+        // art. Media3 fires art-less MediaMetadata between tracks and on state
+        // transitions (the same blank emissions the title/artist gate above
+        // skips); routing those into updateAlbumArt hit its else branch and
+        // called viewModel.clearArtwork(), blanking the cover. The authoritative
+        // artwork is the session-extras EXTRA_ARTWORK_URL path (loadArtworkFromUrl,
+        // driven by the preserved PlaybackState.artworkUrl). When the server omits
+        // artwork_url on a same-album track the service never re-fetches the
+        // bitmap, so the controller emission stays art-less for the whole track
+        // and the clear was permanent -- the cover vanished at the track change
+        // and never came back. Genuine clears happen via resetPlaybackState /
+        // the idle watchdog, not here.
+        if (metadata.artworkData?.isNotEmpty() == true || metadata.artworkUri != null) {
+            updateAlbumArt(metadata)
+        }
     }
 
     private fun updateMetadata(

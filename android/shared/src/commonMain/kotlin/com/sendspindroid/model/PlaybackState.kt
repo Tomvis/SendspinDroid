@@ -103,11 +103,21 @@ data class PlaybackState(
             artist = newArtist,
             albumArtist = resolveStr(albumArtist, this.albumArtist),
             album = newAlbum,
-            artworkUrl = when {
-                artworkUrl == null -> this.artworkUrl
-                artworkUrl.isEmpty() -> null
-                else -> artworkUrl
-            },
+            // Preserve the prior cover on BOTH null and empty input; only a
+            // non-empty URL replaces it (a real clear goes through
+            // withClearedMetadata on disconnect/stop). The stateless kotlinx
+            // parser collapses an OMITTED artwork_url to "", and the SendSpin
+            // server omits it in most frames -- the periodic position-only
+            // updates AND the new-track announce, whose real URL lands a frame
+            // or two later. Clearing on empty therefore blanked the cover both
+            // mid-track and at every track change until the URL caught up.
+            // Holding the prior image through the gap (the next non-empty URL
+            // overrides it) reconstructs the pre-merge diff-merge's
+            // inherit-on-absent and matches the optimistic queue-tap's
+            // preserve-on-null. isNewTrack is intentionally NOT consulted here:
+            // an art-less track is vanishingly rare on this server and a
+            // momentary stale cover beats a blank one.
+            artworkUrl = if (artworkUrl.isNullOrEmpty()) this.artworkUrl else artworkUrl,
             year = resolveInt(year, this.year),
             albumTrack = resolveInt(albumTrack, this.albumTrack),
             queueTrack = resolveInt(queueTrack, this.queueTrack),

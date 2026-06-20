@@ -271,6 +271,53 @@ class PlaybackStateTest {
     }
 
     @Test
+    fun withMetadata_sameTrackPreservesArtworkUrlOnEmpty() {
+        // Regression (post-Beta13 kotlinx parser swap): the upstream stateless
+        // parser collapses an OMITTED artwork_url to "" -- it can't distinguish
+        // an omitted field from a present-but-empty one. The SendSpin server
+        // emits periodic position-only server/state frames that omit
+        // artwork_url; on the same track those must NOT wipe the cover. The
+        // prior Moshi parser inherited the omitted URL via a stateful
+        // diff-merge; that preservation is reconstructed here as
+        // clear-only-on-track-change, mirroring the int ancillaries.
+        val state = PlaybackState(
+            title = "Song", artist = "Artist", album = "Album",
+            artworkUrl = "https://art.jpg"
+        )
+        val updated = state.withMetadata(
+            title = "Song", artist = "Artist", album = "Album",
+            albumArtist = null, artworkUrl = "",
+            year = null, albumTrack = null, queueTrack = null, totalTracks = null,
+            durationMs = 180000, positionMs = 5000
+        )
+        assertEquals("https://art.jpg", updated.artworkUrl)
+    }
+
+    @Test
+    fun withMetadata_newTrackPreservesArtworkUrlOnEmpty() {
+        // Track-change side of the same regression: the SendSpin server
+        // announces a new track (new title) in a frame that OMITS artwork_url
+        // and sends the real URL a frame or two later. The stateless parser
+        // collapses that omission to "", so clearing on a track change blanked
+        // the cover until the new URL caught up -- "the cover is lost when the
+        // next track starts". Holding the prior image through the gap (the new
+        // non-empty URL overrides it on arrival) matches the pre-merge
+        // inherit-on-absent behavior and the optimistic queue-tap's
+        // preserve-on-null. A real clear goes through withClearedMetadata.
+        val state = PlaybackState(
+            title = "Old", artist = "Old Artist", album = "Old Album",
+            artworkUrl = "https://old.jpg"
+        )
+        val updated = state.withMetadata(
+            title = "New", artist = "New Artist", album = "New Album",
+            albumArtist = null, artworkUrl = "",
+            year = null, albumTrack = null, queueTrack = null, totalTracks = null,
+            durationMs = 0, positionMs = 0
+        )
+        assertEquals("https://old.jpg", updated.artworkUrl)
+    }
+
+    @Test
     fun withMetadata_newTrackByTitleOnlyClearsAncillaries() {
         // Track change detected even when only title differs.
         val state = PlaybackState(
