@@ -121,7 +121,17 @@ data class PlaybackState(
             year = resolveInt(year, this.year),
             albumTrack = resolveInt(albumTrack, this.albumTrack),
             queueTrack = resolveInt(queueTrack, this.queueTrack),
-            totalTracks = resolveInt(totalTracks, this.totalTracks),
+            // total_tracks is the queue length, not a per-track attribute. The
+            // server sends it once (the connect snapshot) and OMITS it on every
+            // later track-change and position frame -- the stateless parser maps
+            // that to 0 -> null. resolveInt clears ancillaries on a track change
+            // (correct for year / album_track), which wiped totalTracks too and
+            // froze the NowPlaying "X of Y" counter once the snapshot scrolled
+            // past (the sticky updater only commits when totalTracks > 0).
+            // Preserve the prior value on absent/non-positive input; only a
+            // positive value replaces it -- same inherit-on-absent contract as
+            // artworkUrl. A real reset goes through withClearedMetadata.
+            totalTracks = totalTracks?.takeIf { it > 0 } ?: this.totalTracks,
             durationMs = if (durationMs > 0) durationMs else this.durationMs,
             positionMs = positionMs,
             // positionUpdatedAt: stamp when positionMs > 0 (real anchor),

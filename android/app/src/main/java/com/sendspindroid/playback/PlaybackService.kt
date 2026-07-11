@@ -1433,10 +1433,21 @@ class PlaybackService : MediaLibraryService() {
                 }
 
                 val newState = if (isGroupChange) {
+                    // Preserve total_tracks across the metadata clear. It is the
+                    // queue length, delivered ONLY in the connect/subscribe
+                    // server/state snapshot -- which races AHEAD of this
+                    // group/update on initial join (null -> group). A full
+                    // withClearedMetadata() wiped the just-received value and the
+                    // NowPlaying "X of Y" counter never recovered, because the
+                    // server never re-sends total_tracks on subsequent frames
+                    // (withMetadata preserves it, but only if it survives to be
+                    // preserved). A genuine switch to a different queue re-delivers
+                    // it in that queue's own snapshot, overriding the held value.
                     currentState.withClearedMetadata().copy(
                         groupId = groupId,
                         groupName = groupName.ifEmpty { null },
-                        playbackState = newPlaybackState
+                        playbackState = newPlaybackState,
+                        totalTracks = currentState.totalTracks
                     )
                 } else {
                     currentState.copy(

@@ -194,7 +194,10 @@ class PlaybackStateTest {
         assertNull(updated.year)
         assertNull(updated.albumTrack)
         assertNull(updated.queueTrack)
-        assertNull(updated.totalTracks)
+        // totalTracks is the exception: 0 is never a real queue length (a
+        // playing track implies >= 1), so it means "absent" and preserves the
+        // prior value rather than clearing. See withMetadata.
+        assertEquals(12, updated.totalTracks)
     }
 
     // --- withMetadata new-track-clear semantics ---
@@ -222,7 +225,10 @@ class PlaybackStateTest {
         assertNull(updated.year)
         assertNull(updated.albumTrack)
         assertNull(updated.queueTrack)
-        assertNull(updated.totalTracks)
+        // totalTracks is the queue length, not a per-track field: it is
+        // preserved across track changes (the server only sends it once). See
+        // withMetadata_newTrackPreservesTotalTracksOnAbsent.
+        assertEquals(10, updated.totalTracks)
     }
 
     @Test
@@ -332,6 +338,32 @@ class PlaybackStateTest {
         )
         assertNull(updated.year)
         assertNull(updated.queueTrack)
+    }
+
+    @Test
+    fun withMetadata_newTrackPreservesTotalTracksOnAbsent() {
+        // total_tracks is the QUEUE length, not a per-track attribute. The MA
+        // server sends it once (the connect snapshot) and OMITS it on every
+        // subsequent track-change and position frame; the stateless parser maps
+        // the omission to 0 -> null. Clearing it on each track change (the way
+        // year / album_track legitimately clear) froze the NowPlaying "X of Y"
+        // counter once the snapshot scrolled past: the numerator stuck while the
+        // queue advanced, because the sticky updater only commits when
+        // totalTracks > 0. Preserve it across track changes; only a positive
+        // server value replaces it. queueTrack still tracks per-track (the
+        // server sends the new position in the same frame).
+        val state = PlaybackState(
+            title = "Old Song", artist = "Old Artist", album = "Old Album",
+            queueTrack = 4, totalTracks = 9
+        )
+        val updated = state.withMetadata(
+            title = "New Song", artist = "New Artist", album = "New Album",
+            albumArtist = null, artworkUrl = null,
+            year = null, albumTrack = null, queueTrack = 5, totalTracks = null,
+            durationMs = 180000, positionMs = 0
+        )
+        assertEquals(5, updated.queueTrack)
+        assertEquals(9, updated.totalTracks)
     }
 
     // --- withClearedMetadata ---
