@@ -74,15 +74,15 @@ android {
         // Ranges: MAJOR 0-9999, MINOR 0-99, PATCH 0-99
         // Example: 2.0.0 = 20000, 2.1.3 = 20103, 10.5.22 = 100522
         // Beta releases: bump by N from base, BetaN = base + N
-        // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta13 = 20013). Note this diverges
+        // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta15 = 20015). Note this diverges
         // from the global rule in CLAUDE.md ("pre-release shares the stable
         // versionCode"); this fork bumps each beta so internal users get the
         // newer build via Play.
-        versionCode = 20013
+        versionCode = 20015
 
         // versionName: User-visible version string
         // Follows semantic versioning (major.minor.patch[-prerelease])
-        versionName = "2.0.0-Beta13"
+        versionName = "2.0.0-Beta15"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
