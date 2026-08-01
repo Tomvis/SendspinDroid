@@ -11,13 +11,10 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -67,9 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -1553,29 +1548,23 @@ private fun TvOverflowMenuItem(
     onClick: () -> Unit,
     focusRequester: FocusRequester? = null,
 ) {
-    // tvFocusable + clickable on the same Box adds two focus targets, and the
-    // outer (tvFocusable's) absorbs focus while the inner clickable holds the
-    // OK key handler -- pressing OK does nothing. Drive the visual ring from
-    // clickable's own interaction source so there's only one focus target.
+    // Hand clickable's own interaction source to tvFocusable so the shared focus
+    // ring is driven by this Box's single focus target. Letting the helper add
+    // its own focus target instead would stack two of them: the outer one would
+    // absorb focus while the inner clickable kept the OK key handler, so the
+    // item would highlight but pressing OK would do nothing.
     val interactionSource = remember { MutableInteractionSource() }
-    val isFocused by interactionSource.collectIsFocusedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (isFocused) 1.02f else 1f,
-        label = "tv-menu-item-scale",
-    )
-    val borderColor = if (isFocused) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        Color.Transparent
-    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
-            .scale(scale)
-            .border(width = 3.dp, color = borderColor, shape = RoundedCornerShape(10.dp))
+            .tvFocusable(
+                focusRequester = focusRequester,
+                cornerRadius = 10.dp,
+                focusScale = 1.02f,
+                interactionSource = interactionSource,
+            )
             .clip(RoundedCornerShape(10.dp))
-            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .clickable(
                 interactionSource = interactionSource,
                 indication = LocalIndication.current,

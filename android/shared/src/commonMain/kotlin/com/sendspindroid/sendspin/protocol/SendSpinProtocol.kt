@@ -113,7 +113,6 @@ object SendSpinProtocol {
         const val CONTROLLER = "controller@v1"
         const val METADATA = "metadata@v1"
         const val ARTWORK = "artwork@v1"
-        const val COLOR = "color@v1"
     }
 
     /**
@@ -128,7 +127,6 @@ object SendSpinProtocol {
         const val METADATA = "metadata"
         const val ARTWORK = "artwork"
         const val VISUALIZER = "visualizer"
-        const val COLOR = "color"
     }
 }
 
@@ -291,54 +289,8 @@ data class ControllerState(
 data class ServerStateResult(
     val metadata: TrackMetadata?,
     val playbackState: String?,
-    val controller: ControllerState?,
-    val colorState: ColorState? = null
+    val controller: ControllerState?
 )
-
-/**
- * Color palette extracted from the currently-playing artwork. Sent on
- * `server/state.color` to clients that advertise the `color@v1` role.
- *
- * Each color is a list of three integers in 0..255 (RGB). Fields are nullable
- * because the server may emit a partial palette (only the colors it could
- * extract). [timestamp] is the server-side capture time in microseconds.
- *
- * Equality intentionally EXCLUDES [timestamp]: the server regenerates the
- * timestamp on every color emission, but the palette itself rarely changes
- * within a track. Consumers compare ColorStates for change-detection dedup,
- * and including timestamp would defeat that dedup. (This is why it is a
- * hand-written class rather than a data class.)
- */
-class ColorState(
-    val timestamp: Long = 0L,
-    val backgroundDark: List<Int>? = null,
-    val backgroundLight: List<Int>? = null,
-    val primary: List<Int>? = null,
-    val accent: List<Int>? = null,
-    val onDark: List<Int>? = null,
-    val onLight: List<Int>? = null,
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (other !is ColorState) return false
-        return backgroundDark == other.backgroundDark &&
-            backgroundLight == other.backgroundLight &&
-            primary == other.primary &&
-            accent == other.accent &&
-            onDark == other.onDark &&
-            onLight == other.onLight
-    }
-
-    override fun hashCode(): Int {
-        var result = backgroundDark?.hashCode() ?: 0
-        result = 31 * result + (backgroundLight?.hashCode() ?: 0)
-        result = 31 * result + (primary?.hashCode() ?: 0)
-        result = 31 * result + (accent?.hashCode() ?: 0)
-        result = 31 * result + (onDark?.hashCode() ?: 0)
-        result = 31 * result + (onLight?.hashCode() ?: 0)
-        return result
-    }
-}
 
 /**
  * Group information from group/update messages.

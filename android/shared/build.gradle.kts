@@ -52,3 +52,22 @@ kotlin {
 
     jvmToolchain(21)
 }
+
+// "test" lifecycle alias for the KMP host-test suite.
+//
+// The Android KMP target names its host (JVM) test task "testAndroidHostTest"
+// and, unlike the java plugin, never creates a plain "test" task. Gradle's
+// multi-project "./gradlew test" matches tasks by name across every project,
+// so without this alias the documented "cd android && ./gradlew test" resolved
+// to :app:test only and silently skipped this module's entire suite - a
+// regression in, say, the transport error classifier or PlaybackState metadata
+// merging would ship green.
+//
+// dependsOn takes the task *name* (not a TaskProvider) on purpose: the Android
+// plugin registers testAndroidHostTest during afterEvaluate, so resolving it
+// eagerly here would fail with UnknownTaskException.
+tasks.register("test") {
+    group = "verification"
+    description = "Runs the host (JVM) unit tests, i.e. testAndroidHostTest."
+    dependsOn("testAndroidHostTest")
+}

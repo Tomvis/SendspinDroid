@@ -443,6 +443,15 @@ class SendspinTimeFilter {
      */
     fun resetAndDiscard() = synchronized(lock) {
         frozenState = null
+        // The server-pushed sync offset belongs to the session being discarded.
+        // Both callers of this method start a NEW server session (fresh connect,
+        // or a reconnect whose server identity changed), and the new server may
+        // never push a client/sync_offset -- in which case the previous server's
+        // correction would silently keep skewing serverToClient() forever. The
+        // user offset is a device-level preference and deliberately survives;
+        // the auto-measured hardware latency is a property of this device's
+        // output path and survives too.
+        serverSyncOffsetMicros = 0
         offset = 0.0
         drift = 0.0
         p00 = Double.MAX_VALUE

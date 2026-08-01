@@ -32,7 +32,6 @@ import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.size.Size
 import coil.transform.Transformation

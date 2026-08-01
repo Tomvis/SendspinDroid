@@ -35,10 +35,8 @@ object MessageBuilder {
                     add(kotlinx.serialization.json.JsonPrimitive(SendSpinProtocol.Roles.PLAYER))
                     add(kotlinx.serialization.json.JsonPrimitive(SendSpinProtocol.Roles.CONTROLLER))
                     add(kotlinx.serialization.json.JsonPrimitive(SendSpinProtocol.Roles.METADATA))
-                    // color@v1 is cheap (a handful of RGB triples) so it is
-                    // advertised even in low-memory mode; only ARTWORK (full
-                    // bitmaps) is dropped.
-                    add(kotlinx.serialization.json.JsonPrimitive(SendSpinProtocol.Roles.COLOR))
+                    // Artwork (full bitmaps) is the one role we drop under
+                    // memory pressure.
                     if (!lowMemoryMode) {
                         add(kotlinx.serialization.json.JsonPrimitive(SendSpinProtocol.Roles.ARTWORK))
                     }
@@ -65,9 +63,6 @@ object MessageBuilder {
                         add(kotlinx.serialization.json.JsonPrimitive("mute"))
                     })
                 })
-                // Capabilities stub for the color@v1 role (no negotiable
-                // options; presence advertises support).
-                put("color@v1_support", buildJsonObject {})
                 if (!lowMemoryMode) {
                     put("artwork@v1_support", buildJsonObject {
                         put("channels", buildJsonArray {

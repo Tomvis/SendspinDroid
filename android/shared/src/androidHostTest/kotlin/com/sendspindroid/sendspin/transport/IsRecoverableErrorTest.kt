@@ -133,13 +133,13 @@ class IsRecoverableErrorTest {
         // would hang or stack-overflow on regression.
         val a = RuntimeException("a")
         val b = RuntimeException("b")
-        // Construct A→B→A via reflection (initCause refuses if the cause was
+        // Construct A->B->A via reflection (initCause refuses if the cause was
         // already set in the constructor, so use the no-cause ctor and set it
         // afterwards).
         a.initCause(b)
         b.initCause(a)
         // Just needs to terminate; the actual classification is "unrecognized"
-        // → false because none of the chain members match a known category.
+        // -> false because none of the chain members match a known category.
         assertEquals(false, transport.classify(a))
     }
 }

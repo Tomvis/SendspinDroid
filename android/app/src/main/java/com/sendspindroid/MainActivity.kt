@@ -618,6 +618,12 @@ class MainActivity : AppCompatActivity() {
                     applyControllerMetadata(controller.mediaMetadata)
                     // Restore play/pause button state
                     updatePlayPauseButton(controller.isPlaying)
+                    // Seed the raw play-intent: onPlayWhenReadyChanged only fires
+                    // on a CHANGE, so a controller that connects mid-playback
+                    // (activity recreate, return from background) would otherwise
+                    // leave the VM at its false default and NowPlayingScreen's
+                    // isBuffering gate permanently off.
+                    viewModel.updatePlayWhenReady(controller.playWhenReady)
                 }
             }
             is AppConnectionState.Reconnecting -> {
@@ -2276,8 +2282,15 @@ class MainActivity : AppCompatActivity() {
         mediaController?.let { controller ->
             val isPlaying = controller.isPlaying
             val state = controller.playbackState
+            val playWhenReady = controller.playWhenReady
 
             runOnUiThread {
+                // Seed the raw play-intent from the controller. Media3 only
+                // fires onPlayWhenReadyChanged on a change, so without this the
+                // VM keeps its false default after every activity recreate and
+                // the reanchor-vs-pause discrimination in NowPlayingScreen
+                // (isBuffering) never engages.
+                viewModel.updatePlayWhenReady(playWhenReady)
                 // Check if we're actively connected (playing or ready to play)
                 val isConnected = isPlaying || state == Player.STATE_READY || state == Player.STATE_BUFFERING
 

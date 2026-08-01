@@ -12,9 +12,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.sendspindroid.R
 import com.sendspindroid.ui.main.AudioStreamSpec
 import com.sendspindroid.ui.theme.NpMonoFamily
 import java.util.Locale
@@ -30,18 +31,27 @@ fun SpecChips(
     spec: AudioStreamSpec,
     modifier: Modifier = Modifier,
 ) {
+    // buildList's lambda is not composable, so the patterns are resolved here
+    // and formatted inside. Formatting goes through Locale.ROOT for the same
+    // reason formatSampleRateKhz does -- the config locale would render the
+    // numbers in Arabic-Indic digits on some devices.
+    val bitDepthFormat = stringResource(R.string.np_tv_spec_bit_depth)
+    val sampleRateFormat = stringResource(R.string.np_tv_spec_sample_rate)
+    val bitrateFormat = stringResource(R.string.np_tv_spec_bitrate)
     val labels = buildList {
         if (spec.codec.isNotBlank()) add(spec.codec)
-        if (spec.bitDepth > 0) add("${spec.bitDepth}-BIT")
-        if (spec.sampleRate > 0) add(formatSampleRate(spec.sampleRate))
-        if (spec.bitrateKbps > 0) add("${spec.bitrateKbps} kbps")
+        if (spec.bitDepth > 0) add(String.format(Locale.ROOT, bitDepthFormat, spec.bitDepth))
+        if (spec.sampleRate > 0) {
+            add(String.format(Locale.ROOT, sampleRateFormat, formatSampleRateKhz(spec.sampleRate)))
+        }
+        if (spec.bitrateKbps > 0) add(String.format(Locale.ROOT, bitrateFormat, spec.bitrateKbps))
     }
     if (labels.isEmpty()) return
 
     FlowRow(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(NowPlayingTvTokens.Space.TightGap),
+        verticalArrangement = Arrangement.spacedBy(NowPlayingTvTokens.Space.TightGap),
     ) {
         labels.forEach { label ->
             Chip(text = label)
@@ -52,26 +62,32 @@ fun SpecChips(
 @Composable
 private fun Chip(text: String) {
     Text(
-        text = text.uppercase(Locale.getDefault()),
+        // Locale.ROOT, not the device locale: the label text is English
+        // (codec names, "kHz", "kbps") whatever the device is set to, so
+        // uppercasing it under a foreign locale's casing rules is wrong.
+        text = text.uppercase(Locale.ROOT),
         fontFamily = NpMonoFamily,
-        fontSize = 18.sp,
+        fontSize = NowPlayingTvTokens.Type.Label,
         fontWeight = FontWeight.W600,
-        letterSpacing = 1.8.sp,
+        letterSpacing = NowPlayingTvTokens.Type.TrackChip,
         color = ChipFg,
         modifier = Modifier
-            .clip(RoundedCornerShape(999.dp))
+            .clip(RoundedCornerShape(NowPlayingTvTokens.Radius.Pill))
             .background(ChipBg)
-            .border(1.dp, ChipBorder, RoundedCornerShape(999.dp))
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .border(1.dp, ChipBorder, RoundedCornerShape(NowPlayingTvTokens.Radius.Pill))
+            .padding(
+                horizontal = NowPlayingTvTokens.Dimen.ChipPaddingH,
+                vertical = NowPlayingTvTokens.Dimen.ChipPaddingV,
+            ),
     )
 }
 
-private fun formatSampleRate(sampleRateHz: Int): String {
+/** The numeric part of the sample-rate chip; the caller appends the "kHz" unit. */
+private fun formatSampleRateKhz(sampleRateHz: Int): String {
     val khz = sampleRateHz / 1000f
     // Common rates (44.1, 48, 88.2, 96, 176.4, 192) — show one decimal only when fractional.
     // Locale.ROOT keeps "44.1" stable across locales (no "44,1" in de-DE etc.).
     val isFractional = sampleRateHz % 1000 != 0
-    val formatted = if (isFractional) String.format(Locale.ROOT, "%.1f", khz) else khz.toInt().toString()
-    return "$formatted kHz"
+    return if (isFractional) String.format(Locale.ROOT, "%.1f", khz) else khz.toInt().toString()
 }
 

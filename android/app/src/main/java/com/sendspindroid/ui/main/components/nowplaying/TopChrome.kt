@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -35,9 +36,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
+import com.sendspindroid.R
 import com.sendspindroid.ui.theme.NpInterFamily
 import java.util.Calendar
 import java.util.Locale
@@ -95,15 +95,18 @@ fun SourceBadge(
     // frame while buffering, rebuilding the string and re-running uppercase().
     // The per-frame fraction is read inside the dot/halo graphicsLayer lambdas
     // below, which run in the draw phase and don't invalidate composition.
-    val label = remember(isBuffering, paused, groupLabel) {
-        badgeLabel(
-            status = when {
-                isBuffering -> "Buffering"
-                paused -> "Paused"
-                else -> "Now Playing"
-            },
-            groupLabel = groupLabel,
-        )
+    //
+    // The status word is resolved above the remember because stringResource is
+    // itself composable and can't be called inside remember's lambda. It changes
+    // exactly when isBuffering/paused change, so keying on it preserves the
+    // once-per-state-change guarantee.
+    val statusText = when {
+        isBuffering -> stringResource(R.string.np_tv_status_buffering)
+        paused -> stringResource(R.string.np_tv_status_paused)
+        else -> stringResource(R.string.now_playing)
+    }
+    val label = remember(statusText, groupLabel) {
+        badgeLabel(status = statusText, groupLabel = groupLabel)
     }
 
     // Use Modifier.background for the glow halo rather than a Canvas-style
@@ -117,7 +120,7 @@ fun SourceBadge(
     // a radial gradient (and its backing Shader) on every frame of the
     // 500ms color tween — ~30 Shader allocations per play/pause toggle on
     // the Shield Tegra. The inner dot still animates via dotColor so the
-    // status transition reads smoothly; the 20dp halo's hard color switch
+    // status transition reads smoothly; the halo's hard color switch
     // is imperceptible against that.
     val glowBrushGreen = remember {
         Brush.radialGradient(
@@ -132,12 +135,12 @@ fun SourceBadge(
     val glowBrush = if (paused) glowBrushAmber else glowBrushGreen
     StatusBadge(label = label, labelColor = ChromeFg, modifier = modifier) {
         Box(
-            modifier = Modifier.size(20.dp),
+            modifier = Modifier.size(NowPlayingTvTokens.Dimen.StatusDotGlow),
             contentAlignment = Alignment.Center,
         ) {
             Box(
                 modifier = Modifier
-                    .size(20.dp)
+                    .size(NowPlayingTvTokens.Dimen.StatusDotGlow)
                     .graphicsLayer {
                         val frac = pulseAnim.value
                         val s = if (isBuffering) lerp(0.85f, 1.18f, frac) else 1f
@@ -149,7 +152,7 @@ fun SourceBadge(
             )
             Box(
                 modifier = Modifier
-                    .size(8.dp)
+                    .size(NowPlayingTvTokens.Dimen.StatusDot)
                     .graphicsLayer {
                         val s = if (isBuffering) lerp(0.85f, 1.18f, pulseAnim.value) else 1f
                         scaleX = s
@@ -177,28 +180,38 @@ internal fun StatusBadge(
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(NowPlayingTvTokens.Space.BadgeGap),
     ) {
         dot()
         Text(
             text = label,
             fontFamily = NpInterFamily,
-            fontSize = 16.sp,
+            fontSize = NowPlayingTvTokens.Type.Caption,
             fontWeight = FontWeight.W500,
-            letterSpacing = 2.5.sp,
+            letterSpacing = NowPlayingTvTokens.Type.TrackBadge,
             color = labelColor,
         )
     }
 }
 
-/** "NOW PLAYING · KITCHEN" -- the badge label form used by both screens. */
+/**
+ * Builds the badge label used by both screens: the uppercased status, then a
+ * middot separator, then the uppercased group name.
+ *
+ * Uppercases with Locale.ROOT, not the device locale: the app ships a single
+ * English string set, so applying a foreign locale's casing rules to English
+ * text is simply wrong -- Locale.getDefault() on a Turkish-locale device maps
+ * the "i" of "Buffering" to a dotted capital I instead of "I". Same discipline
+ * as the String.format(Locale.ROOT, ...) calls in formatTime and
+ * formatSampleRateKhz.
+ */
 internal fun badgeLabel(status: String, groupLabel: String): String = buildString {
     append(status)
     if (groupLabel.isNotBlank()) {
         append(" · ")
         append(groupLabel)
     }
-}.uppercase(Locale.getDefault())
+}.uppercase(Locale.ROOT)
 
 /**
  * Returns a State<Calendar> that updates on every system minute tick and on
@@ -264,6 +277,12 @@ internal fun rememberClockParts(monthStyle: Int = Calendar.SHORT): ClockParts {
 @Composable
 fun NowPlayingClock(modifier: Modifier = Modifier) {
     val clock = rememberClockParts()
+    // Resolve the pattern, then format with Locale.ROOT rather than calling
+    // stringResource(id, args): the resource overload formats against the
+    // config locale, which renders %d as Arabic-Indic digits on some devices.
+    // The weekday/month words themselves are already localised by
+    // rememberClockParts; only the assembly is locale-neutral.
+    val dateFormat = stringResource(R.string.np_tv_date_short)
 
     Column(
         modifier = modifier,
@@ -272,20 +291,21 @@ fun NowPlayingClock(modifier: Modifier = Modifier) {
         Text(
             text = "${clock.hour}:${clock.minute}",
             fontFamily = NpInterFamily,
-            fontSize = 42.sp,
+            fontSize = NowPlayingTvTokens.Type.TopClock,
             fontWeight = FontWeight.W300,
-            letterSpacing = (-0.5).sp,
-            lineHeight = 42.sp,
+            letterSpacing = NowPlayingTvTokens.Type.TrackDisplay,
+            lineHeight = NowPlayingTvTokens.Type.TopClock,
             color = ChromeFg,
             textAlign = TextAlign.End,
         )
         Text(
-            text = "${clock.weekday} · ${clock.month} ${clock.day}".uppercase(Locale.getDefault()),
-            modifier = Modifier.padding(top = 8.dp),
+            text = String.format(Locale.ROOT, dateFormat, clock.weekday, clock.month, clock.day)
+                .uppercase(Locale.ROOT),
+            modifier = Modifier.padding(top = NowPlayingTvTokens.Space.SublabelGap),
             fontFamily = NpInterFamily,
-            fontSize = 18.sp,
+            fontSize = NowPlayingTvTokens.Type.Label,
             fontWeight = FontWeight.W500,
-            letterSpacing = 2.sp,
+            letterSpacing = NowPlayingTvTokens.Type.TrackMeta,
             color = ChromeFgFaint,
             textAlign = TextAlign.End,
         )

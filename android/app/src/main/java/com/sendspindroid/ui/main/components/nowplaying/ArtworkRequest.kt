@@ -25,7 +25,7 @@ import com.sendspindroid.ui.main.ArtworkSource
  * call-site that applies different transformations. We then point the
  * next request's placeholderMemoryCacheKey at the previous request's
  * key — Coil pulls the previous bitmap out of memory cache and the
- * crossfade is old-image → new-image instead of placeholder → new-image.
+ * crossfade is old-image -> new-image instead of placeholder -> new-image.
  *
  * [namespace] separates per-call-site caches (the same bytes blurred for
  * the ambient background must not collide with the unblurred focus

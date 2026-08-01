@@ -38,9 +38,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.sendspindroid.R
 import com.sendspindroid.ui.main.components.formatTime
 import com.sendspindroid.ui.theme.NpCream
 import com.sendspindroid.ui.theme.NpMonoFamily
@@ -202,20 +203,39 @@ fun ProgressRail(
     // frame for the entire duration of every track.
     val progress = { (displayPositionMs.toFloat() / safeDuration).coerceIn(0f, 1f) }
 
+    // Resolve the label templates at composable scope. remember{} takes a
+    // non-composable lambda, so stringResource cannot be called inside the blocks
+    // below; the resolved templates are passed in and keyed on so a configuration
+    // change re-formats. In practice they are stable for the life of the
+    // composition and never re-key.
+    val remainingFmt = stringResource(R.string.np_tv_time_remaining)
+    val totalFmt = stringResource(R.string.np_tv_total_duration)
+    val counterFmt = stringResource(R.string.np_tv_track_counter)
+
     // Time labels change only once per second. derivedStateOf gates recomposition
     // on the whole-second value so this scope wakes ~1x/sec instead of ~60x/sec,
     // and the remembers below keep the String.format work off the frame budget.
     // formatTime already floors to seconds, so the text is identical.
+    //
+    // Locale.ROOT rather than the device locale for both the formatting and the
+    // uppercasing: the app ships one English string set, and a Turkish-locale
+    // device would otherwise render "TOTAL" with a dotless I and emit
+    // Arabic-Indic digits for the track counter's %d. This matches the
+    // Locale.ROOT discipline formatTime already uses.
     val displaySeconds by remember { derivedStateOf { displayPositionMs / 1000L } }
     val elapsedLabel = remember(displaySeconds) { formatTime(displaySeconds * 1000L) }
-    val remainingLabel = remember(displaySeconds, durationMs) {
-        "−" + formatTime((durationMs - displaySeconds * 1000L).coerceAtLeast(0L))
+    val remainingLabel = remember(displaySeconds, durationMs, remainingFmt) {
+        String.format(
+            Locale.ROOT,
+            remainingFmt,
+            formatTime((durationMs - displaySeconds * 1000L).coerceAtLeast(0L)),
+        )
     }
-    val totalLabel = remember(durationMs) {
-        "Total ${formatTime(durationMs)}".uppercase(Locale.getDefault())
+    val totalLabel = remember(durationMs, totalFmt) {
+        String.format(Locale.ROOT, totalFmt, formatTime(durationMs)).uppercase(Locale.ROOT)
     }
-    val counterLabel = remember(trackNumber, trackTotal) {
-        "$trackNumber of $trackTotal".uppercase(Locale.getDefault())
+    val counterLabel = remember(trackNumber, trackTotal, counterFmt) {
+        String.format(Locale.ROOT, counterFmt, trackNumber, trackTotal).uppercase(Locale.ROOT)
     }
 
     val elapsedColor by animateColorAsState(
@@ -244,29 +264,36 @@ fun ProgressRail(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(NowPlayingTvTokens.Space.BadgeGap),
             ) {
                 StatusGlyph(paused = paused, color = elapsedColor)
                 Text(
                     text = elapsedLabel,
                     fontFamily = NpMonoFamily,
-                    fontSize = 20.sp,
+                    fontSize = NowPlayingTvTokens.Type.Body,
                     fontWeight = FontWeight.W600,
-                    letterSpacing = 0.5.sp,
+                    letterSpacing = NowPlayingTvTokens.Type.TrackTimecode,
                     color = elapsedColor,
                 )
             }
             Text(
                 text = remainingLabel,
                 fontFamily = NpMonoFamily,
-                fontSize = 20.sp,
+                fontSize = NowPlayingTvTokens.Type.Body,
                 fontWeight = FontWeight.W500,
-                letterSpacing = 0.5.sp,
+                letterSpacing = NowPlayingTvTokens.Type.TrackTimecode,
                 color = RailFgDim,
             )
         }
 
-        Box(modifier = Modifier.padding(top = 14.dp).fillMaxWidth().height(14.dp)) {
+        // Two different meanings, same number: RailBarGap is the drop from the
+        // timecode row, RailTrackHeight is the vertical room the playhead needs.
+        Box(
+            modifier = Modifier
+                .padding(top = NowPlayingTvTokens.Space.RailBarGap)
+                .fillMaxWidth()
+                .height(NowPlayingTvTokens.Dimen.RailTrackHeight),
+        ) {
             RailBar(
                 progress = progress,
                 accent = accent,
@@ -277,24 +304,26 @@ fun ProgressRail(
         }
 
         Row(
-            modifier = Modifier.padding(top = 10.dp).fillMaxWidth(),
+            modifier = Modifier
+                .padding(top = NowPlayingTvTokens.Space.TightGap)
+                .fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
                 text = totalLabel,
                 fontFamily = NpMonoFamily,
-                fontSize = 18.sp,
+                fontSize = NowPlayingTvTokens.Type.Label,
                 fontWeight = FontWeight.W600,
-                letterSpacing = 2.sp,
+                letterSpacing = NowPlayingTvTokens.Type.TrackMeta,
                 color = RailFgDim,
             )
             if (trackTotal > 0 && trackNumber > 0) {
                 Text(
                     text = counterLabel,
                     fontFamily = NpMonoFamily,
-                    fontSize = 18.sp,
+                    fontSize = NowPlayingTvTokens.Type.Label,
                     fontWeight = FontWeight.W600,
-                    letterSpacing = 2.sp,
+                    letterSpacing = NowPlayingTvTokens.Type.TrackMeta,
                     color = RailFgDim,
                 )
             }
@@ -321,7 +350,7 @@ private fun RailBar(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(4.dp)
+                .height(NowPlayingTvTokens.Dimen.RailBarHeight)
                 .clip(BarShape)
                 .background(RailBarBg),
         )
@@ -352,7 +381,9 @@ private fun RailBar(
                     )
                     layout(placeable.width, placeable.height) { placeable.place(0, 0) }
                 }
-                .height(4.dp)
+                // Must stay equal to the track's height above -- the fill sits
+                // directly on top of it and any mismatch shows as a seam.
+                .height(NowPlayingTvTokens.Dimen.RailBarHeight)
                 .clip(BarShape)
                 .background(fillBrush),
         )
@@ -361,8 +392,8 @@ private fun RailBar(
         // brush involved, so the Canvas path is fine for it. The progress read
         // happens inside the draw lambda, so interpolation invalidates draw only.
         Canvas(modifier = Modifier.fillMaxWidth().fillMaxHeight()) {
-            val headWidth = 16.dp.toPx()
-            val headHeight = 6.dp.toPx()
+            val headWidth = NowPlayingTvTokens.Dimen.RailHeadWidth.toPx()
+            val headHeight = NowPlayingTvTokens.Dimen.RailHeadHeight.toPx()
             val headRadius = headHeight / 2f
             val halfW = headWidth / 2f
             val halfH = headHeight / 2f

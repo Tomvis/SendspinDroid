@@ -155,6 +155,20 @@ fun NowPlayingScreen(
         }
     }
 
+    // Release the zombie latch as soon as audio is flowing again. The artwork
+    // effect above is keyed only on (artworkSource, isActivelyConnected), so on
+    // an art-less library artworkSource stays null across the whole track change
+    // and that effect never re-runs to clear the flag -- leaving stickyMetadata
+    // pinned to EMPTY and the screen stuck on the idle clock for every
+    // subsequent art-less track. Any resumption of playback (or a buffering
+    // fill, which precedes it) means the "stopped with stale metadata" premise
+    // no longer holds.
+    LaunchedEffect(isPlaying, playbackState) {
+        if (isPlaying || playbackState == PlaybackState.BUFFERING) {
+            artworkZombieClear = false
+        }
+    }
+
     var stickyMetadata by remember { mutableStateOf(metadata) }
     LaunchedEffect(metadata, isActivelyConnected, artworkZombieClear) {
         if (artworkZombieClear) {
@@ -263,11 +277,18 @@ fun NowPlayingScreen(
 
     // Determine accent color from player colors
     val accentColor = playerColors?.let { Color(it.accentColor) }
-    // Artwork-derived accent can briefly drop to null during a track
-    // transition (palette recomputes on the new bitmap). Hold the last
-    // non-null value so downstream consumers -- TV ambient wash and album-art
-    // glow, progress bar gradient, volume slider tint -- don't flash through
-    // FallbackAccent between tracks. Mirrors the stickyMetadata /
+    // NOTE: accentColor is currently ALWAYS null -- the artwork-derived accent
+    // pipeline is not wired up. Nothing populates the ViewModel's
+    // _playerColors: updatePlayerColors() has no callers repo-wide, and
+    // MainActivity's Palette extraction (extractAndApplyColors) writes only to
+    // the legacy View bindings (volume slider, coordinator layout), never to
+    // the ViewModel. So every downstream consumer -- TV ambient wash and
+    // album-art glow, progress bar gradient, volume slider tint -- renders the
+    // hardcoded brand accent (NowPlayingTvScreen.FallbackAccent) at all times.
+    // The sticky-accent machinery below is therefore inert scaffolding, kept
+    // for whenever the pipeline is revived: it would hold the last non-null
+    // value so the surface doesn't flash through FallbackAccent while a new
+    // track's palette is computed. Mirrors the stickyMetadata /
     // stickyArtworkSource pattern above.
     var stickyAccentColor by remember { mutableStateOf(accentColor) }
     LaunchedEffect(accentColor, isActivelyConnected) {

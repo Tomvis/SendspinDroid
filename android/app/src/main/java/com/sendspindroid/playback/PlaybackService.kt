@@ -4558,13 +4558,25 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand: action=${intent?.action}, flags=$flags")
-        // Must call startForeground within 5s when launched via startForegroundService(),
-        // regardless of action or intent validity (Android 8+). handleAutoConnect() may
-        // refresh the notification text later once the server is resolved.
-        startForegroundServiceWithNotification()
         super.onStartCommand(intent, flags, startId)
 
         if (intent?.action == ACTION_AUTO_CONNECT) {
+            // Must call startForeground within 5s when launched via
+            // startForegroundService() (Android 8+) -- and unconditionally here,
+            // BEFORE handleAutoConnect, because that method returns early on a
+            // missing/unknown server without ever promoting us.
+            //
+            // Gated on ACTION_AUTO_CONNECT: that is the only action any
+            // startForegroundService()/getForegroundService() path uses (see
+            // BootReceiver, both the direct start and the tap-to-resume
+            // PendingIntent), so it covers every case that owes Android a
+            // startForeground. Promoting unconditionally instead meant any
+            // media-button or Media3-originated start posted a permanent
+            // setOngoing(true) notification -- under an id Media3 does not own,
+            // so nothing would ever clear it while disconnected -- and on API
+            // 31+ a background-originated start threw
+            // ForegroundServiceStartNotAllowedException into the catch below.
+            startForegroundServiceWithNotification()
             handleAutoConnect(intent)
         }
 

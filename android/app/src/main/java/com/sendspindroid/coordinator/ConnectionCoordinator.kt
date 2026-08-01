@@ -100,11 +100,14 @@ class ConnectionCoordinator(
          * 1-based [attempt]. Mirrors runReconnectLoop's
          * BACKOFF_DELAYS.getOrElse(attempt - 1) mapping so UI countdowns key
          * off the schedule that actually governs the attempt. The broadcast
-         * attempt is always in 1..MAX_ATTEMPTS; any out-of-range value (incl.
-         * < 1) clamps to the last (steady-state) delay.
+         * attempt is always in 1..MAX_ATTEMPTS; an attempt past the end of the
+         * table clamps to the last (steady-state) delay, and a nonsensical
+         * attempt < 1 clamps to the first. (Without the lower clamp, attempt=0
+         * indexes -1 and getOrElse falls through to the 60 s steady-state value,
+         * so the UI countdown would read "60s" for the very first attempt.)
          */
         fun backoffDelayMsForAttempt(attempt: Int): Long =
-            BACKOFF_DELAYS.getOrElse(attempt - 1) { BACKOFF_DELAYS.last() }
+            BACKOFF_DELAYS[(attempt - 1).coerceIn(BACKOFF_DELAYS.indices)]
 
         private const val NETWORK_DEBOUNCE_MS = 2_000L
         private const val MIN_DELAY_AFTER_NETWORK_SKIP_MS = 500L

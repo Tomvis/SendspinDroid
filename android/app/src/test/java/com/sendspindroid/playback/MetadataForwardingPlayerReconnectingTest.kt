@@ -1,5 +1,6 @@
 package com.sendspindroid.playback
 
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import io.mockk.every
 import io.mockk.mockk
@@ -138,5 +139,60 @@ class MetadataForwardingPlayerReconnectingTest {
         val metadata = forwardingPlayer.mediaMetadata
         assertEquals("Reconnecting to FirstBoot...", metadata.title.toString())
         assertEquals(Player.STATE_BUFFERING, forwardingPlayer.playbackState)
+    }
+
+    @Test
+    fun `getCurrentMediaItem synthesizes the overlay item when the wrapped player has none`() {
+        // First connect attempt failed before any track metadata arrived, so
+        // the wrapped SendSpinPlayer has no current item at all.
+        every { mockPlayer.currentMediaItem } returns null
+
+        forwardingPlayer.setReconnectingOverlay("Living Room")
+
+        val item = forwardingPlayer.currentMediaItem
+        assertNotNull(item)
+        assertEquals(MetadataForwardingPlayer.OVERLAY_MEDIA_ID, item!!.mediaId)
+        assertEquals("Reconnecting to Living Room...", item.mediaMetadata.title.toString())
+    }
+
+    @Test
+    fun `getCurrentMediaItem returns null when the wrapped player has no item and no overlay`() {
+        // Routine mid-playback gap: SendSpinPlayer.updateConnectionState(false)
+        // has nulled its current item while this cache still holds the last
+        // track. Advertising OVERLAY_MEDIA_ID here would hand Android Auto /
+        // AVRCP a media id that the browse tree cannot resolve.
+        every { mockPlayer.currentMediaItem } returns null
+        forwardingPlayer.updateMetadata(title = "Song Title", artist = "Artist", album = "Album")
+
+        assertNull(forwardingPlayer.currentMediaItem)
+    }
+
+    @Test
+    fun `getCurrentMediaItem stops synthesizing once the overlay is cleared`() {
+        every { mockPlayer.currentMediaItem } returns null
+        forwardingPlayer.updateMetadata(title = "Song Title", artist = "Artist", album = "Album")
+        forwardingPlayer.setReconnectingOverlay("Office")
+        assertNotNull(forwardingPlayer.currentMediaItem)
+
+        forwardingPlayer.clearReconnectingOverlay()
+
+        assertNull(forwardingPlayer.currentMediaItem)
+    }
+
+    @Test
+    fun `getCurrentMediaItem keeps the wrapped player's media id during the overlay`() {
+        // The overlay must never rewrite a real media id -- only stand in when
+        // there is none.
+        every { mockPlayer.currentMediaItem } returns MediaItem.Builder()
+            .setMediaId("sendspin_current")
+            .build()
+        forwardingPlayer.updateMetadata(title = "Song Title", artist = "Artist", album = "Album")
+
+        forwardingPlayer.setReconnectingOverlay("Kitchen")
+
+        val item = forwardingPlayer.currentMediaItem
+        assertNotNull(item)
+        assertEquals("sendspin_current", item!!.mediaId)
+        assertEquals("Reconnecting to Kitchen...", item.mediaMetadata.title.toString())
     }
 }

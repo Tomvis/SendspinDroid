@@ -63,11 +63,6 @@ abstract class SendSpinProtocolHandler(
     // Merged controller (group-level) state from server/state deltas.
     private var currentControllerState: ControllerState? = null
 
-    // Last dispatched artwork color palette (color@v1). Used for
-    // timestamp-excluding change detection -- ColorState.equals ignores the
-    // timestamp, so a re-emitted identical palette does not re-fire.
-    private var lastColorState: ColorState? = null
-
     // Time sync manager (lazy initialized by subclass)
     protected var timeSyncManager: TimeSyncManager? = null
 
@@ -180,17 +175,6 @@ abstract class SendSpinProtocolHandler(
      * Default no-op for handlers that don't surface controller state.
      */
     protected open fun onControllerStateUpdate(state: ControllerState) {}
-
-    /**
-     * Called when the artwork color palette (color@v1) changes. Default no-op.
-     */
-    protected open fun onColorStateUpdate(state: ColorState) {}
-
-    /**
-     * Called when the artwork color palette is cleared (handshake / stream end).
-     * Default no-op.
-     */
-    protected open fun onColorStateCleared() {}
 
     /**
      * Called when the audio output should be silenced or unsilenced because
@@ -598,11 +582,6 @@ abstract class SendSpinProtocolHandler(
         lastPlaybackState = null
         lastGroupInfo = null
         currentControllerState = null
-        // Always clear the color palette on handshake (unlike metadata, which
-        // is just nulled for dedup): a byte-identical first palette from the
-        // new server would otherwise be suppressed, and a stale prior-server
-        // palette would persist if the new server doesn't advertise color@v1.
-        clearColorState()
 
         onHandshakeComplete(result.serverName, result.serverId)
 
@@ -620,7 +599,7 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected fun handleServerState(payload: JsonObject?) {
-        val (metadata, state, controllerDelta, colorState) = MessageParser.parseServerState(payload)
+        val (metadata, state, controllerDelta) = MessageParser.parseServerState(payload)
 
         if (metadata != null) {
             lastMetadata = metadata
@@ -638,13 +617,6 @@ abstract class SendSpinProtocolHandler(
                 currentControllerState = merged
                 onControllerStateUpdate(merged)
             }
-        }
-
-        // Artwork color palette (color@v1). Dedup uses ColorState.equals, which
-        // excludes the timestamp, so a re-emitted identical palette is skipped.
-        if (colorState != null && colorState != lastColorState) {
-            lastColorState = colorState
-            onColorStateUpdate(colorState)
         }
     }
 
@@ -718,26 +690,12 @@ abstract class SendSpinProtocolHandler(
     private fun rolesCover(roles: List<String>?, family: String, versioned: String): Boolean =
         roles == null || family in roles || versioned in roles
 
-    /** Drops any cached palette and notifies, at most once per palette. */
-    private fun clearColorState() {
-        if (lastColorState != null) {
-            lastColorState = null
-            onColorStateCleared()
-        }
-    }
-
     protected fun handleStreamClear(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamClear ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
         val roles = MessageParser.parseRoles(payload)
 
-        // Clear the color palette on a color-family clear, independently of the
-        // audio-buffer flush below.
-        if (rolesCover(roles, SendSpinProtocol.RoleFamily.COLOR, SendSpinProtocol.Roles.COLOR)) {
-            clearColorState()
-        }
-
         // Only flush the audio buffer for a player-role (or all-roles) clear.
-        // A visualizer/color-only clear must not wipe our PCM queue.
+        // A visualizer-only clear must not wipe our PCM queue.
         if (!rolesCover(roles, SendSpinProtocol.RoleFamily.PLAYER, SendSpinProtocol.Roles.PLAYER)) {
             Log.d(tag, "Stream clear for non-player roles: $roles - not flushing audio")
             return
@@ -750,13 +708,6 @@ abstract class SendSpinProtocolHandler(
     protected fun handleStreamEnd(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamEnd ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
         val roles = MessageParser.parseRoles(payload)
-
-        // Color teardown runs independently of (and before) the player-role
-        // early-return, so a color-only stream/end still clears the palette
-        // without tearing down audio.
-        if (rolesCover(roles, SendSpinProtocol.RoleFamily.COLOR, SendSpinProtocol.Roles.COLOR)) {
-            clearColorState()
-        }
 
         if (!rolesCover(roles, SendSpinProtocol.RoleFamily.PLAYER, SendSpinProtocol.Roles.PLAYER)) {
             Log.d(tag, "Stream end for non-player roles: $roles - ignoring")

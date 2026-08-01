@@ -126,8 +126,8 @@ abstract class BaseWebSocketTransport(
      */
     protected open fun isRecoverableError(t: Throwable): Boolean {
         // Walk the full cause chain rather than just `t.cause`. Ktor over OkHttp
-        // wraps exceptions 2-3 levels deep (e.g., WebSocketException → IOException
-        // → SocketException, or IOException → IOException → UnknownHostException);
+        // wraps exceptions 2-3 levels deep (e.g., WebSocketException -> IOException
+        // -> SocketException, or IOException -> IOException -> UnknownHostException);
         // checking only the immediate cause misses the real root and falls through
         // to the "unrecognized" branch, mis-classifying transient errors as
         // unrecoverable and -- worse -- mis-classifying DNS / SSL / connection-
@@ -141,7 +141,7 @@ abstract class BaseWebSocketTransport(
         return when {
             // Configuration errors come first so they win when a wrapper layer
             // ALSO matches one of the transient categories below. Example:
-            // [SocketException → UnknownHostException]. Old single-level logic
+            // [SocketException -> UnknownHostException]. Old single-level logic
             // returned false correctly only by luck of which level the check
             // hit first; chain-walking makes both visible, and "unrecoverable"
             // is the right answer.

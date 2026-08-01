@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,6 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -43,7 +45,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.sendspindroid.R
 import com.sendspindroid.ui.adaptive.TvPassiveFocusAnchor
@@ -188,15 +189,19 @@ fun NowPlayingFocus(
         // Foreground stack rides inside the overscan-safe inset. The design's
         // spec margins (54dp top/bottom, 96dp sides) are split: 48dp comes from
         // overscanSafe so we comply with the fork policy explicitly, and the
-        // remainder lives in the per-Row padding below. Net visual margin from
-        // the screen edge is unchanged.
+        // remainder (Space.ChromeInset / Space.SideInset) lives in the per-Row
+        // padding below. Net visual margin from the screen edge is unchanged.
         Box(modifier = Modifier.fillMaxSize().overscanSafe()) {
-            // Top chrome: total top=54dp (48 overscan + 6 internal), sides=96dp.
+            // Top chrome: total top = 48 overscan + ChromeInset, sides = 48 + SideInset.
             Row(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .padding(top = 6.dp, start = 48.dp, end = 48.dp),
+                    .padding(
+                        top = NowPlayingTvTokens.Space.ChromeInset,
+                        start = NowPlayingTvTokens.Space.SideInset,
+                        end = NowPlayingTvTokens.Space.SideInset,
+                    ),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Top,
             ) {
@@ -208,12 +213,13 @@ fun NowPlayingFocus(
                 NowPlayingClock()
             }
 
-            // Center content: art (620dp) + 88dp gap + info column. Sides=96dp.
+            // Center content: art (Dimen.AlbumArt) + Space.ArtToInfo gap + info
+            // column, inside the same 48 + SideInset side margin as the chrome.
             Row(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .fillMaxWidth()
-                    .padding(horizontal = 48.dp),
+                    .padding(horizontal = NowPlayingTvTokens.Space.SideInset),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AlbumArt(
@@ -221,7 +227,7 @@ fun NowPlayingFocus(
                     accent = animatedAccent,
                     paused = effectivePaused,
                 )
-                Spacer(modifier = Modifier.width(88.dp))
+                Spacer(modifier = Modifier.width(NowPlayingTvTokens.Space.ArtToInfo))
                 InfoColumn(
                     metadata = metadata,
                     audioSpec = audioSpec,
@@ -229,7 +235,7 @@ fun NowPlayingFocus(
                 )
             }
 
-            // Progress rail: total bottom=54dp (48 overscan + 6 internal), sides=96dp.
+            // Progress rail: total bottom = 48 overscan + ChromeInset, sides = 48 + SideInset.
             ProgressRail(
                 positionMs = positionMs,
                 durationMs = durationMs,
@@ -243,7 +249,11 @@ fun NowPlayingFocus(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(start = 48.dp, end = 48.dp, bottom = 6.dp),
+                    .padding(
+                        start = NowPlayingTvTokens.Space.SideInset,
+                        end = NowPlayingTvTokens.Space.SideInset,
+                        bottom = NowPlayingTvTokens.Space.ChromeInset,
+                    ),
             )
         }
     }
@@ -273,20 +283,26 @@ private fun AlbumArt(
 
     Box(
         modifier = Modifier
-            .size(620.dp)
+            .size(NowPlayingTvTokens.Dimen.AlbumArt)
             .graphicsLayer { scaleX = scale; scaleY = scale },
         contentAlignment = Alignment.Center,
     ) {
         // Accent glow extending ~40dp outside the image bounds (spec: inset -40).
-        // The 700dp size matches the original (620 + 40*2) and centers in the
-        // parent so the glow overhangs the image by 40dp on each side. Keyed on
-        // accent only; the per-frame glowAlpha tween rides on graphicsLayer so
-        // the gradient's backing Shader isn't re-allocated on every animation
-        // tick. The visual result is equivalent (lerp(c.copy(alpha=a),
-        // transparent, t) == alpha*lerp(c, transparent, t)).
+        // Dimen.AlbumGlow is AlbumArt + 40*2 and centers in the parent so the
+        // glow overhangs the image by 40dp on each side. Keyed on accent only;
+        // the per-frame glowAlpha tween rides on graphicsLayer so the gradient's
+        // backing Shader isn't re-allocated on every animation tick. The visual
+        // result is equivalent (lerp(c.copy(alpha=a), transparent, t) ==
+        // alpha*lerp(c, transparent, t)).
         RadialWash(
             modifier = Modifier
-                .size(700.dp)
+                // requiredSize, not size: the parent Box is size(Dimen.AlbumArt),
+                // which hands down FIXED AlbumArt constraints, and Modifier.size
+                // honours incoming constraints -- so a plain size(AlbumGlow) was
+                // silently clamped back to AlbumArt and the intended 40dp glow
+                // overhang never rendered. requiredSize ignores the incoming
+                // constraints.
+                .requiredSize(NowPlayingTvTokens.Dimen.AlbumGlow)
                 .graphicsLayer { alpha = glowAlpha },
             key1 = accent,
         ) { w, h ->
@@ -302,7 +318,7 @@ private fun AlbumArt(
             namespace = "np-focus",
         )
 
-        // 620 dp card. The dark backdrop sits behind the image so that:
+        // The Dimen.AlbumArt card. The dark backdrop sits behind the image so that:
         //  - while artwork is loading, the user sees a calm dark surface
         //    that already picks up the current accent rather than a stark
         //    light-gray square that fights the rest of the screen,
@@ -311,13 +327,13 @@ private fun AlbumArt(
         //  - the elevation shadow stays a property of the whole card.
         Box(
             modifier = Modifier
-                .size(620.dp)
+                .size(NowPlayingTvTokens.Dimen.AlbumArt)
                 .shadow(
-                    elevation = 60.dp,
-                    shape = RoundedCornerShape(8.dp),
+                    elevation = NowPlayingTvTokens.Dimen.AlbumElevation,
+                    shape = RoundedCornerShape(NowPlayingTvTokens.Radius.AlbumArt),
                     clip = false,
                 )
-                .clip(RoundedCornerShape(8.dp)),
+                .clip(RoundedCornerShape(NowPlayingTvTokens.Radius.AlbumArt)),
         ) {
             DarkAlbumBackdrop(accent = accent, modifier = Modifier.fillMaxSize())
             AsyncImage(
@@ -369,7 +385,9 @@ private fun DarkAlbumBackdrop(
         ) {
             drawRoundRect(
                 color = NpCream.copy(alpha = 0.06f),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx()),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                    NowPlayingTvTokens.Radius.AlbumArt.toPx(),
+                ),
                 style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()),
             )
         }
@@ -383,35 +401,53 @@ private fun InfoColumn(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
+        // buildString takes a non-composable lambda, so the two slug resources
+        // have to be resolved above it and substituted inside. Formatting goes
+        // through String.format(Locale.ROOT, ...) rather than the
+        // stringResource(id, args) overload, which formats against the config
+        // locale -- the same discipline formatTime() and formatSampleRateKhz()
+        // already follow, and what keeps %d arguments (see albumYearFmt below)
+        // from rendering as Arabic-Indic digits.
+        val trackNumberFmt = stringResource(R.string.np_tv_track_number)
+        val fromTheAlbum = stringResource(R.string.np_tv_from_the_album)
         val slug = buildString {
             if (metadata.albumTrack > 0) {
-                append("Track ")
-                append(metadata.albumTrack.toString().padStart(2, '0'))
+                append(
+                    String.format(
+                        Locale.ROOT,
+                        trackNumberFmt,
+                        metadata.albumTrack.toString().padStart(2, '0'),
+                    ),
+                )
             }
             if (metadata.album.isNotBlank()) {
                 if (isNotEmpty()) append(" · ")
-                append("From the Album")
+                append(fromTheAlbum)
             }
         }
         if (slug.isNotEmpty()) {
             Text(
-                text = slug.uppercase(Locale.getDefault()),
+                // Locale.ROOT, not getDefault(): the app ships a single English
+                // string set, so uppercasing against the device locale is wrong
+                // (a Turkish-locale device would render "FROM THE ALBUM" with a
+                // dotted I).
+                text = slug.uppercase(Locale.ROOT),
                 fontFamily = NpInterFamily,
-                fontSize = 18.sp,
+                fontSize = NowPlayingTvTokens.Type.Label,
                 fontWeight = FontWeight.W600,
-                letterSpacing = 4.sp,
+                letterSpacing = NowPlayingTvTokens.Type.TrackSlug,
                 color = FocusFgDim,
             )
-            Spacer(modifier = Modifier.height(28.dp))
+            Spacer(modifier = Modifier.height(NowPlayingTvTokens.Space.SlugGap))
         }
 
         Text(
             text = metadata.title,
             fontFamily = NpFrauncesFamily,
-            fontSize = 88.sp,
+            fontSize = NowPlayingTvTokens.Type.Title,
             fontWeight = FontWeight.W500,
-            lineHeight = 84.sp,
-            letterSpacing = (-2.5).sp,
+            lineHeight = NowPlayingTvTokens.Type.TitleLeading,
+            letterSpacing = NowPlayingTvTokens.Type.TrackTitle,
             color = FocusFg,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
@@ -419,32 +455,34 @@ private fun InfoColumn(
         )
 
         if (metadata.artist.isNotBlank()) {
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(NowPlayingTvTokens.Space.SectionGap))
             Text(
                 text = metadata.artist,
                 fontFamily = NpInterFamily,
-                fontSize = 32.sp,
+                fontSize = NowPlayingTvTokens.Type.Heading,
                 fontWeight = FontWeight.W500,
-                letterSpacing = (-0.4).sp,
+                letterSpacing = NowPlayingTvTokens.Type.TrackHeading,
                 color = FocusFg,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
 
+        val albumYearFmt = stringResource(R.string.np_tv_album_year)
         val albumLine = when {
-            metadata.album.isNotBlank() && metadata.year > 0 -> "${metadata.album} · ${metadata.year}"
+            metadata.album.isNotBlank() && metadata.year > 0 ->
+                String.format(Locale.ROOT, albumYearFmt, metadata.album, metadata.year)
             metadata.album.isNotBlank() -> metadata.album
             else -> ""
         }
         if (albumLine.isNotBlank()) {
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(NowPlayingTvTokens.Space.TightGap))
             Text(
                 text = albumLine,
                 fontFamily = NpInterFamily,
-                fontSize = 24.sp,
+                fontSize = NowPlayingTvTokens.Type.Subheading,
                 fontWeight = FontWeight.W400,
-                letterSpacing = (-0.2).sp,
+                letterSpacing = NowPlayingTvTokens.Type.TrackSubheading,
                 color = FocusFgDim,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -453,7 +491,7 @@ private fun InfoColumn(
         }
 
         if (audioSpec != null) {
-            Spacer(modifier = Modifier.height(56.dp))
+            Spacer(modifier = Modifier.height(NowPlayingTvTokens.Space.ChipsGap))
             SpecChips(spec = audioSpec)
         }
     }

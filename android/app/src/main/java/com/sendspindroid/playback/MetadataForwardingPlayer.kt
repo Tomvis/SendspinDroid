@@ -81,6 +81,13 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     @Volatile
     private var reconnectingOverlay: String? = null
 
+    // Stand-in MediaItem for the reconnecting overlay, used only when the
+    // wrapped player has dropped its current item. MediaItem is immutable and
+    // getCurrentMediaItem() copies via buildUpon(), so one shared instance is
+    // safe to hand out repeatedly.
+    private val overlayMediaItem: MediaItem =
+        MediaItem.Builder().setMediaId(OVERLAY_MEDIA_ID).build()
+
     /**
      * Updates the current track metadata.
      *
@@ -321,19 +328,33 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
      * (not getMediaMetadata()), so we must override this to include artwork
      * and other enhanced fields.
      *
-     * Edge case: when a reconnecting overlay is active but the underlying
-     * player has no current item (e.g. first connect attempt fails after
-     * stream/end before any metadata arrived), we synthesize a MediaItem so
-     * the "Reconnecting to..." overlay still surfaces via the MediaItem path
-     * on legacy Auto bridges.
+     * Edge case: a reconnecting overlay can be active while the underlying
+     * player has no current item. PlaybackService arms the overlay only on the
+     * Ready -> Connecting transition (network handover / stall watchdog), and a
+     * session that reached Ready without ever receiving track metadata (server
+     * connected but idle) never called SendSpinPlayer.updateMediaItem, so its
+     * current item is still null. We synthesize a MediaItem there so the
+     * "Reconnecting to..." overlay still surfaces via the MediaItem path on
+     * legacy Auto bridges.
+     *
+     * That synthesis is gated on [reconnectingOverlay] alone, never on
+     * "baseItem happened to be null". A null baseItem is not evidence of the
+     * overlay state: it is equally the ordinary reading before the first track
+     * metadata arrives, and after tearDownConnection's
+     * SendSpinPlayer.updateConnectionState(false) nulls the item (that teardown
+     * clears the overlay first, so those two never overlap). Handing
+     * [OVERLAY_MEDIA_ID] to Android Auto / AVRCP outside the overlay would
+     * advertise a media id that the browse tree cannot resolve, turning
+     * "nothing is playing" into a browse-callback failure. Outside the overlay
+     * we return null, which is what the Media3 contract expects for "no current
+     * item".
      */
     override fun getCurrentMediaItem(): MediaItem? {
         val baseItem = super.getCurrentMediaItem()
         val metadata = getMediaMetadata()
         if (metadata == MediaMetadata.EMPTY) return baseItem
-        val base = baseItem ?: MediaItem.Builder()
-            .setMediaId("sendspin_overlay")
-            .build()
+        val base = baseItem
+            ?: if (reconnectingOverlay != null) overlayMediaItem else return null
         return base.buildUpon()
             .setMediaMetadata(metadata)
             .build()
@@ -353,5 +374,19 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     override fun removeListener(listener: Player.Listener) {
         super.removeListener(listener)
         listeners.remove(listener)
+    }
+
+    companion object {
+        /**
+         * Media id carried by the synthetic reconnecting-overlay MediaItem.
+         *
+         * Deliberately absent from the Android Auto browse tree: it exists
+         * only so legacy Auto compat bridges, which read metadata off the
+         * MediaItem rather than getMediaMetadata(), have something to hang
+         * "Reconnecting to {server}..." on while the wrapped player has no
+         * item of its own. It is emitted only while a reconnecting overlay is
+         * active. Issue #132.
+         */
+        const val OVERLAY_MEDIA_ID = "sendspin_overlay"
     }
 }

@@ -3,6 +3,8 @@ package com.sendspindroid.ui.adaptive
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -38,22 +40,68 @@ import androidx.compose.ui.unit.dp
  * @param borderWidth Width of the focus ring border
  * @param cornerRadius Corner radius of the focus ring
  * @param focusScale Scale factor when focused (1.0 = no scale)
+ * @param interactionSource The interaction source of a focus target the caller
+ *   already owns -- i.e. the exact instance it passes to its own `clickable`,
+ *   `selectable` or `focusable`. Supplying it collapses the element to a single
+ *   focus target: the helper reads focus from that source and installs no focus
+ *   target of its own.
+ *
+ *   This is not required for interactive elements in general. Most call sites
+ *   here stack the helper's `focusable()` over an inner `clickable` -- the Card
+ *   in `ServerListItem`, the IconButtons in `PlaybackControls`,
+ *   `QueueSheetContent` and `PlayerSheetContent` -- and D-pad OK reaches the
+ *   click handler normally. The parameter exists for one observed failure: the
+ *   TV overflow overlay's menu item, where the stacked outer focus target took
+ *   focus (ring lit) while the inner `clickable` kept the OK / DPAD_CENTER
+ *   handler, so pressing OK did nothing. Reach for it when an element shows
+ *   that symptom, or when it is focused programmatically inside a transient
+ *   overlay, where the stacking has bitten us before.
+ *
+ *   Leave `null` otherwise, including for plain, non-interactive elements that
+ *   need this helper to make them focusable in the first place.
  */
 fun Modifier.tvFocusable(
     focusRequester: FocusRequester? = null,
     borderWidth: Dp = 3.dp,
     cornerRadius: Dp = 12.dp,
-    focusScale: Float = 1.05f
+    focusScale: Float = 1.05f,
+    interactionSource: MutableInteractionSource? = null
 ): Modifier = composed {
     val formFactor = LocalFormFactor.current
+    val withRequester = this
+        .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
 
     if (formFactor != FormFactor.TV) {
-        return@composed this
-            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .focusable()
+        // No ring off-TV; only become a focus target when the caller isn't one.
+        return@composed if (interactionSource != null) withRequester else withRequester.focusable()
+    }
+
+    if (interactionSource != null) {
+        // Caller owns the one and only focus target -- we just paint the ring.
+        val isFocused by interactionSource.collectIsFocusedAsState()
+        return@composed withRequester.tvFocusRing(isFocused, borderWidth, cornerRadius, focusScale)
     }
 
     var isFocused by remember { mutableStateOf(false) }
+    withRequester
+        .tvFocusRing(isFocused, borderWidth, cornerRadius, focusScale)
+        .onFocusChanged { isFocused = it.isFocused }
+        .focusable()
+}
+
+/**
+ * Draws the shared TV focus ring (scale + border) for an element whose focus
+ * state has already been resolved. Split out of [tvFocusable] so that both the
+ * self-focusing path and the caller-owned-focus-target path render an identical
+ * ring from one place.
+ */
+@Composable
+private fun Modifier.tvFocusRing(
+    isFocused: Boolean,
+    borderWidth: Dp,
+    cornerRadius: Dp,
+    focusScale: Float
+): Modifier {
     val scale by animateFloatAsState(
         targetValue = if (isFocused) focusScale else 1f,
         label = "tv_focus_scale"
@@ -63,17 +111,13 @@ fun Modifier.tvFocusable(
     } else {
         Color.Transparent
     }
-
-    this
-        .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+    return this
         .scale(scale)
         .border(
             width = borderWidth,
             color = borderColor,
             shape = RoundedCornerShape(cornerRadius)
         )
-        .onFocusChanged { isFocused = it.isFocused }
-        .focusable()
 }
 
 /**

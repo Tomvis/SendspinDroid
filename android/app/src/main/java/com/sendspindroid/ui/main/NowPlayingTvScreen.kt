@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.Density
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.main.components.nowplaying.NowPlayingFocus
 import com.sendspindroid.ui.main.components.nowplaying.NowPlayingIdleScreen
+import com.sendspindroid.ui.main.components.nowplaying.NowPlayingTvTokens
 import com.sendspindroid.ui.theme.SendSpinTvTheme
 
 /**
@@ -44,7 +45,8 @@ internal fun NowPlayingTv(
 ) {
     val accent = accentColor ?: FallbackAccent
     SendSpinTvTheme {
-        // Design is authored at 1920x1080 in pixel units. Instead of pinning
+        // Design is authored at 1920x1080 in pixel units, the canvas named by
+        // NowPlayingTvTokens.DesignCanvas. Instead of pinning
         // density to 1.0 (which assumed a 1080p window), scale density so that
         // our dp values map to the "1920x1080 design canvas" regardless of the
         // actual surface size Android hands us. On a 1080p window this
@@ -62,8 +64,8 @@ internal fun NowPlayingTv(
                 return@BoxWithConstraints
             }
             val designScale = minOf(
-                constraints.maxWidth.toFloat() / 1920f,
-                constraints.maxHeight.toFloat() / 1080f,
+                constraints.maxWidth.toFloat() / NowPlayingTvTokens.DesignCanvas.WidthPx,
+                constraints.maxHeight.toFloat() / NowPlayingTvTokens.DesignCanvas.HeightPx,
             )
             val platformFontScale = LocalDensity.current.fontScale
             CompositionLocalProvider(

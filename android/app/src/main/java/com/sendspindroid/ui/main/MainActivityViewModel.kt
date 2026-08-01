@@ -294,18 +294,31 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         _artworkSource.value = source
     }
 
+    /**
+     * Currently uncalled. The artwork-derived accent pipeline is inert: nothing
+     * in the app invokes this, and PlayerColors is never constructed anywhere,
+     * so [playerColors] only ever holds null. MainActivity's Palette extraction
+     * (extractAndApplyColors) writes straight to the legacy View bindings and
+     * never reaches this ViewModel. Retained as the wiring point if the accent
+     * is ever revived -- see the accent comment in NowPlayingScreen.
+     */
     fun updatePlayerColors(colors: PlayerColors?) {
         _playerColors.value = colors
     }
 
     fun clearArtwork() {
         _artworkSource.value = null
-        // _playerColors deliberately preserved: when an artwork-less track is
-        // displayed, NowPlayingScreen's sticky-artwork logic keeps the prior
-        // image visible. Clearing the derived accent here would leave the
-        // sticky image with the fallback accent — a visible mismatch (e.g.
-        // orange-tinted album art surrounded by amber glows). resetPlaybackState
-        // is the authoritative path that clears both on disconnect.
+        // _playerColors deliberately not cleared here: when an artwork-less
+        // track is displayed, NowPlayingScreen's sticky-artwork logic keeps the
+        // prior image visible, and clearing a derived accent alongside it would
+        // leave the sticky image with the fallback accent -- a visible mismatch
+        // (e.g. orange-tinted album art surrounded by amber glows).
+        // resetPlaybackState is the authoritative path that clears both on
+        // disconnect.
+        //
+        // Moot in practice today: _playerColors is always null because nothing
+        // calls updatePlayerColors. The reasoning is kept because it is the
+        // constraint any revival of that pipeline has to satisfy.
     }
 
     // ========================================================================

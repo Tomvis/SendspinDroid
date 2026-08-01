@@ -861,4 +861,49 @@
     <string name="save_queue_failed_remove">Failed to remove existing tracks</string>
     <string name="save_queue_failed_create">Failed to create playlist</string>
     <string name="save_queue_failed_load_playlists">Failed to load playlists</string>
+
+    <!--
+      TV Now Playing (10-foot surface).
+      The "·" (U+00B7 middle dot) separators and the "−" (U+2212 minus sign) on the
+      remaining-time label are deliberate typography for a 77" display, not stray
+      non-ASCII. Do not fold them to ASCII "." / "-": the project's ASCII rule
+      targets code, comments and logs, not rendered UI text.
+      Every label on this surface is uppercased at the call site with Locale.ROOT.
+    -->
+    <string name="np_tv_status_buffering">Buffering</string>
+    <string name="np_tv_status_paused">Paused</string>
+
+    <string name="np_tv_idle_standby">Standby</string>
+    <string name="np_tv_idle_standby_sub">Audio · Ready</string>
+    <string name="np_tv_idle_connecting">Connecting</string>
+    <string name="np_tv_idle_connecting_sub">Linking · Audio</string>
+    <string name="np_tv_idle_reconnecting">Reconnecting</string>
+    <string name="np_tv_idle_reconnecting_sub">Searching · Audio</string>
+    <string name="np_tv_idle_offline">Offline</string>
+    <string name="np_tv_idle_offline_sub">No Server</string>
+    <string name="np_tv_idle_error">Disconnected</string>
+    <string name="np_tv_idle_error_sub">Connection Lost</string>
+
+    <string name="np_tv_wordmark_primary">Sendspin</string>
+    <string name="np_tv_wordmark_accent">Droid</string>
+    <string name="np_tv_idle_tagline">silence, in its own key</string>
+
+    <!-- weekday · month day -->
+    <string name="np_tv_date_short">%1$s · %2$s %3$d</string>
+    <!-- weekday · month day, year -->
+    <string name="np_tv_date_long">%1$s · %2$s %3$d, %4$d</string>
+
+    <string name="np_tv_track_number">Track %1$s</string>
+    <string name="np_tv_from_the_album">From the Album</string>
+    <!-- album · year -->
+    <string name="np_tv_album_year">%1$s · %2$d</string>
+
+    <!-- U+2212 minus sign, then the formatted remaining time -->
+    <string name="np_tv_time_remaining">−%1$s</string>
+    <string name="np_tv_total_duration">Total %1$s</string>
+    <string name="np_tv_track_counter">%1$d of %2$d</string>
+
+    <string name="np_tv_spec_bit_depth">%1$d-BIT</string>
+    <string name="np_tv_spec_sample_rate">%1$s kHz</string>
+    <string name="np_tv_spec_bitrate">%1$d kbps</string>
 </resources>

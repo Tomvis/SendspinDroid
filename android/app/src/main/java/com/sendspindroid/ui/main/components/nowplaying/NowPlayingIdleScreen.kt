@@ -1,5 +1,6 @@
 package com.sendspindroid.ui.main.components.nowplaying
 
+import androidx.annotation.StringRes
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -30,6 +31,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
@@ -39,6 +41,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sendspindroid.R
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.TvPassiveFocusAnchor
 import com.sendspindroid.ui.adaptive.overscanSafe
@@ -67,18 +70,22 @@ private val BlobTintB = Color(0xFFD98C58).copy(alpha = 0.67f)
  * [dotColor] is null for the states whose dot picks up the live accent colour.
  * [pulses] drives the breathing dot the focus screen uses while the link isn't
  * healthy.
+ *
+ * [dotLabel] and [wordmarkLabel] are string-resource ids rather than resolved
+ * text, because an enum constructor is not a composable scope. Each surface
+ * resolves its own label with `stringResource` at the point it draws it.
  */
 private enum class IdleStatus(
-    val dotLabel: String,
-    val wordmarkLabel: String,
+    @param:StringRes val dotLabel: Int,
+    @param:StringRes val wordmarkLabel: Int,
     val pulses: Boolean,
     val dotColor: Color?,
 ) {
-    READY("Standby", "Audio · Ready", pulses = false, dotColor = IdleFgFaint),
-    CONNECTING("Connecting", "Linking · Audio", pulses = true, dotColor = null),
-    RECONNECTING("Reconnecting", "Searching · Audio", pulses = true, dotColor = null),
-    OFFLINE("Offline", "No Server", pulses = false, dotColor = IdleFgFaint),
-    ERROR("Disconnected", "Connection Lost", pulses = true, dotColor = IdleFgError),
+    READY(R.string.np_tv_idle_standby, R.string.np_tv_idle_standby_sub, pulses = false, dotColor = IdleFgFaint),
+    CONNECTING(R.string.np_tv_idle_connecting, R.string.np_tv_idle_connecting_sub, pulses = true, dotColor = null),
+    RECONNECTING(R.string.np_tv_idle_reconnecting, R.string.np_tv_idle_reconnecting_sub, pulses = true, dotColor = null),
+    OFFLINE(R.string.np_tv_idle_offline, R.string.np_tv_idle_offline_sub, pulses = false, dotColor = IdleFgFaint),
+    ERROR(R.string.np_tv_idle_error, R.string.np_tv_idle_error_sub, pulses = true, dotColor = IdleFgError),
 }
 
 private fun AppConnectionState?.toIdleStatus(): IdleStatus = when (this) {
@@ -168,6 +175,11 @@ private fun IdleBlobs(accent: Color) {
         label = "np-idle-blob4",
     )
 
+    // The four blobs are one art-directed composition, hand-placed to balance
+    // the frame in design-canvas pixels. No size or offset below recurs anywhere
+    // else or constrains another component, so none of them is a design token --
+    // naming them would imply a reuse contract that does not exist. They read as
+    // a set through the Blob() call signature instead.
     Box(modifier = Modifier.fillMaxSize()) {
         Blob(
             color = accent.copy(alpha = 0.33f),
@@ -272,12 +284,12 @@ private fun StandbyBadge(
     )
     val dotColor = status.dotColor ?: accent
     StatusBadge(
-        label = badgeLabel(status = status.dotLabel, groupLabel = groupLabel),
+        label = badgeLabel(status = stringResource(status.dotLabel), groupLabel = groupLabel),
         labelColor = IdleFgDim,
     ) {
         Box(
             modifier = Modifier
-                .size(8.dp)
+                .size(NowPlayingTvTokens.Dimen.StatusDot)
                 .graphicsLayer {
                     scaleX = pulseScale
                     scaleY = pulseScale
@@ -293,6 +305,11 @@ private fun StandbyBadge(
 
 @Composable
 private fun Wordmark(accent: Color, status: IdleStatus) {
+    // buildAnnotatedString takes a non-composable lambda, so both halves of the
+    // wordmark have to be resolved before it. `wordmarkDroid` rather than
+    // `accent` because that name is already the accent *colour* parameter.
+    val wordmarkSendspin = stringResource(R.string.np_tv_wordmark_primary)
+    val wordmarkDroid = stringResource(R.string.np_tv_wordmark_accent)
     val annotated = buildAnnotatedString {
         withStyle(
             SpanStyle(
@@ -301,7 +318,7 @@ private fun Wordmark(accent: Color, status: IdleStatus) {
                 color = IdleFg,
             ),
         ) {
-            append("Sendspin")
+            append(wordmarkSendspin)
         }
         withStyle(
             SpanStyle(
@@ -309,24 +326,27 @@ private fun Wordmark(accent: Color, status: IdleStatus) {
                 color = accent,
             ),
         ) {
-            append("Droid")
+            append(wordmarkDroid)
         }
     }
     Column(horizontalAlignment = Alignment.End) {
         Text(
             text = annotated,
             fontFamily = NpFrauncesFamily,
-            fontSize = 32.sp,
-            letterSpacing = (-0.5).sp,
-            lineHeight = 32.sp,
+            fontSize = NowPlayingTvTokens.Type.Heading,
+            letterSpacing = NowPlayingTvTokens.Type.TrackDisplay,
+            lineHeight = NowPlayingTvTokens.Type.Heading,
         )
         Text(
-            text = status.wordmarkLabel.uppercase(Locale.getDefault()),
-            modifier = Modifier.padding(top = 8.dp),
+            // Locale.ROOT, not getDefault(): the app ships a single English
+            // string set, so on a Turkish-locale device getDefault() would
+            // uppercase the i in "Audio" to a dotted I. See badgeLabel.
+            text = stringResource(status.wordmarkLabel).uppercase(Locale.ROOT),
+            modifier = Modifier.padding(top = NowPlayingTvTokens.Space.SublabelGap),
             fontFamily = NpInterFamily,
-            fontSize = 16.sp,
+            fontSize = NowPlayingTvTokens.Type.Caption,
             fontWeight = FontWeight.W600,
-            letterSpacing = 3.sp,
+            letterSpacing = NowPlayingTvTokens.Type.TrackSublabel,
             color = IdleFgFaint,
             textAlign = TextAlign.End,
         )
@@ -336,37 +356,49 @@ private fun Wordmark(accent: Color, status: IdleStatus) {
 @Composable
 private fun HeroClock(accent: Color) {
     val clock = rememberClockParts(monthStyle = Calendar.LONG)
+    // Resolve the layout, then format it with Locale.ROOT. stringResource(id,
+    // args) would format against the config locale instead, which emits
+    // Arabic-Indic digits for the day and year on some devices -- the same trap
+    // formatTime's Locale.ROOT guards against. The weekday and month words are
+    // still genuinely localised; rememberClockParts pulls them off the platform.
+    val dateFmt = stringResource(R.string.np_tv_date_long)
 
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = clock.hour,
                 fontFamily = NpFrauncesFamily,
-                fontSize = 240.sp,
-                lineHeight = 240.sp,
+                fontSize = NowPlayingTvTokens.Type.HeroClock,
+                lineHeight = NowPlayingTvTokens.Type.HeroClock,
                 fontWeight = FontWeight.W300,
-                letterSpacing = (-8).sp,
+                letterSpacing = NowPlayingTvTokens.Type.TrackHeroClock,
                 color = IdleFg,
             )
             PulsingColon(accent = accent)
             Text(
                 text = clock.minute,
                 fontFamily = NpFrauncesFamily,
-                fontSize = 240.sp,
-                lineHeight = 240.sp,
+                fontSize = NowPlayingTvTokens.Type.HeroClock,
+                lineHeight = NowPlayingTvTokens.Type.HeroClock,
                 fontWeight = FontWeight.W300,
-                letterSpacing = (-8).sp,
+                letterSpacing = NowPlayingTvTokens.Type.TrackHeroClock,
                 color = IdleFg,
             )
         }
         Text(
-            text = "${clock.weekday} · ${clock.month} ${clock.day}, ${clock.year}"
-                .uppercase(Locale.getDefault()),
-            modifier = Modifier.padding(top = 32.dp),
+            text = String.format(
+                Locale.ROOT,
+                dateFmt,
+                clock.weekday,
+                clock.month,
+                clock.day,
+                clock.year,
+            ).uppercase(Locale.ROOT),
+            modifier = Modifier.padding(top = NowPlayingTvTokens.Space.SectionGap),
             fontFamily = NpInterFamily,
-            fontSize = 20.sp,
+            fontSize = NowPlayingTvTokens.Type.Body,
             fontWeight = FontWeight.W500,
-            letterSpacing = 8.sp,
+            letterSpacing = NowPlayingTvTokens.Type.TrackHeroDate,
             color = IdleFgDim,
             textAlign = TextAlign.Center,
         )
@@ -395,6 +427,10 @@ private fun PulsingColon(accent: Color) {
         label = "np-colon-b",
     )
 
+    // Local geometry that centres the two dots against the 240px hero digits:
+    // a fixed-width gutter between hour and minute, tall enough to hold both.
+    // The 48.dp here is *not* Space.SideInset -- it is coincidentally the same
+    // number and means something entirely different, so it stays inline.
     Box(
         modifier = Modifier
             .padding(horizontal = 48.dp)
@@ -420,10 +456,10 @@ private fun ColonDot(
     scale: () -> Float,
 ) {
     // Glow goes through Modifier.background (Shield Tegra drops brushes
-    // drawn inside Canvas, paints black). Wrap in a 72dp box so the
-    // auto-fit radius (min/2 = 36dp) matches the original size.minDimension
-    // glow radius -- visually equivalent. Keyed on color so the shader is
-    // recycled across every pulse-driven recompose.
+    // drawn inside Canvas, paints black). Wrap in a Dimen.ColonGlow box so the
+    // auto-fit radius (min/2, i.e. Dimen.ColonDot) matches the original
+    // size.minDimension glow radius -- visually equivalent. Keyed on color so
+    // the shader is recycled across every pulse-driven recompose.
     val glowBrush = remember(color) {
         Brush.radialGradient(
             colors = listOf(color.copy(alpha = 0.6f), Color.Transparent),
@@ -435,7 +471,7 @@ private fun ColonDot(
     ) {
         Box(
             modifier = Modifier
-                .size(72.dp)
+                .size(NowPlayingTvTokens.Dimen.ColonGlow)
                 .graphicsLayer {
                     val s = scale()
                     scaleX = s
@@ -443,17 +479,17 @@ private fun ColonDot(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            // Glow halo: 72dp box with radial gradient that fades to
-            // transparent at the box edge. Clipped to a circle so the
+            // Glow halo: a Dimen.ColonGlow box with a radial gradient that fades
+            // to transparent at the box edge. Clipped to a circle so the
             // background fills a disc rather than a square.
             Box(
                 modifier = Modifier
-                    .size(72.dp)
+                    .size(NowPlayingTvTokens.Dimen.ColonGlow)
                     .background(glowBrush, CircleShape),
             )
             // Solid inner dot stays in Canvas -- flat color, no brush, no
             // Shield issue.
-            Canvas(modifier = Modifier.size(36.dp)) {
+            Canvas(modifier = Modifier.size(NowPlayingTvTokens.Dimen.ColonDot)) {
                 drawCircle(color = color, radius = size.minDimension / 2f)
             }
         }
@@ -471,9 +507,9 @@ private fun HorizonTagline() {
         )
     }
     Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = NowPlayingTvTokens.Space.HorizonTop),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(24.dp),
+        horizontalArrangement = Arrangement.spacedBy(NowPlayingTvTokens.Space.HorizonGap),
     ) {
         Box(
             modifier = Modifier
@@ -482,11 +518,13 @@ private fun HorizonTagline() {
                 .background(dividerBrush),
         )
         Text(
-            text = "silence, in its own key",
+            text = stringResource(R.string.np_tv_idle_tagline),
             fontFamily = NpFrauncesFamily,
-            fontSize = 18.sp,
+            fontSize = NowPlayingTvTokens.Type.Label,
             fontStyle = FontStyle.Italic,
             fontWeight = FontWeight.W400,
+            // Sub-1sp optical nudge on one italic serif line -- not part of the
+            // tracked-uppercase ladder in Type, so it stays inline.
             letterSpacing = 0.3.sp,
             color = IdleFgDim,
         )

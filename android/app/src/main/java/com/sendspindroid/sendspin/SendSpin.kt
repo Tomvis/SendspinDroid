@@ -8,7 +8,6 @@ import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.throwableSummary
 import com.sendspindroid.remote.WebRTCTransport
 import com.sendspindroid.sendspin.transport.ProxyWebSocketTransport
-import com.sendspindroid.sendspin.protocol.ColorState
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
@@ -146,23 +145,6 @@ class SendSpin(
          * Default no-op for callers that don't expose group-level controls.
          */
         fun onControllerStateUpdate(state: ControllerState) {}
-
-        /**
-         * Called when artwork-derived color state arrives from the server
-         * (only for clients that advertise the `color@v1` role). Each palette
-         * slot is either null (the server did not extract this color for the
-         * current artwork) or a 3-element list of RGB integers in 0..255.
-         *
-         * Default no-op for callers that don't render color-based theming.
-         */
-        fun onColorStateUpdate(state: ColorState) {}
-
-        /**
-         * Called when the color stream ends and any cached palette should
-         * be cleared. Default no-op for callers that don't render
-         * color-based theming.
-         */
-        fun onColorStateCleared() {}
 
         /**
          * Called when audio output should be silenced or unsilenced because
@@ -489,14 +471,6 @@ class SendSpin(
         // for anything the latest delta omitted.
         _controllerState.value = state
         callback.onControllerStateUpdate(state)
-    }
-
-    override fun onColorStateUpdate(state: ColorState) {
-        callback.onColorStateUpdate(state)
-    }
-
-    override fun onColorStateCleared() {
-        callback.onColorStateCleared()
     }
 
     override fun onStreamStart(config: StreamConfig) {

@@ -1,6 +1,5 @@
 package com.sendspindroid.sendspin.protocol.message
 
-import com.sendspindroid.sendspin.protocol.ColorState
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
@@ -14,7 +13,9 @@ import com.sendspindroid.sendspin.protocol.TrackMetadata
 import com.sendspindroid.sendspin.protocol.TrackProgress
 import com.sendspindroid.shared.log.Log
 import com.sendspindroid.shared.platform.Platform
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
@@ -145,28 +146,23 @@ object MessageParser {
             )
         }
 
-        // Artwork color palette (color@v1 role). Absent => null (no dispatch).
-        val colorState = (payload["color"] as? JsonObject)?.let { colorObj ->
-            ColorState(
-                timestamp = colorObj.longOrDefault("timestamp", 0),
-                backgroundDark = colorObj.rgbTriple("background_dark"),
-                backgroundLight = colorObj.rgbTriple("background_light"),
-                primary = colorObj.rgbTriple("primary"),
-                accent = colorObj.rgbTriple("accent"),
-                onDark = colorObj.rgbTriple("on_dark"),
-                onLight = colorObj.rgbTriple("on_light")
-            )
-        }
-
-        return ServerStateResult(metadata, state, controller, colorState)
+        return ServerStateResult(metadata, state, controller)
     }
 
     /**
      * Parse the unversioned `roles` array from stream/end / stream/clear.
      * Returns null when the field is absent (meaning "all roles").
+     *
+     * Uses `as? JsonArray` / `as? JsonPrimitive` rather than the `.jsonArray` /
+     * `.jsonPrimitive` accessors: those throw IllegalArgumentException on a
+     * JsonNull or wrong-shaped value, and the only catch is the blanket one in
+     * SendSpinProtocolHandler.handleTextMessage -- so a `"roles": null` frame
+     * would abort the whole stream/clear and silently skip the audio flush.
      */
-    fun parseRoles(payload: JsonObject?): List<String>? =
-        payload?.get("roles")?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+    fun parseRoles(payload: JsonObject?): List<String>? {
+        val arr = payload?.get("roles") as? JsonArray ?: return null
+        return arr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+    }
 
     /**
      * Parse a proxy auth response frame (non-spec relay handshake). Returns
@@ -183,19 +179,6 @@ object MessageParser {
             Log.w(TAG, "Failed to parse proxy auth response (${e.message}): ${text.take(200)}")
             null to null
         }
-    }
-
-    /**
-     * Read a JSON array of exactly three ints in 0..255 (an RGB triple).
-     * A malformed slot (wrong arity or out-of-range component) is dropped to
-     * null rather than failing the whole decode.
-     */
-    private fun JsonObject.rgbTriple(key: String): List<Int>? {
-        val arr = (this[key] as? kotlinx.serialization.json.JsonArray) ?: return null
-        val list = arr.mapNotNull { it.jsonPrimitive.intOrNull }
-        if (list.size != 3) return null
-        if (list.any { it !in 0..255 }) return null
-        return list
     }
 
     fun parseServerCommand(payload: JsonObject?): ServerCommandResult? {

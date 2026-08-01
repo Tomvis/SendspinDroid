@@ -37,6 +37,8 @@ Any new or modified UI must:
 - Use `.tvFocusable()` from `ui/adaptive/TvFocusHelpers.kt` on every interactive element.
 - Apply `.overscanSafe()` at screen roots so nothing critical sits within ~48dp of the edge.
 - Scale typography and sizing via `ui/adaptive/AdaptiveDefaults.kt` rather than hardcoded dp/sp values.
+- Exception - the TV Now Playing surface (`ui/main/NowPlayingTvScreen.kt` and `ui/main/components/nowplaying/`) overrides `LocalDensity` so `1.dp` == 1 pixel on a fixed 1920x1080 design canvas that scales with the window (density 2.0 at 4K).
+- Inside that surface take every size, spacing and font value from `ui/main/components/nowplaying/NowPlayingTvTokens.kt` - not bare literals, and not `AdaptiveDefaults` (whose values mean real dp/sp, so they come out under-scaled here: a 36.sp lands as 36 canvas px, roughly 18 real sp on a 1080p Shield window).
 - Land `TvInitialFocus` on a sensible default element on first composition.
 - Keep hit targets >=~48dp and TV-layout text >=~18sp.
 
@@ -138,10 +140,15 @@ All Gradle work happens inside the `android/` subdirectory.
 cd android
 ./gradlew assembleDebug       # build debug APK
 ./gradlew installDebug        # install to connected Shield
-./gradlew test                # JVM unit tests (fast)
+./gradlew test                # JVM unit tests for :app + :shared (fast)
 ./gradlew lintDebug           # Android lint
 ./gradlew check               # tests + lint
 ```
+
+`:shared` is a KMP module: its host tests live in `testAndroidHostTest`, not in a
+plain `test` task. `shared/build.gradle.kts` registers a `test` alias for it so the
+multi-project `./gradlew test` above covers `:shared` too. To run that suite alone:
+`./gradlew :shared:testAndroidHostTest`.
 
 The first build downloads the JDK toolchain and Android dependencies (a few hundred MB, one-time).
 

@@ -285,6 +285,13 @@ class WebRTCTransport(
         // worker thread, so invoking them from an observer callback
         // (e.g. PeerConnectionObserver.onIceConnectionChange -> handleError
         // -> cleanup) risks deadlocking that worker.
+        // Cancel the ICE-recovery timeout SYNCHRONOUSLY (Handler.removeCallbacks
+        // is thread-safe). Deferring it into closeNative leaves a window where,
+        // on a non-main-thread cleanup, the pending runnable fires first and
+        // calls handleError() on a transport that is already being torn down --
+        // re-entering cleanup and dispatching a stale onFailure to the listener.
+        iceRecoveryHandler.removeCallbacks(iceRecoveryRunnable)
+
         val dc = dataChannel; dataChannel = null
         val maDc = maApiDataChannel; maApiDataChannel = null
         val pc = peerConnection; peerConnection = null
@@ -294,7 +301,6 @@ class WebRTCTransport(
         remoteDescriptionSet = false
 
         val closeNative = Runnable {
-            iceRecoveryHandler.removeCallbacks(iceRecoveryRunnable)
             dc?.close()
             maDc?.close()
             pc?.close()
