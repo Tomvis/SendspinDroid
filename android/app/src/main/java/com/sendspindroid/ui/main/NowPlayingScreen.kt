@@ -317,24 +317,12 @@ fun NowPlayingScreen(
                     artworkSource = stickyArtworkSource,
                     isBuffering = isBuffering,
                     isPlaying = isPlaying,
-                    playbackState = playbackState,
-                    controlsEnabled = controlsEnabled,
                     accentColor = stickyAccentColor,
-                    isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
                     audioSpec = stickyAudioSpec,
-                    connectionState = connectionState,
-                    onPreviousClick = onPreviousClick,
-                    onPlayPauseClick = onPlayPauseClick,
-                    onNextClick = onNextClick,
-                    onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick,
-                    queueViewModel = queueViewModel,
-                    onBrowseLibrary = onBrowseLibrary,
-                    showPlayerButton = showPlayerButton,
-                    onPlayerClick = onPlayerClick
+                    connectionState = connectionState
                 )
             }
             // Tablet: inline queue panel always visible

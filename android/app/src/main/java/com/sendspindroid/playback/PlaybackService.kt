@@ -946,7 +946,7 @@ class PlaybackService : MediaLibraryService() {
                         startDebugLogging()
 
                         // Broadcast connection state to controllers (MainActivity)
-                        broadcastConnectionState()
+                        broadcastSessionExtras()
 
                         // Notify MusicAssistant of connection
                         // This triggers MA API availability check and token auth if applicable
@@ -990,7 +990,7 @@ class PlaybackService : MediaLibraryService() {
                             // and the extras-fingerprint dedup would then suppress
                             // the correction permanently (terminal failures like
                             // AuthRejected never trigger a later re-broadcast).
-                            broadcastConnectionState(
+                            broadcastSessionExtras(
                                 forceState = STATE_ERROR,
                                 forceErrorMessage = message,
                             )
@@ -1015,7 +1015,7 @@ class PlaybackService : MediaLibraryService() {
                             pendingExitDraining = false  // Clear any stale flag
 
                             // Broadcast to UI
-                            broadcastConnectionState()
+                            broadcastSessionExtras()
 
                             // Surface the reconnect on the MediaSession so lock screen /
                             // Android Auto / AVRCP show "Reconnecting to {server}..." and the
@@ -1295,7 +1295,7 @@ class PlaybackService : MediaLibraryService() {
                 releasePlaybackLocks()
 
                 // Broadcast state after buffer exhausted
-                broadcastConnectionState()
+                broadcastSessionExtras()
 
                 // Clear playback state
                 _playbackState.value = _playbackState.value.copy(
@@ -2214,7 +2214,7 @@ class PlaybackService : MediaLibraryService() {
         forwardingPlayer?.clearMetadata()
 
         // Broadcast disconnection to controllers (MainActivity)
-        broadcastConnectionState()
+        broadcastSessionExtras()
 
         // Notify MusicAssistant of disconnection
         MusicAssistant.onServerDisconnected()
@@ -2254,13 +2254,23 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Broadcasts all session state to MediaControllers via session extras.
+     * Broadcasts all session state (connection, metadata, group, volume) to
+     * connected MediaControllers via session extras.
      *
-     * This unified method ensures all state (connection, metadata, group, volume)
-     * is broadcast together, preventing individual setSessionExtras calls from
-     * overwriting each other.
+     * This is how MainActivity and Android Auto react to state changes without
+     * observing PlaybackService's StateFlows across the process boundary.
+     * Broadcasting everything together keeps individual setSessionExtras calls
+     * from overwriting each other, so call this whenever any state changes that
+     * needs to be reflected in the UI.
      *
-     * Call this method whenever any state changes that needs to be reflected in the UI.
+     * The connection state, server name, and error message are derived from the
+     * coordinator / playback state here, so callers only need to make sure the
+     * underlying state is set before invoking this. [forceState] /
+     * [forceErrorMessage] are for callers that need to broadcast a state which
+     * has not yet propagated through the coordinator's stateIn flow (e.g. the
+     * connect*() entry points stamping STATE_CONNECTING before
+     * SendSpinClient.connect() returns, or catch blocks reporting a synchronous
+     * connect failure with the exception message).
      */
     private fun broadcastSessionExtras(
         forceState: String? = null,
@@ -2434,7 +2444,7 @@ class PlaybackService : MediaLibraryService() {
         // coordinator's sessionState lags behind the synchronous transport
         // update, so the override is required to surface STATE_CONNECTING
         // immediately on initial connect and on reconnect-after-error.
-        broadcastConnectionState(forceState = STATE_CONNECTING)
+        broadcastSessionExtras(forceState = STATE_CONNECTING)
 
         try {
             if (sendSpinClient?.isConnected == true) {
@@ -2457,7 +2467,7 @@ class PlaybackService : MediaLibraryService() {
             sendSpinClient?.connect(SendSpinEndpoint.Local(address, path))
         } catch (e: Exception) {
             Log.e(TAG, "Error connecting to server", e)
-            broadcastConnectionState(
+            broadcastSessionExtras(
                 forceState = STATE_ERROR,
                 forceErrorMessage = "Connection failed: ${e.message}",
             )
@@ -2474,7 +2484,7 @@ class PlaybackService : MediaLibraryService() {
         lastDisconnectUserInitiated = false
 
         // See connectToServer() for why the override is required.
-        broadcastConnectionState(forceState = STATE_CONNECTING)
+        broadcastSessionExtras(forceState = STATE_CONNECTING)
 
         try {
             if (sendSpinClient?.isConnected == true) {
@@ -2496,7 +2506,7 @@ class PlaybackService : MediaLibraryService() {
             sendSpinClient?.connect(SendSpinEndpoint.Remote(remoteId))
         } catch (e: Exception) {
             Log.e(TAG, "Error connecting to remote server", e)
-            broadcastConnectionState(
+            broadcastSessionExtras(
                 forceState = STATE_ERROR,
                 forceErrorMessage = "Connection failed: ${e.message}",
             )
@@ -2517,7 +2527,7 @@ class PlaybackService : MediaLibraryService() {
         lastDisconnectUserInitiated = false
 
         // See connectToServer() for why the override is required.
-        broadcastConnectionState(forceState = STATE_CONNECTING)
+        broadcastSessionExtras(forceState = STATE_CONNECTING)
 
         try {
             if (sendSpinClient?.isConnected == true) {
@@ -2539,35 +2549,11 @@ class PlaybackService : MediaLibraryService() {
             sendSpinClient?.connect(SendSpinEndpoint.Proxy(url, authToken))
         } catch (e: Exception) {
             Log.e(TAG, "Error connecting to proxy server", e)
-            broadcastConnectionState(
+            broadcastSessionExtras(
                 forceState = STATE_ERROR,
                 forceErrorMessage = "Connection failed: ${e.message}",
             )
         }
-    }
-
-    /**
-     * Broadcasts connection state to all connected MediaControllers via session extras.
-     *
-     * This allows MainActivity (and Android Auto) to react to connection state changes
-     * without needing to observe PlaybackService's StateFlow directly across process boundaries.
-     *
-     * The connection state, server name, and error message are derived from
-     * the coordinator / playback state inside broadcastSessionExtras(), so
-     * callers don't need to pass them -- they just need to make sure the
-     * underlying state is set before invoking this.
-     *
-     * [forceState] / [forceErrorMessage] are for callers that need to broadcast
-     * a state which has not yet propagated through the coordinator's
-     * stateIn flow (e.g. the connect*() entry points stamping STATE_CONNECTING
-     * before SendSpinClient.connect() returns, or catch blocks reporting
-     * a synchronous connect failure with the exception message).
-     */
-    private fun broadcastConnectionState(
-        forceState: String? = null,
-        forceErrorMessage: String? = null,
-    ) {
-        broadcastSessionExtras(forceState, forceErrorMessage)
     }
 
     /**

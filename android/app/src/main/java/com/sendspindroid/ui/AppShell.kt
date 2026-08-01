@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.annotation.StringRes
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -377,47 +378,17 @@ private fun ConnectedShell(
         }
     }
 
-    // Shared overflow menu items, rendered inside the top-bar DropdownMenu and
-    // (on TV, where the top bar is hidden) inside a parallel top-end menu
-    // surface triggered by the OK / DPAD_CENTER remote button.
-    val overflowMenuItems: @Composable () -> Unit = {
-        DropdownMenuItem(
-            text = { Text(stringResource(R.string.action_stats)) },
-            onClick = {
-                showOverflowMenu = false
-                onStatsClick()
-            }
-        )
-        DropdownMenuItem(
-            text = { Text(stringResource(R.string.action_edit_server)) },
-            onClick = {
-                showOverflowMenu = false
-                onEditServerClick()
-            }
-        )
-        DropdownMenuItem(
-            text = { Text(stringResource(R.string.action_switch_server)) },
-            onClick = {
-                showOverflowMenu = false
-                onDisconnectClick()
-            }
-        )
-        DropdownMenuItem(
-            text = { Text(stringResource(R.string.action_app_settings)) },
-            onClick = {
-                showOverflowMenu = false
-                onSettingsClick()
-            }
-        )
-        HorizontalDivider()
-        DropdownMenuItem(
-            text = { Text(stringResource(R.string.action_exit_app)) },
-            onClick = {
-                showOverflowMenu = false
-                onExitAppClick()
-            }
-        )
-    }
+    // Single definition of the overflow menu, rendered twice: inside the top-bar
+    // DropdownMenu, and (on TV, where the top bar is hidden) inside the parallel
+    // D-pad-operable overlay triggered by the OK / DPAD_CENTER remote button.
+    // Each renderer supplies its own dismiss behaviour and divider styling.
+    val overflowActions = listOf(
+        OverflowAction(R.string.action_stats, onClick = onStatsClick),
+        OverflowAction(R.string.action_edit_server, onClick = onEditServerClick),
+        OverflowAction(R.string.action_switch_server, onClick = onDisconnectClick),
+        OverflowAction(R.string.action_app_settings, onClick = onSettingsClick),
+        OverflowAction(R.string.action_exit_app, dividerBefore = true, onClick = onExitAppClick),
+    )
 
     // Shared top bar composable
     val topBar: @Composable () -> Unit = {
@@ -508,7 +479,16 @@ private fun ConnectedShell(
                             expanded = showOverflowMenu,
                             onDismissRequest = { showOverflowMenu = false }
                         ) {
-                            overflowMenuItems()
+                            overflowActions.forEach { action ->
+                                if (action.dividerBefore) HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(action.labelRes)) },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        action.onClick()
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -673,13 +653,17 @@ private fun ConnectedShell(
         }
     }
 
+    // Both Scaffold branches hide the top bar under the same condition; computing
+    // it once keeps them from drifting apart (the fork policy below already asks
+    // for manual mirroring, and this is exactly the kind of thing that rots).
+    val hideTopBar = formFactor == FormFactor.TV &&
+        selectedNavTab == null &&
+        currentDetail == null
+
     if (!isMaConnected) {
         // FORK POLICY: this is the LIVE path on this fork (MA features are inert;
         // see CLAUDE.md). Any shell-level UI work (topBar, scaffold, padding) must
         // land here. The `else` branch below is effectively dead on this fork.
-        val hideTopBar = formFactor == FormFactor.TV &&
-            selectedNavTab == null &&
-            currentDetail == null
         // When the top bar is hidden on TV+Now Playing the overflow icon isn't
         // reachable, so OK / DPAD_CENTER on the passive focus anchor opens the
         // overflow menu instead. Returns false unless we actually consume the
@@ -709,17 +693,13 @@ private fun ConnectedShell(
                 // Material3 DropdownMenu items are not D-pad operable on TV;
                 // render a TV-tailored overlay with tvFocusable items instead.
                 TvOverflowMenuOverlay(
+                    actions = overflowActions,
                     onDismiss = {
                         showOverflowMenu = false
                         // Bump the reclaim token so NowPlayingFocus's anchor
                         // re-requests focus once the overlay tears down.
                         tvFocusReclaimToken++
                     },
-                    onStats = onStatsClick,
-                    onEditServer = onEditServerClick,
-                    onSwitchServer = onDisconnectClick,
-                    onSettings = onSettingsClick,
-                    onExitApp = onExitAppClick,
                 )
             }
         }
@@ -792,9 +772,6 @@ private fun ConnectedShell(
             // FORK POLICY: MA-connected branch. Inert on this fork — isMaConnected
             // is never true in production. Any visible UI changes should be mirrored
             // in the `if (!isMaConnected)` branch ABOVE, which is the live path.
-            val hideTopBar = formFactor == FormFactor.TV &&
-                selectedNavTab == null &&
-                currentDetail == null
             Scaffold(
                 topBar = if (hideTopBar) ({}) else topBar,
                 content = contentArea
@@ -1512,12 +1489,8 @@ private fun SideMiniPlayerBar(
  */
 @Composable
 private fun TvOverflowMenuOverlay(
+    actions: List<OverflowAction>,
     onDismiss: () -> Unit,
-    onStats: () -> Unit,
-    onEditServer: () -> Unit,
-    onSwitchServer: () -> Unit,
-    onSettings: () -> Unit,
-    onExitApp: () -> Unit,
 ) {
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { firstFocus.requestFocus() }
@@ -1557,28 +1530,18 @@ private fun TvOverflowMenuOverlay(
                 .padding(48.dp),
         ) {
             Column(modifier = Modifier.padding(vertical = 12.dp)) {
-                TvOverflowMenuItem(
-                    label = stringResource(R.string.action_stats),
-                    onClick = { onDismiss(); onStats() },
-                    focusRequester = firstFocus,
-                )
-                TvOverflowMenuItem(
-                    label = stringResource(R.string.action_edit_server),
-                    onClick = { onDismiss(); onEditServer() },
-                )
-                TvOverflowMenuItem(
-                    label = stringResource(R.string.action_switch_server),
-                    onClick = { onDismiss(); onSwitchServer() },
-                )
-                TvOverflowMenuItem(
-                    label = stringResource(R.string.action_app_settings),
-                    onClick = { onDismiss(); onSettings() },
-                )
-                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
-                TvOverflowMenuItem(
-                    label = stringResource(R.string.action_exit_app),
-                    onClick = { onDismiss(); onExitApp() },
-                )
+                actions.forEachIndexed { index, action ->
+                    if (action.dividerBefore) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        )
+                    }
+                    TvOverflowMenuItem(
+                        label = stringResource(action.labelRes),
+                        onClick = { onDismiss(); action.onClick() },
+                        focusRequester = if (index == 0) firstFocus else null,
+                    )
+                }
             }
         }
     }
@@ -1629,3 +1592,18 @@ private fun TvOverflowMenuItem(
         )
     }
 }
+
+/**
+ * One entry in the app's overflow menu. Declared once in `ConnectedShell` and
+ * rendered by both the Material dropdown (phone/tablet) and the D-pad overlay
+ * (TV), so adding or reordering an entry is a single edit.
+ *
+ * [onClick] is the bare action -- each renderer wraps it with its own dismiss.
+ * [dividerBefore] asks the renderer to draw a separator above this entry, in
+ * whatever style that surface uses.
+ */
+private class OverflowAction(
+    @param:StringRes val labelRes: Int,
+    val dividerBefore: Boolean = false,
+    val onClick: () -> Unit,
+)

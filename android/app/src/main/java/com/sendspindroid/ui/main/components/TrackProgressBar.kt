@@ -31,6 +31,7 @@ import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.theme.SendSpinTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import java.util.Locale
 
 /**
  * Track progress display showing elapsed / total as a simple timestamp pair.
@@ -174,10 +175,12 @@ internal fun formatTime(ms: Long): String {
     val hours = totalSeconds / 3600
     val minutes = (totalSeconds % 3600) / 60
     val seconds = totalSeconds % 60
+    // Locale.ROOT pins ASCII digits + ":" separator across all locales
+    // (some locales would otherwise emit Arabic-Indic digits or NBSP separators).
     return if (hours > 0) {
-        "%d:%02d:%02d".format(hours, minutes, seconds)
+        String.format(Locale.ROOT, "%d:%02d:%02d", hours, minutes, seconds)
     } else {
-        "%d:%02d".format(minutes, seconds)
+        String.format(Locale.ROOT, "%d:%02d", minutes, seconds)
     }
 }
 

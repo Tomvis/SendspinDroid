@@ -12,7 +12,6 @@ import androidx.compose.ui.unit.Density
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.main.components.nowplaying.NowPlayingFocus
 import com.sendspindroid.ui.main.components.nowplaying.NowPlayingIdleScreen
-import com.sendspindroid.ui.queue.QueueViewModel
 import com.sendspindroid.ui.theme.SendSpinTvTheme
 
 /**
@@ -23,6 +22,11 @@ import com.sendspindroid.ui.theme.SendSpinTvTheme
  */
 private val FallbackAccent: Color = Color(0xFFF5A524)
 
+/**
+ * TV Now Playing surface. Deliberately display-only: the screen is driven
+ * entirely by the D-pad transport keys handled in AppShell, so it takes no
+ * click callbacks and renders no controls.
+ */
 @Composable
 internal fun NowPlayingTv(
     metadata: TrackMetadata,
@@ -30,24 +34,12 @@ internal fun NowPlayingTv(
     artworkSource: ArtworkSource?,
     isBuffering: Boolean,
     isPlaying: Boolean,
-    playbackState: PlaybackState,
-    @Suppress("UNUSED_PARAMETER") controlsEnabled: Boolean,
     accentColor: Color?,
-    @Suppress("UNUSED_PARAMETER") isMaConnected: Boolean,
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
     audioSpec: AudioStreamSpec? = null,
     connectionState: AppConnectionState? = null,
-    @Suppress("UNUSED_PARAMETER") onPreviousClick: () -> Unit,
-    @Suppress("UNUSED_PARAMETER") onPlayPauseClick: () -> Unit,
-    @Suppress("UNUSED_PARAMETER") onNextClick: () -> Unit,
-    @Suppress("UNUSED_PARAMETER") onSwitchGroupClick: () -> Unit,
-    @Suppress("UNUSED_PARAMETER") onFavoriteClick: () -> Unit,
-    @Suppress("UNUSED_PARAMETER") queueViewModel: QueueViewModel?,
-    @Suppress("UNUSED_PARAMETER") onBrowseLibrary: () -> Unit,
-    @Suppress("UNUSED_PARAMETER") showPlayerButton: Boolean = false,
-    @Suppress("UNUSED_PARAMETER") onPlayerClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val accent = accentColor ?: FallbackAccent
@@ -92,7 +84,6 @@ internal fun NowPlayingTv(
                             durationMs = durationMs,
                             positionUpdatedAt = positionUpdatedAt,
                             isPlaying = isPlaying,
-                            playbackState = playbackState,
                             accent = accent,
                             groupLabel = groupName,
                             audioSpec = audioSpec,

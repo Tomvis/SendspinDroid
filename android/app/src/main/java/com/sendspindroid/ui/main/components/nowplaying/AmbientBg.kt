@@ -199,21 +199,49 @@ private class BoxBlurTransformation(
         return output
     }
 
+    // Both passes keep a running window sum instead of re-accumulating the
+    // whole (2r+1)-wide kernel per pixel. The window for output pixel i is
+    // [max(0, i-r), min(last, i+r)] exactly as before, and the divisor is that
+    // window's true length, so the output is bit-identical to the naive form --
+    // it just does O(1) work per pixel instead of O(r). At the caller's
+    // 384x384 / r=24 / 3 iterations that is ~49x fewer accumulate steps, which
+    // matters because the transform competes with the decode dispatcher and
+    // the audio playback loop for the Shield's cores on every track change.
+
     private fun boxBlurHorizontal(src: IntArray, dst: IntArray, w: Int, h: Int, r: Int) {
         for (y in 0 until h) {
             val yOff = y * w
+            var sumA = 0; var sumR = 0; var sumG = 0; var sumB = 0
+            // Seed with the window for x = 0.
+            for (xi in 0..minOf(w - 1, r)) {
+                val p = src[yOff + xi]
+                sumA += (p ushr 24) and 0xFF
+                sumR += (p ushr 16) and 0xFF
+                sumG += (p ushr 8) and 0xFF
+                sumB += p and 0xFF
+            }
             for (x in 0 until w) {
-                var sumA = 0; var sumR = 0; var sumG = 0; var sumB = 0; var n = 0
-                val x0 = maxOf(0, x - r)
-                val x1 = minOf(w - 1, x + r)
-                for (xi in x0..x1) {
-                    val p = src[yOff + xi]
-                    sumA += (p ushr 24) and 0xFF
-                    sumR += (p ushr 16) and 0xFF
-                    sumG += (p ushr 8) and 0xFF
-                    sumB += p and 0xFF
-                    n++
+                if (x > 0) {
+                    // Slide: drop the pixel that fell off the left edge, add
+                    // the one that entered on the right.
+                    val outIdx = x - r - 1
+                    if (outIdx >= 0) {
+                        val p = src[yOff + outIdx]
+                        sumA -= (p ushr 24) and 0xFF
+                        sumR -= (p ushr 16) and 0xFF
+                        sumG -= (p ushr 8) and 0xFF
+                        sumB -= p and 0xFF
+                    }
+                    val inIdx = x + r
+                    if (inIdx <= w - 1) {
+                        val p = src[yOff + inIdx]
+                        sumA += (p ushr 24) and 0xFF
+                        sumR += (p ushr 16) and 0xFF
+                        sumG += (p ushr 8) and 0xFF
+                        sumB += p and 0xFF
+                    }
                 }
+                val n = minOf(w - 1, x + r) - maxOf(0, x - r) + 1
                 dst[yOff + x] = ((sumA / n) shl 24) or ((sumR / n) shl 16) or ((sumG / n) shl 8) or (sumB / n)
             }
         }
@@ -221,49 +249,80 @@ private class BoxBlurTransformation(
 
     private fun boxBlurVertical(src: IntArray, dst: IntArray, w: Int, h: Int, r: Int) {
         for (x in 0 until w) {
+            var sumA = 0; var sumR = 0; var sumG = 0; var sumB = 0
+            // Seed with the window for y = 0.
+            for (yi in 0..minOf(h - 1, r)) {
+                val p = src[yi * w + x]
+                sumA += (p ushr 24) and 0xFF
+                sumR += (p ushr 16) and 0xFF
+                sumG += (p ushr 8) and 0xFF
+                sumB += p and 0xFF
+            }
             for (y in 0 until h) {
-                var sumA = 0; var sumR = 0; var sumG = 0; var sumB = 0; var n = 0
-                val y0 = maxOf(0, y - r)
-                val y1 = minOf(h - 1, y + r)
-                for (yi in y0..y1) {
-                    val p = src[yi * w + x]
-                    sumA += (p ushr 24) and 0xFF
-                    sumR += (p ushr 16) and 0xFF
-                    sumG += (p ushr 8) and 0xFF
-                    sumB += p and 0xFF
-                    n++
+                if (y > 0) {
+                    val outIdx = y - r - 1
+                    if (outIdx >= 0) {
+                        val p = src[outIdx * w + x]
+                        sumA -= (p ushr 24) and 0xFF
+                        sumR -= (p ushr 16) and 0xFF
+                        sumG -= (p ushr 8) and 0xFF
+                        sumB -= p and 0xFF
+                    }
+                    val inIdx = y + r
+                    if (inIdx <= h - 1) {
+                        val p = src[inIdx * w + x]
+                        sumA += (p ushr 24) and 0xFF
+                        sumR += (p ushr 16) and 0xFF
+                        sumG += (p ushr 8) and 0xFF
+                        sumB += p and 0xFF
+                    }
                 }
+                val n = minOf(h - 1, y + r) - maxOf(0, y - r) + 1
                 dst[y * w + x] = ((sumA / n) shl 24) or ((sumR / n) shl 16) or ((sumG / n) shl 8) or (sumB / n)
             }
         }
     }
 }
 
+/**
+ * Draws a size-derived gradient overlay filling [modifier]'s bounds.
+ *
+ * Every gradient on the Now Playing screens goes through Modifier.background
+ * rather than a DrawScope drawRect(brush=...): the Shield Tegra renderer drops
+ * Canvas-shader brushes and paints black, while Modifier.background takes a
+ * different code path that renders reliably. The trade-off is that the design's
+ * BlendMode.Screen / Overlay can't be expressed this way; at the alphas used
+ * here the delta against normal alpha composition is imperceptible.
+ *
+ * [buildBrush] receives the resolved pixel size and is cached under
+ * [key1]/[key2] plus that size -- brushes back a Shader, and re-allocating one
+ * per recompose churns GC on every animation frame. Callers must pass every
+ * value the lambda reads as a key.
+ */
+@Composable
+internal fun RadialWash(
+    modifier: Modifier = Modifier,
+    key1: Any? = null,
+    key2: Any? = null,
+    buildBrush: (w: Float, h: Float) -> Brush,
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val w = constraints.maxWidth.toFloat().coerceAtLeast(1f)
+        val h = constraints.maxHeight.toFloat().coerceAtLeast(1f)
+        val brush = remember(key1, key2, w, h) { buildBrush(w, h) }
+        Box(modifier = Modifier.fillMaxSize().background(brush))
+    }
+}
+
 @Composable
 private fun AccentWash(accent: Color, paused: Boolean) {
-    // BoxWithConstraints reads layout size so the radial brush can be sized,
-    // then the brush is applied via Modifier.background. Shield Tegra renders
-    // drawRect(brush=...) inside DrawScope as black, which made the prior
-    // implementation invisible on the target device; Modifier.background
-    // takes a different code path that works. The BlendMode.Screen that the
-    // design originally called for can't be expressed via Modifier.background.
-    // For the accent colors and low alpha values used here, the visual delta
-    // between Screen and normal alpha composition is subtle, so the wash
-    // alphas are kept identical to the pre-fix code.
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val w = constraints.maxWidth.toFloat()
-        val h = constraints.maxHeight.toFloat()
-        val washAlpha = if (paused) 0.08f else 0.2f
-        // Keyed on accent + paused + size: brushes back a Shader, and
-        // re-allocating one per recompose churns GC on every animation frame.
-        val brush = remember(accent, washAlpha, w, h) {
-            Brush.radialGradient(
-                colors = listOf(accent.copy(alpha = washAlpha), Color.Transparent),
-                center = Offset(w * 0.30f, h * 0.35f),
-                radius = maxOf(w, h) * 0.55f,
-            )
-        }
-        Box(modifier = Modifier.fillMaxSize().background(brush))
+    val washAlpha = if (paused) 0.08f else 0.2f
+    RadialWash(modifier = Modifier.fillMaxSize(), key1 = accent, key2 = washAlpha) { w, h ->
+        Brush.radialGradient(
+            colors = listOf(accent.copy(alpha = washAlpha), Color.Transparent),
+            center = Offset(w * 0.30f, h * 0.35f),
+            radius = maxOf(w, h) * 0.55f,
+        )
     }
 }
 
@@ -274,23 +333,15 @@ private fun AccentWash(accent: Color, paused: Boolean) {
  */
 @Composable
 internal fun Vignette(radiusFactor: Float = 0.75f) {
-    // BoxWithConstraints reads layout size so the brush radius can be
-    // computed and applied via Modifier.background. Shield Tegra renders
-    // drawRect(brush=...) as black; Modifier.background works.
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val w = constraints.maxWidth.toFloat()
-        val h = constraints.maxHeight.toFloat()
-        val brush = remember(w, h, radiusFactor) {
-            Brush.radialGradient(
-                colorStops = arrayOf(
-                    0.35f to Color.Transparent,
-                    1.0f to Color.Black,
-                ),
-                center = Offset(w * 0.5f, h * 0.5f),
-                radius = maxOf(w, h) * radiusFactor,
-            )
-        }
-        Box(modifier = Modifier.fillMaxSize().background(brush))
+    RadialWash(modifier = Modifier.fillMaxSize(), key1 = radiusFactor) { w, h ->
+        Brush.radialGradient(
+            colorStops = arrayOf(
+                0.35f to Color.Transparent,
+                1.0f to Color.Black,
+            ),
+            center = Offset(w * 0.5f, h * 0.5f),
+            radius = maxOf(w, h) * radiusFactor,
+        )
     }
 }
 

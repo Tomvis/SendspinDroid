@@ -42,29 +42,43 @@ import androidx.compose.ui.unit.sp
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.TvPassiveFocusAnchor
 import com.sendspindroid.ui.adaptive.overscanSafe
+import com.sendspindroid.ui.theme.NpCream
+import com.sendspindroid.ui.theme.NpCreamDim
 import com.sendspindroid.ui.theme.NpFrauncesFamily
 import com.sendspindroid.ui.theme.NpInterFamily
 import java.util.Calendar
 import java.util.Locale
 
 private val IdleBase = Color(0xFF07060D)
-private val IdleFg = Color(0xFFFAF6F0)
-private val IdleFgDim = Color(0xFFFAF6F0).copy(alpha = 0.60f)
-private val IdleFgFaint = Color(0xFFFAF6F0).copy(alpha = 0.35f)
+private val IdleFg = NpCream
+private val IdleFgDim = NpCreamDim
+private val IdleFgFaint = NpCream.copy(alpha = 0.35f)
+private val IdleFgError = Color(0xFFE57373) // muted coral, doesn't fight cream/accent
 private val BlobTintA = Color(0xFF6A4D9A).copy(alpha = 0.4f)
 private val BlobTintB = Color(0xFFD98C58).copy(alpha = 0.67f)
 
 /**
  * View-model for the idle screen's status surfaces (standby badge + wordmark
  * subtitle). The two surfaces share the same five-state machine so the badge
- * dot and wordmark subtitle always agree.
+ * dot and wordmark subtitle always agree. Every per-status difference is a
+ * constructor argument, so adding a sixth state is a single edit here rather
+ * than a new arm in each surface's `when`.
+ *
+ * [dotColor] is null for the states whose dot picks up the live accent colour.
+ * [pulses] drives the breathing dot the focus screen uses while the link isn't
+ * healthy.
  */
-private enum class IdleStatus(val dotLabel: String, val wordmarkLabel: String) {
-    READY("Standby", "Audio · Ready"),
-    CONNECTING("Connecting", "Linking · Audio"),
-    RECONNECTING("Reconnecting", "Searching · Audio"),
-    OFFLINE("Offline", "No Server"),
-    ERROR("Disconnected", "Connection Lost"),
+private enum class IdleStatus(
+    val dotLabel: String,
+    val wordmarkLabel: String,
+    val pulses: Boolean,
+    val dotColor: Color?,
+) {
+    READY("Standby", "Audio · Ready", pulses = false, dotColor = IdleFgFaint),
+    CONNECTING("Connecting", "Linking · Audio", pulses = true, dotColor = null),
+    RECONNECTING("Reconnecting", "Searching · Audio", pulses = true, dotColor = null),
+    OFFLINE("Offline", "No Server", pulses = false, dotColor = IdleFgFaint),
+    ERROR("Disconnected", "Connection Lost", pulses = true, dotColor = IdleFgError),
 }
 
 private fun AppConnectionState?.toIdleStatus(): IdleStatus = when (this) {
@@ -246,34 +260,20 @@ private fun StandbyBadge(
     // When the link isn't healthy, the dot does the same gentle breath
     // SourceBadge uses on the focus screen. Reusing the cadence makes the
     // two screens read as the same instrument in two states.
-    val isLive = status != IdleStatus.READY && status != IdleStatus.OFFLINE
     val transition = rememberInfiniteTransition(label = "np-idle-badge")
     val pulseScale by transition.animateFloat(
-        initialValue = if (isLive) 0.85f else 1f,
-        targetValue = if (isLive) 1.18f else 1f,
+        initialValue = if (status.pulses) 0.85f else 1f,
+        targetValue = if (status.pulses) 1.18f else 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 1100, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse,
         ),
         label = "np-idle-badge-scale",
     )
-    val dotColor = when (status) {
-        IdleStatus.READY -> IdleFgFaint
-        IdleStatus.OFFLINE -> IdleFgFaint
-        IdleStatus.CONNECTING -> accent
-        IdleStatus.RECONNECTING -> accent
-        IdleStatus.ERROR -> Color(0xFFE57373) // muted coral, doesn't fight cream/accent
-    }
-    val label = buildString {
-        append(status.dotLabel)
-        if (groupLabel.isNotBlank()) {
-            append(" · ")
-            append(groupLabel)
-        }
-    }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    val dotColor = status.dotColor ?: accent
+    StatusBadge(
+        label = badgeLabel(status = status.dotLabel, groupLabel = groupLabel),
+        labelColor = IdleFgDim,
     ) {
         Box(
             modifier = Modifier
@@ -287,14 +287,6 @@ private fun StandbyBadge(
                         drawCircle(color = dotColor)
                     }
                 },
-        )
-        Text(
-            text = label.uppercase(Locale.getDefault()),
-            fontFamily = NpInterFamily,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.W500,
-            letterSpacing = 2.5.sp,
-            color = IdleFgDim,
         )
     }
 }
@@ -343,18 +335,12 @@ private fun Wordmark(accent: Color, status: IdleStatus) {
 
 @Composable
 private fun HeroClock(accent: Color) {
-    val now by rememberCurrentTime()
-    val hour = now.get(Calendar.HOUR_OF_DAY).toString().padStart(2, '0')
-    val minute = now.get(Calendar.MINUTE).toString().padStart(2, '0')
-    val weekday = now.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG, Locale.getDefault()).orEmpty()
-    val month = now.getDisplayName(Calendar.MONTH, Calendar.LONG, Locale.getDefault()).orEmpty()
-    val day = now.get(Calendar.DAY_OF_MONTH)
-    val year = now.get(Calendar.YEAR)
+    val clock = rememberClockParts(monthStyle = Calendar.LONG)
 
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = hour,
+                text = clock.hour,
                 fontFamily = NpFrauncesFamily,
                 fontSize = 240.sp,
                 lineHeight = 240.sp,
@@ -364,7 +350,7 @@ private fun HeroClock(accent: Color) {
             )
             PulsingColon(accent = accent)
             Text(
-                text = minute,
+                text = clock.minute,
                 fontFamily = NpFrauncesFamily,
                 fontSize = 240.sp,
                 lineHeight = 240.sp,
@@ -374,7 +360,8 @@ private fun HeroClock(accent: Color) {
             )
         }
         Text(
-            text = "$weekday · $month $day, $year".uppercase(Locale.getDefault()),
+            text = "${clock.weekday} · ${clock.month} ${clock.day}, ${clock.year}"
+                .uppercase(Locale.getDefault()),
             modifier = Modifier.padding(top = 32.dp),
             fontFamily = NpInterFamily,
             fontSize = 20.sp,

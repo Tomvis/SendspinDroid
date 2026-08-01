@@ -96,19 +96,14 @@ fun SourceBadge(
     // The per-frame fraction is read inside the dot/halo graphicsLayer lambdas
     // below, which run in the draw phase and don't invalidate composition.
     val label = remember(isBuffering, paused, groupLabel) {
-        buildString {
-            append(
-                when {
-                    isBuffering -> "Buffering"
-                    paused -> "Paused"
-                    else -> "Now Playing"
-                }
-            )
-            if (groupLabel.isNotBlank()) {
-                append(" · ")
-                append(groupLabel)
-            }
-        }.uppercase(Locale.getDefault())
+        badgeLabel(
+            status = when {
+                isBuffering -> "Buffering"
+                paused -> "Paused"
+                else -> "Now Playing"
+            },
+            groupLabel = groupLabel,
+        )
     }
 
     // Use Modifier.background for the glow halo rather than a Canvas-style
@@ -135,11 +130,7 @@ fun SourceBadge(
         )
     }
     val glowBrush = if (paused) glowBrushAmber else glowBrushGreen
-    Row(
-        modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
+    StatusBadge(label = label, labelColor = ChromeFg, modifier = modifier) {
         Box(
             modifier = Modifier.size(20.dp),
             contentAlignment = Alignment.Center,
@@ -167,16 +158,47 @@ fun SourceBadge(
                     .background(dotColor, CircleShape),
             )
         }
+    }
+}
+
+/**
+ * Status dot + label row shared by the focus screen's [SourceBadge] and the
+ * idle screen's standby badge, so the two read as the same instrument in two
+ * states. Callers supply [dot] because the focus badge carries a glow halo the
+ * idle badge doesn't; the row metrics and label typography are fixed here.
+ */
+@Composable
+internal fun StatusBadge(
+    label: String,
+    labelColor: Color,
+    modifier: Modifier = Modifier,
+    dot: @Composable () -> Unit,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        dot()
         Text(
             text = label,
             fontFamily = NpInterFamily,
             fontSize = 16.sp,
             fontWeight = FontWeight.W500,
             letterSpacing = 2.5.sp,
-            color = ChromeFg,
+            color = labelColor,
         )
     }
 }
+
+/** "NOW PLAYING · KITCHEN" -- the badge label form used by both screens. */
+internal fun badgeLabel(status: String, groupLabel: String): String = buildString {
+    append(status)
+    if (groupLabel.isNotBlank()) {
+        append(" · ")
+        append(groupLabel)
+    }
+}.uppercase(Locale.getDefault())
 
 /**
  * Returns a State<Calendar> that updates on every system minute tick and on
@@ -210,21 +232,45 @@ internal fun rememberCurrentTime(): State<Calendar> {
     return state
 }
 
+/** Display-ready fields derived from [rememberCurrentTime]. */
+internal class ClockParts(
+    val hour: String,
+    val minute: String,
+    val weekday: String,
+    val month: String,
+    val day: Int,
+    val year: Int,
+)
+
+/**
+ * Derives the zero-padded 24h time and localised date fields from the shared
+ * minute-tick clock. [monthStyle] is a `Calendar` display style -- the top-bar
+ * clock uses SHORT, the idle hero clock LONG -- so a 12h/24h or locale-format
+ * change lands in one place for both.
+ */
+@Composable
+internal fun rememberClockParts(monthStyle: Int = Calendar.SHORT): ClockParts {
+    val now by rememberCurrentTime()
+    return ClockParts(
+        hour = now.get(Calendar.HOUR_OF_DAY).toString().padStart(2, '0'),
+        minute = now.get(Calendar.MINUTE).toString().padStart(2, '0'),
+        weekday = now.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG, Locale.getDefault()).orEmpty(),
+        month = now.getDisplayName(Calendar.MONTH, monthStyle, Locale.getDefault()).orEmpty(),
+        day = now.get(Calendar.DAY_OF_MONTH),
+        year = now.get(Calendar.YEAR),
+    )
+}
+
 @Composable
 fun NowPlayingClock(modifier: Modifier = Modifier) {
-    val now by rememberCurrentTime()
-    val hour = now.get(Calendar.HOUR_OF_DAY).toString().padStart(2, '0')
-    val minute = now.get(Calendar.MINUTE).toString().padStart(2, '0')
-    val weekday = now.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG, Locale.getDefault()).orEmpty()
-    val month = now.getDisplayName(Calendar.MONTH, Calendar.SHORT, Locale.getDefault()).orEmpty()
-    val day = now.get(Calendar.DAY_OF_MONTH)
+    val clock = rememberClockParts()
 
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.End,
     ) {
         Text(
-            text = "$hour:$minute",
+            text = "${clock.hour}:${clock.minute}",
             fontFamily = NpInterFamily,
             fontSize = 42.sp,
             fontWeight = FontWeight.W300,
@@ -234,7 +280,7 @@ fun NowPlayingClock(modifier: Modifier = Modifier) {
             textAlign = TextAlign.End,
         )
         Text(
-            text = "$weekday · $month $day".uppercase(Locale.getDefault()),
+            text = "${clock.weekday} · ${clock.month} ${clock.day}".uppercase(Locale.getDefault()),
             modifier = Modifier.padding(top = 8.dp),
             fontFamily = NpInterFamily,
             fontSize = 18.sp,

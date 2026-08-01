@@ -8,6 +8,7 @@ import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.throwableSummary
 import com.sendspindroid.remote.WebRTCTransport
 import com.sendspindroid.sendspin.transport.ProxyWebSocketTransport
+import com.sendspindroid.sendspin.protocol.ColorState
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
@@ -132,43 +133,29 @@ class SendSpin(
 
         /**
          * Called when group-level controller state arrives from the server
-         * (only for clients that advertise the `controller@v1` role).
-         * Reports the application-supported MediaCommand values plus the
-         * group's current volume/mute. Distinct from per-player volume/mute,
-         * which arrives via [onVolumeChanged] / [onMutedChanged].
+         * (only for clients that advertise the `controller@v1` role). Carries
+         * the application-supported MediaCommand values plus the group's
+         * current volume/mute/repeat/shuffle. Distinct from per-player
+         * volume/mute, which arrives via [onVolumeChanged] / [onMutedChanged].
          *
-         * [repeat] is `null` when the server did not report a value (e.g.
-         * older server before controller.repeat was added). Valid string
-         * values are `"off"`, `"one"`, `"all"`. [shuffle] is null on the same
-         * fallback grounds.
+         * The state is delivered whole (as with [onMetadataUpdate]) so a new
+         * server field doesn't change this signature. Its properties are
+         * nullable because the server sends deltas -- null means "unreported",
+         * and [SendSpin.controllerState] holds the merged view.
          *
          * Default no-op for callers that don't expose group-level controls.
          */
-        fun onControllerStateUpdate(
-            supportedCommands: List<String>,
-            volume: Int,
-            muted: Boolean,
-            repeat: String? = null,
-            shuffle: Boolean? = null,
-        ) {}
+        fun onControllerStateUpdate(state: ControllerState) {}
 
         /**
          * Called when artwork-derived color state arrives from the server
-         * (only for clients that advertise the `color@v1` role). Each list
-         * is either null (the server did not extract this color for the
+         * (only for clients that advertise the `color@v1` role). Each palette
+         * slot is either null (the server did not extract this color for the
          * current artwork) or a 3-element list of RGB integers in 0..255.
          *
          * Default no-op for callers that don't render color-based theming.
          */
-        fun onColorStateUpdate(
-            timestamp: Long,
-            backgroundDark: List<Int>?,
-            backgroundLight: List<Int>?,
-            primary: List<Int>?,
-            accent: List<Int>?,
-            onDark: List<Int>?,
-            onLight: List<Int>?,
-        ) {}
+        fun onColorStateUpdate(state: ColorState) {}
 
         /**
          * Called when the color stream ends and any cached palette should
@@ -321,18 +308,6 @@ class SendSpin(
 
     val isConnected: Boolean
         get() = _connectionState.value is TransportState.Ready
-
-    /**
-     * Optional pre-buffer hook: fires for every received audio chunk before
-     * the [Callback.onAudioChunk] path runs. Receives chunks regardless of
-     * the clock-sync filter's state, making it suitable for raw recording
-     * or conformance testing where downstream buffer / late-drop logic
-     * should not apply.
-     *
-     * Set to null (the default) to disable. Thread-safe to assign.
-     */
-    @Volatile
-    var onAudioChunkHook: ((Long, ByteArray) -> Unit)? = null
 
     /**
      * Get the number of reconnection attempts since last successful connect.
@@ -508,32 +483,16 @@ class SendSpin(
         callback.onGroupUpdate(info.groupId, info.groupName, info.playbackState)
     }
 
-    override fun onControllerStateUpdate(state: com.sendspindroid.sendspin.protocol.ControllerState) {
-        // Publish to the StateFlow (observers) and forward the flattened
-        // fields to the Callback (the live UI path). ControllerState fields are
-        // nullable (delta semantics); coerce to neutral defaults for the
-        // flattened callback since the merged state carries forward prior
-        // values for anything the latest delta omitted.
+    override fun onControllerStateUpdate(state: ControllerState) {
+        // Publish to the StateFlow (observers) and to the Callback (the live
+        // UI path). `state` is the merged view, carrying forward prior values
+        // for anything the latest delta omitted.
         _controllerState.value = state
-        callback.onControllerStateUpdate(
-            state.supportedCommands ?: emptyList(),
-            state.volume ?: 0,
-            state.muted ?: false,
-            state.repeat,
-            state.shuffle,
-        )
+        callback.onControllerStateUpdate(state)
     }
 
-    override fun onColorStateUpdate(state: com.sendspindroid.sendspin.protocol.ColorState) {
-        callback.onColorStateUpdate(
-            state.timestamp,
-            state.backgroundDark,
-            state.backgroundLight,
-            state.primary,
-            state.accent,
-            state.onDark,
-            state.onLight,
-        )
+    override fun onColorStateUpdate(state: ColorState) {
+        callback.onColorStateUpdate(state)
     }
 
     override fun onColorStateCleared() {
@@ -568,10 +527,6 @@ class SendSpin(
     }
 
     override fun onAudioChunk(timestampMicros: Long, audioData: ByteArray) {
-        // Pre-buffer hook: fires first so recorders see every chunk even when
-        // the callback path is throttled or buffer-bound. Stored as a Volatile
-        // var so a captured local snapshot won't race with assign-to-null.
-        onAudioChunkHook?.invoke(timestampMicros, audioData)
         callback.onAudioChunk(timestampMicros, audioData)
     }
 

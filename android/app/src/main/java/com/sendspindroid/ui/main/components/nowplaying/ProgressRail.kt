@@ -8,7 +8,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -22,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.draw.clip
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -37,17 +37,22 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sendspindroid.ui.main.components.formatTime
+import com.sendspindroid.ui.theme.NpCream
 import com.sendspindroid.ui.theme.NpMonoFamily
 import kotlinx.coroutines.isActive
 import java.util.Locale
+import kotlin.math.roundToInt
 
-private val RailFg = Color(0xFFFAF6F0)
-private val RailFgDim = Color(0xFFFAF6F0).copy(alpha = 0.58f)
-private val RailBarBg = Color(0xFFFAF6F0).copy(alpha = 0.14f)
-private val RailHeadRing = Color(0xFFFAF6F0).copy(alpha = 0.7f)
+private val RailFg = NpCream
+private val RailFgDim = NpCream.copy(alpha = 0.58f)
+private val RailBarBg = NpCream.copy(alpha = 0.14f)
+private val RailHeadRing = NpCream.copy(alpha = 0.7f)
+private val BarShape = RoundedCornerShape(50)
 
 @Composable
 fun ProgressRail(
@@ -189,16 +194,28 @@ fun ProgressRail(
     // duration; remember slots above stay stable across this gate.
     if (durationMs <= 0L) return
 
-    val progress = (displayPositionMs.toFloat() / safeDuration).coerceIn(0f, 1f)
+    // Pass progress as a lambda rather than a value: RailBar reads it in the
+    // layout and draw phases only, so the 60 Hz interpolation never invalidates
+    // composition. Reading displayPositionMs here at composable scope instead
+    // would recompose this whole subtree -- ~15 composable calls, a dozen
+    // Modifier-chain allocations and a SubcomposeLayout re-measure -- on every
+    // frame for the entire duration of every track.
+    val progress = { (displayPositionMs.toFloat() / safeDuration).coerceIn(0f, 1f) }
 
-    // Time labels change only once per second; gate the String.format work on
-    // the whole-second value so it runs ~1x/sec instead of ~60x/sec. The bar
-    // fill below keeps reading displayPositionMs raw to stay smooth at frame
-    // rate. formatRailTime already floors to seconds, so the text is identical.
-    val displaySeconds = displayPositionMs / 1000L
-    val elapsedLabel = remember(displaySeconds) { formatRailTime(displaySeconds * 1000L) }
+    // Time labels change only once per second. derivedStateOf gates recomposition
+    // on the whole-second value so this scope wakes ~1x/sec instead of ~60x/sec,
+    // and the remembers below keep the String.format work off the frame budget.
+    // formatTime already floors to seconds, so the text is identical.
+    val displaySeconds by remember { derivedStateOf { displayPositionMs / 1000L } }
+    val elapsedLabel = remember(displaySeconds) { formatTime(displaySeconds * 1000L) }
     val remainingLabel = remember(displaySeconds, durationMs) {
-        "−" + formatRailTime((durationMs - displaySeconds * 1000L).coerceAtLeast(0L))
+        "−" + formatTime((durationMs - displaySeconds * 1000L).coerceAtLeast(0L))
+    }
+    val totalLabel = remember(durationMs) {
+        "Total ${formatTime(durationMs)}".uppercase(Locale.getDefault())
+    }
+    val counterLabel = remember(trackNumber, trackTotal) {
+        "$trackNumber of $trackTotal".uppercase(Locale.getDefault())
     }
 
     val elapsedColor by animateColorAsState(
@@ -264,7 +281,7 @@ fun ProgressRail(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = "Total ${formatRailTime(durationMs)}".uppercase(Locale.getDefault()),
+                text = totalLabel,
                 fontFamily = NpMonoFamily,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.W600,
@@ -273,7 +290,7 @@ fun ProgressRail(
             )
             if (trackTotal > 0 && trackNumber > 0) {
                 Text(
-                    text = "$trackNumber of $trackTotal".uppercase(Locale.getDefault()),
+                    text = counterLabel,
                     fontFamily = NpMonoFamily,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.W600,
@@ -287,7 +304,7 @@ fun ProgressRail(
 
 @Composable
 private fun RailBar(
-    progress: Float,
+    progress: () -> Float,
     accent: Color,
     playheadAlpha: Float,
     fillAlpha: Float,
@@ -297,47 +314,59 @@ private fun RailBar(
     // with a brush. On the Shield TV GPU path, Canvas-shader brushes were falling
     // back to solid black; Modifier.background takes a different rendering path
     // that renders gradients reliably.
-    val barShape = RoundedCornerShape(50)
-    BoxWithConstraints(
+    Box(
         modifier = modifier,
         contentAlignment = Alignment.CenterStart,
     ) {
-        val barWidthPx = constraints.maxWidth.toFloat()
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(4.dp)
-                .clip(barShape)
+                .clip(BarShape)
                 .background(RailBarBg),
         )
-        if (progress > 0f) {
-            // RailBar recomposes ~60Hz during interpolation; remember the two
-            // gradient brushes so shader allocation isn't on the frame budget.
-            val playingBrush = remember(accent) {
-                Brush.horizontalGradient(listOf(accent, Color.White))
-            }
-            val pausedBrush = remember {
-                Brush.horizontalGradient(listOf(RailFgDim, RailFgDim))
-            }
-            val fillBrush = if (fillAlpha >= 0.5f) playingBrush else pausedBrush
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(progress)
-                    .height(4.dp)
-                    .clip(barShape)
-                    .background(fillBrush),
-            )
+        // Remember the two gradient brushes so shader allocation isn't on the
+        // frame budget.
+        val playingBrush = remember(accent) {
+            Brush.horizontalGradient(listOf(accent, Color.White))
         }
+        val pausedBrush = remember {
+            Brush.horizontalGradient(listOf(RailFgDim, RailFgDim))
+        }
+        val fillBrush = if (fillAlpha >= 0.5f) playingBrush else pausedBrush
+        Box(
+            modifier = Modifier
+                // Resolve the fill width in the layout phase. Measuring to
+                // `maxWidth * progress()` (rather than scaling a full-width
+                // box via graphicsLayer) keeps the pill's corner radius
+                // geometrically identical to the previous fillMaxWidth(progress),
+                // while the snapshot read of the interpolated position stays out
+                // of composition. Width 0 draws nothing, which is what the old
+                // `if (progress > 0f)` guard did.
+                .layout { measurable, constraints ->
+                    val width = (constraints.maxWidth * progress())
+                        .roundToInt()
+                        .coerceIn(constraints.minWidth, constraints.maxWidth)
+                    val placeable = measurable.measure(
+                        constraints.copy(minWidth = width, maxWidth = width),
+                    )
+                    layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+                }
+                .height(4.dp)
+                .clip(BarShape)
+                .background(fillBrush),
+        )
 
         // Playhead stays in Canvas — it's a flat white/stroked pill, no
-        // brush involved, so the Canvas path is fine for it.
+        // brush involved, so the Canvas path is fine for it. The progress read
+        // happens inside the draw lambda, so interpolation invalidates draw only.
         Canvas(modifier = Modifier.fillMaxWidth().fillMaxHeight()) {
             val headWidth = 16.dp.toPx()
             val headHeight = 6.dp.toPx()
             val headRadius = headHeight / 2f
             val halfW = headWidth / 2f
             val halfH = headHeight / 2f
-            val progressWidth = barWidthPx * progress
+            val progressWidth = size.width * progress()
             val headX = progressWidth.coerceIn(halfW, size.width - halfW)
             val headY = size.height / 2f
 
@@ -404,20 +433,5 @@ private fun StatusGlyph(paused: Boolean, color: Color) {
                 cornerRadius = CornerRadius(0.4.dp.toPx()),
             )
         }
-    }
-}
-
-private fun formatRailTime(ms: Long): String {
-    if (ms < 0) return "0:00"
-    val totalSeconds = ms / 1000
-    val hours = totalSeconds / 3600
-    val minutes = (totalSeconds % 3600) / 60
-    val seconds = totalSeconds % 60
-    // Locale.ROOT pins ASCII digits + ":" separator across all locales
-    // (some locales would otherwise emit Arabic-Indic digits or NBSP separators).
-    return if (hours > 0) {
-        String.format(Locale.ROOT, "%d:%02d:%02d", hours, minutes, seconds)
-    } else {
-        String.format(Locale.ROOT, "%d:%02d", minutes, seconds)
     }
 }

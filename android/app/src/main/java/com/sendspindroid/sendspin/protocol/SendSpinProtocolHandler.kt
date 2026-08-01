@@ -602,10 +602,7 @@ abstract class SendSpinProtocolHandler(
         // is just nulled for dedup): a byte-identical first palette from the
         // new server would otherwise be suppressed, and a stale prior-server
         // palette would persist if the new server doesn't advertise color@v1.
-        if (lastColorState != null) {
-            lastColorState = null
-            onColorStateCleared()
-        }
+        clearColorState()
 
         onHandshakeComplete(result.serverName, result.serverId)
 
@@ -623,8 +620,7 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected fun handleServerState(payload: JsonObject?) {
-        val result = MessageParser.parseServerState(payload)
-        val (metadata, state, controllerDelta) = result
+        val (metadata, state, controllerDelta, colorState) = MessageParser.parseServerState(payload)
 
         if (metadata != null) {
             lastMetadata = metadata
@@ -646,7 +642,6 @@ abstract class SendSpinProtocolHandler(
 
         // Artwork color palette (color@v1). Dedup uses ColorState.equals, which
         // excludes the timestamp, so a re-emitted identical palette is skipped.
-        val colorState = result.colorState
         if (colorState != null && colorState != lastColorState) {
             lastColorState = colorState
             onColorStateUpdate(colorState)
@@ -713,26 +708,37 @@ abstract class SendSpinProtocolHandler(
         onStreamStart(config)
     }
 
+    /**
+     * True when a stream/clear or stream/end [roles] array applies to the given
+     * role family. The server emits the unversioned family name ("player") in
+     * these arrays, NOT the versioned role ("player@v1"), so match on the family
+     * and accept the versioned form too for forward compat. A null roles field
+     * means "all roles".
+     */
+    private fun rolesCover(roles: List<String>?, family: String, versioned: String): Boolean =
+        roles == null || family in roles || versioned in roles
+
+    /** Drops any cached palette and notifies, at most once per palette. */
+    private fun clearColorState() {
+        if (lastColorState != null) {
+            lastColorState = null
+            onColorStateCleared()
+        }
+    }
+
     protected fun handleStreamClear(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamClear ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
         val roles = MessageParser.parseRoles(payload)
 
         // Clear the color palette on a color-family clear, independently of the
         // audio-buffer flush below.
-        val clearColor = roles == null ||
-            SendSpinProtocol.RoleFamily.COLOR in roles ||
-            SendSpinProtocol.Roles.COLOR in roles
-        if (clearColor && lastColorState != null) {
-            lastColorState = null
-            onColorStateCleared()
+        if (rolesCover(roles, SendSpinProtocol.RoleFamily.COLOR, SendSpinProtocol.Roles.COLOR)) {
+            clearColorState()
         }
 
         // Only flush the audio buffer for a player-role (or all-roles) clear.
         // A visualizer/color-only clear must not wipe our PCM queue.
-        val clearPlayer = roles == null ||
-            SendSpinProtocol.RoleFamily.PLAYER in roles ||
-            SendSpinProtocol.Roles.PLAYER in roles
-        if (!clearPlayer) {
+        if (!rolesCover(roles, SendSpinProtocol.RoleFamily.PLAYER, SendSpinProtocol.Roles.PLAYER)) {
             Log.d(tag, "Stream clear for non-player roles: $roles - not flushing audio")
             return
         }
@@ -743,27 +749,16 @@ abstract class SendSpinProtocolHandler(
 
     protected fun handleStreamEnd(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamEnd ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
-        // The server emits the unversioned role-family name ("player") in the
-        // stream/end roles array, NOT the versioned role ("player@v1"). Match
-        // against RoleFamily (accepting the versioned form too for forward
-        // compat); a null roles field means "all roles".
         val roles = MessageParser.parseRoles(payload)
 
         // Color teardown runs independently of (and before) the player-role
         // early-return, so a color-only stream/end still clears the palette
         // without tearing down audio.
-        val endColor = roles == null ||
-            SendSpinProtocol.RoleFamily.COLOR in roles ||
-            SendSpinProtocol.Roles.COLOR in roles
-        if (endColor && lastColorState != null) {
-            lastColorState = null
-            onColorStateCleared()
+        if (rolesCover(roles, SendSpinProtocol.RoleFamily.COLOR, SendSpinProtocol.Roles.COLOR)) {
+            clearColorState()
         }
 
-        val endPlayer = roles == null ||
-            SendSpinProtocol.RoleFamily.PLAYER in roles ||
-            SendSpinProtocol.Roles.PLAYER in roles
-        if (!endPlayer) {
+        if (!rolesCover(roles, SendSpinProtocol.RoleFamily.PLAYER, SendSpinProtocol.Roles.PLAYER)) {
             Log.d(tag, "Stream end for non-player roles: $roles - ignoring")
             return
         }

@@ -12,10 +12,6 @@
     <string name="volume">Volume</string>
     <string name="device_volume">Device Volume</string>
     <string name="group_label">Group: %s</string>
-    <string name="track_number_label">TRACK %d</string>
-    <string name="album_artist_label">Album artist: %s</string>
-    <string name="queue_position_label">%1$d of %2$d in queue</string>
-    <string name="queue_total_label">%d in queue</string>
     <string name="not_connected">Not Connected</string>
     <string name="connected">Connected</string>
     <string name="discovering">Discovering servers...</string>

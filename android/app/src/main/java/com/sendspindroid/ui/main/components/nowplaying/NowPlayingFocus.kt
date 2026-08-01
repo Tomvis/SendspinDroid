@@ -7,7 +7,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -51,15 +50,17 @@ import com.sendspindroid.ui.adaptive.TvPassiveFocusAnchor
 import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.main.AudioStreamSpec
-import com.sendspindroid.ui.main.PlaybackState
 import com.sendspindroid.ui.main.TrackMetadata
+import com.sendspindroid.ui.theme.NpCream
+import com.sendspindroid.ui.theme.NpCreamDim
 import com.sendspindroid.ui.theme.NpFrauncesFamily
 import com.sendspindroid.ui.theme.NpInterFamily
 import kotlinx.coroutines.delay
 import java.util.Locale
 
-private val FocusFg = Color(0xFFFAF6F0)
-private val FocusFgDim = Color(0xFFFAF6F0).copy(alpha = 0.60f)
+private val FocusFg = NpCream
+private val FocusFgDim = NpCreamDim
+private val AlbumBackdropBase = Color(0xFF0B0810)
 
 @Composable
 fun NowPlayingFocus(
@@ -69,7 +70,6 @@ fun NowPlayingFocus(
     durationMs: Long,
     positionUpdatedAt: Long,
     isPlaying: Boolean,
-    @Suppress("UNUSED_PARAMETER") playbackState: PlaybackState,
     accent: Color,
     groupLabel: String,
     audioSpec: AudioStreamSpec?,
@@ -278,32 +278,22 @@ private fun AlbumArt(
         contentAlignment = Alignment.Center,
     ) {
         // Accent glow extending ~40dp outside the image bounds (spec: inset -40).
-        // Migrated from drawBehind { drawRect(brush=...) } because the Shield
-        // Tegra renderer drops Canvas-shader brushes and paints black.
-        // BoxWithConstraints reads the actual layout size so the brush radius
-        // can be derived once and applied via Modifier.background. The 700dp
-        // size matches the original (620 + 40*2) and centers in the parent so
-        // the glow overhangs the image by 40dp on each side.
-        BoxWithConstraints(modifier = Modifier.size(700.dp)) {
-            val w = constraints.maxWidth.toFloat()
-            val h = constraints.maxHeight.toFloat()
-            // Keyed on accent + size only; the per-frame glowAlpha tween is
-            // applied via graphicsLayer so the gradient's backing Shader
-            // isn't re-allocated on every animation tick. The visual result
-            // is equivalent (lerp(c.copy(alpha=a), transparent, t) ==
-            // alpha*lerp(c, transparent, t)).
-            val glowBrush = remember(accent, w, h) {
-                Brush.radialGradient(
-                    colors = listOf(accent, Color.Transparent),
-                    center = Offset(w * 0.5f, h * 0.55f),
-                    radius = w * 0.5f * 0.9f,
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer { alpha = glowAlpha }
-                    .background(glowBrush)
+        // The 700dp size matches the original (620 + 40*2) and centers in the
+        // parent so the glow overhangs the image by 40dp on each side. Keyed on
+        // accent only; the per-frame glowAlpha tween rides on graphicsLayer so
+        // the gradient's backing Shader isn't re-allocated on every animation
+        // tick. The visual result is equivalent (lerp(c.copy(alpha=a),
+        // transparent, t) == alpha*lerp(c, transparent, t)).
+        RadialWash(
+            modifier = Modifier
+                .size(700.dp)
+                .graphicsLayer { alpha = glowAlpha },
+            key1 = accent,
+        ) { w, h ->
+            Brush.radialGradient(
+                colors = listOf(accent, Color.Transparent),
+                center = Offset(w * 0.5f, h * 0.55f),
+                radius = w * 0.5f * 0.9f,
             )
         }
 
@@ -352,36 +342,25 @@ private fun AlbumArt(
  * soft accent radial offset toward the top-left, a faint hairline border,
  * and the placeholder music note from R.drawable.placeholder_album_simple_dark
  * layered at low alpha so the slot still reads as "album art".
- *
- * Uses Modifier.background for both the base and the accent wash because
- * the Shield Tegra renderer drops Canvas-shader brushes (see AmbientBg.kt
- * for the long version).
  */
 @Composable
 private fun DarkAlbumBackdrop(
     accent: Color,
     modifier: Modifier = Modifier,
 ) {
-    BoxWithConstraints(modifier = modifier) {
-        val w = constraints.maxWidth.toFloat().coerceAtLeast(1f)
-        val h = constraints.maxHeight.toFloat().coerceAtLeast(1f)
-        val washBrush = remember(accent, w, h) {
+    Box(modifier = modifier) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(AlbumBackdropBase),
+        )
+        RadialWash(modifier = Modifier.fillMaxSize(), key1 = accent) { w, h ->
             Brush.radialGradient(
                 colors = listOf(accent.copy(alpha = 0.14f), Color.Transparent),
                 center = Offset(w * 0.28f, h * 0.30f),
                 radius = maxOf(w, h) * 0.85f,
             )
         }
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF0B0810)),
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(washBrush),
-        )
         // Cream hairline so the card still reads as a physical object when
         // the dark backdrop is showing. 6% alpha matches the cover's own
         // box-shadow inner stroke from the design spec.
@@ -389,7 +368,7 @@ private fun DarkAlbumBackdrop(
             modifier = Modifier.fillMaxSize(),
         ) {
             drawRoundRect(
-                color = Color(0xFFFAF6F0).copy(alpha = 0.06f),
+                color = NpCream.copy(alpha = 0.06f),
                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx()),
                 style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()),
             )
