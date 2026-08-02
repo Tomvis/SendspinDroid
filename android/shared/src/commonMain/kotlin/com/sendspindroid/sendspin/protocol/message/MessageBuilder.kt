@@ -126,8 +126,17 @@ object MessageBuilder {
             put("type", SendSpinProtocol.MessageType.CLIENT_STATE)
             put("payload", buildJsonObject {
                 // Per spec, `state` is a top-level payload field (sibling of
-                // `player`), not part of the player object.
+                // `player`), not part of the player object. Spec PR #115
+                // replaced it with the `available` boolean; we send both so
+                // pre- and post-#115 servers are both satisfied.
                 put("state", syncState)
+                // `available` is false only for "external_source" - the server
+                // reacts by parking us in a solo group and ending our streams,
+                // which is exactly what we want on audio-focus loss. "error"
+                // must stay available=true: we report it until the time filter
+                // converges, and mapping it to false would evict us from the
+                // group on every connect and every re-anchor.
+                put("available", syncState != "external_source")
                 put("player", buildJsonObject {
                     put("volume", volume)
                     put("muted", muted)
@@ -162,7 +171,11 @@ object MessageBuilder {
                 put("controller", buildJsonObject {
                     put("command", command)
                     if (volume != null) put("volume", volume.coerceIn(0, 100))
-                    if (mute != null) put("mute", mute)
+                    // Spec names this `muted` for client -> server
+                    // client/command. (The server -> client server/command
+                    // player payload uses `mute` - the asymmetry is in the
+                    // spec, not a typo here.)
+                    if (mute != null) put("muted", mute)
                 })
             })
         }

@@ -73,6 +73,40 @@ class MessageBuilderTest {
     }
 
     @Test
+    fun buildPlayerState_availableTrueWhenSynchronized() {
+        // Spec PR #115 replaced the `state` enum with an `available` boolean.
+        // We emit both for pre-/post-#115 server compatibility.
+        val payload = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, "synchronized")
+        ).jsonObject["payload"]!!.jsonObject
+        assertTrue(payload["available"]?.jsonPrimitive?.boolean ?: false)
+    }
+
+    @Test
+    fun buildPlayerState_availableStaysTrueWhileUnsynchronized() {
+        // Critical: "error" is reported until the time filter converges, which
+        // includes every connect and every re-anchor. Mapping it to
+        // available=false would make the server evict us from our group each
+        // time. Only external_source may report unavailable.
+        val payload = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, "error")
+        ).jsonObject["payload"]!!.jsonObject
+        assertTrue(payload["available"]?.jsonPrimitive?.boolean ?: false)
+    }
+
+    @Test
+    fun buildPlayerState_availableFalseWhenExternalSource() {
+        // Audio-focus loss: the server parks us in a solo group and ends our
+        // streams, which is the desired behaviour.
+        val payload = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, "external_source")
+        ).jsonObject["payload"]!!.jsonObject
+        assertEquals(false, payload["available"]?.jsonPrimitive?.boolean)
+        // The legacy field is still carried for pre-#115 servers.
+        assertEquals("external_source", payload["state"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun buildPlayerState_staticDelayMsRoundedToInt() {
         // Spec: static_delay_ms is an integer.
         val msg = Json.parseToJsonElement(
@@ -159,7 +193,10 @@ class MessageBuilderTest {
         val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("mute", mute = true)).jsonObject
         val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
         assertEquals("mute", controller["command"]?.jsonPrimitive?.content)
-        assertEquals(true, controller["mute"]?.jsonPrimitive?.boolean)
+        // Spec names the client -> server field `muted` (the server -> client
+        // server/command player payload uses `mute`; the asymmetry is real).
+        assertEquals(true, controller["muted"]?.jsonPrimitive?.boolean)
+        assertNull("client/command must not send `mute`", controller["mute"])
         assertNull(controller["volume"])
     }
 
@@ -169,7 +206,7 @@ class MessageBuilderTest {
         val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
         assertEquals("repeat_all", controller["command"]?.jsonPrimitive?.content)
         assertNull(controller["volume"])
-        assertNull(controller["mute"])
+        assertNull(controller["muted"])
     }
 
     // --- buildStreamRequestFormat ---

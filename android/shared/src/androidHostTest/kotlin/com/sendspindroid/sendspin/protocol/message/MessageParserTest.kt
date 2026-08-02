@@ -430,16 +430,28 @@ class MessageParserTest {
     }
 
     @Test
-    fun parseServerCommand_muteMissing_usesDefault() {
-        // When "mute" key is absent, booleanOrDefault should return the default (false)
+    fun parseServerCommand_muteMissing_isIgnored() {
+        // A missing "mute" field must be ignored, not defaulted to false.
+        // Defaulting let a malformed frame audibly unmute the device and
+        // restore the last volume. Matches how `volume` and `set_static_delay`
+        // already reject out-of-range/missing values.
         val payload = buildJsonObject {
             put("player", buildJsonObject {
                 put("command", "mute")
             })
         }
-        val result = MessageParser.parseServerCommand(payload)
-        assertTrue(result is ServerCommandResult.Mute)
-        assertFalse((result as ServerCommandResult.Mute).muted)
+        assertNull(MessageParser.parseServerCommand(payload))
+    }
+
+    @Test
+    fun parseServerCommand_muteNonBoolean_isIgnored() {
+        val payload = buildJsonObject {
+            put("player", buildJsonObject {
+                put("command", "mute")
+                put("mute", "yes")
+            })
+        }
+        assertNull(MessageParser.parseServerCommand(payload))
     }
 
     @Test

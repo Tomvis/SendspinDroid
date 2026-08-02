@@ -269,9 +269,6 @@ dependencies {
     // ViewModel KTX - Kotlin extensions for ViewModel
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.0")
 
-    // Java-WebSocket - Lightweight WebSocket server for server-initiated connections
-    implementation("org.java-websocket:Java-WebSocket:1.6.0")
-
     // ========== Remote Access (WebRTC + QR Scanning) ==========
 
     // WebRTC for Android - Enables remote connections via Music Assistant

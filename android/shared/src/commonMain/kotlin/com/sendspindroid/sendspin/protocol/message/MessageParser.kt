@@ -197,8 +197,16 @@ object MessageParser {
                 }
             }
             "mute" -> {
-                val muted = player.booleanOrDefault("mute", false)
-                ServerCommandResult.Mute(muted)
+                // No default: a missing `mute` field must be ignored, not
+                // treated as false. Defaulting would let a malformed frame
+                // audibly unmute the device and restore the last volume.
+                val muted = player["mute"]?.jsonPrimitive?.booleanOrNull
+                if (muted != null) {
+                    ServerCommandResult.Mute(muted)
+                } else {
+                    Log.w(TAG, "mute command missing 'mute' field, ignoring")
+                    null
+                }
             }
             "set_static_delay" -> {
                 // Spec: integer, 0-5000 ms.

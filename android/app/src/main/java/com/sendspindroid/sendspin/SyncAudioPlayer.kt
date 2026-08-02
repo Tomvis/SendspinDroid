@@ -661,7 +661,10 @@ class SyncAudioPlayer(
     @Volatile private var framesInserted = 0L
     @Volatile private var framesDropped = 0L
     @Volatile private var reanchorCount = 0L        // Count of reanchor events
-    @Volatile private var bufferUnderrunCount = 0L  // Count of times queue was empty during playback
+    @Volatile private var bufferUnderrunCount = 0L  // Count of underrun events (edge-triggered)
+    // Latch for the above: set while the queue is starved, cleared once audio
+    // is available again, so one starvation counts once however long it lasts.
+    @Volatile private var inUnderrun = false
 
     // Stuck-state watchdog: tracks when a non-PLAYING state was first entered.
     // Used by the stats logger to surface state-machine deadlocks.
@@ -931,8 +934,7 @@ class SyncAudioPlayer(
             if (pauseDurationUs > LONG_PAUSE_THRESHOLD_US) {
                 AppLog.Audio.d("Long pause detected (${pauseDurationUs / 1000}ms) - clearing stale buffer")
                 // Clear buffer and let it refill from server
-                chunkQueue.clear()
-                totalQueuedSamples.set(0)
+                discardQueuedAudio()
                 setPlaybackState(PlaybackState.INITIALIZING)
                 expectedNextTimestampUs = null
             }
@@ -1029,8 +1031,7 @@ class SyncAudioPlayer(
             isFlushPending.set(false)  // Clear any pending flush since we flush directly below
             audioSink?.stop()
             audioSink?.flush()
-            chunkQueue.clear()
-            totalQueuedSamples.set(0)
+            discardQueuedAudio()
 
             // Clear pending chunks buffer
             synchronized(pendingChunks) {
@@ -1072,8 +1073,7 @@ class SyncAudioPlayer(
             AppLog.Audio.i("[cmd-trace] T4 enterIdle ts=${nowNs() / 1_000_000} thread=${Thread.currentThread().name} gen=$streamGeneration")
 
             // Clear all audio buffers
-            chunkQueue.clear()
-            totalQueuedSamples.set(0)
+            discardQueuedAudio()
             synchronized(pendingChunks) {
                 pendingChunks.clear()
                 hasPendingChunks = false
@@ -1272,8 +1272,7 @@ class SyncAudioPlayer(
             audioSink = null
 
             // Clear all buffers and state
-            chunkQueue.clear()
-            totalQueuedSamples.set(0)
+            discardQueuedAudio()
             synchronized(pendingChunks) {
                 pendingChunks.clear()
                 hasPendingChunks = false
@@ -1306,8 +1305,7 @@ class SyncAudioPlayer(
             val wasPaused = isPaused.getAndSet(false)
 
             // Clear the chunk queue (thread-safe operation)
-            chunkQueue.clear()
-            totalQueuedSamples.set(0)
+            discardQueuedAudio()
 
             // Clear pending chunks buffer
             synchronized(pendingChunks) {
@@ -2054,6 +2052,20 @@ class SyncAudioPlayer(
     }
 
     /**
+     * Discard all queued audio.
+     *
+     * Also re-arms the underrun latch: the emptiness we just caused is
+     * deliberate, so a latch left set would swallow the next real underrun
+     * event. Every queue-clearing site must go through here to keep that
+     * invariant - clearing the queue by hand silently breaks the stat.
+     */
+    private fun discardQueuedAudio() {
+        chunkQueue.clear()
+        totalQueuedSamples.set(0)
+        inUnderrun = false
+    }
+
+    /**
      * Reset all playback timing/sync/DAC state to a fresh-start baseline.
      *
      * Must be called under stateLock. The caller owns AudioTrack handling and the
@@ -2063,8 +2075,7 @@ class SyncAudioPlayer(
      */
     private fun resetPlaybackTimingState() {
         // Clear queued audio - its server timestamps predate the reset.
-        chunkQueue.clear()
-        totalQueuedSamples.set(0)
+        discardQueuedAudio()
 
         // Reset start gating state
         scheduledStartLoopTimeUs = null
@@ -2445,10 +2456,20 @@ class SyncAudioPlayer(
                         delay(BUFFER_EMPTY_DELAY_MS)
                         continue
                     }
-                    bufferUnderrunCount++
+                    // Edge-triggered: count underrun *events*, not poll
+                    // iterations. The loop re-polls every BUFFER_EMPTY_DELAY_MS
+                    // while starved, so a level-triggered counter turned one
+                    // brief starvation into a three-digit stat.
+                    if (!inUnderrun) {
+                        inUnderrun = true
+                        bufferUnderrunCount++
+                        AppLog.Audio.w("Buffer underrun: queue empty during playback")
+                    }
                     delay(BUFFER_EMPTY_DELAY_MS)
                     continue
                 }
+                // Queue has audio again - re-arm the underrun edge.
+                inUnderrun = false
 
                 // Pending-to-DAC pacing: only mechanism needed for write timing.
                 // The Python CLI uses a pull/callback model (audio system requests
