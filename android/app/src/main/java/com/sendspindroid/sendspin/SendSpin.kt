@@ -24,6 +24,8 @@ import com.sendspindroid.sendspin.crypto.PskCandidates
 import com.sendspindroid.sendspin.crypto.PskCandidateSet
 import com.sendspindroid.sendspin.protocol.SendSpinHandshakeDriver
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import com.sendspindroid.sendspin.protocol.RehandshakeDriver
 import com.sendspindroid.sendspin.protocol.GoodbyeReason
 import com.sendspindroid.sendspin.protocol.SendSpinProtocolHandler
