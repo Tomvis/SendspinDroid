@@ -163,12 +163,22 @@ android {
         }
     }
 
-    // TODO: Add packaging options to handle native library conflicts
-    // packaging {
-    //     resources {
-    //         excludes += "/META-INF/{AL2.0,LGPL2.1}"
-    //     }
-    // }
+    packaging {
+        resources {
+            // BouncyCastle (pulled in by :shared for the Noise layer) ships
+            // ~1.2 MB of resource files we never touch. R8 shrinks code but
+            // does not strip arbitrary dependency resources, so without this
+            // they ride along in every release APK:
+            //   picnic lowmcL1/L3/L5 tables  ~1.19 MB  (post-quantum signatures)
+            //   CertPathReviewerMessages     ~12 KB    (X.509 path validation)
+            // The Noise layer uses only X25519, SHA-256, HMAC, ChaCha20-Poly1305
+            // and AES-GCM, none of which read these.
+            excludes += setOf(
+                "org/bouncycastle/pqc/crypto/picnic/**",
+                "org/bouncycastle/x509/CertPathReviewerMessages*.properties",
+            )
+        }
+    }
 }
 
 
@@ -278,6 +288,12 @@ dependencies {
 
     // ZXing-C++ Barcode Scanning - FOSS QR code scanning for Remote ID input
     implementation("io.github.zxing-cpp:android:2.3.0")
+
+    // ZXing core - the *encoder*. zxing-cpp above ships only reader classes, so
+    // it cannot generate the pairing QR. Pure Java, no NDK, so it also runs in
+    // plain JVM unit tests, which is what lets PairingQrCodeTest scan its own
+    // output instead of merely asserting on the input.
+    implementation("com.google.zxing:core:3.5.3")
 
     // CameraX - Modern camera API for QR code scanner
     implementation("androidx.camera:camera-camera2:1.4.1")

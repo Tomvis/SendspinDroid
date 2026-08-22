@@ -10,6 +10,14 @@ object SendSpinProtocol {
     const val ENDPOINT_PATH = "/sendspin"
 
     /**
+     * How long a pairing attempt may stay open before the client aborts it.
+     *
+     * "The client bounds each attempt with an attempt timeout measured from its
+     * first message (recommended 2 minutes)."
+     */
+    const val PAIR_ATTEMPT_TIMEOUT_MS = 120_000L
+
+    /**
      * Binary message header: 1 byte type + 8 bytes big-endian int64 timestamp.
      */
     const val BINARY_HEADER_SIZE_BYTES = 9
@@ -18,9 +26,39 @@ object SendSpinProtocol {
      * Binary message type identifiers.
      */
     object BinaryType {
+        /**
+         * A JSON message body (UTF-8). Every application message travels this
+         * way once the Noise handshake completes.
+         */
+        const val JSON = 0
+
+        /** Reserved by the spec for future use. */
+        const val RESERVED = 1
+
+        /** Fragmentation, see messaging.md#fragmentation. Handled in item 1.5. */
+        const val FRAGMENT_MORE = 2
+        const val FRAGMENT_END = 3
+
         const val AUDIO = 4
         const val ARTWORK_BASE = 8  // 8-11 for channels 0-3
         const val VISUALIZER = 16
+    }
+
+    /**
+     * Noise transport framing limits.
+     *
+     * "A single Noise transport message is limited to 65535 bytes by the Noise
+     * specification. Both defined cipher suites use a 16-byte AEAD
+     * authentication tag, and the message type byte occupies the first byte of
+     * the AEAD plaintext, so the application payload per frame is at most
+     * 65535 - 16 - 1 = 65518 bytes." Anything larger must be fragmented (1.5).
+     */
+    object NoiseFraming {
+        const val MAX_TRANSPORT_MESSAGE = 65535
+        const val AEAD_TAG = 16
+        const val TYPE_BYTE = 1
+        const val MAX_PLAINTEXT = MAX_TRANSPORT_MESSAGE - AEAD_TAG          // 65519
+        const val MAX_PAYLOAD = MAX_PLAINTEXT - TYPE_BYTE                   // 65518
     }
 
     /**
@@ -88,8 +126,19 @@ object SendSpinProtocol {
      * Protocol message type identifiers.
      */
     object MessageType {
+        // Cleartext handshake. These three are the ONLY messages sent as
+        // WebSocket text frames; everything below travels as a Noise ciphertext
+        // in a binary frame once transport mode begins.
+        const val CLIENT_INIT = "client/init"
+        const val SERVER_INIT = "server/init"
+        const val NOISE_HANDSHAKE = "noise/handshake"
+
         const val CLIENT_HELLO = "client/hello"
         const val SERVER_HELLO = "server/hello"
+        const val SERVER_ACTIVATE = "server/activate"
+        const val PAIR_ABORT = "pair/abort"
+        const val CLIENT_PAIR_FINALIZE = "client/pair-finalize"
+        const val SERVER_PAIR_FINALIZE = "server/pair-finalize"
         const val CLIENT_TIME = "client/time"
         const val SERVER_TIME = "server/time"
         const val CLIENT_STATE = "client/state"
@@ -97,12 +146,29 @@ object SendSpinProtocol {
         const val CLIENT_COMMAND = "client/command"
         const val SERVER_COMMAND = "server/command"
         const val CLIENT_GOODBYE = "client/goodbye"
+
+        /**
+         * Valid at any time regardless of `activities`; notably it does NOT
+         * require `'management'`, so it must never be gated on the activity set.
+         */
+        const val SERVER_UNPAIR = "server/unpair"
         const val GROUP_UPDATE = "group/update"
         const val STREAM_START = "stream/start"
         const val STREAM_END = "stream/end"
         const val STREAM_CLEAR = "stream/clear"
         const val STREAM_REQUEST_FORMAT = "stream/request-format"
         const val CLIENT_SYNC_OFFSET = "client/sync_offset"
+
+        // Management. Every one of these is answered by exactly one
+        // MANAGEMENT_RESULT; ordering alone matches reply to request, so none
+        // of them carries an identifier.
+        const val MANAGEMENT_LIST_RECORDS = "management/list-records"
+        const val MANAGEMENT_ADD_RECORD = "management/add-record"
+        const val MANAGEMENT_REMOVE_RECORD = "management/remove-record"
+        const val MANAGEMENT_GET_PAIRING_CONFIG = "management/get-pairing-config"
+        const val MANAGEMENT_SET_PAIRING_CONFIG = "management/set-pairing-config"
+        const val MANAGEMENT_OPEN_PAIRING_WINDOW = "management/open-pairing-window"
+        const val MANAGEMENT_RESULT = "management/result"
     }
 
     /**
@@ -168,27 +234,32 @@ data class TrackProgress(
  * @param progress Progress information (position, duration, speed)
  */
 data class TrackMetadata(
-    val timestamp: Long,
-    val title: String,
-    val artist: String,
-    val albumArtist: String,
-    val album: String,
-    val artworkUrl: String,
-    val year: Int,
-    val track: Int,
-    val progress: TrackProgress,
+    val timestamp: Long? = null,
+    val title: String? = null,
+    val artist: String? = null,
+    val albumArtist: String? = null,
+    val album: String? = null,
+    val artworkUrl: String? = null,
+    val year: Int? = null,
+    val track: Int? = null,
+    val progress: TrackProgress? = null,
     // Queue-position metadata (fork extension consumed by the now-playing UI
     // and media notification). albumTrack is the track number within its
     // album (wire `album_track`, falling back to legacy `track`); queueTrack /
-    // totalTracks describe the position within the active play queue. Default
-    // 0 = not reported.
-    val albumTrack: Int = 0,
-    val queueTrack: Int = 0,
-    val totalTracks: Int = 0
+    // totalTracks describe the position within the active play queue. Null
+    // carries the same meaning as it does for every field above: not reported.
+    val albumTrack: Int? = null,
+    val queueTrack: Int? = null,
+    val totalTracks: Int? = null
 ) {
+    // Every field is nullable because `server/state` can clear any of them
+    // individually. Null means "the server has no value for this", which is
+    // distinct from the empty string - the old representation, which could not
+    // tell a cleared title from a title the delta simply did not mention.
+
     // Convenience properties for backwards compatibility
-    val durationMs: Long get() = progress.trackDuration
-    val positionMs: Long get() = progress.trackProgress
+    val durationMs: Long get() = progress?.trackDuration ?: 0L
+    val positionMs: Long get() = progress?.trackProgress ?: 0L
 
     /**
      * Current track position extrapolated from this metadata snapshot,
@@ -204,12 +275,15 @@ data class TrackMetadata(
      *   microseconds (from the time filter's client->server mapping)
      */
     fun progressAtServerTime(serverNowMicros: Long): Long {
-        if (timestamp == 0L) return progress.trackProgress
+        val p = progress ?: return 0L
+        // A null or zero timestamp means no anchor to extrapolate from - legacy
+        // servers, or a cleared field - so report the raw position.
+        if (timestamp == null || timestamp == 0L) return p.trackProgress
         val elapsedMicros = serverNowMicros - timestamp
-        val calculated = progress.trackProgress +
-                elapsedMicros * progress.playbackSpeed / 1_000_000L
-        return if (progress.trackDuration != 0L) {
-            calculated.coerceIn(0L, progress.trackDuration)
+        val calculated = p.trackProgress +
+                elapsedMicros * p.playbackSpeed / 1_000_000L
+        return if (p.trackDuration != 0L) {
+            calculated.coerceIn(0L, p.trackDuration)
         } else {
             calculated.coerceAtLeast(0L)
         }
@@ -271,25 +345,18 @@ data class ControllerState(
     val volume: Int? = null,
     val muted: Boolean? = null,
     val repeat: String? = null,
-    val shuffle: Boolean? = null
-) {
-    /** Merge a delta update into this state, keeping known values. */
-    fun mergedWith(delta: ControllerState): ControllerState = ControllerState(
-        supportedCommands = delta.supportedCommands ?: supportedCommands,
-        volume = delta.volume ?: volume,
-        muted = delta.muted ?: muted,
-        repeat = delta.repeat ?: repeat,
-        shuffle = delta.shuffle ?: shuffle
-    )
-}
+    val shuffle: Boolean? = null,
+    /** Furthest seekable position; `controller` role, read by item 3.11. */
+    val seekMaxMs: Long? = null
+)
 
 /**
  * Result of parsing a server/state message.
  */
 data class ServerStateResult(
-    val metadata: TrackMetadata?,
+    val metadata: RoleUpdate<TrackMetadata>,
     val playbackState: String?,
-    val controller: ControllerState?
+    val controller: RoleUpdate<ControllerState>
 )
 
 /**

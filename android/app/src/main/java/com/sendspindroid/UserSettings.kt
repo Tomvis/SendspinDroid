@@ -9,6 +9,10 @@ import androidx.preference.PreferenceManager
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
 import java.util.UUID
+import com.sendspindroid.sendspin.crypto.ClientIdentity
+import com.sendspindroid.sendspin.crypto.AndroidPairingConfigStore
+import com.sendspindroid.sendspin.crypto.EncryptedPrefsTrustStore
+import com.sendspindroid.sendspin.crypto.TrustStore
 
 /**
  * Centralized access to user settings stored in SharedPreferences.
@@ -48,6 +52,18 @@ object UserSettings {
     const val KEY_LAYOUT_MODE = "layout_mode"
     const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
     const val KEY_SEARCH_LIBRARY_ONLY = "search_library_only"  // Backward compatibility: search local library only
+
+    // Long-term PSK records from pairing (stored in encrypted prefs).
+    // Record semantics live in the trust store; this is only the blob.
+    const val KEY_PSK_RECORDS = "sendspin_psk_records"
+
+    // Pairing configuration. The PSK is sensitive; the two flags are policy.
+    // All of it is read and written only through the pairing config store -
+    // these are plain accessors with no policy of their own.
+    const val KEY_PAIRING_PSK = "sendspin_pairing_psk"
+    const val KEY_PAIRING_PSK_ENABLED = "sendspin_pairing_psk_enabled"
+    const val KEY_UNPAIRED_ACCESS = "sendspin_unpaired_access"
+    const val KEY_RECORD_MODE_PSK_ID = "sendspin_record_mode_psk_id"
 
     // Remote access preference keys (stored in encrypted prefs)
     const val KEY_REMOTE_SERVERS = "remote_servers"
@@ -178,6 +194,140 @@ object UserSettings {
      * in memory. The cached ID is persisted when initialize() runs.
      * Double-checked locking ensures only one UUID is ever generated.
      */
+    // ========== Sendspin identity (Curve25519) ==========
+
+    private const val KEY_NOISE_IDENTITY = "sendspin_noise_identity"
+
+    @Volatile
+    private var cachedIdentity: ClientIdentity? = null
+
+    /**
+     * The client's persistent Sendspin identity.
+     *
+     * Its public half is the `client_id` on the wire, and it is a pre-message
+     * input to every Noise handshake, so losing it makes this device a stranger
+     * to every server it has paired with - and the failure mode the spec
+     * prescribes is a silent socket close.
+     *
+     * Stored in [sensitivePrefs] with `commit()` rather than `apply()`: an
+     * async write that loses a race with process death would mint a different
+     * identity on next launch, breaking pairings with nothing to point at.
+     *
+     * A stored value that will not decode is NOT silently replaced. That state
+     * means something went wrong, and quietly generating a new identity would
+     * convert a recoverable problem into permanent, invisible unpairing.
+     */
+    fun getOrCreateClientIdentity(): ClientIdentity {
+        cachedIdentity?.let { return it }
+        synchronized(this) {
+            cachedIdentity?.let { return it }
+
+            val stored = sensitivePrefs?.getString(KEY_NOISE_IDENTITY, null)
+            if (!stored.isNullOrBlank()) {
+                val restored = ClientIdentity.fromStoredKey(stored)
+                if (restored != null) {
+                    cachedIdentity = restored
+                    return restored
+                }
+                Log.e(
+                    TAG,
+                    "Stored Sendspin identity is unreadable. Refusing to overwrite it: " +
+                        "minting a new one would silently unpair this device from every " +
+                        "server. Clear app data deliberately if that is what you want."
+                )
+                error("stored Sendspin identity is corrupt")
+            }
+
+            val fresh = ClientIdentity.generate()
+            val ok = sensitivePrefs?.edit()
+                ?.putString(KEY_NOISE_IDENTITY, ClientIdentity.encodeForStorage(fresh))
+                ?.commit() ?: false
+            if (!ok) {
+                Log.w(TAG, "Could not persist the Sendspin identity; it will not survive restart")
+            }
+            cachedIdentity = fresh
+            Log.i(TAG, "Generated Sendspin identity ${fresh.clientId}")
+            return fresh
+        }
+    }
+
+    // ========== Long-term PSK records (trust store backing) ==========
+    //
+    // Only the opaque blob lives here. Record semantics - the psk_id namespace,
+    // `used`, and the add/remove rules - belong to the trust store, so that
+    // there is exactly one place they can be got wrong.
+
+    @Volatile
+    private var cachedTrustStore: TrustStore? = null
+
+    /**
+     * The process-wide trust store.
+     *
+     * One instance, for the same reason the identity is cached: two stores over
+     * the same preferences would each hold their own record list, so a write
+     * through one would be invisible to the other and the `psk_id` namespace
+     * check would run against a stale view.
+     */
+    fun getOrCreateTrustStore(): TrustStore {
+        cachedTrustStore?.let { return it }
+        synchronized(this) {
+            cachedTrustStore?.let { return it }
+            val store = EncryptedPrefsTrustStore()
+            cachedTrustStore = store
+            return store
+        }
+    }
+
+    /** The serialised record store, or "" when nothing has been paired. */
+    fun getPskRecordsBlob(): String =
+        sensitivePrefs?.getString(KEY_PSK_RECORDS, null) ?: ""
+
+    /**
+     * Persist the serialised record store.
+     *
+     * `commit()` rather than `apply()`, for the same reason the identity uses
+     * it: an asynchronous write that loses a race with process death drops a
+     * record the server has already accepted, and the next connect fails as
+     * `unauthorized` with nothing to point at.
+     *
+     * @return false if there is no storage to write to.
+     */
+    fun setPskRecordsBlob(blob: String): Boolean =
+        sensitivePrefs?.edit()?.putString(KEY_PSK_RECORDS, blob)?.commit() ?: false
+
+    /** The stored Pairing PSK as base64url, or null when none has been minted. */
+    fun getPairingPskBlob(): String? =
+        sensitivePrefs?.getString(KEY_PAIRING_PSK, null)
+
+    /** `commit()`: a lost write would mint a different PSK on next launch. */
+    fun setPairingPskBlob(blob: String): Boolean =
+        sensitivePrefs?.edit()?.putString(KEY_PAIRING_PSK, blob)?.commit() ?: false
+
+    fun getPairingPskEnabled(): Boolean =
+        sensitivePrefs?.getBoolean(KEY_PAIRING_PSK_ENABLED, true) ?: true
+
+    /**
+     * @return false if the change was not persisted.
+     *
+     * `commit()` rather than `apply()`, and the result is propagated, because
+     * management answers `ok` only once "any state change has been persisted".
+     * The rest of this file uses `apply()`; a management write cannot.
+     */
+    fun setPairingPskEnabled(enabled: Boolean): Boolean =
+        sensitivePrefs?.edit()?.putBoolean(KEY_PAIRING_PSK_ENABLED, enabled)?.commit() ?: false
+
+    fun getUnpairedAccessEnabled(): Boolean =
+        sensitivePrefs?.getBoolean(KEY_UNPAIRED_ACCESS, true) ?: true
+
+    fun setUnpairedAccessEnabled(enabled: Boolean): Boolean =
+        sensitivePrefs?.edit()?.putBoolean(KEY_UNPAIRED_ACCESS, enabled)?.commit() ?: false
+
+    fun getRecordModePskId(): String? =
+        sensitivePrefs?.getString(KEY_RECORD_MODE_PSK_ID, null)
+
+    fun setRecordModePskId(pskId: String): Boolean =
+        sensitivePrefs?.edit()?.putString(KEY_RECORD_MODE_PSK_ID, pskId)?.commit() ?: false
+
     fun getPlayerId(): String {
         // Fast path: prefs available and ID already stored
         val p = prefs
@@ -695,6 +845,10 @@ object UserSettings {
             isEncrypted = false
             cachedPlayerId = null
             appContext = null
+            // Or a store built over one test's mock prefs would answer queries
+            // in the next test, against records that test never wrote.
+            cachedTrustStore = null
+            AndroidPairingConfigStore.resetForTesting()
         }
     }
 

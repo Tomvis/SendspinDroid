@@ -3,15 +3,31 @@ package com.sendspindroid.sendspin.protocol
 import android.util.Log
 import com.sendspindroid.sendspin.AdaptiveBufferPolicy
 import com.sendspindroid.sendspin.SendspinTimeFilter
+import com.sendspindroid.sendspin.crypto.NoiseCrypto
+import com.sendspindroid.sendspin.crypto.NoiseTransport
+import com.sendspindroid.sendspin.crypto.Psk
+import com.sendspindroid.sendspin.crypto.PskCategory
+import com.sendspindroid.sendspin.crypto.PairingConfigStore
+import com.sendspindroid.sendspin.protocol.management.ManagementResultCode
+import com.sendspindroid.sendspin.protocol.management.ManagementRequestParser
+import com.sendspindroid.sendspin.protocol.management.ManagementService
+import com.sendspindroid.sendspin.protocol.management.ManagementSessionContext
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import com.sendspindroid.sendspin.protocol.message.MessageParser
 import com.sendspindroid.sendspin.protocol.timesync.TimeSyncManager
 import kotlinx.coroutines.CoroutineScope
+import com.sendspindroid.sendspin.crypto.TrustStore
+import com.sendspindroid.sendspin.pairing.PairAbortReason
+import com.sendspindroid.sendspin.pairing.PairingAction
+import com.sendspindroid.sendspin.pairing.PairingEvent
+import com.sendspindroid.sendspin.pairing.PairingPskFlow
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -78,9 +94,17 @@ abstract class SendSpinProtocolHandler(
     // ========== Abstract Transport Methods ==========
 
     /**
-     * Send a text message over the WebSocket.
+     * Send a raw WebSocket TEXT frame.
+     *
+     * After the Noise handshake this is a protocol violation - "all messages
+     * are sent as WebSocket binary frames carrying Noise transport ciphertexts".
+     * Only the handshake driver and the legacy path may call it; everything else
+     * goes through [sendProtocolMessage].
      */
     protected abstract fun sendTextMessage(text: String)
+
+    /** Send a raw WebSocket BINARY frame. */
+    protected abstract fun sendBinaryFrame(bytes: ByteArray)
 
     /**
      * Get the coroutine scope for async operations.
@@ -219,15 +243,26 @@ abstract class SendSpinProtocolHandler(
         }
         val bufferCapacity = MessageBuilder.calculateBufferCapacity(formats, bufferDuration)
         val text = MessageBuilder.buildClientHello(
-            clientId = getClientId(),
+            // Always null: client_id and version live in client/init, and every
+            // session is encrypted, so repeating them here would be sending
+            // fields the spec does not define for this message.
+            clientId = null,
             deviceName = getDeviceName(),
             bufferCapacity = bufferCapacity,
             manufacturer = getManufacturer(),
             supportedFormats = formats,
-            softwareVersion = getSoftwareVersion()
+            softwareVersion = getSoftwareVersion(),
+            trustLevel = getTrustLevel(),
+            unpairedAccessEnabled = isUnpairedAccessEnabled(),
+            supportedPairMethods = getSupportedPairMethods(),
         )
-        sendTextMessage(text)
-        Log.d(tag, "Sent client/hello: ${text.take(500)}")
+        sendProtocolMessage(text)
+        // Logged whole, not truncated. The pairing fields sit at the end of the
+        // payload, and whether a server offers pairing at all is decided by
+        // them - a 500-character cut hid exactly the thing worth checking when
+        // Music Assistant reports "this player has nothing to pair". Nothing
+        // here is secret: client_id is public, and the pair methods are names.
+        Log.d(tag, "Sent client/hello: $text")
     }
 
     /**
@@ -235,19 +270,82 @@ abstract class SendSpinProtocolHandler(
      */
     protected fun sendClientTime() {
         val clientTransmitted = System.nanoTime() / 1000 // Convert to microseconds
-        sendTextMessage(MessageBuilder.buildClientTime(clientTransmitted))
+        sendProtocolMessage(MessageBuilder.buildClientTime(clientTransmitted))
     }
 
     /**
      * Send goodbye message before disconnecting.
+     *
+     * Note the [handshakeComplete] gate, which means "server/hello seen". A
+     * goodbye is legitimate before that, as soon as the Noise handshake
+     * finishes, so this swallows one silently. `server/unpair` sidesteps it by
+     * sending its own goodbye - it has to sequence the send against the close
+     * anyway - but item 2.9's `concurrent_attempt` will need this relaxed.
      */
+    protected fun sendGoodbye(reason: GoodbyeReason) = sendGoodbye(reason.wire)
+
     protected fun sendGoodbye(reason: String) {
         if (!handshakeComplete) return
-        sendTextMessage(MessageBuilder.buildGoodbye(reason))
+        sendProtocolMessage(MessageBuilder.buildGoodbye(reason))
     }
 
     /**
-     * Send player state update (volume/muted/sync state).
+     * Whether this client can currently participate in playback.
+     *
+     * Two conditions, and they mean different things:
+     *
+     * - The time filter must have converged. "A player MUST NOT report
+     *   `available: true` until its time filter has converged enough to begin
+     *   scheduling playback." Reporting availability early invites the server to
+     *   schedule audio against a clock estimate we do not trust yet.
+     * - The output must not be held by an external system. That is the ONLY
+     *   other meaning `available: false` carries since the spec replaced the old
+     *   `state` string (#115) - it is not a way to signal a sync problem.
+     *
+     * Note the asymmetry with the old tri-state: there is no longer any way to
+     * tell the server "I am here but unhealthy". A client that loses sync mid
+     * stream stays `available: true` and mutes its own output; going
+     * `available: false` would make the server move us to a solo group and
+     * require an explicit `switch` to get back, which is much more disruptive
+     * than a brief mute.
+     */
+    protected fun isAvailable(): Boolean {
+        if (externalSourceActive) return false
+        return getTimeFilter().isConverged
+    }
+
+    /**
+     * `'user'` when a pairing record exists for this server, `'none'` otherwise.
+     *
+     * Phase 1 has no record store, so this is always `'none'`. Item 2.1 (#202)
+     * gives it a real answer; 2.3 (#204) makes it follow the matched PSK.
+     */
+    protected open fun getTrustLevel(): String = MessageBuilder.TRUST_NONE
+
+    /**
+     * Whether this client admits a server holding no pairing record.
+     *
+     * This is what decides whether an unpaired connection can carry audio at
+     * all: the spec allows `['playback']` on a Sentinel-keyed session "only when
+     * the client has unpaired access enabled". Default on, so a fresh install
+     * plays before anyone has paired anything; item 3.2 (#228) lets a paired
+     * server toggle it.
+     */
+    protected open fun isUnpairedAccessEnabled(): Boolean = true
+
+    /**
+     * The pairing methods this client currently offers.
+     *
+     * "An implemented method that is disabled is omitted", so a disabled
+     * `pairing_psk` leaves this list - and its PSK leaves the handshake
+     * candidate set at the same time, or the server could still re-handshake to
+     * a method the client no longer advertises.
+     */
+    protected open fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> =
+        listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
+
+    /**
+     * Send player state update (volume/muted/availability).
      */
     protected fun sendPlayerStateUpdate() {
         val delayMs = getTimeFilter().staticDelayMs
@@ -256,10 +354,14 @@ abstract class SendSpinProtocolHandler(
             lastReportedMinBufferMs = target
             target
         }
-        sendTextMessage(
+        sendProtocolMessage(
             MessageBuilder.buildPlayerState(
-                currentVolume, currentMuted, currentSyncState, delayMs,
-                minBufferMs = minBufferMs
+                currentVolume, currentMuted, isAvailable(), delayMs,
+                minBufferMs = minBufferMs,
+                // On the legacy dialect there is no server/activate, so the
+                // player object always ships; on the spec path it may only
+                // appear once the role is actually active.
+                playerRoleActive = !isEncrypted || activeRoles.contains(ROLE_PLAYER_V1),
             )
         )
     }
@@ -439,7 +541,7 @@ abstract class SendSpinProtocolHandler(
             Log.w(tag, "Dropping controller command '$command': not in server supported_commands $supported")
             return
         }
-        sendTextMessage(MessageBuilder.buildCommand(command, volume, mute))
+        sendProtocolMessage(MessageBuilder.buildCommand(command, volume, mute))
     }
 
     /**
@@ -456,7 +558,7 @@ abstract class SendSpinProtocolHandler(
     ) {
         if (!handshakeComplete) return
         Log.i(tag, "Requesting stream format: codec=$codec, rate=$sampleRate, ch=$channels, bits=$bitDepth")
-        sendTextMessage(MessageBuilder.buildStreamRequestFormat(codec, sampleRate, channels, bitDepth))
+        sendProtocolMessage(MessageBuilder.buildStreamRequestFormat(codec, sampleRate, channels, bitDepth))
     }
 
     // ========== Player State Methods ==========
@@ -532,6 +634,145 @@ abstract class SendSpinProtocolHandler(
         )
     }
 
+    // ========== Encrypted channel ==========
+
+    /**
+     * Set once the Noise handshake completes. Null means the legacy
+     * (unencrypted) dialect, which Music Assistant still accepts today behind
+     * its `allow_legacy_clients` toggle but has documented as temporary.
+     *
+     * This one field is what switches the whole protocol layer between the two
+     * wire formats: every existing caller of [sendProtocolMessage] becomes
+     * encrypted with no further edits, and [handleBinaryMessage] routes through
+     * the codec instead of parsing a bare frame.
+     */
+    @Volatile
+    private var wireCodec: NoiseWireCodec? = null
+
+    /** True once the connection is carrying Noise ciphertexts. */
+    val isEncrypted: Boolean get() = wireCodec != null
+
+    /** Install the transport produced by the handshake driver. */
+    fun installEncryptedTransport(transport: NoiseTransport) {
+        wireCodec = NoiseWireCodec(transport)
+        Log.i(tag, "Encrypted channel established")
+    }
+
+    /**
+     * A `noise/handshake` arrived inside the encrypted channel.
+     *
+     * Overridden by the connection, which owns the identity, the candidate set
+     * and the prior handshake hash. The base implementation closes: a
+     * `noise/handshake` is only ever valid in transport mode, and a handler
+     * that cannot run one must not silently ignore it.
+     */
+    protected open fun onRehandshakeMessage(payload: JsonObject?) {
+        onProtocolFailure("noise/handshake received but re-handshake is not supported here")
+    }
+
+    /**
+     * Reset the application-level handshake state after a re-handshake.
+     *
+     * The channel is promoted, not replaced: the transport, the group and the
+     * time filter all survive, so this deliberately does NOT touch them. What
+     * does reset is the message sequence - the server sends `server/hello`
+     * again, and the next `server/activate` is a *first* activation, so a
+     * server that omits `active_roles` clears them rather than inheriting the
+     * roles from before the promotion.
+     */
+    protected fun resetForRehandshake() {
+        handshakeComplete = false
+        activationSeen = false
+        activeRoles = emptyList()
+        activities = emptySet()
+    }
+
+    /** Drop the encrypted channel (disconnect, or falling back to legacy). */
+    fun clearEncryptedTransport() {
+        wireCodec = null
+    }
+
+    /**
+     * Send an application protocol message.
+     *
+     * Encrypted when a Noise transport is installed, a plain text frame
+     * otherwise. Callers do not need to know which.
+     */
+    protected fun sendProtocolMessage(text: String) {
+        val codec = wireCodec
+        if (codec == null) {
+            // Legacy dialect: a plain text frame.
+            sendTextMessage(text)
+            return
+        }
+        // encodeJson takes the send mutex, so this has to be in a coroutine.
+        getCoroutineScope().launch { sendProtocolMessageAwaiting(text) }
+    }
+
+    /**
+     * [sendProtocolMessage], but the caller can tell when the frames have been
+     * handed to the transport.
+     *
+     * Needed wherever something must happen strictly after a message is on the
+     * wire - closing the connection after a goodbye, for instance. The
+     * fire-and-forget version returns while the encrypt is still queued, so
+     * "send, then close" written in that order does not execute in it.
+     */
+    protected suspend fun sendProtocolMessageAwaiting(text: String) {
+        val codec = wireCodec
+        if (codec == null) {
+            sendTextMessage(text)
+            return
+        }
+        try {
+            codec.encodeJson(text).forEach { sendBinaryFrame(it) }
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to encrypt outbound message", e)
+            onProtocolFailure("outbound encryption failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Send [text] under the current keys, then promote the channel to [next].
+     *
+     * The completing frame of a re-handshake. Ordering is the codec's problem
+     * (it holds the send mutex across encrypt-then-install); ordering with
+     * respect to the *application* is this method's: [onSwapped] runs only
+     * after the frame is on the wire, so the re-asserted `client/hello` cannot
+     * be built from state the swap has not finished changing.
+     */
+    protected fun sendAndSwapKeys(text: String, next: NoiseCrypto, onSwapped: () -> Unit) {
+        val codec = wireCodec
+        if (codec == null) {
+            onProtocolFailure("re-handshake attempted with no encrypted channel")
+            return
+        }
+        getCoroutineScope().launch {
+            try {
+                codec.encodeAndSwap(
+                    SendSpinProtocol.BinaryType.JSON,
+                    text.encodeToByteArray(),
+                    next,
+                ).forEach { sendBinaryFrame(it) }
+                onSwapped()
+            } catch (e: Exception) {
+                Log.e(tag, "Re-handshake key swap failed", e)
+                onProtocolFailure("re-handshake key swap failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * A protocol-level failure that requires closing the socket.
+     *
+     * The spec allows no application-level error message for these, so the only
+     * thing to do is close - and the only diagnostic anyone will ever have is
+     * the log line the implementation writes here.
+     */
+    protected open fun onProtocolFailure(reason: String) {
+        Log.e(tag, "Protocol failure: $reason")
+    }
+
     // ========== Message Handling ==========
 
     /**
@@ -547,7 +788,20 @@ abstract class SendSpinProtocolHandler(
             val payload = json["payload"]?.jsonObject
 
             when (type) {
+                // An in-band re-handshake. It arrives as an ordinary encrypted
+                // JSON message inside the current channel, which is why it is
+                // dispatched here and not by the cleartext handshake driver.
+                SendSpinProtocol.MessageType.NOISE_HANDSHAKE -> onRehandshakeMessage(payload)
+
+                // Deliberately not gated on `activities`, and deliberately
+                // discarding the payload: "Valid at any time regardless of the
+                // current `activities`", and the message has no fields.
+                SendSpinProtocol.MessageType.SERVER_UNPAIR -> handleServerUnpair()
+
+                SendSpinProtocol.MessageType.PAIR_ABORT -> handlePairAbort(payload)
+                SendSpinProtocol.MessageType.SERVER_PAIR_FINALIZE -> handleServerPairFinalize()
                 SendSpinProtocol.MessageType.SERVER_HELLO -> handleServerHello(payload)
+                SendSpinProtocol.MessageType.SERVER_ACTIVATE -> handleServerActivate(payload)
                 SendSpinProtocol.MessageType.SERVER_TIME -> handleServerTime(payload)
                 SendSpinProtocol.MessageType.SERVER_STATE -> handleServerState(payload)
                 SendSpinProtocol.MessageType.SERVER_COMMAND -> handleServerCommand(payload)
@@ -556,7 +810,16 @@ abstract class SendSpinProtocolHandler(
                 SendSpinProtocol.MessageType.STREAM_END -> handleStreamEnd(payload)
                 SendSpinProtocol.MessageType.STREAM_CLEAR -> handleStreamClear(payload)
                 SendSpinProtocol.MessageType.CLIENT_SYNC_OFFSET -> handleClientSyncOffset(payload)
-                else -> Log.d(tag, "Unhandled message type: $type")
+                // Before the else: every management request must be
+                // answered, including one we do not implement. Falling through
+                // to the unhandled log leaves the server waiting for a reply
+                // that never comes - which is exactly how MA's device-settings
+                // dialog hangs (#228).
+                else -> if (type.startsWith("management/")) {
+                    handleManagementRequest(type, payload)
+                } else {
+                    Log.d(tag, "Unhandled message type: $type")
+                }
             }
         } catch (e: Exception) {
             Log.e(tag, "Failed to parse message: ${text.take(100)}", e)
@@ -570,8 +833,11 @@ abstract class SendSpinProtocolHandler(
             return
         }
 
-        Log.i(tag, "server/hello: name=${result.serverName}, id=${result.serverId}, reason=${result.connectionReason}")
-        Log.d(tag, "Active roles: ${result.activeRoles}")
+        // server/hello carries only `name` in the current spec. active_roles
+        // moved to server/activate and connection_reason was an aiosendspin
+        // legacy-mode invention; both are still parsed for the legacy dialect
+        // but must not be acted on here.
+        Log.i(tag, "server/hello: name=${result.serverName}")
 
         handshakeComplete = true
 
@@ -582,11 +848,431 @@ abstract class SendSpinProtocolHandler(
         lastPlaybackState = null
         lastGroupInfo = null
         currentControllerState = null
+        activationSeen = false
+        activeRoles = emptyList()
 
         onHandshakeComplete(result.serverName, result.serverId)
 
-        sendPlayerStateUpdate()
-        startTimeSync()
+        if (isEncrypted) {
+            // "Only after receiving the initial server/activate should the
+            // client send any other messages (including client/time and the
+            // initial client/state)." Starting either here would put frames on
+            // the wire before the server has told us what this connection is
+            // for.
+            Log.d(tag, "Waiting for server/activate before sending state or time")
+        } else {
+            sendPlayerStateUpdate()
+            startTimeSync()
+        }
+    }
+
+    /** The versioned player role, as it appears in active_roles. */
+    protected val ROLE_PLAYER_V1 = SendSpinProtocol.Roles.PLAYER
+
+    /** True once the first server/activate has been accepted on this connection. */
+    @Volatile
+    protected var activationSeen = false
+        private set
+
+    /** Roles the server has activated, persisted across activations that omit them. */
+    @Volatile
+    protected var activeRoles: List<String> = emptyList()
+        private set
+
+    /** Activities currently declared on this connection. */
+    @Volatile
+    protected var activities: Set<Activity> = emptySet()
+        private set
+
+    /**
+     * The PSK category that admitted this connection. Drives the admissibility
+     * table; item 2.3 (#204) makes it follow the real handshake result.
+     */
+    protected open fun matchedPskCategory(): PskCategory = PskCategory.SENTINEL
+
+    /** Pairing methods this client currently offers, as live configuration. */
+    protected open fun offeredPairMethods(): Set<String> = setOf("pairing_psk")
+
+    protected fun handleServerActivate(payload: JsonObject?) {
+        val activate = ServerActivateRules.parse(payload)
+        if (activate == null) {
+            Log.e(tag, "server/activate missing required activities")
+            onProtocolFailure("malformed server/activate")
+            return
+        }
+        if (activate.unknownActivities.isNotEmpty()) {
+            // Forward compatibility: ignore, but say so - an unknown activity
+            // usually means the server is newer than we are.
+            Log.i(tag, "Ignoring unknown activities: ${activate.unknownActivities}")
+        }
+
+        val outcome = ServerActivateRules.evaluate(
+            activate = activate,
+            category = matchedPskCategory(),
+            unpairedAccessEnabled = isUnpairedAccessEnabled(),
+            previousRoles = activeRoles,
+            isFirstActivation = !activationSeen,
+            offeredPairMethods = offeredPairMethods(),
+        )
+
+        when (outcome) {
+            is ActivationOutcome.Close -> {
+                Log.w(tag, "Rejecting server/activate: ${outcome.goodbyeReason} " +
+                    "(activities=${activate.activities}, roles=${activate.activeRoles})")
+                sendGoodbye(outcome.goodbyeReason)
+                onProtocolFailure("server/activate not admissible: ${outcome.goodbyeReason}")
+            }
+
+            is ActivationOutcome.AbortPairing -> {
+                // Connection stays open; the server may re-activate with a
+                // method we do offer.
+                Log.w(tag, "Aborting pairing: ${outcome.reason}")
+                onPairAbort(outcome.reason)
+            }
+
+            is ActivationOutcome.Accept -> {
+                val first = !activationSeen
+                activities = activate.activities
+                activeRoles = outcome.activeRoles
+                activationSeen = true
+                Log.i(tag, "server/activate accepted: activities=${activate.activities} " +
+                    "roles=${outcome.activeRoles}")
+                val pairing = Activity.PAIRING in activate.activities
+
+                // A pairing activation is answered with client/pair-finalize and
+                // NOTHING else. The server is sitting in _receive_pairing
+                // waiting for that exact message, so a client/state or the
+                // client/time burst arriving first is read as the finalize and
+                // rejected as malformed - which is precisely how this failed
+                // against both Music Assistant builds.
+                //
+                // Withholding them costs nothing: the admissibility table grants
+                // no roles on a Pairing-PSK connection, so there is no player
+                // state worth reporting and no stream to synchronise to. The
+                // activation that follows the promotion starts them.
+                if (first && !pairing) {
+                    // Now, and only now, may we speak.
+                    sendPlayerStateUpdate()
+                    startTimeSync()
+                }
+
+                // Every accepted activation is fed to the pairing flow, not
+                // only the pairing ones: an activation WITHOUT `pairing` is how
+                // the server ends an attempt without finalizing, and the client
+                // must then discard the PSK it generated.
+                runPairingActions(
+                    if (pairing) {
+                        PairingEvent.PairingActivation(
+                            method = activate.pairingMethod,
+                            // From the handshake, never re-derived: this is the
+                            // only thing keeping a long-term secret off an
+                            // unauthenticated connection.
+                            matchedCategory = matchedPskCategory(),
+                        )
+                    } else {
+                        PairingEvent.NonPairingActivation
+                    }
+                )
+            }
+        }
+    }
+
+    /**
+     * Send `pair/abort`.
+     *
+     * "With reason `concurrent_attempt` the sender closes the connection after
+     * sending, otherwise the connection stays open." The close is the sender's
+     * job only - see [handlePairAbort] for the receiving side, which never
+     * closes.
+     *
+     * The send and the close are sequenced in one coroutine for the same reason
+     * the unpair goodbye is: `sendProtocolMessage` returns while the encrypt is
+     * still queued, so a close issued after it can outrun the frame.
+     */
+    protected fun sendPairAbort(reason: String) {
+        Log.w(tag, "Pairing aborted (sent): reason=$reason")
+        val closes = reason in PairAbortReason.CLOSES_CONNECTION
+        getCoroutineScope().launch {
+            sendProtocolMessageAwaiting(MessageBuilder.buildPairAbort(reason))
+            if (closes) closeConnectionAfterFlush()
+        }
+    }
+
+    /**
+     * Kept as an override point for the legacy call sites in 1.6's activation
+     * handling, which abort before any attempt exists.
+     */
+    protected open fun onPairAbort(reason: String) {
+        sendPairAbort(reason)
+    }
+
+    /**
+     * `pair/abort` from the server.
+     *
+     * Never closes the connection, for any reason including
+     * `concurrent_attempt`: the spec makes the *sender* close, and closing here
+     * too would race the peer's close and report the wrong reason for it.
+     *
+     * The reason is passed through unvalidated on purpose. A reason we do not
+     * recognise still means the peer has abandoned the attempt, and treating it
+     * as a protocol error would leave us waiting on an attempt that is over.
+     */
+    protected fun handlePairAbort(payload: JsonObject?) {
+        val reason = payload?.get("reason")?.jsonPrimitive?.contentOrNull ?: "unspecified"
+        Log.w(tag, "Pairing aborted (received): reason=$reason")
+        runPairingActions(PairingEvent.PairAbortReceived(reason))
+    }
+
+    // ========== Management (item 3.1) ==========
+
+    /** Where the pairing configuration lives. Null on the legacy path. */
+    protected open fun pairingConfigStore(): PairingConfigStore? = null
+
+    /**
+     * Answer one `management/` request.
+     *
+     * Handled to completion on the receive path, synchronously, and that is a
+     * requirement rather than a convenience: "At most one management request
+     * may be in flight per connection; in-order WebSocket delivery makes the
+     * reply unambiguous", and the reply carries no request identifier. The Nth
+     * result on the wire IS the answer to the Nth request. Moving the work to
+     * another dispatcher would let two replies race and be attributed to the
+     * wrong requests, with nothing in either frame to reveal the swap.
+     *
+     * If persistence ever has to leave this thread, it needs a single-consumer
+     * serialized queue, not a `launch`.
+     */
+    private fun handleManagementRequest(type: String, payload: JsonObject?) {
+        val request = ManagementRequestParser.parse(type, payload) ?: return
+
+        val matched = matchedPsk()
+        val outcome = ManagementService(trustStore(), pairingConfigStore()).handle(
+            request,
+            ManagementSessionContext(
+                hasManagementActivity = Activity.MANAGEMENT in activities,
+                // No PIN method is implemented (audit D2), so none can be on.
+                pinMethodEnabled = false,
+                // Only a record identifies "our own record"; the Sentinel and
+                // the Pairing PSK are not records and cannot be removed.
+                matchedPskId = matched?.takeIf { it.category == PskCategory.LONG_TERM }?.pskId,
+            ),
+        )
+
+        Log.i(tag, "management: $type -> ${outcome.code.wire}")
+
+        // Sequenced in one coroutine, and that is the contract: the result must
+        // reach the wire before the goodbye, because the result is the only
+        // thing that tells the server the operation happened. A close on its
+        // own reads as a failure. sendProtocolMessage returns while the encrypt
+        // is still queued, so the awaiting form is what makes the order real.
+        getCoroutineScope().launch {
+            sendProtocolMessageAwaiting(
+                MessageBuilder.buildManagementResult(outcome.code, outcome.data)
+            )
+            outcome.closeAfterReply?.let { reason ->
+                sendProtocolMessageAwaiting(MessageBuilder.buildGoodbye(reason))
+                onManagementSessionRevoked()
+                closeConnectionAfterFlush()
+            }
+        }
+    }
+
+    /**
+     * The client removed the record that authenticated this session.
+     *
+     * "Server should not auto-reconnect with the same activity set" - and we
+     * should not either: the credential is gone, so every attempt would fail
+     * the handshake PSK lookup and loop.
+     */
+    protected open fun onManagementSessionRevoked() {}
+
+    /** The operator cancelled pairing from the UI. Leaves the connection open. */
+    fun cancelPairing() {
+        runPairingActions(PairingEvent.UserCancelled)
+    }
+
+    // ========== Pairing PSK flow (item 2.5) ==========
+
+    /** One attempt at a time, owned by the connection. */
+    private val pairingFlow = PairingPskFlow()
+
+    private var attemptTimeoutJob: Job? = null
+
+    /**
+     * The `server_id` this connection authenticated against, for the record a
+     * successful pairing persists. Null on the legacy path.
+     */
+    protected open fun currentServerId(): String? = null
+
+    /** Where a completed pairing stores its record. */
+    protected open fun trustStore(): TrustStore? = null
+
+    /** Surfaced for the pairing UI (#225). */
+    protected open fun onPaired(serverId: String) {}
+
+    // ========== server/unpair (item 2.7) ==========
+
+    /**
+     * The PSK that admitted this connection, or null before the handshake.
+     *
+     * This is the single source of truth for the session's trust level, and
+     * `server/unpair` must read it rather than ask "do we hold a record for
+     * this server?". The two differ in a case that matters: during a pairing
+     * handshake we may well hold a record for that same server from a previous
+     * pairing, while the current session was admitted by the Pairing PSK and is
+     * `trust_level: none`. Deciding on the record would delete it.
+     *
+     * A re-handshake replaces it at the key swap, so an unpair arriving just
+     * after a promotion sees the post-swap value.
+     */
+    protected open fun matchedPsk(): Psk? = null
+
+    /** The record this connection dropped. Drives the UI and reconnect policy. */
+    protected open fun onUnpaired(pskId: String, serverId: String?) {}
+
+    /**
+     * Close the connection once the goodbye is on the wire.
+     *
+     * Separate from an ordinary close because the frame must actually be
+     * flushed first; see [handleServerUnpair].
+     */
+    protected open fun closeConnectionAfterFlush() {}
+
+    /** One unpair per connection; a repeat is a no-op. */
+    private var unpairHandled = false
+
+    /**
+     * `messaging.md#server--client-serverunpair`: "Remove the matched pairing
+     * record, send `client/goodbye` reason `'unpaired'`, and close the
+     * connection."
+     *
+     * Takes no payload: the message has no fields, and ignoring whatever
+     * arrives is exactly the required tolerance for unknown ones.
+     */
+    protected fun handleServerUnpair() {
+        val matched = matchedPsk()
+
+        // "If the connection's `trust_level` is `'none'` (e.g., an in-flight
+        // pairing handshake), ignore the message and continue unchanged." Not
+        // an error, and specifically not a close: the connection carries on.
+        if (matched == null || matched.category != PskCategory.LONG_TERM) {
+            Log.i(tag, "server/unpair at trust_level none (psk=${matched?.category}) - ignoring")
+            return
+        }
+
+        if (unpairHandled) {
+            Log.d(tag, "server/unpair already handled on this connection - ignoring")
+            return
+        }
+
+        if (matched.serverId == null) {
+            // "If the matched record is a shared-PSK record ... the client MUST
+            // NOT remove it." The same PSK may authenticate other servers, and
+            // none of them asked to be unpaired. Wholesale removal is
+            // management/remove-record's job.
+            Log.i(tag, "server/unpair matched shared-PSK record ${matched.pskId} - retaining it")
+        } else {
+            val store = trustStore()
+            if (store == null) {
+                Log.e(tag, "server/unpair with no trust store - cannot drop the record")
+                return
+            }
+            // Durable before we say a word. A crash between the two must not
+            // leave a record the server has already forgotten, and telling the
+            // server we unpaired while the record survives is worse still: the
+            // device keeps authenticating with a credential that is gone, and
+            // it looks like a working pairing until the next handshake fails.
+            try {
+                store.removeRecord(matched.pskId)
+            } catch (e: Exception) {
+                Log.e(tag, "server/unpair could not remove record ${matched.pskId}", e)
+                return
+            }
+            Log.i(tag, "server/unpair removed record ${matched.pskId} for ${matched.serverId}")
+        }
+
+        unpairHandled = true
+        onUnpaired(matched.pskId, matched.serverId)
+
+        // The goodbye has to reach the wire before the close, and on the
+        // encrypted path sending is a suspending encrypt. Sequencing them in
+        // one coroutine is what makes "send then close" true rather than
+        // merely written in that order.
+        getCoroutineScope().launch {
+            sendProtocolMessageAwaiting(MessageBuilder.buildGoodbye(GoodbyeReason.UNPAIRED))
+            closeConnectionAfterFlush()
+        }
+    }
+
+    protected fun handleServerPairFinalize() {
+        runPairingActions(PairingEvent.ServerPairFinalize)
+    }
+
+    /** Called by the connection when the socket goes away mid-attempt. */
+    fun onConnectionClosedForPairing() {
+        runPairingActions(PairingEvent.ConnectionClosed)
+    }
+
+    private fun runPairingActions(event: PairingEvent) {
+        for (action in pairingFlow.onEvent(event)) {
+            when (action) {
+                is PairingAction.SendPairFinalize -> {
+                    // Metadata only. The payload carries the long-term PSK in
+                    // the clear (inside the encrypted channel), so logging the
+                    // message itself would put a live credential in logcat.
+                    Log.i(tag, "Pairing: sending client/pair-finalize (32-byte PSK)")
+                    sendProtocolMessage(
+                        MessageBuilder.buildClientPairFinalize(action.longTermPsk)
+                    )
+                }
+
+                is PairingAction.SendPairAbort -> sendPairAbort(action.reason)
+
+                is PairingAction.PersistRecord -> persistPairingRecord(action.psk)
+
+                PairingAction.StartAttemptTimeout -> {
+                    attemptTimeoutJob?.cancel()
+                    attemptTimeoutJob = getCoroutineScope().launch {
+                        delay(SendSpinProtocol.PAIR_ATTEMPT_TIMEOUT_MS)
+                        Log.w(tag, "Pairing attempt timed out")
+                        runPairingActions(PairingEvent.AttemptTimeout)
+                    }
+                }
+
+                PairingAction.ClearAttemptTimeout -> {
+                    attemptTimeoutJob?.cancel()
+                    attemptTimeoutJob = null
+                }
+            }
+        }
+    }
+
+    private fun persistPairingRecord(psk: ByteArray) {
+        val store = trustStore()
+        val serverId = currentServerId()
+        if (store == null || serverId == null) {
+            // The server has already stored its half, so this is not
+            // recoverable by retrying - say so loudly rather than leaving a
+            // half-pairing that fails as `unauthorized` on the next connect.
+            Log.e(tag, "Paired, but there is nowhere to store the record")
+            return
+        }
+        when (val result = store.addRecord(psk, serverId)) {
+            is TrustStore.AddRecordResult.Ok -> {
+                Log.i(tag, "Paired with $serverId (psk_id=${result.record.pskId})")
+                onPaired(serverId)
+            }
+            // Astronomically unlikely, and not worth a silent retry: the server
+            // holds a PSK we cannot store, so the pairing is already broken.
+            TrustStore.AddRecordResult.AlreadyExists ->
+                Log.e(tag, "Cannot store pairing record: psk_id already claimed")
+            TrustStore.AddRecordResult.Invalid ->
+                Log.e(tag, "Cannot store pairing record: PSK rejected as invalid")
+            TrustStore.AddRecordResult.StorageFailed ->
+                // The one failure a user could actually act on, so it names the
+                // cause rather than the symptom.
+                Log.e(tag, "Cannot store pairing record: the write did not persist")
+        }
     }
 
     protected fun handleServerTime(payload: JsonObject?) {
@@ -598,12 +1284,35 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
+    /**
+     * `server/state` is a delta, so every field is merged into the cached role
+     * state rather than replacing it.
+     *
+     * Before this merge existed, a delta carrying only `progress` arrived as a
+     * metadata object with empty title, artist and album, and blanked the Now
+     * Playing screen on every progress tick.
+     */
     protected fun handleServerState(payload: JsonObject?) {
-        val (metadata, state, controllerDelta) = MessageParser.parseServerState(payload)
+        val (metadataUpdate, state, controllerUpdate) = MessageParser.parseServerState(payload)
 
-        if (metadata != null) {
-            lastMetadata = metadata
-            onMetadataUpdate(metadata)
+        when (metadataUpdate) {
+            RoleUpdate.Absent -> Unit
+
+            RoleUpdate.Cleared -> {
+                // The role was dropped from active_roles; the UI must blank
+                // rather than keep showing a track the server no longer has.
+                lastMetadata = null
+                onMetadataCleared()
+            }
+
+            is RoleUpdate.Delta -> {
+                val merged = metadataUpdate.applyTo(lastMetadata)
+                lastMetadata = merged
+                // Fired even when the merged value is unchanged: progress
+                // extrapolation needs a fresh receive-time anchor on every
+                // message, not only on a change.
+                if (merged != null) onMetadataUpdate(merged)
+            }
         }
 
         if (state != null && state != lastPlaybackState) {
@@ -611,13 +1320,27 @@ abstract class SendSpinProtocolHandler(
             onPlaybackStateChanged(state)
         }
 
-        if (controllerDelta != null) {
-            val merged = currentControllerState?.mergedWith(controllerDelta) ?: controllerDelta
-            if (merged != currentControllerState) {
-                currentControllerState = merged
-                onControllerStateUpdate(merged)
+        when (controllerUpdate) {
+            RoleUpdate.Absent -> Unit
+
+            RoleUpdate.Cleared -> {
+                currentControllerState = null
+                onControllerStateUpdate(ControllerState())
+            }
+
+            is RoleUpdate.Delta -> {
+                val merged = controllerUpdate.applyTo(currentControllerState)
+                if (merged != null && merged != currentControllerState) {
+                    currentControllerState = merged
+                    onControllerStateUpdate(merged)
+                }
             }
         }
+    }
+
+    /** The server dropped the metadata role. Default: treat as an empty track. */
+    protected open fun onMetadataCleared() {
+        onMetadataUpdate(TrackMetadata())
     }
 
     protected fun handleServerCommand(payload: JsonObject?) {
@@ -753,9 +1476,24 @@ abstract class SendSpinProtocolHandler(
      * Handle binary message from the transport.
      */
     protected fun handleBinaryMessage(bytes: ByteArray) {
-        val message = BinaryMessageParser.parse(bytes)
-        if (message != null) {
-            dispatchBinaryMessage(message)
+        val codec = wireCodec
+        if (codec == null) {
+            // Legacy path: the frame is a bare SendSpin binary message.
+            BinaryMessageParser.parse(bytes)?.let { dispatchBinaryMessage(it) }
+            return
+        }
+        when (val decoded = codec.decode(bytes)) {
+            is NoiseWireCodec.Decoded.Json -> handleTextMessage(decoded.text)
+            is NoiseWireCodec.Decoded.Typed ->
+                BinaryMessageParser.parse(decoded.type, decoded.body)
+                    ?.let { dispatchBinaryMessage(it) }
+            is NoiseWireCodec.Decoded.Buffered -> {
+                // A fragment landed and the message is still incomplete. The
+                // codec holds the partial buffer; nothing to dispatch until the
+                // fragment-end frame arrives.
+            }
+            is NoiseWireCodec.Decoded.ProtocolError ->
+                onProtocolFailure(decoded.reason)
         }
     }
 

@@ -11,6 +11,21 @@ import com.sendspindroid.sendspin.transport.ProxyWebSocketTransport
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
+
+import com.sendspindroid.sendspin.crypto.NoiseCipherSuite
+import com.sendspindroid.sendspin.crypto.asNoiseCrypto
+import com.sendspindroid.sendspin.crypto.NoiseHandshakeException
+import com.sendspindroid.sendspin.crypto.AndroidPairingConfigStore
+import com.sendspindroid.sendspin.crypto.Psk
+import com.sendspindroid.sendspin.crypto.PskCategory
+import com.sendspindroid.sendspin.crypto.PairingConfigStore
+import com.sendspindroid.sendspin.crypto.TrustStore
+import com.sendspindroid.sendspin.crypto.PskCandidates
+import com.sendspindroid.sendspin.crypto.PskCandidateSet
+import com.sendspindroid.sendspin.protocol.SendSpinHandshakeDriver
+import kotlinx.serialization.json.JsonObject
+import com.sendspindroid.sendspin.protocol.RehandshakeDriver
+import com.sendspindroid.sendspin.protocol.GoodbyeReason
 import com.sendspindroid.sendspin.protocol.SendSpinProtocolHandler
 import com.sendspindroid.sendspin.protocol.StreamConfig
 import com.sendspindroid.sendspin.protocol.TrackMetadata
@@ -119,6 +134,20 @@ class SendSpin(
         fun onStateChanged(state: String)
         fun onGroupUpdate(groupId: String, groupName: String, playbackState: String)
         fun onMetadataUpdate(metadata: TrackMetadata)
+
+        /**
+         * The server dropped the `metadata` role entirely (a whole-role
+         * `null` in `server/state`, or `server/activate` removing it), so
+         * there is no track to show any more.
+         *
+         * Distinct from [onMetadataUpdate] carrying null fields: those go
+         * through the delta merge and mean "unreported", which preserves what
+         * is on screen. This one means "gone" and must blank it.
+         *
+         * Default no-op for callers with nothing to blank.
+         */
+        fun onMetadataCleared() {}
+
         fun onArtwork(imageData: ByteArray)
         fun onArtworkCleared()
         fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?)
@@ -154,6 +183,18 @@ class SendSpin(
          * that don't render audio.
          */
         fun onSyncMuteChanged(muted: Boolean) {}
+
+        /**
+         * The server dropped its pairing with this device.
+         *
+         * Without surfacing this, an unpair is indistinguishable from a network
+         * drop: the player simply stops appearing, and the app looks broken
+         * rather than deliberately disconnected.
+         *
+         * @param serverId null when a shared-PSK record was matched, whose
+         *   record is deliberately retained.
+         */
+        fun onUnpaired(serverId: String?) {}
     }
 
     /**
@@ -248,6 +289,17 @@ class SendSpin(
 
     // Reconnection state
     private val userInitiatedDisconnect = AtomicBoolean(false)
+
+    /**
+     * Set when the server unpairs us; blocks automatic reconnection only.
+     *
+     * Separate from [userInitiatedDisconnect] because the two answer different
+     * questions and are reported differently to the UI. Cleared when the user
+     * deliberately connects again, which is the only thing that can make
+     * reconnecting sensible: the credential the server dropped is gone, so
+     * every automatic attempt would just be refused.
+     */
+    private val suppressAutoReconnect = AtomicBoolean(false)
     private val reconnectAttempts = AtomicInteger(0)
     private val reconnecting = AtomicBoolean(false)
     // @Volatile to match the sibling connection fields: reconnectJob is snapshot
@@ -332,11 +384,319 @@ class SendSpin(
 
     // ========== SendSpinProtocolHandler Implementation ==========
 
+    // ========== Encrypted handshake (spec) ==========
+
+    private var handshakeDriver: SendSpinHandshakeDriver? = null
+
+    private fun startEncryptedHandshake() {
+        // Cleared here rather than on disconnect: every handshake passes through
+        // this point, so a stale category from the previous session can never
+        // survive into the next one and overstate its trust level. This also
+        // covers the in-band re-handshake (#223), which never disconnects.
+        matchedPsk = null
+
+        // The wire client_id for an encrypted session is the base64url public
+        // key, NOT the legacy UUID player id - the two are different
+        // identifiers and the server rejects a non-43-character value.
+        val identity = UserSettings.getOrCreateClientIdentity()
+        val driver = SendSpinHandshakeDriver(
+            identity = identity,
+            candidates = pskCandidates(),
+            onEvent = ::onHandshakeEvent,
+        )
+        handshakeDriver = driver
+        driver.start()
+    }
+
+    private fun onHandshakeEvent(event: SendSpinHandshakeDriver.Event) {
+        when (event) {
+            is SendSpinHandshakeDriver.Event.SendCleartext ->
+                // Cleartext handshake frames are the only text frames the spec
+                // permits; everything after transport mode is binary.
+                sendTextMessage(event.text)
+
+            is SendSpinHandshakeDriver.Event.TransportReady -> {
+                Log.i(TAG, "Noise handshake complete with ${event.serverInit.serverId} " +
+                    "(psk=${event.matchedPsk.category})")
+                // Retained rather than logged and dropped: the category decides
+                // trust_level, which activities the server may declare, and
+                // whether pairing may run. Recomputing it anywhere else would
+                // let those three disagree.
+                matchedPsk = event.matchedPsk
+
+                // Retained for the in-band re-handshake, which re-sends none of
+                // this and has no way to ask for it again.
+                sessionFacts = SessionFacts(
+                    serverId = event.serverInit.serverId,
+                    serverStaticKey = event.serverInit.serverStaticKey,
+                    // Carries over unchanged: the re-handshake re-sends no
+                    // client/init, so there is no opportunity to renegotiate it.
+                    suite = SendSpinHandshakeDriver.DEFAULT_SUITE,
+                    priorHandshakeHash = event.transport.handshakeHash,
+                )
+
+                // "used" means a server has authenticated a session with this
+                // record. Marked on entry to transport mode rather than on the
+                // psk_id match, because a match that then failed AEAD
+                // authenticated nothing.
+                if (event.matchedPsk.category == PskCategory.LONG_TERM) {
+                    UserSettings.getOrCreateTrustStore().markUsed(event.matchedPsk.pskId)
+                }
+                installEncryptedTransport(event.transport)
+                // client/hello is the first ENCRYPTED message, not the first
+                // frame on the socket. It now rides the codec like everything
+                // else.
+                sendClientHello()
+            }
+
+            is SendSpinHandshakeDriver.Event.Fail -> {
+                // The spec allows no application-level error message here, so
+                // this log line is the only diagnostic that will ever exist.
+                Log.e(TAG, "Noise handshake failed: ${event.reason} - ${event.detail}")
+                handshakeDriver = null
+                // A server too old to speak the encrypted handshake is the one
+                // failure the user can fix, so it is reported as itself rather
+                // than as a generic handshake failure.
+                val reason = if (event.reason ==
+                    NoiseHandshakeException.Cause.ServerLacksEncryption
+                ) {
+                    FailureReason.ServerLacksEncryption
+                } else {
+                    FailureReason.HandshakeFailed
+                }
+                _connectionState.value = TransportState.Failed(reason)
+                transport?.close(1002, "handshake failed")
+            }
+        }
+    }
+
+    /** Read once per connection; the PSK is process-wide and never rotates itself. */
+    private val pairingConfigStore = AndroidPairingConfigStore()
+
+    /**
+     * The PSK that admitted the current session, or null before the handshake.
+     *
+     * Single source of truth for everything that follows from how we were
+     * authenticated: `trust_level`, the `server/activate` admissibility table,
+     * and (in 2.5) whether a pairing activation may proceed.
+     */
+    @Volatile
+    private var matchedPsk: Psk? = null
+
+    /**
+     * Everything a re-handshake needs that is NOT re-sent.
+     *
+     * "`client/init` and `server/init` are not re-sent - `client_id`,
+     * `server_id`, and `suite` carry over. The new handshake's prologue is the
+     * prior handshake's hash `h`." So the connection has to retain them; there
+     * is no second chance to read them off the wire.
+     */
+    private class SessionFacts(
+        val serverId: String,
+        val serverStaticKey: ByteArray,
+        val suite: NoiseCipherSuite,
+        /** Prologue for the NEXT handshake. Advances on every promotion. */
+        var priorHandshakeHash: ByteArray,
+    )
+
+    @Volatile
+    private var sessionFacts: SessionFacts? = null
+
+    /**
+     * Every PSK this handshake may match: the stored records, the Sentinel, and
+     * the Pairing PSK whenever the method is enabled.
+     *
+     * Built from stored state alone, with no reference to whether a pairing
+     * screen is open, because the server re-handshakes to the Pairing PSK
+     * unprompted and that handshake "succeeds only if the client already
+     * recognizes its `psk_id`".
+     *
+     * A collision cannot arise here - the trust store rejects a colliding
+     * record on the write path and rotation rejects a colliding PSK - so a
+     * failure means the invariant broke somewhere upstream, and falling back to
+     * the Sentinel keeps the client connectable while making the problem loud.
+     */
+    private fun pskCandidates(): PskCandidateSet {
+        val candidates = PskCandidates.build(
+            records = UserSettings.getOrCreateTrustStore().listRecords(),
+            config = pairingConfigStore.load(),
+        )
+        return PskCandidateSet.of(candidates).getOrElse {
+            Log.e(TAG, "PSK candidate set is invalid, falling back to the Sentinel", it)
+            PskCandidateSet.sentinelOnly()
+        }
+    }
+
+    override fun isUnpairedAccessEnabled(): Boolean =
+        pairingConfigStore.load().unpairedAccessEnabled
+
+    /**
+     * The category that admitted this connection, defaulting to the Sentinel
+     * before a handshake has matched anything - the least-privileged answer,
+     * so a bug here narrows what the server may declare rather than widening it.
+     */
+    override fun matchedPskCategory(): PskCategory =
+        matchedPsk?.category ?: PskCategory.SENTINEL
+
+    /**
+     * `'user'` if and only if a long-term record admitted this session.
+     *
+     * The Sentinel and the Pairing PSK are both `'none'`: neither proves the
+     * server is one we have ever paired with. This single field is what makes
+     * the server pick the long-term row of the admissibility table.
+     */
+    override fun getTrustLevel(): String =
+        if (matchedPsk?.category == PskCategory.LONG_TERM) {
+            MessageBuilder.TRUST_USER
+        } else {
+            MessageBuilder.TRUST_NONE
+        }
+
+    /** The live configuration, not a constant: a disabled method is not offered. */
+    override fun offeredPairMethods(): Set<String> =
+        if (pairingConfigStore.load().pairingPskEnabled) setOf("pairing_psk") else emptySet()
+
+    /**
+     * The `server_id` a pairing record binds to.
+     *
+     * The exact 43-character string from `server/init`, retained on the
+     * session - a record bound to a re-derived or reformatted value would fail
+     * the stored-pubkey check on the next connect and look like corruption.
+     */
+    override fun currentServerId(): String? = sessionFacts?.serverId
+
+    override fun trustStore(): TrustStore = UserSettings.getOrCreateTrustStore()
+
+    override fun pairingConfigStore(): PairingConfigStore = pairingConfigStore
+
+    override fun onManagementSessionRevoked() {
+        Log.i(TAG, "Our pairing record was removed by the server - not reconnecting")
+        suppressAutoReconnect.set(true)
+    }
+
+    override fun onPaired(serverId: String) {
+        // The server drives the in-band re-handshake from here (#223); the
+        // client sends nothing further. The new record is already visible to
+        // pskCandidates(), which reads the store on every call.
+        Log.i(TAG, "Pairing complete with $serverId - awaiting the server's re-handshake")
+    }
+
+    /** The PSK that admitted this session; the re-handshake swaps it. */
+    override fun matchedPsk(): Psk? = matchedPsk
+
+    override fun onUnpaired(pskId: String, serverId: String?) {
+        Log.i(TAG, "Unpaired by ${serverId ?: "a server holding a shared PSK"} (psk_id=$pskId)")
+
+        // "Server should not auto-reconnect." On a client-initiated topology
+        // that guidance lands on us: reconnecting would just hand the server a
+        // credential it has dropped, once per backoff step, forever.
+        suppressAutoReconnect.set(true)
+
+        callback?.onUnpaired(serverId)
+    }
+
+    override fun closeConnectionAfterFlush() {
+        // closeAfterFlush, not close: close() cancels the connection job, and
+        // the sender coroutine is its child, so a goodbye still sitting in the
+        // outgoing channel dies with it.
+        transport?.closeAfterFlush(1000, "unpaired")
+    }
+
+    /**
+     * Run an in-band re-handshake.
+     *
+     * The server initiates this to promote the channel after a pairing, or to
+     * switch a Sentinel-keyed connection to the Pairing PSK before offering
+     * `pairing_psk`. The socket stays open throughout: "The server may rerun
+     * the Noise handshake in transport mode to swap session keys without
+     * closing the WebSocket."
+     *
+     * Every failure below closes without an application-level message, because
+     * the spec allows none - so each one logs its own reason first. That log
+     * line is the only artifact anyone will have.
+     */
+    override fun onRehandshakeMessage(payload: JsonObject?) {
+        val facts = sessionFacts ?: return failRehandshake(
+            "noise/handshake arrived before any handshake completed"
+        )
+        Log.i(TAG, "Re-handshake starting (prior h=${hashPrefix(facts.priorHandshakeHash)})")
+
+        // Candidates are rebuilt now rather than reused from connect time: a
+        // record persisted moments ago by a pairing must be visible to this
+        // very selection, which is why the server started the exchange.
+        val driver = RehandshakeDriver(
+            identity = UserSettings.getOrCreateClientIdentity(),
+            candidates = pskCandidates(),
+            serverId = facts.serverId,
+            serverStaticKey = facts.serverStaticKey,
+            suite = facts.suite,
+            priorHandshakeHash = facts.priorHandshakeHash,
+        )
+
+        val outcome = driver.handle(payload?.get("data")?.jsonPrimitive?.contentOrNull)
+        if (outcome is RehandshakeDriver.Outcome.Fail) return failRehandshake(outcome.reason)
+        outcome as RehandshakeDriver.Outcome.Reply
+
+        // Encrypted under the OLD keys, then the swap. The callback runs only
+        // once that frame is on the wire.
+        sendAndSwapKeys(outcome.replyJson, outcome.transport.asNoiseCrypto()) {
+            facts.priorHandshakeHash = outcome.transport.handshakeHash
+            matchedPsk = outcome.matched
+            if (outcome.matched.category == PskCategory.LONG_TERM) {
+                UserSettings.getOrCreateTrustStore().markUsed(outcome.matched.pskId)
+            }
+            // The channel is promoted, not replaced: transport, group and time
+            // filter all survive. Only the message sequence restarts.
+            resetForRehandshake()
+            Log.i(
+                TAG,
+                "Re-handshake complete: psk=${outcome.matched.category} " +
+                    "trust=${getTrustLevel()} new h=${hashPrefix(outcome.transport.handshakeHash)}"
+            )
+
+            // Re-assert client/hello, carrying the trust_level the new PSK
+            // earns. On the initial connection this is sent from the handshake
+            // driver's TransportReady callback - but a re-handshake produces no
+            // such event, because there is no new driver. Without this the
+            // server sends server/hello, waits for a reply that never comes,
+            // and closes the session after a couple of seconds. The sequence is
+            // server/hello -> client/hello -> server/activate, and we owe the
+            // middle one.
+            sendClientHello()
+        }
+    }
+
+    /** First 8 hex chars of a handshake hash. Channel-binding data, not a secret. */
+    private fun hashPrefix(hash: ByteArray): String =
+        hash.take(4).joinToString("") { b ->
+            ((b.toInt() and 0xFF) + 0x100).toString(16).substring(1)
+        }
+
+    private fun failRehandshake(reason: String) {
+        Log.e(TAG, "Re-handshake failed: $reason")
+        onProtocolFailure(reason)
+    }
+
+    override fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> =
+        if (pairingConfigStore.load().pairingPskEnabled) {
+            listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
+        } else {
+            // "An implemented method that is disabled is omitted."
+            emptyList()
+        }
+
     override fun sendTextMessage(text: String) {
         val t = transport ?: return  // Silently drop if transport is gone (e.g. post-disconnect race)
         val success = t.send(text)
         if (!success) {
             Log.w(TAG, "Failed to send message")
+        }
+    }
+
+    override fun sendBinaryFrame(bytes: ByteArray) {
+        val t = transport ?: return
+        if (!t.send(bytes)) {
+            Log.w(TAG, "Failed to send binary frame (${bytes.size} bytes)")
         }
     }
 
@@ -442,11 +802,21 @@ class SendSpin(
             val pos = metadata.progressAtServerTime(
                 timeFilter.clientToServer(System.nanoTime() / 1000)
             )
-            metadata.copy(progress = metadata.progress.copy(trackProgress = pos))
+            metadata.progress?.let { p ->
+                metadata.copy(progress = p.copy(trackProgress = pos))
+            } ?: metadata
         } else {
             metadata
         }
+        // A null field means the server has no value for it - never sent, or
+        // explicitly cleared by a delta. The whole object goes through: the
+        // now-playing UI and media notification consume the queue-position
+        // fields, and each consumer decides what a null means for itself.
         callback.onMetadataUpdate(published)
+    }
+
+    override fun onMetadataCleared() {
+        callback.onMetadataCleared()
     }
 
     override fun onPlaybackStateChanged(state: String) {
@@ -812,6 +1182,7 @@ class SendSpin(
         reconnectJob = null
 
         userInitiatedDisconnect.set(false)
+        suppressAutoReconnect.set(false)
         reconnectAttempts.set(0)
         reconnecting.set(false)
         waitingForNetwork.set(false)
@@ -925,8 +1296,9 @@ class SendSpin(
         // user_request. "restart" fits: the client will reconnect (after the
         // outer loop re-selects the transport) and the server should
         // auto-reconnect. (A non-enum value like "network_type_changed" makes
-        // the server drop the connection with a noisy ValueError trace.)
-        sendGoodbye("restart")
+        // the server drop the connection with a noisy ValueError trace, which
+        // is why this goes through the enum rather than a bare string.)
+        sendGoodbye(GoodbyeReason.RESTART)
         // Clear the transport listener BEFORE tearing down to prevent the async onClosed
         // callback from firing a second onDisconnected after we fire one synchronously below.
         // destroy() (not close()) closes the underlying HttpClient too -- close() alone
@@ -953,7 +1325,7 @@ class SendSpin(
         stopTimeSync()
         reconnecting.set(false)
         waitingForNetwork.set(false)
-        sendGoodbye("user_request")
+        sendGoodbye(GoodbyeReason.USER_REQUEST)
         // Clear the transport listener BEFORE tearing down to prevent the async onClosed
         // callback from firing a second onDisconnected after we fire one synchronously below.
         // destroy() (not close()) closes the underlying HttpClient too -- close() alone
@@ -1186,6 +1558,11 @@ class SendSpin(
 
         if (userInitiatedDisconnect.get()) {
             Log.d(TAG, "Not reconnecting: user-initiated disconnect")
+            return
+        }
+
+        if (suppressAutoReconnect.get()) {
+            Log.i(TAG, "Not reconnecting: this server unpaired us")
             return
         }
 
@@ -1449,9 +1826,30 @@ class SendSpin(
                 Log.e(TAG, "Proxy connection has no auth token - server will reject")
                 failProxyAuthAndTeardown()
             } else {
-                // Local/Remote mode: proceed directly with hello
-                sendClientHello()
+                // Spec order: client/init is the FIRST frame on the socket.
+                // client/hello moves after the Noise handshake and travels
+                // encrypted like every other application message.
+                //
+                // There is no unencrypted branch here. Encryption has been
+                // mandatory since spec #84 (2026-06-29), and a fallback would be
+                // a second wire format that only ever runs when the first one
+                // breaks - the least tested path reached exactly when things are
+                // already going wrong.
+                Log.d(TAG, "Starting encrypted handshake")
+                startEncryptedHandshake()
             }
+        }
+
+        override fun onMessage(text: String, rawUtf8: ByteArray) {
+            // The Noise prologue is built from the EXACT bytes of server/init as
+            // received, so the driver gets rawUtf8 and never a re-encoding.
+            val driver = handshakeDriver
+            if (driver != null && driver.phase != SendSpinHandshakeDriver.Phase.Transport) {
+                lastByteReceivedAtMs.set(System.currentTimeMillis())
+                driver.onCleartextFrame(rawUtf8)
+                return
+            }
+            onMessage(text)
         }
 
         override fun onMessage(text: String) {
@@ -1484,8 +1882,13 @@ class SendSpin(
 
                 if (awaitingAuthResponse) {
                     awaitingAuthResponse = false
-                    Log.d(TAG, "Proxy auth phase complete (first-msg type=${msgType ?: "<none>"}), sending client/hello")
-                    sendClientHello()
+                    Log.d(TAG, "Proxy auth phase complete (first-msg type=${msgType ?: "<none>"}), starting encrypted handshake")
+                    // Proxy auth wraps the socket; it does not replace the
+                    // Sendspin handshake. Once the proxy has accepted us the
+                    // session starts like every other one, with client/init.
+                    // client/hello used to be sent here - it now travels
+                    // encrypted, from the driver's TransportReady event.
+                    startEncryptedHandshake()
 
                     // If the first post-auth message is itself a SendSpin protocol
                     // envelope, the proxy skipped the explicit auth_ok step --

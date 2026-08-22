@@ -60,6 +60,19 @@ interface SendSpinTransport {
     fun close(code: Int = 1000, reason: String = "")
 
     /**
+     * Close, but let already-queued frames reach the wire first.
+     *
+     * [send] only *queues*; [close] can then discard what it queued. That
+     * matters for exactly one kind of message: the last one. A `client/goodbye`
+     * that never lands leaves the server applying its no-goodbye heuristic -
+     * for a playback connection, "assume restart and reconnect" - which is the
+     * opposite of what every goodbye reason asks for.
+     *
+     * Defaults to [close] for transports that cannot distinguish the two.
+     */
+    fun closeAfterFlush(code: Int = 1000, reason: String = "") = close(code, reason)
+
+    /**
      * Release all resources associated with this transport.
      * Should be called when the transport is no longer needed.
      */
@@ -84,6 +97,27 @@ interface SendSpinTransport {
          * Called when the transport receives a text message.
          */
         fun onMessage(text: String)
+
+        /**
+         * Called when the transport receives a text message, with the frame's
+         * exact bytes as they arrived.
+         *
+         * The Noise prologue is "the concatenation of the exact bytes of
+         * `client/init` followed by the exact bytes of `server/init`, as
+         * transmitted on the wire", and both sides "MUST hash the raw message
+         * bytes exactly as sent and received, not a re-encoding of the parsed
+         * message" (`connection.md#prologue`). `text.encodeToByteArray()` is a
+         * re-encoding: it round-trips through Ktor's UTF-8 decoder and back,
+         * which is lossy for malformed input and is not the same operation the
+         * spec describes.
+         *
+         * Only the handshake driver needs [rawUtf8]; everything else can keep
+         * using the String. Defaults to [onMessage] so transports that cannot
+         * supply raw bytes (WebRTC, proxy) keep working unchanged - they simply
+         * cannot carry the spec handshake, which is correct: those are custom
+         * connection methods outside it.
+         */
+        fun onMessage(text: String, rawUtf8: ByteArray) = onMessage(text)
 
         /**
          * Called when the transport receives binary data.

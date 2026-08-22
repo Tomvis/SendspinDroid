@@ -82,6 +82,39 @@ class SendSpinProtocolHandlerTest {
     }
 
     @Test
+    fun `whole-role null clears the metadata instead of updating it`() {
+        handler.handleTextMessageForTest(
+            buildServerStateJson(title = "Song A", artist = "Artist A", album = "Album A")
+        )
+        assertEquals(1, handler.metadataUpdates.size)
+
+        // "a whole role object set to `null` clears all of that role's state" -
+        // it must reach the clear hook, not arrive as an update carrying nulls
+        // (which the delta merge reads as "unreported" and preserves).
+        handler.handleTextMessageForTest(
+            """{"type":"server/state","payload":{"metadata":null}}"""
+        )
+
+        assertEquals("clear must not be delivered as an update", 1, handler.metadataUpdates.size)
+        assertEquals(1, handler.metadataClears)
+    }
+
+    @Test
+    fun `absent metadata role neither updates nor clears`() {
+        handler.handleTextMessageForTest(
+            buildServerStateJson(title = "Song A", artist = "Artist A", album = "Album A")
+        )
+
+        // No `metadata` key at all: keep whatever is on screen.
+        handler.handleTextMessageForTest(
+            """{"type":"server/state","payload":{"state":"paused"}}"""
+        )
+
+        assertEquals(1, handler.metadataUpdates.size)
+        assertEquals(0, handler.metadataClears)
+    }
+
+    @Test
     fun `different metadata fires onMetadataUpdate for each`() {
         val metadata1 = buildServerStateJson(
             title = "Song A",
@@ -109,13 +142,20 @@ class SendSpinProtocolHandlerTest {
     // ========== External Source Tests ==========
 
     @Test
-    fun `setExternalSource true reports external_source state`() {
+    fun `setExternalSource true reports available false`() {
         handler.sentMessages.clear()
         handler.setExternalSource(true)
 
+        // The spec replaced the tri-state `state` string with a boolean (#115).
+        // External-source takeover is now the ONLY thing available:false means,
+        // so the wire assertion is on the boolean, not on a removed enum value.
         assertEquals("external_source", handler.exposedSyncState())
         assertEquals(1, handler.sentMessages.size)
-        assertTrue(handler.sentMessages[0].contains("\"state\":\"external_source\""))
+        assertTrue(handler.sentMessages[0].contains("\"available\":false"))
+        assertTrue(
+            "the removed state string must not appear on the wire",
+            !handler.sentMessages[0].contains("external_source"),
+        )
     }
 
     @Test
@@ -548,6 +588,7 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     private val timeFilter = SendspinTimeFilter()
     val sentMessages = mutableListOf<String>()
     val metadataUpdates = mutableListOf<TrackMetadata>()
+    var metadataClears = 0
     val controllerStateUpdates = mutableListOf<ControllerState>()
     val playbackStateChanges = mutableListOf<String>()
     val groupUpdates = mutableListOf<GroupInfo>()
@@ -576,6 +617,13 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
         sentMessages.add(text)
     }
 
+    /** Frames sent on the encrypted path, in order. */
+    val sentBinaryFrames = mutableListOf<ByteArray>()
+
+    override fun sendBinaryFrame(bytes: ByteArray) {
+        sentBinaryFrames.add(bytes)
+    }
+
     override fun getCoroutineScope(): CoroutineScope = testScope
 
     override fun getTimeFilter(): SendspinTimeFilter = timeFilter
@@ -596,6 +644,10 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     override fun onMetadataUpdate(metadata: TrackMetadata) {
         metadataUpdates.add(metadata)
+    }
+
+    override fun onMetadataCleared() {
+        metadataClears++
     }
 
     override fun onControllerStateUpdate(state: ControllerState) {

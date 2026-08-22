@@ -1005,7 +1005,21 @@ class PlaybackService : MediaLibraryService() {
                         // Android Auto / lock screen. setError + setPlayerError are
                         // idempotent on the Media3 side when no error is present.
                         sendSpinPlayer?.clearError()
-                        if (prevSendSpinState is TransportState.Ready) {
+                        if (prevSendSpinState !is TransportState.Ready) {
+                            // Announce the attempt from here, where the transition
+                            // has already happened. The connect* methods used to do
+                            // it on their first line, before anything had left Idle,
+                            // and the publisher reports observed state rather than
+                            // the argument it is handed - so that call announced
+                            // DISCONNECTED at the very moment a connection began.
+                            // Upstream announced this through a
+                            // broadcastConnectionState() wrapper that ignored
+                            // its argument and forwarded to broadcastSessionExtras();
+                            // this fork deleted that wrapper, and the explicit
+                            // override says the same thing without depending on
+                            // which flow has settled by now.
+                            broadcastSessionExtras(forceState = STATE_CONNECTING)
+                        } else {
                             // PORTED FROM onReconnecting (the Ready->Connecting path during
                             // network handover or stall watchdog):
                             val serverName = sendSpinClient?.getServerName() ?: ""
@@ -1495,7 +1509,7 @@ class PlaybackService : MediaLibraryService() {
             val totalTracks = metadata.totalTracks
             val durationMs = metadata.durationMs
             val positionMs = metadata.positionMs
-            val playbackSpeed = metadata.progress.playbackSpeed
+            val playbackSpeed = metadata.progress?.playbackSpeed ?: 1000
             mainHandler.post {
                 Log.d(TAG, "Metadata update: $title / $artist / $album")
                 Log.d(TAG, "  extra fields: albumArtist=$albumArtist year=$year albumTrack=$albumTrack queueTrack=$queueTrack totalTracks=$totalTracks")
@@ -1504,7 +1518,7 @@ class PlaybackService : MediaLibraryService() {
                 // address (e.g., https://music.example.com/imageproxy?...) which aren't
                 // reachable from the remote client. Rewrite to ma-proxy:// scheme so
                 // Coil's MaProxyImageFetcher can fetch via the WebRTC DataChannel.
-                val effectiveArtworkUrl = rewriteArtworkUrlForRemote(artworkUrl)
+                val effectiveArtworkUrl = rewriteArtworkUrlForRemote(artworkUrl.orEmpty())
 
                 // Int fields: 0 / absent maps to null so withMetadata applies
                 // its null-handling rules. Those rules: preserve prior on a
@@ -1523,12 +1537,12 @@ class PlaybackService : MediaLibraryService() {
                 // These six mapped values feed both withMetadata and the
                 // sendSpinPlayer.updateMediaItem call below; compute once so the
                 // two argument lists cannot drift.
-                val titleOrNull = title.ifEmpty { null }
-                val artistOrNull = artist.ifEmpty { null }
-                val albumOrNull = album.ifEmpty { null }
-                val albumArtistOrNull = albumArtist.ifEmpty { null }
-                val yearOrNull = year.takeIf { it > 0 }
-                val albumTrackOrNull = albumTrack.takeIf { it > 0 }
+                val titleOrNull = title?.ifEmpty { null }
+                val artistOrNull = artist?.ifEmpty { null }
+                val albumOrNull = album?.ifEmpty { null }
+                val albumArtistOrNull = albumArtist?.ifEmpty { null }
+                val yearOrNull = year?.takeIf { it > 0 }
+                val albumTrackOrNull = albumTrack?.takeIf { it > 0 }
                 _playbackState.value = _playbackState.value.withMetadata(
                     title = titleOrNull,
                     artist = artistOrNull,
@@ -1537,8 +1551,8 @@ class PlaybackService : MediaLibraryService() {
                     artworkUrl = effectiveArtworkUrl,
                     year = yearOrNull,
                     albumTrack = albumTrackOrNull,
-                    queueTrack = queueTrack.takeIf { it > 0 },
-                    totalTracks = totalTracks.takeIf { it > 0 },
+                    queueTrack = queueTrack?.takeIf { it > 0 },
+                    totalTracks = totalTracks?.takeIf { it > 0 },
                     durationMs = durationMs,
                     positionMs = positionMs,
                     playbackSpeed = playbackSpeed
@@ -1617,6 +1631,45 @@ class PlaybackService : MediaLibraryService() {
                     lastArtworkUrl = effectiveArtworkUrl
                     fetchArtwork(effectiveArtworkUrl)
                 }
+            }
+        }
+
+        override fun onMetadataCleared() {
+            // The server dropped the metadata role. withMetadata() reads null
+            // as "unreported" and preserves what is on screen, which is right
+            // for a delta but wrong here - so the clear goes through
+            // withClearedMetadata(), the fork's explicit reset.
+            mainHandler.post {
+                Log.d(TAG, "Metadata role cleared - blanking track display")
+                _playbackState.value = _playbackState.value.withClearedMetadata()
+
+                // Same teardown a track change performs: drop the artwork and
+                // bump the generation so an in-flight fetch for the old track
+                // cannot land after this.
+                lastTrackTitle = null
+                lastArtworkUrl = null
+                urlArtwork = null
+                binaryArtwork = null
+                ++artworkGeneration
+
+                // Refresh the forwarding-player cache before updateMediaItem,
+                // for the reason spelled out in onMetadataUpdate.
+                updateMediaMetadata()
+                sendSpinPlayer?.updateMediaItem(
+                    title = null,
+                    artist = null,
+                    album = null,
+                    durationMs = 0L,
+                    albumArtist = null,
+                    year = null,
+                    albumTrack = null
+                )
+                sendSpinPlayer?.updatePlaybackState(
+                    syncState = null,
+                    positionMs = 0L,
+                    durationMs = 0L
+                )
+                broadcastSessionExtras()
             }
         }
 
@@ -2280,23 +2333,34 @@ class PlaybackService : MediaLibraryService() {
         val sessionState = coordinator.sessionState.value
         val reconnectStatus = coordinator.reconnectStatus.value
 
-        // forceState lets the connect*() entry points stamp STATE_CONNECTING /
-        // STATE_ERROR immediately, before the coordinator's stateIn flow has
-        // observed the synchronous transport update. Without the override the
-        // broadcast captures the pre-connect state (Idle / Failed) and
-        // external controllers never see "Connecting..." on a fresh connect.
+        // coordinator.sessionState is a combine() of several upstream flows, so it
+        // settles a beat after sendSpinClient.connectionState - the flow every
+        // collector here reacts to. Deriving the published state from the lagging
+        // copy made a broadcast triggered by a client transition announce the
+        // PREVIOUS state. On first connect the previous state is Idle, so the
+        // service announced DISCONNECTED while it was actually connecting;
+        // MainActivity reads a non-user-initiated DISCONNECTED as an unexpected
+        // drop and answers with a second, competing reconnect loop, which then
+        // tore down the connection the first one had just established.
+        val sendSpinState = sendSpinClient?.connectionState?.value ?: sessionState.sendSpin
+
+        // forceState still wins, for the one case the leading flow cannot cover:
+        // a terminal failure stamped from the collector that is holding the
+        // Failed state it has not published yet.
         val connectionStateString = forceState ?: when {
             reconnectStatus is ReconnectStatus.Attempting -> STATE_RECONNECTING
-            sessionState.sendSpin is TransportState.Failed -> STATE_ERROR
-            sessionState.sendSpin is TransportState.Ready -> STATE_CONNECTED
-            sessionState.sendSpin is TransportState.Connecting -> STATE_CONNECTING
+            sendSpinState is TransportState.Failed -> STATE_ERROR
+            sendSpinState is TransportState.Ready -> STATE_CONNECTED
+            sendSpinState is TransportState.Connecting -> STATE_CONNECTING
             else -> STATE_DISCONNECTED
         }
 
         val serverName: String? = sessionState.server?.name
 
-        val errorMessage: String? = forceErrorMessage ?: when (val s = sessionState.sendSpin) {
-            is TransportState.Failed -> failureReasonToMessage(s.reason)
+        // Same source as connectionStateString above, or STATE_ERROR could be
+        // published with a null message when the two copies disagree.
+        val errorMessage: String? = forceErrorMessage ?: when (sendSpinState) {
+            is TransportState.Failed -> failureReasonToMessage(sendSpinState.reason)
             else -> null
         }
 
@@ -2428,6 +2492,9 @@ class PlaybackService : MediaLibraryService() {
         is FailureReason.TransientNetwork -> "Network error"
         is FailureReason.ProtocolError -> "Protocol error"
         is FailureReason.Exhausted -> "Connection lost after multiple attempts"
+        is FailureReason.ServerLacksEncryption ->
+            "This server does not support encrypted connections. " +
+                "Music Assistant 2.9 or newer is required."
     }
 
     /**
@@ -2440,11 +2507,9 @@ class PlaybackService : MediaLibraryService() {
         Log.d(TAG, "Connecting to server: $address path=$path")
         lastDisconnectUserInitiated = false
 
-        // Broadcast connecting state to controllers (MainActivity). The
-        // coordinator's sessionState lags behind the synchronous transport
-        // update, so the override is required to surface STATE_CONNECTING
-        // immediately on initial connect and on reconnect-after-error.
-        broadcastSessionExtras(forceState = STATE_CONNECTING)
+        // No broadcast here: the coordinator is still Idle at this point, and
+        // the publisher reports whatever state the coordinator is in. The
+        // Connecting branch of the connectionState collector announces it.
 
         try {
             if (sendSpinClient?.isConnected == true) {
@@ -2483,8 +2548,8 @@ class PlaybackService : MediaLibraryService() {
         Log.d(TAG, "Connecting to remote server via Remote ID: $remoteId")
         lastDisconnectUserInitiated = false
 
-        // See connectToServer() for why the override is required.
-        broadcastSessionExtras(forceState = STATE_CONNECTING)
+        // See connectToServer: announcing Connecting before the coordinator
+        // leaves Idle publishes DISCONNECTED instead.
 
         try {
             if (sendSpinClient?.isConnected == true) {
@@ -2526,8 +2591,8 @@ class PlaybackService : MediaLibraryService() {
         Log.d(TAG, "Connecting to proxy server: $url")
         lastDisconnectUserInitiated = false
 
-        // See connectToServer() for why the override is required.
-        broadcastSessionExtras(forceState = STATE_CONNECTING)
+        // See connectToServer: announcing Connecting before the coordinator
+        // leaves Idle publishes DISCONNECTED instead.
 
         try {
             if (sendSpinClient?.isConnected == true) {

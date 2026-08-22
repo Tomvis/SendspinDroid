@@ -48,69 +48,63 @@ class MessageBuilderTest {
 
     @Test
     fun buildPlayerState_hasCorrectType() {
-        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false)).jsonObject
+        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false, available = true)).jsonObject
         assertEquals(SendSpinProtocol.MessageType.CLIENT_STATE, msg["type"]?.jsonPrimitive?.content)
     }
 
     @Test
     fun buildPlayerState_hasPlayerObjectWithFields() {
-        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(75, true, "error")).jsonObject
+        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(75, true, available = false)).jsonObject
         val payload = msg["payload"]!!.jsonObject
         val player = payload["player"]!!.jsonObject
         assertEquals(75, player["volume"]?.jsonPrimitive?.int)
         assertTrue(player["muted"]?.jsonPrimitive?.boolean ?: false)
         // Per spec, `state` is a top-level payload field, not part of the
         // player object.
-        assertEquals("error", payload["state"]?.jsonPrimitive?.content)
+        assertEquals("false", payload["available"]?.jsonPrimitive?.content)
         assertNull("state must not be nested in player", player["state"])
     }
 
     @Test
     fun buildPlayerState_defaultSyncState() {
-        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false)).jsonObject
+        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false, available = true)).jsonObject
         val payload = msg["payload"]!!.jsonObject
-        assertEquals("synchronized", payload["state"]?.jsonPrimitive?.content)
+        assertEquals("true", payload["available"]?.jsonPrimitive?.content)
     }
 
     @Test
-    fun buildPlayerState_availableTrueWhenSynchronized() {
-        // Spec PR #115 replaced the `state` enum with an `available` boolean.
-        // We emit both for pre-/post-#115 server compatibility.
-        val payload = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "synchronized")
+    fun buildPlayerState_carriesAvailableVerbatim() {
+        // Spec PR #115 replaced the `state` enum with the `available` boolean,
+        // and the builder now forwards the caller's decision untouched. The
+        // policy that used to live here - available=false only for
+        // external_source - moved to SendSpinProtocolHandler.isAvailable(),
+        // which also gates on time-filter convergence per the spec.
+        val on = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, available = true)
         ).jsonObject["payload"]!!.jsonObject
-        assertTrue(payload["available"]?.jsonPrimitive?.boolean ?: false)
+        assertTrue(on["available"]?.jsonPrimitive?.boolean ?: false)
+
+        val off = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, available = false)
+        ).jsonObject["payload"]!!.jsonObject
+        assertEquals(false, off["available"]?.jsonPrimitive?.boolean)
     }
 
     @Test
-    fun buildPlayerState_availableStaysTrueWhileUnsynchronized() {
-        // Critical: "error" is reported until the time filter converges, which
-        // includes every connect and every re-anchor. Mapping it to
-        // available=false would make the server evict us from our group each
-        // time. Only external_source may report unavailable.
+    fun buildPlayerState_dropsLegacyStateField() {
+        // The pre-#115 `state` string is gone from the wire; a server that
+        // still wanted it would be older than anything this fork talks to.
         val payload = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "error")
+            MessageBuilder.buildPlayerState(50, false, available = true)
         ).jsonObject["payload"]!!.jsonObject
-        assertTrue(payload["available"]?.jsonPrimitive?.boolean ?: false)
-    }
-
-    @Test
-    fun buildPlayerState_availableFalseWhenExternalSource() {
-        // Audio-focus loss: the server parks us in a solo group and ends our
-        // streams, which is the desired behaviour.
-        val payload = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "external_source")
-        ).jsonObject["payload"]!!.jsonObject
-        assertEquals(false, payload["available"]?.jsonPrimitive?.boolean)
-        // The legacy field is still carried for pre-#115 servers.
-        assertEquals("external_source", payload["state"]?.jsonPrimitive?.content)
+        assertNull(payload["state"])
     }
 
     @Test
     fun buildPlayerState_staticDelayMsRoundedToInt() {
         // Spec: static_delay_ms is an integer.
         val msg = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "synchronized", 12.5)
+            MessageBuilder.buildPlayerState(50, false, true, 12.5)
         ).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
         assertEquals(13, player["static_delay_ms"]?.jsonPrimitive?.int)
@@ -119,7 +113,7 @@ class MessageBuilderTest {
     @Test
     fun buildPlayerState_staticDelayMsDefaultsToZero() {
         val msg = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false)
+            MessageBuilder.buildPlayerState(50, false, available = true)
         ).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
         assertEquals(0, player["static_delay_ms"]?.jsonPrimitive?.int)
@@ -130,19 +124,19 @@ class MessageBuilderTest {
         // Spec: 0-5000, negative values not supported. A negative user sync
         // offset is applied locally but reported as 0.
         val negative = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "synchronized", -120.0)
+            MessageBuilder.buildPlayerState(50, false, true, -120.0)
         ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
         assertEquals(0, negative["static_delay_ms"]?.jsonPrimitive?.int)
 
         val huge = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, "synchronized", 9999.0)
+            MessageBuilder.buildPlayerState(50, false, true, 9999.0)
         ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
         assertEquals(5000, huge["static_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
     fun buildPlayerState_declaresSetStaticDelaySupport() {
-        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false)).jsonObject
+        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false, available = true)).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
         val commands = player["supported_commands"]!!.jsonArray.map { it.jsonPrimitive.content }
         assertEquals(listOf("set_static_delay"), commands)
@@ -152,7 +146,7 @@ class MessageBuilderTest {
     fun buildPlayerState_includesRequiredTimingFields() {
         // Spec: required_lead_time_ms and min_buffer_ms are always required
         // for players.
-        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false)).jsonObject
+        val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false, available = true)).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
         assertEquals(
             SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS,

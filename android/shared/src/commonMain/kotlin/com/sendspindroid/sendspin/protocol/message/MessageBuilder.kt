@@ -1,5 +1,8 @@
 package com.sendspindroid.sendspin.protocol.message
 
+import com.sendspindroid.sendspin.crypto.Base64Url
+import com.sendspindroid.sendspin.protocol.GoodbyeReason
+import com.sendspindroid.sendspin.protocol.management.ManagementResultCode
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
@@ -9,6 +12,31 @@ import kotlin.math.roundToInt
 
 object MessageBuilder {
 
+    /** `trust_level` values (README.md#definitions). Ordered none < user. */
+    const val TRUST_NONE = "none"
+    const val TRUST_USER = "user"
+
+    /**
+     * A `supported_pair_methods` entry.
+     *
+     * "Every client implements at least the Pairing PSK method." The PIN methods
+     * are optional for clients and are deferred to item 4.4 (#220).
+     */
+    data class PairMethodDescriptor(
+        val wireName: String,
+        val locations: List<String>,
+    ) {
+        companion object {
+            /**
+             * `locations: ["device"]` because this client generates its own
+             * Pairing PSK from a CSPRNG and shows the resulting token on screen,
+             * which is what "printed on the device" describes. Item 0.3 (#191)
+             * confirmed Music Assistant renders that hint accurately.
+             */
+            val PAIRING_PSK = PairMethodDescriptor("pairing_psk", listOf("device"))
+        }
+    }
+
     data class FormatEntry(
         val codec: String,
         val sampleRate: Int,
@@ -16,21 +44,43 @@ object MessageBuilder {
         val bitDepth: Int
     )
 
+    /**
+     * Build `client/hello`.
+     *
+     * @param clientId legacy dialect only. `client_id` and `version` moved to
+     *   `client/init` when encryption landed, and `messaging.md#communication`
+     *   forbids sending fields the spec does not define for a message - so on
+     *   an encrypted session this must be null and both fields are omitted.
+     * @param trustLevel `'user'` when a pairing record exists for this server,
+     *   `'none'` otherwise. Required.
+     * @param unpairedAccessEnabled whether this client admits a server with no
+     *   pairing record. This is what decides whether an unpaired connection can
+     *   ever carry playback: the spec permits `['playback']` on a Sentinel-keyed
+     *   session "only when the client has unpaired access enabled", so omitting
+     *   it leaves the server no choice but empty activities.
+     */
     fun buildClientHello(
-        clientId: String,
+        clientId: String?,
         deviceName: String,
         bufferCapacity: Int,
         manufacturer: String,
         supportedFormats: List<FormatEntry>,
         lowMemoryMode: Boolean = false,
-        softwareVersion: String = "unknown"
+        softwareVersion: String = "unknown",
+        trustLevel: String = TRUST_NONE,
+        unpairedAccessEnabled: Boolean = true,
+        supportedPairMethods: List<PairMethodDescriptor> = listOf(PairMethodDescriptor.PAIRING_PSK),
     ): String {
         val message = buildJsonObject {
             put("type", SendSpinProtocol.MessageType.CLIENT_HELLO)
             put("payload", buildJsonObject {
-                put("client_id", clientId)
+                // Legacy-only. On an encrypted session these live in client/init.
+                if (clientId != null) {
+                    put("client_id", clientId)
+                    put("version", SendSpinProtocol.VERSION)
+                }
                 put("name", deviceName)
-                put("version", SendSpinProtocol.VERSION)
+                put("trust_level", trustLevel)
                 put("supported_roles", buildJsonArray {
                     add(kotlinx.serialization.json.JsonPrimitive(SendSpinProtocol.Roles.PLAYER))
                     add(kotlinx.serialization.json.JsonPrimitive(SendSpinProtocol.Roles.CONTROLLER))
@@ -75,6 +125,22 @@ object MessageBuilder {
                         })
                     })
                 }
+                // Both required by messaging.md#client--server-clienthello.
+                put("supported_pair_methods", buildJsonArray {
+                    for (method in supportedPairMethods) {
+                        add(buildJsonObject {
+                            put("method", method.wireName)
+                            put("locations", buildJsonArray {
+                                for (location in method.locations) {
+                                    add(kotlinx.serialization.json.JsonPrimitive(location))
+                                }
+                            })
+                        })
+                    }
+                })
+                put("unpaired_access", buildJsonObject {
+                    put("enabled", unpairedAccessEnabled)
+                })
             })
         }
         return message.toString()
@@ -89,6 +155,79 @@ object MessageBuilder {
         }
         return message.toString()
     }
+
+    /**
+     * Build `client/pair-finalize` for the Pairing PSK flow.
+     *
+     * `pairing.md#client--server-clientpair-finalize`: "In the Pairing PSK
+     * Flow, it starts the pairing attempt and is sent immediately after the
+     * `server/activate`, carrying the PSK directly."
+     *
+     * Exactly one of `long_term_psk` and `wrapped_psk` is ever present, and the
+     * wrapped form belongs to the PIN methods this client does not offer - so
+     * only the direct field is emitted here.
+     */
+    fun buildClientPairFinalize(longTermPsk: ByteArray): String {
+        require(longTermPsk.size == 32) {
+            "a Sendspin PSK is 32 bytes, got ${longTermPsk.size}"
+        }
+        return buildJsonObject {
+            put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_FINALIZE)
+            put("payload", buildJsonObject {
+                put("long_term_psk", Base64Url.encode(longTermPsk))
+            })
+        }.toString()
+    }
+
+    /**
+     * `pair/abort`.
+     *
+     * Only `concurrent_attempt` closes the connection after sending; every
+     * other reason leaves it open so the server can re-activate. Item 2.9
+     * (#226) owns the full enum and the attempt state machine.
+     */
+    fun buildPairAbort(reason: String): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.PAIR_ABORT)
+        put("payload", buildJsonObject { put("reason", reason) })
+    }.toString()
+
+    /** The typed form. Prefer this: a bare string can invent a reason. */
+    /**
+     * A `management/result`.
+     *
+     * Deliberately omits the `storage` accounting object. "a client whose
+     * storage is effectively unbounded or of unknown size omits the key, and
+     * the server relies on `storage_exhausted` alone" - records are roughly a
+     * hundred bytes in EncryptedSharedPreferences on a filesystem measured in
+     * gigabytes, so any capacity figure we invented would corrupt the server's
+     * free/cost arithmetic. `storage_exhausted` stays authoritative for a
+     * genuine write failure.
+     *
+     * Also carries no request identifier: replies are matched to requests by
+     * ordering alone.
+     *
+     * @param data merged into the payload, and only when the operation
+     *   succeeded. A failure that carried state would invite the server to read
+     *   it out of a reply saying the operation did not happen.
+     */
+    fun buildManagementResult(
+        code: ManagementResultCode,
+        data: JsonObject? = null,
+    ): String {
+        val message = buildJsonObject {
+            put("type", SendSpinProtocol.MessageType.MANAGEMENT_RESULT)
+            put("payload", buildJsonObject {
+                put("result", code.wire)
+                if (code == ManagementResultCode.OK && data != null) {
+                    for ((key, value) in data) put(key, value)
+                }
+            })
+        }
+        return message.toString()
+    }
+
+    fun buildGoodbye(reason: GoodbyeReason): String =
+        buildGoodbye(reason.wire)
 
     fun buildGoodbye(reason: String): String {
         val message = buildJsonObject {
@@ -114,30 +253,41 @@ object MessageBuilder {
         return message.toString()
     }
 
+    /**
+     * Build `client/state`.
+     *
+     * @param available whether this client can participate in playback. The
+     *   spec renamed the old `state` string to a boolean (#115), so
+     *   `"synchronized"` / `"error"` / `"external_source"` no longer exist on
+     *   the wire. A player reports `true` only once its clock is synchronised:
+     *   "A player MUST NOT report `available: true` until its time filter has
+     *   converged enough to begin scheduling playback."
+     *
+     *   `false` now means only one thing - the client's output is in use by an
+     *   external system (messaging.md#external-source-handling). It is NOT the
+     *   way to report a sync problem, which is why the convergence gate lives
+     *   at the call site rather than here.
+     */
     fun buildPlayerState(
         volume: Int,
         muted: Boolean,
-        syncState: String = "synchronized",
+        available: Boolean,
         staticDelayMs: Double = 0.0,
         requiredLeadTimeMs: Int = SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS,
-        minBufferMs: Int = SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS
+        minBufferMs: Int = SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS,
+        playerRoleActive: Boolean = true
     ): String {
         val message = buildJsonObject {
             put("type", SendSpinProtocol.MessageType.CLIENT_STATE)
             put("payload", buildJsonObject {
-                // Per spec, `state` is a top-level payload field (sibling of
-                // `player`), not part of the player object. Spec PR #115
-                // replaced it with the `available` boolean; we send both so
-                // pre- and post-#115 servers are both satisfied.
-                put("state", syncState)
-                // `available` is false only for "external_source" - the server
-                // reacts by parking us in a solo group and ending our streams,
-                // which is exactly what we want on audio-focus loss. "error"
-                // must stay available=true: we report it until the time filter
-                // converges, and mapping it to false would evict us from the
-                // group on every connect and every re-anchor.
-                put("available", syncState != "external_source")
-                put("player", buildJsonObject {
+                put("available", available)
+                // "player?: object - only if client has player role". Sending it
+                // for an inactive role is a compliance failure: aiosendspin
+                // rejects the connection outright with "client/state carried a
+                // player object for an inactive role". A client whose roles are
+                // all state-less still sends this message - `available` alone is
+                // what unlocks the server's streams.
+                if (playerRoleActive) put("player", buildJsonObject {
                     put("volume", volume)
                     put("muted", muted)
                     // Spec: integer, range 0-5000, negative values not

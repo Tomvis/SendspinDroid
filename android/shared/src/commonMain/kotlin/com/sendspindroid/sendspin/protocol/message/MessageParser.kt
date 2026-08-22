@@ -1,6 +1,16 @@
 package com.sendspindroid.sendspin.protocol.message
 
 import com.sendspindroid.sendspin.protocol.ControllerState
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
+import com.sendspindroid.sendspin.protocol.patch
+import com.sendspindroid.sendspin.protocol.StatePatch
+import com.sendspindroid.sendspin.protocol.RoleUpdate
+import com.sendspindroid.sendspin.protocol.Patch
+import com.sendspindroid.sendspin.protocol.MetadataPatch
+import com.sendspindroid.sendspin.protocol.ControllerPatch
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.ServerCommandResult
@@ -9,13 +19,10 @@ import com.sendspindroid.sendspin.protocol.ServerStateResult
 import com.sendspindroid.sendspin.protocol.StreamConfig
 import com.sendspindroid.sendspin.protocol.SyncOffsetResult
 import com.sendspindroid.sendspin.protocol.TimeMeasurement
-import com.sendspindroid.sendspin.protocol.TrackMetadata
 import com.sendspindroid.sendspin.protocol.TrackProgress
 import com.sendspindroid.shared.log.Log
 import com.sendspindroid.shared.platform.Platform
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
@@ -71,82 +78,97 @@ object MessageParser {
         return TimeMeasurement(offset, rtt, clientReceivedMicros)
     }
 
+    /**
+     * `server/state`, as a delta.
+     *
+     * Every field is read as a [Patch] so that absent, JSON `null` and a value
+     * stay distinguishable all the way to the merge. The previous
+     * implementation used `as? JsonObject` and `?: ""`, which folded the first
+     * two together - so a delta carrying only `progress` arrived downstream as
+     * a metadata object with empty title, artist and album, and blanked the
+     * Now Playing screen on every progress tick.
+     */
     fun parseServerState(payload: JsonObject?): ServerStateResult {
-        if (payload == null) return ServerStateResult(null, null, null)
-
-        val metadata = (payload["metadata"] as? JsonObject)?.let { metadataObj ->
-            fun optStringClean(key: String) =
-                metadataObj[key]?.jsonPrimitive?.contentOrNull?.takeUnless { it == "null" } ?: ""
-
-            val timestamp = metadataObj.longOrDefault("timestamp", 0)
-            val title = optStringClean("title")
-            val artist = optStringClean("artist")
-            val albumArtist = optStringClean("album_artist")
-            val album = optStringClean("album")
-            val artworkUrl = optStringClean("artwork_url")
-            val year = metadataObj.intOrDefault("year", 0)
-            val track = metadataObj.intOrDefault("track", 0)
-            // Queue-position fields (fork extension). album_track is the track
-            // number within its album, falling back to the legacy `track` key
-            // for older servers; queue_track / total_tracks describe position
-            // in the active play queue.
-            val albumTrack = metadataObj.intOrDefault("album_track", track)
-            val queueTrack = metadataObj.intOrDefault("queue_track", 0)
-            val totalTracks = metadataObj.intOrDefault("total_tracks", 0)
-
-            // Use `as? JsonObject` rather than `?.jsonObject`: the latter throws
-            // IllegalArgumentException when the field is JsonNull (the server
-            // sometimes sends `"progress": null` in idle metadata). The cast
-            // form treats JsonNull the same as missing, which is what we want.
-            val progress = (metadataObj["progress"] as? JsonObject)?.let { progressObj ->
-                TrackProgress(
-                    trackProgress = progressObj.longOrDefault("track_progress", 0),
-                    trackDuration = progressObj.longOrDefault("track_duration", 0),
-                    playbackSpeed = progressObj.intOrDefault("playback_speed", 1000)
-                )
-            } ?: run {
-                // Legacy pre-spec Music Assistant fields, not in the
-                // Sendspin spec; kept for old servers.
-                TrackProgress(
-                    trackProgress = metadataObj.longOrDefault("position_ms", 0),
-                    trackDuration = metadataObj.longOrDefault("duration_ms", 0),
-                    playbackSpeed = 1000
-                )
-            }
-
-            TrackMetadata(
-                timestamp = timestamp,
-                title = title,
-                artist = artist,
-                albumArtist = albumArtist,
-                album = album,
-                artworkUrl = artworkUrl,
-                year = year,
-                track = track,
-                progress = progress,
-                albumTrack = albumTrack,
-                queueTrack = queueTrack,
-                totalTracks = totalTracks
-            )
+        if (payload == null) {
+            return ServerStateResult(RoleUpdate.Absent, null, RoleUpdate.Absent)
         }
 
         val state = payload.stringOrDefault("state", "").takeIf { it.isNotEmpty() }
 
-        // Controller (group-level) state delta. All fields lenient: aiosendspin
-        // sends the complete object, but spec delta semantics allow partials.
-        val controller = (payload["controller"] as? JsonObject)?.let { controllerObj ->
-            ControllerState(
-                supportedCommands = controllerObj["supported_commands"]?.jsonArray?.mapNotNull {
-                    it.jsonPrimitive.contentOrNull
-                },
-                volume = controllerObj["volume"]?.jsonPrimitive?.intOrNull,
-                muted = controllerObj["muted"]?.jsonPrimitive?.booleanOrNull,
-                repeat = controllerObj["repeat"]?.jsonPrimitive?.contentOrNull,
-                shuffle = controllerObj["shuffle"]?.jsonPrimitive?.booleanOrNull
+        return ServerStateResult(
+            metadata = payload.roleUpdate("metadata", ::parseMetadataPatch),
+            playbackState = state,
+            controller = payload.roleUpdate("controller", ::parseControllerPatch),
+        )
+    }
+
+    /** Absent / null / object, for a whole role. */
+    private fun <S> JsonObject.roleUpdate(
+        key: String,
+        parse: (JsonObject) -> StatePatch<S>,
+    ): RoleUpdate<S> {
+        val element = this[key] ?: return RoleUpdate.Absent
+        if (element is JsonNull) return RoleUpdate.Cleared
+        val obj = element as? JsonObject ?: return RoleUpdate.Absent
+        return RoleUpdate.Delta(parse(obj))
+    }
+
+    private fun parseMetadataPatch(obj: JsonObject): MetadataPatch = MetadataPatch(
+        timestamp = obj.patch("timestamp") { it.longOrNull() },
+        title = obj.patch("title", ::cleanString),
+        artist = obj.patch("artist", ::cleanString),
+        albumArtist = obj.patch("album_artist", ::cleanString),
+        album = obj.patch("album", ::cleanString),
+        artworkUrl = obj.patch("artwork_url", ::cleanString),
+        year = obj.patch("year") { it.intOrNull() },
+        track = obj.patch("track") { it.intOrNull() },
+        progress = parseProgress(obj),
+        // Queue-position fields (fork extension). `album_track` is the track
+        // number within its album; older servers only send the legacy `track`,
+        // so an absent `album_track` inherits that patch rather than leaving
+        // the field stale. `queue_track` / `total_tracks` describe the position
+        // within the active play queue.
+        albumTrack = obj.patch("album_track") { it.intOrNull() }
+            .orElse { obj.patch("track") { e -> e.intOrNull() } },
+        queueTrack = obj.patch("queue_track") { it.intOrNull() },
+        totalTracks = obj.patch("total_tracks") { it.intOrNull() },
+    )
+
+    /** @return [this] unless it is [Patch.Absent], in which case [fallback]. */
+    private fun <T> Patch<T>.orElse(fallback: () -> Patch<T>): Patch<T> =
+        if (this is Patch.Absent) fallback() else this
+
+    /**
+     * `progress` is replaced or cleared whole, never deep-merged.
+     *
+     * The pre-spec Music Assistant flat fields are honoured only when
+     * `progress` is absent *entirely*. An explicit `"progress": null` is a
+     * clear, and falling back to the legacy fields there would resurrect a
+     * position the server just told us to forget.
+     */
+    private fun parseProgress(obj: JsonObject): Patch<TrackProgress> {
+        val element = obj["progress"]
+        if (element is JsonNull) return Patch.Cleared
+        if (element is JsonObject) {
+            return Patch.Set(
+                TrackProgress(
+                    trackProgress = element.longOrDefault("track_progress", 0),
+                    trackDuration = element.longOrDefault("track_duration", 0),
+                    playbackSpeed = element.intOrDefault("playback_speed", 1000),
+                )
             )
         }
+        if (element != null) return Patch.Absent
 
-        return ServerStateResult(metadata, state, controller)
+        val hasLegacy = obj.containsKey("position_ms") || obj.containsKey("duration_ms")
+        if (!hasLegacy) return Patch.Absent
+        return Patch.Set(
+            TrackProgress(
+                trackProgress = obj.longOrDefault("position_ms", 0),
+                trackDuration = obj.longOrDefault("duration_ms", 0),
+                playbackSpeed = 1000,
+            )
+        )
     }
 
     /**
@@ -180,6 +202,32 @@ object MessageParser {
             null to null
         }
     }
+
+    private fun parseControllerPatch(obj: JsonObject): ControllerPatch = ControllerPatch(
+        supportedCommands = obj.patch("supported_commands") { element ->
+            (element as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }
+        },
+        volume = obj.patch("volume") { it.intOrNull() },
+        muted = obj.patch("muted") { it.booleanOrNull() },
+        repeat = obj.patch("repeat", ::cleanString),
+        shuffle = obj.patch("shuffle") { it.booleanOrNull() },
+        seekMaxMs = obj.patch("seek_max_ms") { it.longOrNull() },
+    )
+
+    /**
+     * Music Assistant sends the four-character string "null" for an absent
+     * title on some tracks. Treated as a clear rather than a title, but only
+     * for strings - narrowly scoped, because any other field could legitimately
+     * carry that text.
+     */
+    private fun cleanString(element: JsonElement): String? =
+        (element as? JsonPrimitive)?.contentOrNull?.takeUnless { it == "null" }
+
+    private fun JsonElement.longOrNull(): Long? = (this as? JsonPrimitive)?.longOrNull
+
+    private fun JsonElement.intOrNull(): Int? = (this as? JsonPrimitive)?.intOrNull
+
+    private fun JsonElement.booleanOrNull(): Boolean? = (this as? JsonPrimitive)?.booleanOrNull
 
     fun parseServerCommand(payload: JsonObject?): ServerCommandResult? {
         if (payload == null) return null
@@ -288,6 +336,4 @@ object MessageParser {
     private fun JsonObject.doubleOrDefault(key: String, default: Double): Double =
         this[key]?.jsonPrimitive?.doubleOrNull ?: default
 
-    private fun JsonObject.booleanOrDefault(key: String, default: Boolean): Boolean =
-        this[key]?.jsonPrimitive?.booleanOrNull ?: default
 }
