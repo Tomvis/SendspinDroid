@@ -22,14 +22,26 @@ class NowPlayingRootTest {
     }
 
     @Test
-    fun connectionStateNeverSelectsABrowseTab() {
-        val offending = appShellLines().filter { it.contains("NavTab.HOME") }
-        assertEquals("Now Playing is the only root; nothing may select HOME", emptyList<String>(), offending)
+    fun nothingSelectsABrowseDestination() {
+        val offending = appShellLines().filter { it.contains("NavTab") }
+        assertEquals("Now Playing is the only root; NavTab must be unreachable", emptyList<String>(), offending)
     }
 
     @Test
-    fun noLaunchedEffectResetsTheTabOnConnect() {
-        val offending = appShellLines().filter { it.startsWith("LaunchedEffect(isMaConnected)") }
-        assertEquals("connection changes must not reset the root destination", emptyList<String>(), offending)
+    fun noDetailNavigationRemains() {
+        val offending = appShellLines().filter {
+            it.contains("DetailDestination") || it.contains("navigateToDetail") || it.contains("currentDetail")
+        }
+        assertEquals("SendSpin defines no browse surface to navigate into", emptyList<String>(), offending)
+    }
+
+    @Test
+    fun noBrowseScreenImportsRemain() {
+        val offending = appShellLines().filter {
+            it.startsWith("import com.sendspindroid.musicassistant") ||
+                it.startsWith("import com.sendspindroid.ui.navigation") ||
+                it.startsWith("import com.sendspindroid.ui.detail")
+        }
+        assertEquals("AppShell must not import MA or browse packages", emptyList<String>(), offending)
     }
 }
