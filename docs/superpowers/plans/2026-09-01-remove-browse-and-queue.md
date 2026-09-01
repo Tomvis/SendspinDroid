@@ -556,7 +556,110 @@ git commit -m "refactor(ui): delete the detail package"
 
 ---
 
-### Task 5: Device verification
+### Task 5: Delete the orphaned player queue machinery
+
+Task 3 deleted `populatePlayerQueue()`, which was the only production caller of
+`SendSpinPlayer.updateQueueItems()`. That orphaned the whole native-queue Timeline
+path, but Task 3 deliberately did not cascade into it: `SendSpinPlayer.kt` is the
+MediaSession `Player` bridge this project treats as playback-critical, and the end of
+a 2,756-line deletion was the wrong moment to touch it unbriefed.
+
+It is now dead code with a passing test suite, which is worse than plain dead code.
+Roughly 11 green tests across three files exercise machinery that can never execute,
+so any "is this referenced?" search finds callers and concludes it is live, and
+deleting it later looks like reducing coverage.
+
+**Verified unreachable** (re-verify before deleting -- intervening work may have added
+a caller): `queueMediaItems` is assigned non-empty at exactly one site, inside
+`updateQueueItems`. Every other assignment sets it to `emptyList()`. So all seven
+`queueMediaItems.isNotEmpty()` guards are permanently false, `MultiItemTimeline` is
+constructible only behind that dead feed, and `onQueueItemSelected` has no production
+setter.
+
+**Files:**
+- Modify: `android/app/src/main/java/com/sendspindroid/playback/SendSpinPlayer.kt`
+- Modify or delete: `android/app/src/test/java/com/sendspindroid/playback/SendSpinPlayerTest.kt`
+- Modify or delete: `android/app/src/test/java/com/sendspindroid/e2e/BrowseMaLibraryQueueTest.kt`
+- Modify or delete: `android/app/src/test/java/com/sendspindroid/e2e/AndroidAutoBrowseTreeTest.kt`
+
+**Interfaces:**
+- Consumes: a codebase where `populatePlayerQueue` no longer exists (Task 3).
+- Produces: `SendSpinPlayer` with single-item Timeline handling only.
+
+- [ ] **Step 1: Re-verify it is still unreachable**
+
+```bash
+grep -rn "updateQueueItems\|onQueueItemSelected\|MultiItemTimeline\|queueMediaItems" android/app/src/main --include=*.kt
+```
+
+Expected: hits only inside `SendSpinPlayer.kt` itself. If any other production file
+appears, STOP and report it -- something re-introduced a caller and the premise no
+longer holds.
+
+- [ ] **Step 2: Write the failing test**
+
+Add to `android/app/src/test/java/com/sendspindroid/playback/SendSpinPlayerTest.kt`:
+
+```kotlin
+    @Test
+    fun timelineIsAlwaysSingleItem() {
+        val source = java.io.File("src/main/java/com/sendspindroid/playback/SendSpinPlayer.kt").readText()
+        val offending = listOf(
+            "updateQueueItems",
+            "onQueueItemSelected",
+            "MultiItemTimeline",
+            "queueMediaItems"
+        ).filter { source.contains(it) }
+        org.junit.Assert.assertEquals(
+            "SendSpin supplies no queue state, so the player has no multi-item timeline",
+            emptyList<String>(),
+            offending
+        )
+    }
+```
+
+- [ ] **Step 3: Run it to make sure it fails**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*SendSpinPlayerTest*"`
+
+Expected: FAIL listing all four symbols.
+
+- [ ] **Step 4: Delete the machinery**
+
+In `SendSpinPlayer.kt` delete `onQueueItemSelected`, `updateQueueItems`, `queueMediaItems`, `currentQueueIndex` and `MultiItemTimeline`. Collapse each of the seven `queueMediaItems.isNotEmpty()` guards to its else branch rather than leaving `if (false)`.
+
+Then handle the tests. For each of the three files, keep any test that still exercises
+surviving single-item behaviour and delete only the cases that drove the queue path.
+Two of the files also carry titles and KDoc describing a world that no longer exists --
+`BrowseMaLibraryQueueTest`'s header describes "Browse MA library -> select album ->
+verify queue" and `AndroidAutoBrowseTreeTest`'s manual steps end at "Tap queue button
+-> verify queue is populated". Fix or remove those headers; a stale test title is how
+the next reader is misled about what the suite covers.
+
+- [ ] **Step 5: Run the test to verify it passes**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*SendSpinPlayerTest*"`
+
+Expected: PASS.
+
+- [ ] **Step 6: Verify build and full suite**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest`
+
+Expected: BUILD SUCCESSFUL. Report the new test count and which tests you removed --
+the total will drop, and that drop must be explainable as "these exercised unreachable
+code", not as lost coverage.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add -A android/app/src
+git commit -m "refactor(playback): delete the orphaned player queue machinery"
+```
+
+---
+
+### Task 6: Device verification
 
 Tasks 1-4 are verified by compilation and unit tests. This confirms the app still works on hardware and that Android Auto kept its server selection.
 
