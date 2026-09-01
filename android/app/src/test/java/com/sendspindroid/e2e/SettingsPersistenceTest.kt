@@ -257,8 +257,8 @@ class SettingsPersistenceTest {
             UserSettings.KEY_FULL_SCREEN_MODE,
             UserSettings.KEY_KEEP_SCREEN_ON,
             UserSettings.KEY_HIGH_POWER_MODE,
-            UserSettings.KEY_REMOTE_SERVERS,
-            UserSettings.KEY_PROXY_SERVERS
+            UserSettings.KEY_LAST_REMOTE_ID,
+            UserSettings.KEY_LAST_PROXY_URL
         )
 
         // All keys should be unique

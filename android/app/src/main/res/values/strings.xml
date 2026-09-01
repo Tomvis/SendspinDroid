@@ -2,7 +2,6 @@
 <resources>
     <string name="app_name">SendSpin Player</string>
     <string name="discover_servers">Discover Servers</string>
-    <string name="connect">Connect</string>
     <string name="disconnect">Disconnect</string>
     <string name="pause">Pause</string>
     <string name="previous">Previous</string>
@@ -16,7 +15,6 @@
     <string name="discovering">Discovering servers...</string>
     <string name="no_servers_found">No servers found</string>
     <string name="add_server_manually">Add Server Manually</string>
-    <string name="server_name">Server Name</string>
     <string name="server_address">Server Address</string>
     <string name="invalid_address">Invalid server address format</string>
     <string name="album_art">Album artwork</string>
@@ -66,7 +64,6 @@
 
     <!-- Snackbar actions -->
     <string name="action_retry">Retry</string>
-    <string name="action_dismiss">Dismiss</string>
 
     <!-- Menu actions -->
     <string name="action_disconnect">Disconnect</string>
@@ -247,16 +244,12 @@
     <string name="pref_version_title">Version</string>
 
     <!-- Remote Access -->
-    <string name="remote_access">Remote Access</string>
     <string name="remote_access_title">Remote Access</string>
     <string name="remote_access_description">Connect to your Music Assistant server from anywhere using Remote ID</string>
     <string name="connection_mode">Connection Mode</string>
     <string name="connection_mode_local">Local Network</string>
     <string name="connection_mode_remote">Remote Access</string>
-    <string name="remote_id">Remote ID</string>
-    <string name="remote_id_hint">Enter 26-character Remote ID</string>
     <string name="remote_id_placeholder">XXXXXXXXXXXXXXXXXXXXXXXXXX</string>
-    <string name="remote_id_invalid">Invalid Remote ID format. Expected 26 uppercase letters/numbers.</string>
     <string name="scan_qr_code">Scan QR Code</string>
     <string name="enter_remote_id">Enter Remote ID</string>
     <string name="remote_server_nickname">Nickname</string>
@@ -265,44 +258,27 @@
     <string name="no_saved_servers">No saved remote servers</string>
     <string name="connect_remote">Connect Remotely</string>
     <string name="connecting_remotely">Connecting remotely…</string>
-    <string name="remote_connection_failed">Remote connection failed: %s</string>
     <string name="last_connected">Last connected: %s</string>
 
     <!-- QR Scanner -->
     <string name="qr_scanner_title">Scan Remote ID</string>
-    <string name="qr_scanner_instruction">Point camera at the Remote ID QR code in Music Assistant settings</string>
-    <string name="qr_scanner_success">Remote ID detected</string>
-    <string name="qr_scanner_invalid">Invalid QR code. Expected Music Assistant Remote ID.</string>
-    <string name="camera_permission_required">Camera permission is required to scan QR codes</string>
     <string name="camera_permission_denied">Camera permission denied. Enter Remote ID manually.</string>
-    <string name="camera_not_available">Camera not available on this device</string>
-    <string name="grant_permission">Grant Permission</string>
-    <string name="enter_remote_manually">Enter Manually</string>
 
     <!-- Accessibility - Remote Access -->
     <string name="accessibility_scan_qr_button">Scan QR code for Remote ID</string>
     <string name="accessibility_remote_id_input">Remote ID input field</string>
-    <string name="accessibility_camera_preview">Camera preview for QR code scanning</string>
     <string name="accessibility_connection_mode_toggle">Toggle between local network and remote access connection modes</string>
 
     <!-- Proxy Access -->
-    <string name="proxy_access">Proxy Access</string>
     <string name="proxy_access_title">Proxy Access</string>
     <string name="proxy_access_description">Connect through your reverse proxy using URL and auth token</string>
-    <string name="proxy_url">Server URL</string>
-    <string name="proxy_url_hint">https://ma.example.com/sendspin</string>
     <string name="auth_token">Auth Token</string>
     <string name="auth_token_hint">Long-lived token from Music Assistant</string>
-    <string name="proxy_server_nickname">Nickname</string>
-    <string name="proxy_server_nickname_hint">e.g., Home Proxy</string>
-    <string name="saved_proxy_servers">Saved Proxy Servers</string>
     <string name="no_saved_proxy_servers">No saved proxy servers</string>
     <string name="connect_proxy">Connect via Proxy</string>
     <string name="connecting_via_proxy">Connecting via proxy…</string>
-    <string name="proxy_connection_failed">Proxy connection failed: %s</string>
     <string name="auth_failed">Authentication failed</string>
     <string name="proxy_url_invalid">Invalid URL format. Enter a valid server URL.</string>
-    <string name="auth_token_required">Auth token is required</string>
 
     <!-- Proxy Access - Login Mode -->
     <string name="auth_mode_login">Login</string>
@@ -315,7 +291,6 @@
     <string name="login_failed">Login failed: %s</string>
     <string name="login_invalid_credentials">Invalid username or password</string>
     <string name="login_server_error">Server error. Please try again.</string>
-    <string name="credentials_required">Username and password are required</string>
 
     <!-- Accessibility - Proxy Access -->
     <string name="accessibility_proxy_url_input">Proxy server URL input field</string>
@@ -328,7 +303,6 @@
     <string name="unified_server">Server</string>
     <string name="add_server">Add Server</string>
     <string name="edit_server">Edit Server</string>
-    <string name="delete">Delete</string>
     <string name="delete_server">Delete Server</string>
     <string name="save_server">Save Server</string>
     <string name="quick_connect">Quick Connect</string>
@@ -362,10 +336,8 @@
     <string name="wizard_local_address_hint">192.168.1.100:8927</string>
     <string name="wizard_local_skip">Skip if you don\'t use local connections</string>
 
-    <string name="wizard_remote_title">Remote Access</string>
     <string name="wizard_remote_description">Connect from anywhere using Music Assistant Remote ID</string>
     <string name="wizard_remote_skip">Skip if you don\'t use Remote Access</string>
-    <string name="wizard_remote_id_info">Find your Remote ID in Music Assistant Settings under Remote Access. Tap the QR code icon to scan it directly.</string>
 
     <string name="wizard_proxy_title">Proxy Connection</string>
     <string name="wizard_proxy_description">Connect through your authenticated reverse proxy</string>
@@ -490,7 +462,6 @@
     <!-- New Wizard Flow - Testing -->
     <string name="wizard_testing_title">Testing Connection</string>
     <string name="wizard_testing_local">Connecting to local server...</string>
-    <string name="wizard_testing_remote">Testing remote access...</string>
     <string name="wizard_testing_proxy">Connecting via proxy...</string>
     <string name="wizard_testing_try_different">Try Different Address</string>
     <string name="wizard_testing_skip_local">Skip Local</string>
@@ -567,13 +538,6 @@
     <string name="wizard_local_only_option_desc">Only connect when on the same network or when using VPN</string>
     <string name="wizard_music_assistant_checkbox">Music Assistant Server</string>
     <string name="wizard_music_assistant_checkbox_desc">Enable to access library browsing and remote access features</string>
-    <string name="wizard_remote_id_info_title">Where to find your Remote ID</string>
-    <string name="scan_qr">Scan QR Code</string>
-    <string name="proxy_auth_login">Login</string>
-    <string name="proxy_auth_token">Token</string>
-    <string name="proxy_username">Username</string>
-    <string name="proxy_password">Password</string>
-    <string name="proxy_token">Auth Token</string>
     <string name="ma_username">Username</string>
     <string name="ma_password">Password</string>
     <string name="ma_port">API Port</string>

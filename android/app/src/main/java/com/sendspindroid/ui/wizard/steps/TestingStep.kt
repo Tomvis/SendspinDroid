@@ -30,7 +30,6 @@ import com.sendspindroid.ui.wizard.ConnectionTestState
 @Composable
 fun TestingStep(
     testState: ConnectionTestState,
-    isLocalTest: Boolean,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -52,10 +51,7 @@ fun TestingStep(
                 Spacer(modifier = Modifier.height(24.dp))
 
                 Text(
-                    text = stringResource(
-                        if (isLocalTest) R.string.wizard_testing_local
-                        else R.string.wizard_testing_remote
-                    ),
+                    text = stringResource(R.string.wizard_testing_local),
                     style = MaterialTheme.typography.titleMedium,
                     textAlign = TextAlign.Center
                 )
@@ -130,7 +126,6 @@ private fun TestingStepInProgressPreview() {
     SendSpinTheme {
         TestingStep(
             testState = ConnectionTestState.Testing,
-            isLocalTest = true,
             onRetry = {}
         )
     }
@@ -142,7 +137,6 @@ private fun TestingStepSuccessPreview() {
     SendSpinTheme {
         TestingStep(
             testState = ConnectionTestState.Success("Connected to Living Room"),
-            isLocalTest = true,
             onRetry = {}
         )
     }
@@ -154,7 +148,6 @@ private fun TestingStepFailedPreview() {
     SendSpinTheme {
         TestingStep(
             testState = ConnectionTestState.Failed("Connection refused. Check if SendSpin is running."),
-            isLocalTest = true,
             onRetry = {}
         )
     }

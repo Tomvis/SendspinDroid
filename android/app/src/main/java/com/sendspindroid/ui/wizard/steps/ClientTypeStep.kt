@@ -160,7 +160,7 @@ private fun MusicAssistantCard(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Connect to Music Assistant as a client while also creating a Sendspin player in Music Assistant. Connect locally or remotely through Music Assistant remote connection or reverse proxy. All of Sendspin\u2019s features plus Music Assistant native library browsing and controls.",
+                text = "Connect to Music Assistant as a client while also creating a Sendspin player in Music Assistant. Connect on your local network. All of Sendspin\u2019s features plus Music Assistant native library browsing and controls.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

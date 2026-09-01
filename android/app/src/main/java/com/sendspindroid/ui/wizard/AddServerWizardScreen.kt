@@ -44,8 +44,6 @@ import com.sendspindroid.ui.wizard.steps.FindServerStep
 import com.sendspindroid.ui.wizard.steps.FinishStep
 import com.sendspindroid.ui.wizard.steps.MaLoginStep
 import com.sendspindroid.ui.wizard.steps.NetworkQuestionStep
-import com.sendspindroid.ui.wizard.steps.RemoteQuestionStep
-import com.sendspindroid.ui.wizard.steps.RemoteSetupStep
 import com.sendspindroid.ui.wizard.steps.TestingStep
 
 /**
@@ -159,7 +157,6 @@ private fun WizardStepContent(
         )
         WizardStep.SS_TestLocal -> TestingStep(
             testState = state.localTestState,
-            isLocalTest = true,
             onRetry = { onStepAction(WizardStepAction.RetryLocalTest) }
         )
         WizardStep.SS_Finish -> FinishStep(
@@ -188,7 +185,6 @@ private fun WizardStepContent(
         )
         WizardStep.MA_TestLocal -> TestingStep(
             testState = state.localTestState,
-            isLocalTest = true,
             onRetry = { onStepAction(WizardStepAction.RetryLocalTest) }
         )
         WizardStep.MA_Login -> MaLoginStep(
@@ -201,74 +197,7 @@ private fun WizardStepContent(
             onPortChange = { onStepAction(WizardStepAction.UpdateMaPort(it)) },
             onTestConnection = { onStepAction(WizardStepAction.TestMaConnection) }
         )
-        WizardStep.MA_RemoteQuestion -> RemoteQuestionStep(
-            onYesRemote = { onStepAction(WizardStepAction.SelectWantsRemote(wantsRemote = true)) },
-            onNoLocalOnly = { onStepAction(WizardStepAction.SelectWantsRemote(wantsRemote = false)) }
-        )
-        WizardStep.MA_RemoteSetup -> RemoteSetupStep(
-            remoteAccessMethod = state.remoteAccessMethod,
-            remoteId = state.remoteId,
-            proxyUrl = state.proxyUrl,
-            proxyAuthMode = state.proxyAuthMode,
-            proxyUsername = state.proxyUsername,
-            proxyPassword = state.proxyPassword,
-            proxyToken = state.proxyToken,
-            onMethodChange = { onStepAction(WizardStepAction.SelectRemoteMethod(it)) },
-            onRemoteIdChange = { onStepAction(WizardStepAction.UpdateRemoteId(it)) },
-            onScanQr = { onStepAction(WizardStepAction.ScanQrCode) },
-            onProxyUrlChange = { onStepAction(WizardStepAction.UpdateProxyUrl(it)) },
-            onAuthModeChange = { onStepAction(WizardStepAction.UpdateProxyAuthMode(it)) },
-            onProxyUsernameChange = { onStepAction(WizardStepAction.UpdateProxyUsername(it)) },
-            onProxyPasswordChange = { onStepAction(WizardStepAction.UpdateProxyPassword(it)) },
-            onProxyTokenChange = { onStepAction(WizardStepAction.UpdateProxyToken(it)) }
-        )
-        WizardStep.MA_TestRemote -> TestingStep(
-            testState = state.remoteTestState,
-            isLocalTest = false,
-            onRetry = { onStepAction(WizardStepAction.RetryRemoteTest) }
-        )
         WizardStep.MA_Finish -> FinishStep(
-            serverName = state.serverName,
-            isDefault = state.setAsDefault,
-            connectionSummary = state.connectionSummary,
-            onNameChange = { onStepAction(WizardStepAction.UpdateServerName(it)) },
-            onDefaultChange = { onStepAction(WizardStepAction.UpdateSetAsDefault(it)) }
-        )
-
-        // MA remote-only path
-        WizardStep.MA_RemoteOnlySetup -> RemoteSetupStep(
-            remoteAccessMethod = state.remoteAccessMethod,
-            remoteId = state.remoteId,
-            proxyUrl = state.proxyUrl,
-            proxyAuthMode = state.proxyAuthMode,
-            proxyUsername = state.proxyUsername,
-            proxyPassword = state.proxyPassword,
-            proxyToken = state.proxyToken,
-            onMethodChange = { onStepAction(WizardStepAction.SelectRemoteMethod(it)) },
-            onRemoteIdChange = { onStepAction(WizardStepAction.UpdateRemoteId(it)) },
-            onScanQr = { onStepAction(WizardStepAction.ScanQrCode) },
-            onProxyUrlChange = { onStepAction(WizardStepAction.UpdateProxyUrl(it)) },
-            onAuthModeChange = { onStepAction(WizardStepAction.UpdateProxyAuthMode(it)) },
-            onProxyUsernameChange = { onStepAction(WizardStepAction.UpdateProxyUsername(it)) },
-            onProxyPasswordChange = { onStepAction(WizardStepAction.UpdateProxyPassword(it)) },
-            onProxyTokenChange = { onStepAction(WizardStepAction.UpdateProxyToken(it)) }
-        )
-        WizardStep.MA_TestRemoteOnly -> TestingStep(
-            testState = state.remoteTestState,
-            isLocalTest = false,
-            onRetry = { onStepAction(WizardStepAction.RetryRemoteTest) }
-        )
-        WizardStep.MA_LoginRemote -> MaLoginStep(
-            username = state.maUsername,
-            password = state.maPassword,
-            port = state.maPort,
-            testState = state.maTestState,
-            onUsernameChange = { onStepAction(WizardStepAction.UpdateMaUsername(it)) },
-            onPasswordChange = { onStepAction(WizardStepAction.UpdateMaPassword(it)) },
-            onPortChange = { onStepAction(WizardStepAction.UpdateMaPort(it)) },
-            onTestConnection = { onStepAction(WizardStepAction.TestMaConnection) }
-        )
-        WizardStep.MA_FinishRemoteOnly -> FinishStep(
             serverName = state.serverName,
             isDefault = state.setAsDefault,
             connectionSummary = state.connectionSummary,
@@ -281,7 +210,7 @@ private fun WizardStepContent(
 /**
  * Bottom bar with Back, Skip, and Next/Save buttons.
  *
- * Card-selection steps (ClientType, NetworkQuestion, RemoteQuestion) have no buttons —
+ * Card-selection steps (ClientType, NetworkQuestion) have no buttons —
  * the user taps a card to navigate. Testing steps also have no buttons (auto-advance).
  * Finish steps show Back + Save. Config steps show Back + Next.
  */
@@ -298,27 +227,23 @@ private fun WizardBottomBar(
     // Card-selection steps — no bottom bar at all
     val isCardSelectionStep = step in setOf(
         WizardStep.ClientType,
-        WizardStep.MA_NetworkQuestion,
-        WizardStep.MA_RemoteQuestion
+        WizardStep.MA_NetworkQuestion
     )
 
     // Testing steps — no bottom bar (auto-advance on completion)
     val isTestingStep = step in setOf(
         WizardStep.SS_TestLocal,
-        WizardStep.MA_TestLocal,
-        WizardStep.MA_TestRemote,
-        WizardStep.MA_TestRemoteOnly
+        WizardStep.MA_TestLocal
     )
 
     // Finish/save steps
     val isFinalStep = step in setOf(
         WizardStep.SS_Finish,
-        WizardStep.MA_Finish,
-        WizardStep.MA_FinishRemoteOnly
+        WizardStep.MA_Finish
     )
 
-    // Show skip on MA_Login steps (user can proceed without authenticating)
-    val showSkip = step == WizardStep.MA_Login || step == WizardStep.MA_LoginRemote
+    // Show skip on the MA_Login step (user can proceed without authenticating)
+    val showSkip = step == WizardStep.MA_Login
 
     // Hide bottom bar entirely for card-selection and testing steps
     if (isCardSelectionStep || isTestingStep) return
@@ -375,22 +300,13 @@ private fun getStepTitle(step: WizardStep): String {
         WizardStep.MA_FindServer -> stringResource(R.string.wizard_find_server_title)
 
         WizardStep.SS_TestLocal,
-        WizardStep.MA_TestLocal,
-        WizardStep.MA_TestRemote,
-        WizardStep.MA_TestRemoteOnly -> stringResource(R.string.wizard_testing_title)
+        WizardStep.MA_TestLocal -> stringResource(R.string.wizard_testing_title)
 
         WizardStep.MA_NetworkQuestion -> stringResource(R.string.wizard_title_add_server)
-        WizardStep.MA_Login,
-        WizardStep.MA_LoginRemote -> stringResource(R.string.wizard_ma_login_title)
-
-        WizardStep.MA_RemoteQuestion -> stringResource(R.string.wizard_title_add_server)
-
-        WizardStep.MA_RemoteSetup,
-        WizardStep.MA_RemoteOnlySetup -> stringResource(R.string.wizard_remote_title)
+        WizardStep.MA_Login -> stringResource(R.string.wizard_ma_login_title)
 
         WizardStep.SS_Finish,
-        WizardStep.MA_Finish,
-        WizardStep.MA_FinishRemoteOnly -> stringResource(R.string.wizard_save_title)
+        WizardStep.MA_Finish -> stringResource(R.string.wizard_save_title)
     }
 }
 
@@ -408,21 +324,12 @@ private fun getStepProgress(step: WizardStep): Float {
         WizardStep.SS_TestLocal -> 0.50f
         WizardStep.SS_Finish -> 1.0f
 
-        // MA local path (up to 8 steps after ClientType)
-        WizardStep.MA_NetworkQuestion -> 0.12f
-        WizardStep.MA_FindServer -> 0.25f
-        WizardStep.MA_TestLocal -> 0.35f
-        WizardStep.MA_Login -> 0.50f
-        WizardStep.MA_RemoteQuestion -> 0.62f
-        WizardStep.MA_RemoteSetup -> 0.75f
-        WizardStep.MA_TestRemote -> 0.87f
+        // MA local path (5 steps after ClientType)
+        WizardStep.MA_NetworkQuestion -> 0.2f
+        WizardStep.MA_FindServer -> 0.4f
+        WizardStep.MA_TestLocal -> 0.6f
+        WizardStep.MA_Login -> 0.8f
         WizardStep.MA_Finish -> 1.0f
-
-        // MA remote-only path (5 steps after ClientType)
-        WizardStep.MA_RemoteOnlySetup -> 0.25f
-        WizardStep.MA_TestRemoteOnly -> 0.50f
-        WizardStep.MA_LoginRemote -> 0.75f
-        WizardStep.MA_FinishRemoteOnly -> 1.0f
     }
 }
 
@@ -457,18 +364,6 @@ data class WizardState(
     val isSearching: Boolean = false,
     val localTestState: ConnectionTestState = ConnectionTestState.Idle,
 
-    // Remote access
-    val remoteAccessMethod: RemoteAccessMethod = RemoteAccessMethod.REMOTE_ID,
-    val remoteId: String = "",
-    val remoteTestState: ConnectionTestState = ConnectionTestState.Idle,
-
-    // Proxy
-    val proxyUrl: String = "",
-    val proxyAuthMode: ProxyAuthMode = ProxyAuthMode.LOGIN,
-    val proxyUsername: String = "",
-    val proxyPassword: String = "",
-    val proxyToken: String = "",
-
     // Music Assistant login
     val maUsername: String = "",
     val maPassword: String = "",
@@ -476,13 +371,6 @@ data class WizardState(
     val maToken: String? = null,
     val maTestState: ConnectionTestState = ConnectionTestState.Idle
 )
-
-/**
- * Proxy authentication mode.
- */
-enum class ProxyAuthMode {
-    LOGIN, TOKEN
-}
 
 /**
  * Discovered server UI model.
@@ -503,9 +391,6 @@ sealed class WizardStepAction {
     // NetworkQuestion step — card tap
     data class SelectNetworkLocation(val isLocal: Boolean) : WizardStepAction()
 
-    // RemoteQuestion step — card tap
-    data class SelectWantsRemote(val wantsRemote: Boolean) : WizardStepAction()
-
     // Find server step
     data class UpdateLocalAddress(val address: String) : WizardStepAction()
     data class SelectDiscoveredServer(val server: DiscoveredServerUi) : WizardStepAction()
@@ -517,21 +402,6 @@ sealed class WizardStepAction {
     data class UpdateMaPassword(val password: String) : WizardStepAction()
     data class UpdateMaPort(val port: Int) : WizardStepAction()
     data object TestMaConnection : WizardStepAction()
-
-    // Remote setup step (method selection within tabbed UI)
-    data class SelectRemoteMethod(val method: RemoteAccessMethod) : WizardStepAction()
-
-    // Remote ID
-    data class UpdateRemoteId(val id: String) : WizardStepAction()
-    data object ScanQrCode : WizardStepAction()
-    data object RetryRemoteTest : WizardStepAction()
-
-    // Proxy
-    data class UpdateProxyUrl(val url: String) : WizardStepAction()
-    data class UpdateProxyAuthMode(val mode: ProxyAuthMode) : WizardStepAction()
-    data class UpdateProxyUsername(val username: String) : WizardStepAction()
-    data class UpdateProxyPassword(val password: String) : WizardStepAction()
-    data class UpdateProxyToken(val token: String) : WizardStepAction()
 
     // Finish step
     data class UpdateServerName(val name: String) : WizardStepAction()
