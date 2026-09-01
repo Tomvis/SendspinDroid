@@ -566,3 +566,53 @@ At the end of this plan the app is Now Playing first, no Music Assistant screen 
 - `com.sendspindroid.ui.queue`
 
 The follow-up plan deletes those, plus `app/remote/`, `shared/remote/`, `ProxyWebSocketTransport`, the Android Auto browse tree in `PlaybackService`, the `io.getstream:stream-webrtc-android` dependency, and the residual MA references in `PlaybackService.kt`, `SendSpin.kt`, `UnifiedServerRepository.kt`, `AddServerWizardViewModel.kt` and `strings.xml`.
+
+## Task 5 device verification record
+
+- **Device**: Relndoo T901_US tablet, Android 15 (API 35).
+- **App**: com.sendspindroid, versionName 2.0.0-Beta15, versionCode 20015, built from
+  `feat/player-first-shell` (commit 96aad52).
+- **Server**: Music Assistant SendSpin server at ws://10.0.2.8:8927/sendspin, connected via
+  Noise handshake with an existing LONG_TERM PSK.
+- **Form factors exercised**: tablet portrait, tablet landscape. Phone and TV/leanback NOT
+  verified - no device or emulator available.
+
+Results:
+
+- 4a disconnected root (picker, no tab bar) - PASS, portrait and landscape, cold launch and
+  after force-stop relaunch.
+- 4b connected root (Now Playing, artwork/metadata/progress) - PASS. Metadata and artwork
+  updated live across three track changes; elapsed-time text advanced while playing.
+- 4c transport controls act on the server - PASS for play, pause, next, previous, volume, each
+  confirmed via logcat round-trip (client click -> outgoing command -> `server/activate` /
+  `group/update` / `stream/start` / `server/state` echo). Seek and mute have no UI control
+  anywhere in the app to test (pre-existing scope, not part of this refactor).
+- 4d no browse surface - PASS. Overflow menu on Now Playing has only Stats for Nerds, Edit
+  Server, Switch Server, App Settings, Exit App. `AppShell.kt` measured at 353 lines (down
+  from 1418), matching the plan's target.
+- 4e back-press behavior - PASS for the immediate outcome: Back from Now Playing backgrounds
+  the app to the launcher, no crash, no blank screen, no browse destination revealed. Testing
+  it surfaced a DEFECT (below).
+- 4f no crashes - PASS. No `FATAL EXCEPTION`/`AndroidRuntime` and no app-originated `E`-level
+  log lines across the full session.
+
+**Defect found** (reported, not fixed, per Task 5's scope): after backgrounding the app via
+the system Back button from Now Playing and returning to it without the process being killed,
+the transport controls (play/pause/next/previous/switch-group) go permanently disabled and the
+elapsed-time display freezes at the moment of backgrounding - while playback, track
+auto-advance, and metadata/artwork updates all continue correctly underneath. Recovery requires
+a full `force-stop` + relaunch. Reproduced twice via the Back-button path; one trial via the
+Home button did not reproduce it. `git diff a152c13..HEAD -- MainActivity.kt` shows tasks 1-4's
+only change to that file (removing the `navigateDetailBack()` check, per Task 4's brief) does
+not touch the player-state collection code responsible, so this is very likely a pre-existing
+bug rather than a regression from this refactor - but it directly affects the transport
+controls this task was told to treat as the highest-value check, so it is flagged here for
+follow-up.
+
+Phone and TV/leanback form factors could not be verified - no hardware or emulator was
+available in this environment. The manifest declares `LEANBACK_LAUNCHER` and the optional
+`android.software.leanback` feature, and TV-specific composables (`NowPlayingTv`,
+`TvTrackProgressBar`) exist in source, but D-pad focus traversal and leanback-launcher
+presence were not exercised.
+
+Full detail: `.superpowers/sdd/2026-09-01-player-first-shell/task-5-report.md`.
