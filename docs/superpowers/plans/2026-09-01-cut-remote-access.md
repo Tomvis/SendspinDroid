@@ -323,6 +323,9 @@ With no UI path and no Music Assistant plumbing, the transports themselves are o
 - Delete: `android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/transport/ProxyWebSocketTransport.kt`
 - Modify: `android/app/src/main/java/com/sendspindroid/sendspin/SendSpin.kt` (`createRemoteTransport` around :1130, the proxy transport creation around :1142, `ConnectionMode.REMOTE` and `PROXY` branches)
 - Modify: `android/app/src/main/java/com/sendspindroid/network/DefaultServerPinger.kt` (:7 `SignalingClient` import and the remote reachability probe around :408)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/server/UnifiedServerConnector.kt` (`connectRemote` :109, `connectProxy` :126, and the command dispatch around :166-180)
+- Modify: `android/app/src/main/java/com/sendspindroid/coordinator/ConnectionSelector.kt` (remote/proxy selection branches)
+- Modify: `android/app/src/main/java/com/sendspindroid/playback/PlaybackService.kt` (`COMMAND_CONNECT_REMOTE` and `COMMAND_CONNECT_PROXY` at :404-405, their advertisement at :2877-2878, their handlers at :2932 and :2946, and the `ARG_REMOTE_ID` / `ARG_PROXY_URL` keys)
 - Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/MaConnectionMode.kt` (`REMOTE`, `PROXY`)
 - Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/transport/BaseWebSocketTransport.kt` (:29 KDoc references `ProxyWebSocketTransport`)
 - Delete these tests: `app/src/test/.../e2e/ProxyConnectAuthTest.kt`, `e2e/RemoteConnectWebRTCTest.kt`, `remote/RemoteConnectionParseTest.kt`, `remote/RemoteConnectionValidationTest.kt`, `remote/WebRTCFactoryLifecycleTest.kt`, `shared/.../remote/RemoteCertificateVerifierTest.kt`, `remote/SignalingClientConnectRaceTest.kt`, `remote/SignalingClientRemoteIdTest.kt`, `shared/.../transport/ProxyWebSocketTransportTest.kt`
@@ -332,6 +335,26 @@ With no UI path and no Music Assistant plumbing, the transports themselves are o
 **Interfaces:**
 - Consumes: no UI path (Task 1), no MA plumbing (Task 2).
 - Produces: `com.sendspindroid.remote` no longer exists in either module. `ConnectionMode` and `MaConnectionMode` offer only `LOCAL`.
+
+**A SECOND remote path exists that no import grep can find.** Task 1's implementer
+discovered it; it is a blocker for this task, not an optional extra.
+
+`UnifiedServerConnector.connectRemote()` and `connectProxy()` do not import
+`com.sendspindroid.remote` at all. They dispatch MediaSession CUSTOM COMMANDS -- string
+constants `COMMAND_CONNECT_REMOTE` and `COMMAND_CONNECT_PROXY` declared on
+`PlaybackService`, carrying a remote ID or proxy URL in a `Bundle` under `ARG_REMOTE_ID`
+and `ARG_PROXY_URL`. `PlaybackService` advertises them in its available-command set and
+handles them by calling into exactly the code this task deletes.
+
+Because the coupling is by string and Bundle key rather than by type, neither an import
+sweep nor a type search reveals it. Delete the whole chain: the two connector functions,
+the two command constants, their advertisement in the session command set, both handlers,
+and the two argument keys. Then collapse `ConnectionSelector`'s remote and proxy selection
+branches to the local path.
+
+Check for other message-passing couplings while you are there: grep for `SessionCommand`,
+`ARG_`, and any Intent action or broadcast that names remote or proxy. Report what you
+find, including "nothing else".
 
 **On the connection-mode enums:** both reduce to a single value. A single-valued enum that is only used to branch is vestigial -- delete it and collapse its consumers. But check first whether either is persisted or serialized anywhere; if a stored value names `REMOTE` or `PROXY`, removing the constant changes how old data deserializes. Report what you find before deciding.
 
