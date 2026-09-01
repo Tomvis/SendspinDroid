@@ -86,7 +86,6 @@ import com.sendspindroid.ui.server.AddServerWizardActivity
 import com.sendspindroid.ui.server.UnifiedServerConnector
 import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.musicassistant.MusicAssistant
-import com.sendspindroid.ui.queue.QueueSheetFragment
 import androidx.activity.viewModels
 import androidx.fragment.app.Fragment
 import kotlinx.coroutines.flow.collectLatest
@@ -724,11 +723,6 @@ class MainActivity : AppCompatActivity() {
             onFavoriteClicked()
         }
 
-        // Queue button - Only visible when connected to MA server
-        binding.queueButton.setOnClickListener {
-            showQueueSheet()
-        }
-
         // Observe MA connection state to show/hide MA-dependent UI elements
         observeMaConnectionState()
 
@@ -874,7 +868,6 @@ class MainActivity : AppCompatActivity() {
                             onVolumeChanged(volume)
                             viewModel.updateVolume(volume)
                         },
-                        onQueueClick = { showQueueSheet() },
                         onDisconnectClick = { onDisconnectClicked() },
                         onAddServerClick = { showAddServerWizard() },
                         onStatsClick = {
@@ -2535,31 +2528,6 @@ class MainActivity : AppCompatActivity() {
                 }
             )
         }
-    }
-
-    /**
-     * Shows the queue management bottom sheet.
-     * Displays the current queue from Music Assistant with controls for
-     * reordering, removing, and jumping to tracks.
-     */
-    private fun showQueueSheet() {
-        Log.d(TAG, "Queue button clicked - showing queue sheet")
-
-        // On tablets (sw >= 600dp) or TV when Now Playing is shown (not browsing),
-        // the queue is already visible inline/sidebar -- skip the bottom sheet
-        val isTabletOrTv = resources.configuration.smallestScreenWidthDp >= 600 || isTvDevice
-        val isOnNowPlaying = !viewModel.isNavigationContentVisible.value
-        if (isTabletOrTv && isOnNowPlaying) {
-            Log.d(TAG, "Queue already visible inline on tablet/TV Now Playing -- skipping sheet")
-            return
-        }
-
-        // Avoid showing multiple instances
-        val existing = supportFragmentManager.findFragmentByTag(QueueSheetFragment.TAG)
-        if (existing != null) return
-
-        val fragment = QueueSheetFragment.newInstance()
-        fragment.show(supportFragmentManager, QueueSheetFragment.TAG)
     }
 
     /**

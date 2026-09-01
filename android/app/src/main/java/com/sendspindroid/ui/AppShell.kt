@@ -26,15 +26,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.sendspindroid.R
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
@@ -43,8 +40,6 @@ import com.sendspindroid.ui.main.MainActivityViewModel
 import com.sendspindroid.ui.main.NowPlayingScreen
 import com.sendspindroid.ui.main.components.ConnectionStatusDot
 import com.sendspindroid.ui.adaptive.FormFactor
-import com.sendspindroid.ui.adaptive.tvFocusable
-import com.sendspindroid.ui.queue.QueueViewModel
 
 /**
  * Root Compose shell for the entire app.
@@ -63,7 +58,6 @@ import com.sendspindroid.ui.queue.QueueViewModel
  * @param onSwitchGroupClick Switch playback group
  * @param onFavoriteClick Toggle favorite on current track
  * @param onVolumeChange Volume slider callback (0-1 range)
- * @param onQueueClick Open queue view
  * @param onDisconnectClick Disconnect from server
  * @param onAddServerClick FAB: launch add server wizard
  */
@@ -77,7 +71,6 @@ fun AppShell(
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
-    onQueueClick: () -> Unit,
     onDisconnectClick: () -> Unit,
     onAddServerClick: () -> Unit,
     onStatsClick: () -> Unit,
@@ -108,7 +101,6 @@ fun AppShell(
                 onSwitchGroupClick = onSwitchGroupClick,
                 onFavoriteClick = onFavoriteClick,
                 onVolumeChange = onVolumeChange,
-                onQueueClick = onQueueClick,
                 onDisconnectClick = onDisconnectClick,
                 onStatsClick = onStatsClick,
                 onSettingsClick = onSettingsClick,
@@ -170,7 +162,6 @@ private fun ConnectedShell(
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
-    onQueueClick: () -> Unit,
     onDisconnectClick: () -> Unit,
     onStatsClick: () -> Unit,
     onSettingsClick: () -> Unit,
@@ -179,14 +170,10 @@ private fun ConnectedShell(
     modifier: Modifier = Modifier
 ) {
     val formFactor = LocalFormFactor.current
-    val isMaConnected by viewModel.isMaConnected.collectAsStateWithLifecycle()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
 
     // Overflow menu state
     var showOverflowMenu by remember { mutableStateOf(false) }
-
-    // Now Playing queue sidebar visibility (tablet)
-    var nowPlayingQueueVisible by rememberSaveable { mutableStateOf(true) }
 
     // Server name for the toolbar subtitle
     val serverName = when (val state = connectionState) {
@@ -238,30 +225,6 @@ private fun ConnectedShell(
                 }
             },
             actions = {
-                // Queue toggle button (tablet/TV)
-                val showQueueToggle = AdaptiveDefaults.showBrowseQueueSidebar(formFactor) && isMaConnected
-                if (showQueueToggle) {
-                    val queueModifier = if (formFactor == FormFactor.TV) {
-                        Modifier.tvFocusable()
-                    } else {
-                        Modifier
-                    }
-                    IconButton(
-                        onClick = { nowPlayingQueueVisible = !nowPlayingQueueVisible },
-                        modifier = queueModifier
-                    ) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_queue_music),
-                            contentDescription = stringResource(R.string.queue_view),
-                            tint = if (nowPlayingQueueVisible) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            }
-                        )
-                    }
-                }
-
                 Box {
                     IconButton(onClick = { showOverflowMenu = true }) {
                         Icon(
@@ -318,14 +281,6 @@ private fun ConnectedShell(
         )
     }
 
-    // QueueViewModel for tablet inline queue panel and TV queue sidebar
-    // M-24: Always call viewModel() unconditionally; gate usage on the condition instead
-    val queueViewModel: QueueViewModel = viewModel()
-    val showQueueViewModel = (AdaptiveDefaults.showInlineQueuePanel(formFactor) ||
-         AdaptiveDefaults.hasTvQueueSidebar(formFactor) ||
-         AdaptiveDefaults.showBrowseQueueSidebar(formFactor) ||
-         formFactor == FormFactor.HEADUNIT) && isMaConnected
-
     // Content area passed to Scaffold
     val contentArea: @Composable (PaddingValues) -> Unit = { innerPadding ->
         NowPlayingScreen(
@@ -336,9 +291,6 @@ private fun ConnectedShell(
             onSwitchGroupClick = onSwitchGroupClick,
             onFavoriteClick = onFavoriteClick,
             onVolumeChange = onVolumeChange,
-            onQueueClick = onQueueClick,
-            queueViewModel = if (showQueueViewModel) queueViewModel else null,
-            inlineQueueVisible = nowPlayingQueueVisible,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)

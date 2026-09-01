@@ -58,7 +58,6 @@ import com.sendspindroid.model.PlaybackState
 import com.sendspindroid.model.PlaybackStateType
 import com.sendspindroid.model.SyncStats
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.musicassistant.MaQueueItem
 import com.sendspindroid.musicassistant.MusicAssistant
 import com.sendspindroid.musicassistant.QueueUpdate
 import com.sendspindroid.sendspin.SendSpin
@@ -158,9 +157,6 @@ class PlaybackService : MediaLibraryService() {
 
     // mDNS discovery for Android Auto browse tree
     private var browseDiscoveryManager: NsdDiscoveryManager? = null
-
-    // Generation counter for populatePlayerQueue() to discard stale async results
-    private var queuePopulateGeneration = 0L
 
     /** Bridges a suspend function into a ListenableFuture for MediaLibrarySession callbacks. */
     private fun <T> suspendToFuture(block: suspend () -> T): ListenableFuture<T> {
@@ -490,9 +486,6 @@ class PlaybackService : MediaLibraryService() {
         // before showing the "No servers found" guidance row. Keeps the first
         // browse on Android Auto from racing discovery and rendering empty.
         private const val BROWSE_DISCOVERY_WAIT_MS = 3_000L
-
-        // MA Queue item prefix (for native Now Playing queue)
-        private const val MEDIA_ID_MA_QUEUE_ITEM_PREFIX = "ma_qi_"
 
         // Exposes the coordinator's network state for in-process observers (e.g. MainActivity).
         // Updated by the service's existing coordinator.networkState collector.
@@ -1364,9 +1357,6 @@ class PlaybackService : MediaLibraryService() {
                     positionMs = positionMs,
                     durationMs = durationMs
                 )
-
-                // Populate the player's timeline with queue items for native queue UI
-                populatePlayerQueue()
 
                 // Title change invalidates BOTH artwork caches so the
                 // notification doesn't briefly show the prior track's image
@@ -2863,11 +2853,6 @@ class PlaybackService : MediaLibraryService() {
                             .setUri("sendspin://$serverAddress")
                             .build()
                     }
-                    // MA queue items (native Now Playing queue)
-                    mediaId.startsWith("ma_") -> {
-                        Log.d(TAG, "MA media item selected: $mediaId")
-                        handleMaMediaItem(mediaId)
-                    }
                     else -> item
                 }
             }
@@ -3268,104 +3253,6 @@ class PlaybackService : MediaLibraryService() {
         browseDiscoveryManager?.startDiscovery()
     }
 
-    /**
-     * Creates a playable MediaItem for a queue entry.
-     * Uses the queue item ID as the media ID (not the track URI),
-     * so tapping it calls playQueueItem() to jump to that position.
-     *
-     * The currently playing item gets a "[Now Playing]" prefix in its title
-     * for visual differentiation in Android Auto.
-     */
-    private fun createMaQueueMediaItem(item: MaQueueItem, isCurrent: Boolean): MediaItem {
-        val displayTitle = if (isCurrent) "[Now Playing] ${item.name}" else item.name
-        val mediaId = "$MEDIA_ID_MA_QUEUE_ITEM_PREFIX${item.queueItemId}"
-
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(displayTitle)
-                    .setSubtitle(item.artist)
-                    .setArtist(item.artist)
-                    .setAlbumTitle(item.album)
-                    .setIsPlayable(true)
-                    .setIsBrowsable(false)
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
-                    .apply {
-                        item.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    /**
-     * Fetches the MA queue in the background and populates the player's timeline.
-     * This makes the native queue button in Android Auto show all queue items.
-     */
-    @OptIn(UnstableApi::class)
-    private fun populatePlayerQueue() {
-        if (MusicAssistant.connectionState.value !is TransportState.Ready) return
-
-        val generation = ++queuePopulateGeneration
-
-        serviceScope.launch {
-            try {
-                val result = MusicAssistant.getQueueItems()
-                val queueState = result.getOrNull() ?: return@launch
-
-                val items = queueState.items.map { queueItem ->
-                    createMaQueueMediaItem(queueItem, isCurrent = false)
-                }
-
-                mainHandler.post {
-                    // Discard result if a newer populatePlayerQueue() was launched
-                    if (generation != queuePopulateGeneration) {
-                        Log.d(TAG, "Discarding stale queue populate (gen=$generation, current=$queuePopulateGeneration)")
-                        return@post
-                    }
-                    sendSpinPlayer?.updateQueueItems(items, queueState.currentIndex)
-                }
-                Log.d(TAG, "Populated player queue: ${items.size} items, current=${queueState.currentIndex}")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to populate player queue", e)
-            }
-        }
-    }
-
-    // Music Assistant MA Playback Dispatch
-    // ========================================================================
-
-    /**
-     * Handles playback for MA queue-item media IDs from the native Now
-     * Playing queue. Called from onAddMediaItems when a ma_* media ID is
-     * tapped.
-     */
-    private fun handleMaMediaItem(mediaId: String): MediaItem {
-        serviceScope.launch {
-            try {
-                when {
-                    mediaId.startsWith(MEDIA_ID_MA_QUEUE_ITEM_PREFIX) -> {
-                        val queueItemId = mediaId.removePrefix(MEDIA_ID_MA_QUEUE_ITEM_PREFIX)
-                        Log.d(TAG, "MA: Playing queue item id=$queueItemId")
-                        MusicAssistant.playQueueItem(queueItemId)
-                    }
-                    else -> {
-                        Log.w(TAG, "MA: Unknown media ID for playback: $mediaId")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "MA: Failed to play media $mediaId", e)
-            }
-        }
-
-        // Return a MediaItem with a dummy URI so media3 doesn't complain
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setUri("sendspin://ma-playback")
-            .build()
-    }
-
     private fun findItemById(mediaId: String): MediaItem? {
         return when {
             mediaId == MEDIA_ID_ROOT -> {
@@ -3401,14 +3288,6 @@ class PlaybackService : MediaLibraryService() {
     @OptIn(UnstableApi::class)
     private fun initializePlayer() {
         sendSpinPlayer = SendSpinPlayer()
-        sendSpinPlayer?.onQueueItemSelected = { mediaId ->
-            // Handle queue item selection from Android Auto's native queue UI
-            val queueItemId = mediaId.removePrefix(MEDIA_ID_MA_QUEUE_ITEM_PREFIX)
-            Log.d(TAG, "Native queue item selected: $queueItemId")
-            serviceScope.launch {
-                MusicAssistant.playQueueItem(queueItemId)
-            }
-        }
         Log.d(TAG, "SendSpinPlayer initialized")
     }
 

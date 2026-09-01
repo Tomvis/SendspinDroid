@@ -10,26 +10,17 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -39,17 +30,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import com.sendspindroid.R
-import com.sendspindroid.musicassistant.MaQueueItem
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.FormFactor
 import com.sendspindroid.ui.main.components.AlbumArtCard
 import com.sendspindroid.ui.main.components.TvTrackProgressBar
-import com.sendspindroid.ui.queue.QueueUiState
-import com.sendspindroid.ui.queue.QueueViewModel
 
 /**
  * Head unit Now Playing layout for large portrait car touchscreens.
@@ -58,7 +44,6 @@ import com.sendspindroid.ui.queue.QueueViewModel
  * - Large album art at top
  * - Track info + visual progress bar with time labels
  * - Single row of 5 oversized controls: shuffle, prev, play, next, favorite
- * - "Up Next" queue peek showing next 3 tracks
  */
 @Composable
 fun NowPlayingHeadUnit(
@@ -78,7 +63,6 @@ fun NowPlayingHeadUnit(
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
-    queueViewModel: QueueViewModel? = null,
     modifier: Modifier = Modifier
 ) {
     val formFactor = FormFactor.HEADUNIT
@@ -173,16 +157,6 @@ fun NowPlayingHeadUnit(
             onNextClick = onNextClick,
             onFavoriteClick = onFavoriteClick
         )
-
-        // Up Next queue peek (when MA connected and queue available)
-        if (isMaConnected && queueViewModel != null) {
-            // Load queue on first composition and refresh when track changes
-            LaunchedEffect(metadata.title) {
-                queueViewModel.loadQueue(showLoading = false)
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            UpNextQueuePeek(queueViewModel = queueViewModel)
-        }
 
         Spacer(modifier = Modifier.height(16.dp))
     }
@@ -302,139 +276,6 @@ private fun HeadUnitControls(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-        }
-    }
-}
-
-/**
- * Compact "Up Next" section showing the next few tracks in the queue.
- * Designed for quick glanceable reference while driving.
- */
-@Composable
-private fun UpNextQueuePeek(
-    queueViewModel: QueueViewModel,
-    maxItems: Int = 3,
-    modifier: Modifier = Modifier
-) {
-    val uiState by queueViewModel.uiState.collectAsStateWithLifecycle()
-    val successState = uiState as? QueueUiState.Success ?: return
-    val upNext = successState.upNextItems.take(maxItems)
-    if (upNext.isEmpty()) return
-
-    Column(modifier = modifier.fillMaxWidth()) {
-        // Divider with label
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            HorizontalDivider(
-                modifier = Modifier.weight(1f),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-            )
-            Text(
-                text = stringResource(R.string.headunit_up_next),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 1.sp,
-                modifier = Modifier.padding(horizontal = 12.dp)
-            )
-            HorizontalDivider(
-                modifier = Modifier.weight(1f),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-            )
-        }
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // Queue items
-        LazyColumn(
-            userScrollEnabled = false
-        ) {
-            itemsIndexed(
-                items = upNext,
-                key = { _, item -> item.queueItemId }
-            ) { index, item ->
-                UpNextItem(index = index + 1, item = item)
-            }
-        }
-    }
-}
-
-/**
- * Single queue peek item: number, thumbnail, title, artist, duration.
- * Minimum height of 76dp to meet Android Automotive touch target guidelines.
- */
-@Composable
-private fun UpNextItem(
-    index: Int,
-    item: MaQueueItem,
-    minHeight: Dp = 76.dp,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(minHeight)
-            .padding(horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // Track number
-        Text(
-            text = "$index",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.width(24.dp),
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        // Thumbnail
-        AsyncImage(
-            model = item.imageUri ?: R.drawable.placeholder_album,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .size(52.dp)
-                .clip(RoundedCornerShape(8.dp))
-        )
-
-        Spacer(modifier = Modifier.width(12.dp))
-
-        // Track info
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = item.name,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            val artistName = item.artist
-            if (!artistName.isNullOrEmpty()) {
-                Text(
-                    text = artistName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-
-        // Duration
-        item.duration?.let { seconds ->
-            val mins = seconds / 60
-            val secs = seconds % 60
-            Text(
-                text = "%d:%02d".format(mins, secs),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            )
         }
     }
 }
