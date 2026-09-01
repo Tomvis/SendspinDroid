@@ -50,10 +50,23 @@ WebSocket API surface with no protocol counterpart, and leaves scope.
 
 ## Decisions
 
-1. **Android Auto browse tree is dropped.** The browse tree is entirely
-   MA-backed (`getPlaylists`, `getAlbums`, `getArtists`, `getRadioStations`,
-   `search`). With MA gone there is nothing to browse. Android Auto retains
-   now-playing and transport controls via MediaSession only.
+1. **Android Auto keeps server selection; the MA library branches are dropped.**
+
+   *Revised 2026-09-01 after implementation. The original wording claimed the
+   browse tree was "entirely MA-backed" and could be removed wholesale. That is
+   false.* `playback/AutoBrowseTree.kt` mixes two concerns in one file:
+
+   - **SendSpin server selection** -- `MEDIA_ID_DISCOVERED`,
+     `MEDIA_ID_SERVER_PREFIX`, `MEDIA_ID_SAVED_SERVER_PREFIX`,
+     `MEDIA_ID_MESSAGE_NO_SERVERS`. This is a genuine SendSpin feature and the
+     only way to choose or switch servers from a car. It **stays**.
+   - **MA library browse** -- `MEDIA_ID_MA_PLAYLISTS`, `MEDIA_ID_MA_ALBUMS`,
+     `MEDIA_ID_MA_ARTISTS`, `MEDIA_ID_MA_RADIO` and their item prefixes, backed
+     by `getPlaylists` / `getAlbums` / `getArtists` / `getRadioStations` /
+     `search`. This **goes**.
+
+   Android Auto therefore retains server browsing plus now-playing and transport
+   via MediaSession.
 
 2. **The app is Now Playing first.** Primary UI is now-playing plus transport
    controls. When not connected, the server picker is shown. The four-tab
@@ -140,6 +153,60 @@ removed, that package was genuinely orphaned.
 
 Deleting first would leave the app without a usable main screen for the middle
 of the project and make regressions hard to attribute.
+
+## Dependency ordering (added 2026-09-01, after phase 1)
+
+The stay/go table above lists packages to delete but implies they are independent.
+They are not. Verified after the player-first shell landed:
+
+- `com.sendspindroid.ui.navigation` is the ONLY genuinely orphaned package. One
+  test imports it: `ui/compose/SearchScreenResultsTest.kt` uses
+  `SearchViewModel.SearchState`.
+- `com.sendspindroid.ui.detail` survives through exactly one edge:
+  `ui/queue/SaveQueueAsPlaylistDialog.kt` imports `ui.detail.components.BulkAddState`.
+  Removing the queue surface unblocks it.
+- `com.sendspindroid.ui.queue` is the live queue surface, reached from
+  `AppShell`, `NowPlayingScreen`, `NowPlayingHeadUnit` and `MainActivity`.
+- `com.sendspindroid.musicassistant` **cannot be deleted wholesale.** Around 40
+  files under `app/src/main` import it, including `PlaybackService`,
+  `SendSpinApp`, `AutoVoiceSearch` and the add-server wizard. It is load-bearing
+  for playback, artwork and server setup, not just for browsing.
+
+The non-browse Music Assistant dependencies, and why they exist:
+
+| Consumer | Uses | Purpose |
+|---|---|---|
+| `SendSpinApp` | `MaSettings.initialize()` | app-wide settings bootstrap |
+| `AddServerWizard` | `MaEndpoint`, `MaSettings` | models Local / Proxy / Remote setup |
+| `PlaybackService` | `MaProxyImageFetcher` | fetches artwork over the WebRTC DataChannel |
+| `PlaybackService` | `queueUpdates` | prefetch about 1s before a track change |
+| `PlaybackService` | `getMaApiDataChannel` | MA API tunnelled over WebRTC in Remote mode |
+| `DefaultServerPinger` | `SignalingClient` | remote reachability probe |
+
+The load-bearing consequence: `MaProxyImageFetcher` and the MA API DataChannel
+exist because of REMOTE ACCESS, not because of browsing. In Proxy and Remote mode
+artwork URLs are not directly reachable, so album art is tunnelled through MA's
+WebRTC data channel -- which is why `sendspin/SendSpin.kt`, the protocol core,
+carries four MA-aware lines. Cutting remote access therefore also retires the
+image proxy, the DataChannel plumbing, the signaling client, and the wizard's
+Proxy/Remote modes.
+
+### Remaining work, as three plans
+
+| Plan | Scope | Approx LOC | Depends on |
+|---|---|---|---|
+| A. Cut remote/proxy | `app/remote/`, `shared/remote/`, WebRTC dependency, `SignalingClient`, `MaProxyImageFetcher`, DataChannel plumbing, `SendSpin.kt`'s 4 MA lines, wizard Proxy/Remote modes | ~1,500 + native dep | nothing |
+| B. Remove browse and queue | `ui/navigation`, the MA half of the Auto browse tree, `ui/queue`, then `ui/detail` | ~10,200 | nothing |
+| C. Retire the MA client | whatever survives in `musicassistant/` | ~6,500 | A and B |
+
+Plan B is being executed first.
+
+### Queue decision
+
+The queue UI is deleted entirely. SendSpin defines no viewable queue, so it has
+no protocol counterpart, and `SaveQueueAsPlaylistDialog` writes to a Music
+Assistant playlist -- a library-write feature outside the player role. Removing
+it also unblocks `ui/detail`.
 
 ## Out of scope
 
