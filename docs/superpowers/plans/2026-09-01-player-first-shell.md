@@ -127,106 +127,98 @@ git commit -m "refactor(ui): make Now Playing the only root destination"
 
 ---
 
-### Task 2: Remove the browse tab bar and detail rendering from AppShell
+### Task 2: Remove the remaining browse surface from AppShell
 
-With `selectedNavTab` permanently null, every browse branch in `AppShell` is dead code that still forces MA imports. Removing it is what actually orphans the MA UI packages.
+Task 1 already removed the tab bar, the tab-content rendering and the title
+`when`. What remains is the detail-navigation half: the imports, the
+`navigateToDetail` callbacks, the `currentDetail` branches, and the
+`selectedNavTab` variable itself.
+
+**This task closes a hole Task 1 left open.** Task 1's test forbids only the
+literal `NavTab.HOME`, and a live path still assigns `selectedNavTab =
+NavTab.LIBRARY`. Browse is therefore still reachable. The strengthened test
+below forbids the `NavTab` type outright, which is the invariant that was
+actually intended.
 
 **Files:**
-- Modify: `android/app/src/main/java/com/sendspindroid/ui/AppShell.kt` (imports at 65-97, `browseNavTabs` at 296-302, detail callbacks at 307-320, title `when` at 340-344, branches at 393-396 and 490-530)
-- Modify: `android/app/src/main/res/values/strings.xml`
-- Test: `android/app/src/test/java/com/sendspindroid/ui/AppShellPurityTest.kt`
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/AppShell.kt`
+- Modify: `android/app/src/test/java/com/sendspindroid/ui/NowPlayingRootTest.kt`
 
-**Locating the edits:** the plan cites line numbers valid only at base commit
-38f8e4a, and Task 1 has already shifted them by about ten lines. Find each
-region by content -- the import text, the `browseNavTabs` name, the `when
-(selectedNavTab)` expression -- not by line number.
+**Locating the edits:** all line numbers below were read from the file at the
+start of this task and will shift as you delete. Work from the bottom of the
+file upward, or re-grep after each deletion. Never trust a stale line number.
 
 **Interfaces:**
-- Consumes: `selectedNavTab` pinned to `null` at composition (Task 1)
-- Produces: an `AppShell` with no import of `com.sendspindroid.ui.navigation`, `com.sendspindroid.ui.detail`, or `com.sendspindroid.musicassistant`.
+- Consumes: an `AppShell` with no tab bar and no tab-content rendering (Task 1).
+- Produces: an `AppShell` with zero references to `NavTab`, `DetailDestination`, `selectedNavTab`, `currentDetail`, `isBrowsing`, or any `ui.navigation` / `ui.detail` / `musicassistant` symbol. Task 3 then deletes the types themselves.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Strengthen the failing test**
 
-Create `android/app/src/test/java/com/sendspindroid/ui/AppShellPurityTest.kt`:
+Replace the two test methods in `android/app/src/test/java/com/sendspindroid/ui/NowPlayingRootTest.kt` with the following, keeping the package, imports and the `appShellLines()` helper as they are:
 
 ```kotlin
-package com.sendspindroid.ui
-
-import java.io.File
-import org.junit.Assert.assertEquals
-import org.junit.Test
-
-/**
- * AppShell is the app's navigation hub. In a SendSpin-only player it must not
- * reference Music Assistant packages or the browse/detail screens built on
- * them -- those are MA API surface with no SendSpin spec counterpart.
- *
- * A source-level assertion is used deliberately: the goal is that the import
- * edge is gone, which is what lets the follow-up plan delete those packages.
- */
-class AppShellPurityTest {
-
-    private val forbiddenPrefixes = listOf(
-        "import com.sendspindroid.musicassistant",
-        "import com.sendspindroid.ui.navigation",
-        "import com.sendspindroid.ui.detail"
-    )
+    @Test
+    fun nothingSelectsABrowseDestination() {
+        val offending = appShellLines().filter { it.contains("NavTab") }
+        assertEquals("Now Playing is the only root; NavTab must be unreachable", emptyList<String>(), offending)
+    }
 
     @Test
-    fun appShellHasNoMusicAssistantOrBrowseImports() {
-        val source = File("src/main/java/com/sendspindroid/ui/AppShell.kt")
-        require(source.exists()) { "AppShell.kt not found at " + source.absolutePath }
+    fun noDetailNavigationRemains() {
+        val offending = appShellLines().filter {
+            it.contains("DetailDestination") || it.contains("navigateToDetail") || it.contains("currentDetail")
+        }
+        assertEquals("SendSpin defines no browse surface to navigate into", emptyList<String>(), offending)
+    }
 
-        val offending = source.readLines()
-            .map { it.trim() }
-            .filter { line -> forbiddenPrefixes.any { line.startsWith(it) } }
-
+    @Test
+    fun noBrowseScreenImportsRemain() {
+        val offending = appShellLines().filter {
+            it.startsWith("import com.sendspindroid.musicassistant") ||
+                it.startsWith("import com.sendspindroid.ui.navigation") ||
+                it.startsWith("import com.sendspindroid.ui.detail")
+        }
         assertEquals("AppShell must not import MA or browse packages", emptyList<String>(), offending)
     }
-}
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
 
-Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*AppShellPurityTest*"`
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*NowPlayingRootTest*"`
 
-Expected: FAIL, listing the MA, navigation and detail imports currently at lines 65-97.
+Expected: all three FAIL. Roughly 24 MA/navigation/detail imports remain, plus the `NavTab` and `DetailDestination` imports, the `selectedNavTab` declaration, five `navigateToDetail` callbacks, and several `currentDetail` branches.
 
-- [ ] **Step 3: Strip the browse branches**
+- [ ] **Step 3: Delete the remaining browse surface**
 
-In `AppShell.kt`, make these edits in order:
+Work bottom-up so earlier line numbers stay valid:
 
-1. Delete imports at lines 65-72 (`MaAlbum`, `MaArtist`, `MaAudiobook`, `MaPlaylist`, `MaTrack`, `EnqueueMode`, `MusicAssistant`, `MaLibraryItem`), 75-82 (`BulkAddState`, `PlaylistPickerDialog`, the five `*DetailScreen` imports, `PlaylistDetailViewModel`), 83 (`DetailDestination`), 85 (`NavTab`), and 90-97 (all `com.sendspindroid.ui.navigation.*`).
-2. Delete the `browseNavTabs` map (lines 296-302) and the composable that renders it as a bottom or side navigation bar.
-3. Delete the five detail-navigation callbacks (lines 307-320) that call `viewModel.navigateToDetail(...)`.
-4. Replace the title expression `when (selectedNavTab) { ... }` (lines 340-344) with `stringResource(R.string.nav_now_playing)`.
-5. Replace lines 393-394 with `val isNowPlaying = true`, then simplify every conditional that read `isBrowsing`, deleting the browse arms. Line 396 becomes unconditional on the Now Playing side.
-6. Delete the browse and detail rendering blocks (lines 490-530), keeping only the Now Playing content and the server-picker branch.
-7. Delete the `selectedNavTab` and `currentDetail` state declarations once nothing reads them.
+1. Delete the detail rendering block -- the `if (currentDetail != null) { ... detail = currentDetail!!, ... }` region near the end of the composable, including every `*DetailScreen` call it makes.
+2. Delete the branch that sets `selectedNavTab = NavTab.LIBRARY` and calls `viewModel.setCurrentNavTab(NavTab.LIBRARY)`, and the sibling that resets `selectedNavTab = null`, together with whatever control -- a button, an action, a callback -- made that branch reachable. This is the hole referenced above.
+3. Delete `val isBrowsing` and `val isNowPlaying`. Every consumer collapses: `isBrowsing` is now always false and `isNowPlaying` always true, so simplify each conditional accordingly rather than leaving `if (true)`. Where a conditional chose between a Now Playing value and a browse value -- for example `if (isNowPlaying) nowPlayingQueueVisible else browseQueueVisible` -- keep the Now Playing side and delete the browse variable if nothing else reads it.
+4. Delete the `topBarTitle` `if (currentDetail != null)` branch, keeping the Now Playing title, and the remaining `currentDetail` conditionals.
+5. Delete the five `navigateToDetail` callbacks.
+6. Delete the `selectedNavTab` and `currentDetail` declarations.
+7. Delete every import the above made unused: the `musicassistant`, `ui.navigation` and `ui.detail` imports, plus `NavTab` and `DetailDestination`.
 
-Add to `android/app/src/main/res/values/strings.xml` if `nav_now_playing` is not already defined:
-
-```xml
-    <string name="nav_now_playing">Now Playing</string>
-```
+Do not touch `PlayerBottomSheet`, `PlayerViewModel` or the `MiniPlayer` wiring -- Task 4 owns those.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*AppShellPurityTest*"`
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*NowPlayingRootTest*"`
 
-Expected: PASS.
+Expected: PASS, 3 tests.
 
 - [ ] **Step 5: Verify build and full suite**
 
 Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest`
 
-Expected: BUILD SUCCESSFUL. `CurrentDetailDerivationTest` may still pass at this point; Task 3 removes it.
+Expected: BUILD SUCCESSFUL. A compile error naming a browse screen means a reader survives -- delete the reader, do not restore the import.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add android/app/src/main/java/com/sendspindroid/ui/AppShell.kt android/app/src/main/res/values/strings.xml android/app/src/test/java/com/sendspindroid/ui/AppShellPurityTest.kt
-git commit -m "refactor(ui): remove browse tab bar and detail navigation from AppShell"
+git add android/app/src/main/java/com/sendspindroid/ui/AppShell.kt android/app/src/test/java/com/sendspindroid/ui/NowPlayingRootTest.kt
+git commit -m "refactor(ui): remove detail navigation and browse imports from AppShell"
 ```
 
 ---
