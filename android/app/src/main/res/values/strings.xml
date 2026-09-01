@@ -522,10 +522,7 @@
     <!-- Playlists -->
     <string name="playlist_empty">No playlists yet</string>
     <string name="playlist_tracks_empty">This playlist has no tracks</string>
-    <string name="playlist_create">New Playlist</string>
-    <string name="playlist_create_title">Create Playlist</string>
     <string name="playlist_create_hint">Playlist name</string>
-    <string name="playlist_delete_confirm">Delete this playlist?</string>
     <string name="playlist_deleted">Playlist deleted</string>
     <string name="playlist_created">Playlist created</string>
     <string name="add_to_playlist">Add to Playlist</string>
@@ -549,56 +546,17 @@
     <string name="mini_player_tap_to_expand">Tap to expand player</string>
 
     <!-- Home Screen -->
-    <string name="home_recently_played">Recently Played</string>
-    <string name="home_recently_added">Recently Added</string>
-    <string name="home_albums">Albums</string>
-    <string name="home_artists">Artists</string>
-    <string name="home_playlists">Playlists</string>
-    <string name="home_radio">Radio</string>
     <string name="home_loading">Loading...</string>
     <string name="home_error_load_failed">Failed to load content</string>
     <string name="home_empty_section">Nothing here yet</string>
-    <string name="home_empty_title">No content available</string>
-    <string name="home_empty_subtitle">Add music to your server library to see it here</string>
 
     <!-- Library Browser -->
-    <string name="library_tab_albums">Albums</string>
-    <string name="library_tab_artists">Artists</string>
-    <string name="library_tab_playlists">Playlists</string>
-    <string name="library_tab_tracks">Tracks</string>
-    <string name="library_tab_radio">Radio</string>
-    <string name="library_tab_podcasts">Podcasts</string>
-    <string name="library_tab_audiobooks">Audiobooks</string>
-    <string name="library_tab_browse">Browse</string>
-    <string name="library_sort_name">Name</string>
-    <string name="library_sort_date_added">Date Added</string>
-    <string name="library_sort_year">Year</string>
-    <string name="library_filter_album_artists">Album Artists Only</string>
     <string name="library_loading_more">Loading more...</string>
-    <string name="library_empty">No items found</string>
     <string name="library_error">Failed to load library</string>
-    <string name="browse_empty">No items found</string>
 
     <!-- Search Screen -->
-    <string name="search_hint">Search music...</string>
-    <string name="search_empty_state">Search for music</string>
     <string name="search_no_results">No results found</string>
-    <string name="search_no_results_for">No results found for \"%s\"</string>
     <string name="search_error">Search failed</string>
-    <string name="search_filter_albums">Albums</string>
-    <string name="search_filter_artists">Artists</string>
-    <string name="search_filter_tracks">Tracks</string>
-    <string name="search_filter_playlists">Playlists</string>
-    <string name="search_filter_radio">Radio</string>
-    <string name="search_filter_podcasts">Podcasts</string>
-    <string name="search_filter_audiobooks">Audiobooks</string>
-    <string name="search_section_artists">Artists</string>
-    <string name="search_section_albums">Albums</string>
-    <string name="search_section_tracks">Tracks</string>
-    <string name="search_section_playlists">Playlists</string>
-    <string name="search_section_radio">Radio</string>
-    <string name="search_section_podcasts">Podcasts</string>
-    <string name="search_section_audiobooks">Audiobooks</string>
 
     <!-- Accessibility - Search -->
     <string name="accessibility_search_input">Search input field</string>
@@ -667,7 +625,6 @@
     <string name="queue_repeat_one">Repeat one</string>
     <string name="queue_load_failed">Failed to load queue</string>
     <string name="queue_view">Queue</string>
-    <string name="play_next">Play Next</string>
     <string name="added_to_queue">Added to queue</string>
     <string name="play_next_added">Playing next</string>
     <string name="queue_move_up">Move up</string>
@@ -693,8 +650,6 @@
     <string name="action_yes">Yes</string>
     <string name="action_no">No</string>
     <string name="add_to_queue">Add to Queue</string>
-    <string name="append_to_queue">Append to Queue</string>
-    <string name="replace_queue">Replace Queue</string>
     <string name="unit_ms">ms</string>
 
     <!-- Accessibility - common -->
