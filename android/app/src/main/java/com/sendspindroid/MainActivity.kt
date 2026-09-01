@@ -420,40 +420,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Shows a Snackbar with an Undo action for reversible operations.
-     *
-     * The operation is deferred until the snackbar dismisses naturally.
-     * If the user taps Undo, the operation is cancelled and onUndo is called.
-     *
-     * @param message The message to display
-     * @param onUndo Called when the user taps Undo (restore the item)
-     * @param onDismissed Called when snackbar dismisses without Undo (execute the deletion)
-     */
-    fun showUndoSnackbar(
-        message: String,
-        onUndo: () -> Unit,
-        onDismissed: () -> Unit = {}
-    ) {
-        val snackbar = Snackbar.make(
-            snackbarView,
-            message,
-            Snackbar.LENGTH_LONG
-        )
-        snackbar.setAction("Undo") {
-            onUndo()
-        }
-        snackbar.addCallback(object : Snackbar.Callback() {
-            override fun onDismissed(transientBottomBar: Snackbar?, event: Int) {
-                if (event != DISMISS_EVENT_ACTION) {
-                    // Dismissed without pressing Undo -> execute the actual operation
-                    onDismissed()
-                }
-            }
-        })
-        snackbar.show()
-    }
-
-    /**
      * Shows an indicator that we're reconnecting to the server.
      * Playback continues from buffer during this time.
      *
