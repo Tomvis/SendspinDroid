@@ -24,82 +24,72 @@
 
 ### Task 1: Make Now Playing the root destination
 
-`AppShell` currently defaults `selectedNavTab` to `NavTab.HOME` whenever MA is connected, and a `LaunchedEffect` forces it back to `HOME` on every reconnect. Both must go so the shell settles on its existing Now Playing zero state.
+`AppShell` defaults `selectedNavTab` to `NavTab.HOME` whenever MA is connected, and a `LaunchedEffect` forces it back to `HOME` on every reconnect. Both must go so the shell settles on its existing Now Playing zero state (`selectedNavTab == null && currentDetail == null`).
+
+This is a deletion, not an abstraction. Do not introduce a helper object or a policy function -- the project forbids abstractions for single-use code, and a function that ignores its argument and returns a constant is exactly that.
 
 **Files:**
-- Create: `android/app/src/main/java/com/sendspindroid/ui/main/AppShellNavigation.kt`
-- Modify: `android/app/src/main/java/com/sendspindroid/ui/AppShell.kt:257-275`
-- Test: `android/app/src/test/java/com/sendspindroid/ui/main/RootDestinationTest.kt`
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/AppShell.kt` (the `selectedNavTab` declaration and the `LaunchedEffect(isMaConnected)` block that follows it)
+- Test: `android/app/src/test/java/com/sendspindroid/ui/NowPlayingRootTest.kt`
 
 **Interfaces:**
-- Consumes: `MainActivityViewModel.isMaConnected: StateFlow<Boolean>` (existing; the field itself is removed in the follow-up plan)
-- Produces: `AppShellNavigation.initialNavTab(isConnected: Boolean): NavTab?`, always returning `null`. Task 3 replaces this with `isNowPlayingRoot`.
+- Consumes: nothing.
+- Produces: `selectedNavTab` is `null` at composition and is never reassigned from connection state. Task 2 deletes the variable entirely; Task 3 deletes the `NavTab` type.
+
+**Locating the edit:** the plan cites line numbers valid only at base commit
+38f8e4a. Find the code by content, not by line number.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `android/app/src/test/java/com/sendspindroid/ui/main/RootDestinationTest.kt`:
+Create `android/app/src/test/java/com/sendspindroid/ui/NowPlayingRootTest.kt`:
 
 ```kotlin
-package com.sendspindroid.ui.main
+package com.sendspindroid.ui
 
-import org.junit.Assert.assertNull
+import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * The app is a SendSpin player: Now Playing is the only root destination.
+ * SendSpinDroid is a SendSpin player. The protocol defines no library,
+ * browse, or search concept, so Now Playing is the only root destination
+ * and connection state must not select a browse tab.
  *
- * AppShell encodes "Now Playing" as selectedNavTab == null && currentDetail == null.
- * This test pins the rule that connection state must never select a browse tab,
- * which is what AppShell previously did via `if (isMaConnected) NavTab.HOME`.
+ * AppShell encodes Now Playing as selectedNavTab == null && currentDetail
+ * == null, so the rule is enforced by asserting that nothing in the file
+ * selects NavTab.HOME or reacts to connection state by changing the tab.
  */
-class RootDestinationTest {
+class NowPlayingRootTest {
 
-    @Test
-    fun rootIsNowPlayingWhenDisconnected() {
-        assertNull(AppShellNavigation.initialNavTab(isConnected = false))
+    private fun appShellLines(): List<String> {
+        val source = File("src/main/java/com/sendspindroid/ui/AppShell.kt")
+        require(source.exists()) { "AppShell.kt not found at " + source.absolutePath }
+        return source.readLines().map { it.trim() }
     }
 
     @Test
-    fun rootIsNowPlayingWhenConnected() {
-        assertNull(AppShellNavigation.initialNavTab(isConnected = true))
+    fun connectionStateNeverSelectsABrowseTab() {
+        val offending = appShellLines().filter { it.contains("NavTab.HOME") }
+        assertEquals("Now Playing is the only root; nothing may select HOME", emptyList<String>(), offending)
+    }
+
+    @Test
+    fun noLaunchedEffectResetsTheTabOnConnect() {
+        val offending = appShellLines().filter { it.startsWith("LaunchedEffect(isMaConnected)") }
+        assertEquals("connection changes must not reset the root destination", emptyList<String>(), offending)
     }
 }
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
 
-Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*RootDestinationTest*"`
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*NowPlayingRootTest*"`
 
-Expected: FAIL to compile with "Unresolved reference: AppShellNavigation".
+Expected: both tests FAIL -- `NavTab.HOME` appears in the `selectedNavTab` initialiser and inside the `LaunchedEffect`, and the `LaunchedEffect(isMaConnected)` line is present.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [ ] **Step 3: Make the minimal change**
 
-Create `android/app/src/main/java/com/sendspindroid/ui/main/AppShellNavigation.kt`:
-
-```kotlin
-package com.sendspindroid.ui.main
-
-/**
- * Root-destination policy for [com.sendspindroid.ui.AppShell].
- *
- * Extracted from the composable so it can be unit tested without Compose.
- * SendSpinDroid is a player: Now Playing is the only root, regardless of
- * connection state. AppShell represents Now Playing as a null tab.
- */
-object AppShellNavigation {
-    fun initialNavTab(isConnected: Boolean): NavTab? = null
-}
-```
-
-- [ ] **Step 4: Run the test to verify it passes**
-
-Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*RootDestinationTest*"`
-
-Expected: PASS, 2 tests.
-
-- [ ] **Step 5: Use it in AppShell and drop the reconnect override**
-
-In `AppShell.kt`, replace line 262:
+Replace the `selectedNavTab` declaration:
 
 ```kotlin
     var selectedNavTab by remember { mutableStateOf<NavTab?>(if (isMaConnected) NavTab.HOME else null) }
@@ -108,23 +98,30 @@ In `AppShell.kt`, replace line 262:
 with:
 
 ```kotlin
-    var selectedNavTab by remember {
-        mutableStateOf(com.sendspindroid.ui.main.AppShellNavigation.initialNavTab(isMaConnected))
-    }
+    // Now Playing is the only root destination; SendSpin defines no browse surface.
+    var selectedNavTab by remember { mutableStateOf<NavTab?>(null) }
 ```
 
-Then delete the entire `LaunchedEffect(isMaConnected) { ... }` block at lines 266-275, which forced `NavTab.HOME` on connect and `null` on disconnect. It no longer has anything to decide.
+Then delete the whole `LaunchedEffect(isMaConnected) { ... }` block that follows it, which set `NavTab.HOME` on connect and `null` on disconnect. It has nothing left to decide.
 
-- [ ] **Step 6: Verify build and full suite**
+Change nothing else. Leave every browse branch in place -- Task 2 removes those.
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*NowPlayingRootTest*"`
+
+Expected: PASS, 2 tests.
+
+- [ ] **Step 5: Verify build and full suite**
 
 Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest`
 
-Expected: BUILD SUCCESSFUL.
+Expected: BUILD SUCCESSFUL. If the compiler warns that `isMaConnected` is now unused, leave it -- Task 2 and the follow-up plan remove its remaining readers.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add android/app/src/main/java/com/sendspindroid/ui/main/AppShellNavigation.kt android/app/src/main/java/com/sendspindroid/ui/AppShell.kt android/app/src/test/java/com/sendspindroid/ui/main/RootDestinationTest.kt
+git add android/app/src/main/java/com/sendspindroid/ui/AppShell.kt android/app/src/test/java/com/sendspindroid/ui/NowPlayingRootTest.kt
 git commit -m "refactor(ui): make Now Playing the only root destination"
 ```
 
@@ -139,8 +136,13 @@ With `selectedNavTab` permanently null, every browse branch in `AppShell` is dea
 - Modify: `android/app/src/main/res/values/strings.xml`
 - Test: `android/app/src/test/java/com/sendspindroid/ui/AppShellPurityTest.kt`
 
+**Locating the edits:** the plan cites line numbers valid only at base commit
+38f8e4a, and Task 1 has already shifted them by about ten lines. Find each
+region by content -- the import text, the `browseNavTabs` name, the `when
+(selectedNavTab)` expression -- not by line number.
+
 **Interfaces:**
-- Consumes: `AppShellNavigation.initialNavTab` (Task 1)
+- Consumes: `selectedNavTab` pinned to `null` at composition (Task 1)
 - Produces: an `AppShell` with no import of `com.sendspindroid.ui.navigation`, `com.sendspindroid.ui.detail`, or `com.sendspindroid.musicassistant`.
 
 - [ ] **Step 1: Write the failing test**
@@ -234,93 +236,99 @@ git commit -m "refactor(ui): remove browse tab bar and detail navigation from Ap
 `NavTab` and `DetailDestination` now have no consumer in `AppShell`. Remove them and the back-stack machinery that exists to serve them.
 
 **Files:**
-- Modify: `android/app/src/main/java/com/sendspindroid/ui/main/AppShellNavigation.kt`
-- Modify: `android/app/src/main/java/com/sendspindroid/ui/main/MainUiState.kt` (delete lines 52-54 and 71-117)
-- Modify: `android/app/src/main/java/com/sendspindroid/ui/main/MainActivityViewModel.kt` (delete lines 101-102, 113, 222-227 and siblings)
-- Modify: `android/app/src/main/java/com/sendspindroid/MainActivity.kt` (lines 120, 965, 2617)
-- Modify: `android/app/src/test/java/com/sendspindroid/ui/main/RootDestinationTest.kt`
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/main/MainUiState.kt` (delete `enum class NavTab` and `sealed class DetailDestination`)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/main/MainActivityViewModel.kt` (delete the nav-tab and detail back-stack members)
+- Modify: `android/app/src/main/java/com/sendspindroid/MainActivity.kt` (delete the `NavTab` import, the `currentNavTab` field, the `setCurrentNavTab` call)
 - Delete: `android/app/src/test/java/com/sendspindroid/ui/main/CurrentDetailDerivationTest.kt`
+- Test: `android/app/src/test/java/com/sendspindroid/ui/main/BrowseStateRemovedTest.kt`
 
 **Interfaces:**
-- Consumes: `AppShellNavigation.initialNavTab` (Task 1), removed here.
-- Produces: `AppShellNavigation.isNowPlayingRoot(isConnected: Boolean): Boolean` returning `true`. `NavTab` and `DetailDestination` no longer exist anywhere in the module.
+- Consumes: an `AppShell` with no browse branches (Task 2).
+- Produces: `NavTab` and `DetailDestination` no longer exist anywhere in the module. `MainUiState.kt` retains `TrackMetadata`, `ArtworkSource`, `ReconnectingState`, `ServerStatus` and `PlayerColors`.
 
-- [ ] **Step 1: Update the test to the post-NavTab shape**
+**Locating the edits:** the plan cites line numbers valid only at base commit
+38f8e4a, and Tasks 1-2 have shifted them. Find each declaration by name.
 
-Replace the entire contents of `RootDestinationTest.kt` with:
+- [ ] **Step 1: Write the failing test**
+
+Create `android/app/src/test/java/com/sendspindroid/ui/main/BrowseStateRemovedTest.kt`:
 
 ```kotlin
 package com.sendspindroid.ui.main
 
-import org.junit.Assert.assertTrue
+import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * The app is a SendSpin player: Now Playing is the only root destination.
- * With NavTab removed there is no other destination that could be selected.
+ * SendSpin defines no library, browse, or search concept, so the app has no
+ * browse destinations to model. NavTab and DetailDestination existed only to
+ * navigate Music Assistant's library screens.
  */
-class RootDestinationTest {
+class BrowseStateRemovedTest {
 
-    @Test
-    fun nowPlayingIsRootWhenDisconnected() {
-        assertTrue(AppShellNavigation.isNowPlayingRoot(isConnected = false))
+    private fun sourceLines(relativePath: String): List<String> {
+        val source = File(relativePath)
+        require(source.exists()) { "not found: " + source.absolutePath }
+        return source.readLines().map { it.trim() }
     }
 
     @Test
-    fun nowPlayingIsRootWhenConnected() {
-        assertTrue(AppShellNavigation.isNowPlayingRoot(isConnected = true))
+    fun browseTypesAreGone() {
+        val lines = sourceLines("src/main/java/com/sendspindroid/ui/main/MainUiState.kt")
+        val offending = lines.filter {
+            it.startsWith("enum class NavTab") || it.startsWith("sealed class DetailDestination")
+        }
+        assertEquals("browse navigation types must be deleted", emptyList<String>(), offending)
+    }
+
+    @Test
+    fun playerStateTypesSurvive() {
+        val text = File("src/main/java/com/sendspindroid/ui/main/MainUiState.kt").readText()
+        val missing = listOf(
+            "data class TrackMetadata",
+            "sealed class ArtworkSource",
+            "data class ReconnectingState",
+            "sealed class ServerStatus",
+            "data class PlayerColors"
+        ).filterNot { text.contains(it) }
+        assertEquals("player state types must be retained", emptyList<String>(), missing)
     }
 }
 ```
 
 - [ ] **Step 2: Run it to make sure it fails**
 
-Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*RootDestinationTest*"`
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*BrowseStateRemovedTest*"`
 
-Expected: FAIL to compile with "Unresolved reference: isNowPlayingRoot".
+Expected: `browseTypesAreGone` FAILS listing both declarations. `playerStateTypesSurvive` PASSES already -- it is a guard against over-deletion, not a driver.
 
-- [ ] **Step 3: Replace the navigation policy**
+- [ ] **Step 3: Delete the browse state**
 
-Replace the entire contents of `AppShellNavigation.kt` with:
+1. In `MainUiState.kt`: delete `enum class NavTab { HOME, SEARCH, LIBRARY, PLAYLISTS }` and the whole `sealed class DetailDestination` block including its `Album`, `Artist`, `Playlist`, `Podcast` and `Audiobook` members. Keep `TrackMetadata`, `ArtworkSource`, `ReconnectingState`, `ServerStatus` and `PlayerColors`.
+2. In `MainActivityViewModel.kt`: delete `_currentNavTab` and `currentNavTab`, `_detailBackStack` and the derived `currentDetail`, and the functions `setCurrentNavTab`, `navigateToDetail`, `navigateDetailBack` and `clearDetailNavigation`.
+3. In `MainActivity.kt`: delete the `com.sendspindroid.ui.main.NavTab` import, the `currentNavTab: Int` field, and the `viewModel.setCurrentNavTab(NavTab.LIBRARY)` call together with the branch that made it reachable.
+4. Delete the obsolete test:
 
-```kotlin
-package com.sendspindroid.ui.main
-
-/**
- * Root-destination policy for [com.sendspindroid.ui.AppShell].
- *
- * SendSpinDroid is a SendSpin player. The protocol defines no library,
- * browse, or search concept, so Now Playing is the only root destination
- * and connection state does not change it. The server picker is presented
- * by AppShell when there is no connected server, not by selecting a route.
- */
-object AppShellNavigation {
-    fun isNowPlayingRoot(isConnected: Boolean): Boolean = true
-}
+```bash
+git rm android/app/src/test/java/com/sendspindroid/ui/main/CurrentDetailDerivationTest.kt
 ```
 
-In `AppShell.kt`, delete the `selectedNavTab` `remember` block added in Task 1 Step 5 if Task 2 Step 3.7 has not already removed it.
+It tests the detail back stack being removed here.
 
-- [ ] **Step 4: Delete the browse state**
+- [ ] **Step 4: Run the test to verify it passes**
 
-1. In `MainUiState.kt`: delete `enum class NavTab` (lines 52-54) and `sealed class DetailDestination` (lines 71-117). Keep `TrackMetadata`, `ArtworkSource`, `ReconnectingState`, `ServerStatus` and `PlayerColors`.
-2. In `MainActivityViewModel.kt`: delete `_currentNavTab` and `currentNavTab` (lines 101-102), `_detailBackStack` and the derived `currentDetail` (line 113), `setCurrentNavTab` (lines 222-223), `navigateToDetail` (line 227) and the sibling `navigateDetailBack` and `clearDetailNavigation` functions.
-3. In `MainActivity.kt`: delete the `NavTab` import (line 120), the `currentNavTab: Int` field (line 965), and the `viewModel.setCurrentNavTab(NavTab.LIBRARY)` call (line 2617) together with the branch that made it reachable.
-4. Delete `android/app/src/test/java/com/sendspindroid/ui/main/CurrentDetailDerivationTest.kt`, which tests the back stack being removed.
-
-- [ ] **Step 5: Run the test to verify it passes**
-
-Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*RootDestinationTest*"`
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*BrowseStateRemovedTest*"`
 
 Expected: PASS, 2 tests.
 
-- [ ] **Step 6: Verify build and full suite**
+- [ ] **Step 5: Verify build and full suite**
 
 Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest`
 
-Expected: BUILD SUCCESSFUL.
+Expected: BUILD SUCCESSFUL. Any remaining compile error naming `NavTab` or `DetailDestination` is a reader Task 2 missed -- remove that reader rather than restoring the type.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add -A android/app/src/main/java/com/sendspindroid/ui/main android/app/src/main/java/com/sendspindroid/MainActivity.kt android/app/src/test/java/com/sendspindroid/ui/main
@@ -344,6 +352,11 @@ Keep `MiniPlayerView.kt` (301 lines, zero MA references) and `ConnectionLoadingS
 - Delete (conditional): `android/app/src/main/java/com/sendspindroid/ui/main/components/QueueButton.kt`
 - Modify: `android/app/src/main/java/com/sendspindroid/ui/AppShell.kt:100-101, 291, 720`
 - Test: `android/app/src/test/java/com/sendspindroid/ui/player/PlayerPackagePurityTest.kt`
+
+**Locating the edits:** the plan cites line numbers valid only at base commit
+38f8e4a. Tasks 1-3 have removed well over a hundred lines above them, so find
+the `PlayerBottomSheet` import, the `playerViewModel` declaration and the
+`PlayerBottomSheet(` call site by name.
 
 **Interfaces:**
 - Consumes: nothing from Tasks 1-3.
