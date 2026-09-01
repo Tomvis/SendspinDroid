@@ -51,7 +51,6 @@ object UserSettings {
     const val KEY_ALBUM_ARTISTS_ONLY = "album_artists_only"
     const val KEY_LAYOUT_MODE = "layout_mode"
     const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
-    const val KEY_SEARCH_LIBRARY_ONLY = "search_library_only"  // Backward compatibility: search local library only
 
     // Long-term PSK records from pairing (stored in encrypted prefs).
     // Record semantics live in the trust store; this is only the blob.
@@ -454,15 +453,6 @@ object UserSettings {
      */
     val autoStartOnBoot: Boolean
         get() = prefs?.getBoolean(KEY_AUTO_START_ON_BOOT, false) ?: false
-
-    /**
-     * Whether search should be limited to the local library only.
-     * When disabled (default), search includes results from online providers (Spotify, etc.).
-     * When enabled (for backward compatibility), search only returns local library results.
-     */
-    var searchLibraryOnly: Boolean
-        get() = prefs?.getBoolean(KEY_SEARCH_LIBRARY_ONLY, false) ?: false
-        set(value) { prefs?.edit()?.putBoolean(KEY_SEARCH_LIBRARY_ONLY, value)?.apply() }
 
     var albumArtistsOnly: Boolean
         get() = prefs?.getBoolean(KEY_ALBUM_ARTISTS_ONLY, false) ?: false

@@ -77,4 +77,16 @@ class BrowsePackagesGoneTest {
             }
         assertEquals("nothing may import ui.detail", emptyList<String>(), offending)
     }
+
+    @Test
+    fun searchLibraryOnlyToggleIsDeletedFromSettings() {
+        val dir = File("src/main/java/com/sendspindroid/ui/settings")
+        assertTrue("ui/settings not found: " + dir.absolutePath, dir.isDirectory)
+        val offending = dir.walkTopDown()
+            .filter { it.isFile && it.name.endsWith(".kt") }
+            .filter { it.readText().contains("searchLibraryOnly") }
+            .map { it.name }
+            .toList()
+        assertEquals("searchLibraryOnly must not appear in ui/settings", emptyList<String>(), offending)
+    }
 }
