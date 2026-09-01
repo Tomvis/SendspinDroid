@@ -558,14 +558,16 @@ git commit -m "docs(plan): record player-first shell device verification"
 
 ## Completion
 
-At the end of this plan the app is Now Playing first, no Music Assistant screen is reachable, and these packages are orphaned but still compiled:
+At the end of this plan the app is Now Playing first, but Music Assistant is not fully disconnected from the live code path. Verified per package:
 
-- `com.sendspindroid.musicassistant`
-- `com.sendspindroid.ui.navigation`
-- `com.sendspindroid.ui.detail`
-- `com.sendspindroid.ui.queue`
+- `com.sendspindroid.ui.navigation` is genuinely orphaned: no file outside the package imports from it.
+- `com.sendspindroid.ui.detail` is **not** orphaned. It stays alive through one edge: `ui/queue/QueueSheetContent.kt:134` calls `SaveQueueAsPlaylistDialog`, and `ui/queue/SaveQueueAsPlaylistDialog.kt:49` imports `ui.detail.components.BulkAddState` to drive its playlist-save flow.
+- `com.sendspindroid.ui.queue` is **not** orphaned - it is the live queue surface, referenced from `AppShell.kt:47,323,340`, `ui/main/NowPlayingScreen.kt:69-70,733,977`, `ui/main/NowPlayingHeadUnit.kt:51-52`, and `MainActivity.kt:89,2562-2566`.
+- `com.sendspindroid.musicassistant` is **not** orphaned either. It is the live MA WebSocket/API client and its data models, referenced well outside the doomed browse packages: `MainActivity.kt`, `playback/PlaybackService.kt`, `SendSpinApp.kt`, `playback/AutoVoiceSearch.kt`, `ui/main/NowPlayingHeadUnit.kt`, `ui/server/AddServerWizardActivity.kt` / `AddServerWizardViewModel.kt`, and all three files under `ui/queue/`.
 
-The follow-up plan deletes those, plus `app/remote/`, `shared/remote/`, `ProxyWebSocketTransport`, the Android Auto browse tree in `PlaybackService`, the `io.getstream:stream-webrtc-android` dependency, and the residual MA references in `PlaybackService.kt`, `SendSpin.kt`, `UnifiedServerRepository.kt`, `AddServerWizardViewModel.kt` and `strings.xml`.
+So "no Music Assistant screen is reachable" is false: Now Playing's queue sheet (`ui/queue/QueueSheetContent.kt`) opens `SaveQueueAsPlaylistDialog`, which writes to a Music Assistant playlist via `com.sendspindroid.musicassistant.MusicAssistant`. That is a live, reachable Music Assistant library-write feature, not dead code.
+
+The only package this branch leaves genuinely orphaned is `com.sendspindroid.ui.navigation`. The follow-up plan cannot delete `ui.detail` or `ui.queue` until it removes (or reimplements without the Music Assistant playlist-write path) the queue sheet and its save-as-playlist dialog. `com.sendspindroid.musicassistant` cannot be deleted wholesale at all - it is load-bearing for playback, the add-server wizard, and the queue; only browse-specific residue in it, if any, can be trimmed once `ui.navigation` and `ui.detail` are gone. The follow-up plan also still needs to remove `app/remote/`, `shared/remote/`, `ProxyWebSocketTransport`, the Android Auto browse tree in `PlaybackService`, the `io.getstream:stream-webrtc-android` dependency, and the residual MA references in `PlaybackService.kt`, `SendSpin.kt`, `UnifiedServerRepository.kt`, `AddServerWizardViewModel.kt` and `strings.xml`.
 
 ## Task 5 device verification record
 
