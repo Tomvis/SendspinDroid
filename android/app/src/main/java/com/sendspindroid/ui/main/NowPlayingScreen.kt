@@ -88,7 +88,6 @@ fun NowPlayingScreen(
     onVolumeChange: (Float) -> Unit,
     onQueueClick: () -> Unit,
     queueViewModel: QueueViewModel? = null,
-    onBrowseLibrary: () -> Unit = {},
     showPlayerButton: Boolean = false,
     onPlayerClick: () -> Unit = {},
     inlineQueueVisible: Boolean = true,
@@ -203,7 +202,6 @@ fun NowPlayingScreen(
                     onSwitchGroupClick = onSwitchGroupClick,
                     onFavoriteClick = onFavoriteClick,
                     queueViewModel = queueViewModel,
-                    onBrowseLibrary = onBrowseLibrary,
                     showPlayerButton = showPlayerButton,
                     onPlayerClick = onPlayerClick
                 )
@@ -257,7 +255,6 @@ fun NowPlayingScreen(
                     onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange,
                     queueViewModel = inlineQueueViewModel,
-                    onBrowseLibrary = onBrowseLibrary,
                     showPlayerButton = showPlayerButton,
                     onPlayerClick = onPlayerClick,
                     queueVisible = inlineQueueVisible
@@ -664,7 +661,6 @@ private fun NowPlayingWithQueuePanel(
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     queueViewModel: QueueViewModel,
-    onBrowseLibrary: () -> Unit,
     showPlayerButton: Boolean = false,
     onPlayerClick: () -> Unit = {},
     queueVisible: Boolean = true,
@@ -762,7 +758,6 @@ private fun NowPlayingWithQueuePanel(
                 ) {
                     QueueSheetContent(
                         viewModel = queueViewModel,
-                        onBrowseLibrary = onBrowseLibrary,
                         currentTrackTitle = metadata.title
                     )
                 }
@@ -796,7 +791,6 @@ private fun NowPlayingTv(
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     queueViewModel: QueueViewModel?,
-    onBrowseLibrary: () -> Unit,
     showPlayerButton: Boolean = false,
     onPlayerClick: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -1028,7 +1022,6 @@ private fun NowPlayingTv(
                     queueViewModel?.let { vm ->
                         QueueSheetContent(
                             viewModel = vm,
-                            onBrowseLibrary = onBrowseLibrary,
                             currentTrackTitle = metadata.title
                         )
                     }

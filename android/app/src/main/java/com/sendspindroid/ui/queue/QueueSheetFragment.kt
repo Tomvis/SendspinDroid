@@ -24,12 +24,6 @@ class QueueSheetFragment : BottomSheetDialogFragment() {
 
     private val viewModel: QueueViewModel by viewModels()
 
-    /**
-     * Callback for navigating to the library tab.
-     * Set by the Activity before showing the fragment.
-     */
-    var onBrowseLibrary: (() -> Unit)? = null
-
     override fun getTheme(): Int = R.style.Theme_SendSpinDroid_BottomSheetDialog
 
     override fun onCreateView(
@@ -48,11 +42,7 @@ class QueueSheetFragment : BottomSheetDialogFragment() {
                         contentColor = MaterialTheme.colorScheme.onSurface
                     ) {
                         QueueSheetContent(
-                            viewModel = viewModel,
-                            onBrowseLibrary = {
-                                onBrowseLibrary?.invoke()
-                                dismiss()
-                            }
+                            viewModel = viewModel
                         )
                     }
                 }

@@ -44,8 +44,6 @@ import com.sendspindroid.ui.main.NowPlayingScreen
 import com.sendspindroid.ui.main.components.ConnectionStatusDot
 import com.sendspindroid.ui.adaptive.FormFactor
 import com.sendspindroid.ui.adaptive.tvFocusable
-import com.sendspindroid.ui.player.PlayerBottomSheet
-import com.sendspindroid.ui.player.PlayerViewModel
 import com.sendspindroid.ui.queue.QueueViewModel
 
 /**
@@ -189,11 +187,6 @@ private fun ConnectedShell(
 
     // Now Playing queue sidebar visibility (tablet)
     var nowPlayingQueueVisible by rememberSaveable { mutableStateOf(true) }
-
-    // Player / Speaker Group bottom sheet state
-    var showPlayerSheet by remember { mutableStateOf(false) }
-    // M-24: Always call viewModel() unconditionally (Compose rule: composable calls must not be conditional)
-    val playerViewModel: PlayerViewModel = viewModel()
 
     // Server name for the toolbar subtitle
     val serverName = when (val state = connectionState) {
@@ -345,8 +338,6 @@ private fun ConnectedShell(
             onVolumeChange = onVolumeChange,
             onQueueClick = onQueueClick,
             queueViewModel = if (showQueueViewModel) queueViewModel else null,
-            showPlayerButton = isMaConnected,
-            onPlayerClick = { showPlayerSheet = true },
             inlineQueueVisible = nowPlayingQueueVisible,
             modifier = Modifier
                 .fillMaxSize()
@@ -359,12 +350,4 @@ private fun ConnectedShell(
         topBar = topBar,
         content = contentArea
     )
-
-    // Player / Speaker Group bottom sheet
-    if (showPlayerSheet && isMaConnected) {
-        PlayerBottomSheet(
-            viewModel = playerViewModel,
-            onDismiss = { showPlayerSheet = false }
-        )
-    }
 }

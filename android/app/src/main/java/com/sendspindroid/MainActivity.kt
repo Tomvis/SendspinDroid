@@ -2563,9 +2563,6 @@ class MainActivity : AppCompatActivity() {
         if (existing != null) return
 
         val fragment = QueueSheetFragment.newInstance()
-        fragment.onBrowseLibrary = {
-            viewModel.setNavigationContentVisible(true)
-        }
         fragment.show(supportFragmentManager, QueueSheetFragment.TAG)
     }
 
