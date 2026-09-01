@@ -257,24 +257,8 @@ private fun ConnectedShell(
     val isMaConnected by viewModel.isMaConnected.collectAsStateWithLifecycle()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
 
-    // Which screen to show. null = Now Playing, non-null = browse tab.
-    // Starts as HOME when MA is connected, null otherwise.
-    var selectedNavTab by remember { mutableStateOf<NavTab?>(if (isMaConnected) NavTab.HOME else null) }
-
-    // M-22: React to MA connection state transitions via LaunchedEffect
-    // (replaces composition-phase side effects that violated Compose rules)
-    LaunchedEffect(isMaConnected) {
-        if (isMaConnected) {
-            // MA just connected -- switch to Home tab
-            selectedNavTab = NavTab.HOME
-            viewModel.setCurrentNavTab(NavTab.HOME)
-            viewModel.setNavigationContentVisible(true)
-        } else {
-            // MA disconnected (or initial state) -- return to Now Playing
-            selectedNavTab = null
-            viewModel.setNavigationContentVisible(false)
-        }
-    }
+    // Now Playing is the only root destination; SendSpin defines no browse surface.
+    var selectedNavTab by remember { mutableStateOf<NavTab?>(null) }
 
     // Overflow menu state
     var showOverflowMenu by remember { mutableStateOf(false) }
@@ -293,14 +277,7 @@ private fun ConnectedShell(
     // Detail navigation state
     val currentDetail by viewModel.currentDetail.collectAsStateWithLifecycle()
 
-    val browseNavTabs = remember {
-        listOf(
-            NavTab.HOME to Pair(R.drawable.ic_nav_home, R.string.nav_home),
-            NavTab.SEARCH to Pair(R.drawable.ic_nav_search, R.string.nav_search),
-            NavTab.LIBRARY to Pair(R.drawable.ic_nav_library, R.string.nav_library),
-            NavTab.PLAYLISTS to Pair(R.drawable.ic_nav_playlists, R.string.nav_playlists)
-        )
-    }
+    val browseNavTabs = emptyList<Pair<NavTab, Pair<Int, Int>>>()
 
     // Detail navigation callbacks (push onto ViewModel back stack)
     val onAlbumClick: (String, String, String) -> Unit = { albumId, albumName, provider ->
@@ -337,13 +314,7 @@ private fun ConnectedShell(
     val topBarTitle = if (currentDetail != null) {
         currentDetail!!.title
     } else {
-        when (selectedNavTab) {
-            NavTab.HOME -> stringResource(R.string.nav_home)
-            NavTab.SEARCH -> stringResource(R.string.nav_search)
-            NavTab.LIBRARY -> stringResource(R.string.nav_library)
-            NavTab.PLAYLISTS -> stringResource(R.string.nav_playlists)
-            null -> stringResource(R.string.now_playing)
-        }
+        stringResource(R.string.now_playing)
     }
 
     // Shared top bar composable
@@ -858,92 +829,7 @@ private fun BrowseContent(
         }
     }
 
-    // Tab content
-    when (selectedNavTab) {
-        NavTab.HOME -> {
-            val homeViewModel: HomeViewModel = viewModel()
-            HomeScreen(
-                viewModel = homeViewModel,
-                onAlbumClick = { album ->
-                    onAlbumClick(album.albumId, album.name, album.provider)
-                },
-                onArtistClick = { artist ->
-                    onArtistClick(artist.artistId, artist.name, artist.provider)
-                },
-                onItemClick = playItem
-            )
-        }
-
-        NavTab.SEARCH -> {
-            val searchViewModel: SearchViewModel = viewModel()
-            SearchScreen(
-                viewModel = searchViewModel,
-                onItemClick = playItem,
-                onAlbumClick = { album ->
-                    onAlbumClick(album.albumId, album.name, album.provider)
-                },
-                onArtistClick = { artist ->
-                    onArtistClick(artist.artistId, artist.name, artist.provider)
-                },
-                onPodcastClick = { podcast ->
-                    onPodcastDetailClick(podcast.podcastId, podcast.name, podcast.imageUri, podcast.publisher, podcast.totalEpisodes, podcast.provider)
-                },
-                onAudiobookClick = { audiobook ->
-                    onAudiobookDetailClick(audiobook.audiobookId, audiobook.name, audiobook.imageUri, audiobook.primaryAuthor, audiobook.provider)
-                },
-                onAddToPlaylist = addToPlaylist,
-                onAddToQueue = addToQueue,
-                onPlayNext = playNext
-            )
-        }
-
-        NavTab.LIBRARY -> {
-            val libraryViewModel: LibraryViewModel = viewModel()
-            LibraryScreen(
-                viewModel = libraryViewModel,
-                onAlbumClick = { album ->
-                    onAlbumClick(album.albumId, album.name, album.provider)
-                },
-                onArtistClick = { artist ->
-                    onArtistClick(artist.artistId, artist.name, artist.provider)
-                },
-                onPodcastClick = { podcast ->
-                    onPodcastDetailClick(podcast.podcastId, podcast.name, podcast.imageUri, podcast.publisher, podcast.totalEpisodes, podcast.provider)
-                },
-                onAudiobookClick = { audiobook ->
-                    onAudiobookDetailClick(audiobook.audiobookId, audiobook.name, audiobook.imageUri, audiobook.primaryAuthor, audiobook.provider)
-                },
-                onItemClick = playItem,
-                onAddToPlaylist = addToPlaylist,
-                onAddToQueue = addToQueue,
-                onPlayNext = playNext
-            )
-        }
-
-        NavTab.PLAYLISTS -> {
-            val playlistsViewModel: PlaylistsViewModel = viewModel()
-            PlaylistsScreen(
-                viewModel = playlistsViewModel,
-                onPlaylistClick = { playlist ->
-                    onPlaylistDetailClick(playlist.playlistId, playlist.name, playlist.provider)
-                },
-                onDeletePlaylist = { playlist ->
-                    val action = playlistsViewModel.deletePlaylist(playlist.playlistId)
-                    if (action != null) {
-                        onShowUndoSnackbar(
-                            currentContext.getString(R.string.snackbar_deleted, playlist.name),
-                            { action.undoDelete() },
-                            { action.executeDelete() }
-                        )
-                    }
-                }
-            )
-        }
-
-        null -> {
-            // Should not reach here -- Now Playing handled by parent
-        }
-    }
+    // Now Playing is the only root destination; content area is handled by parent
 
     // Playlist picker dialog (shared across all browse tabs)
     itemForPlaylist?.let { item ->
