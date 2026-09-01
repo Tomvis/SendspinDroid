@@ -518,18 +518,11 @@
     <string name="favorite_no_track">No track currently playing</string>
 
     <!-- Playlists -->
-    <string name="playlist_empty">No playlists yet</string>
-    <string name="playlist_tracks_empty">This playlist has no tracks</string>
     <string name="playlist_deleted">Playlist deleted</string>
     <string name="playlist_created">Playlist created</string>
-    <string name="add_to_playlist">Add to Playlist</string>
-    <string name="add_tracks">Add Tracks</string>
     <string name="track_added_to_playlist">Added to %s</string>
     <string name="track_add_failed">Failed to add track</string>
     <string name="track_removed">Track removed</string>
-    <string name="remove_from_playlist">Remove from Playlist</string>
-    <string name="search_tracks_hint">Search for tracks</string>
-    <string name="no_tracks_found">No tracks found</string>
 
     <!-- Bulk add to playlist -->
     <string name="adding_to_playlist">Adding to %s...</string>
@@ -620,12 +613,10 @@
     <!-- Common actions (shared across dialogs/buttons) -->
     <string name="action_delete">Delete</string>
     <string name="action_menu">Menu</string>
-    <string name="action_shuffle">Shuffle</string>
     <string name="action_up">Up</string>
     <string name="action_clear">Clear</string>
     <string name="action_yes">Yes</string>
     <string name="action_no">No</string>
-    <string name="add_to_queue">Add to Queue</string>
     <string name="unit_ms">ms</string>
 
     <!-- Accessibility - common -->

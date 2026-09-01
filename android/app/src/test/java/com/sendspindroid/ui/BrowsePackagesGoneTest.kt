@@ -56,4 +56,25 @@ class BrowsePackagesGoneTest {
             }
         assertEquals("nothing may import ui.navigation", emptyList<String>(), offending)
     }
+
+    @Test
+    fun detailPackageIsDeleted() {
+        val dir = File("src/main/java/com/sendspindroid/ui/detail")
+        assertFalse("ui/detail must be deleted, found " + dir.absolutePath, dir.exists())
+    }
+
+    @Test
+    fun nothingImportsTheDetailPackage() {
+        val roots = listOf(File("src/main/java"), File("src/test/java"))
+        val offending = roots
+            .filter { it.isDirectory }
+            .flatMap { it.walkTopDown().filter { f -> f.isFile && f.name.endsWith(".kt") } }
+            .flatMap { file ->
+                file.readLines()
+                    .map { it.trim() }
+                    .filter { it.startsWith("import com.sendspindroid.ui.detail") }
+                    .map { file.name + ": " + it }
+            }
+        assertEquals("nothing may import ui.detail", emptyList<String>(), offending)
+    }
 }
