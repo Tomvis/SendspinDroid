@@ -45,8 +45,6 @@ fun PlaybackControls(
     showFavorite: Boolean = false,
     isFavorite: Boolean = false,
     onFavoriteClick: () -> Unit = {},
-    showPlayerButton: Boolean = false,
-    onPlayerClick: () -> Unit = {},
     playButtonSize: Dp = 72.dp,
     controlButtonSize: Dp = 56.dp,
     buttonGap: Dp = 16.dp,
@@ -164,23 +162,6 @@ fun PlaybackControls(
                     )
                 }
             }
-
-            // Speaker / Group button (inline when compact, MA only)
-            if (compactLayout && showPlayerButton) {
-                Spacer(modifier = Modifier.width(8.dp))
-                FilledTonalIconButton(
-                    onClick = onPlayerClick,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .tvFocusable()
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_speaker_group),
-                        contentDescription = stringResource(R.string.accessibility_player_button),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
         }
 
         // Secondary Row (only when not compact and enabled)
@@ -227,24 +208,6 @@ fun PlaybackControls(
                                 MaterialTheme.colorScheme.primary
                             else
                                 MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                // Speaker / Group button (MA only)
-                if (showPlayerButton) {
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    FilledTonalIconButton(
-                        onClick = onPlayerClick,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .tvFocusable()
-                    ) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_speaker_group),
-                            contentDescription = stringResource(R.string.accessibility_player_button),
-                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }

@@ -73,7 +73,6 @@ import com.sendspindroid.ui.adaptive.tvFocusable
 @Composable
 fun QueueSheetContent(
     viewModel: QueueViewModel,
-    onBrowseLibrary: () -> Unit,
     modifier: Modifier = Modifier,
     currentTrackTitle: String? = null
 ) {
@@ -105,7 +104,7 @@ fun QueueSheetContent(
         }
         is QueueUiState.Success -> {
             if (state.isEmpty) {
-                QueueEmptyContent(onBrowseLibrary = onBrowseLibrary)
+                QueueEmptyContent()
             } else {
                 QueueListContent(
                     state = state,
@@ -659,7 +658,7 @@ private fun QueueListItem(
 // ============================================================================
 
 @Composable
-private fun QueueEmptyContent(onBrowseLibrary: () -> Unit) {
+private fun QueueEmptyContent() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -689,12 +688,6 @@ private fun QueueEmptyContent(onBrowseLibrary: () -> Unit) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        OutlinedButton(onClick = onBrowseLibrary) {
-            Text(stringResource(R.string.queue_browse_library))
-        }
     }
 }
 

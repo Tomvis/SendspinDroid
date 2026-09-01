@@ -88,9 +88,6 @@ fun NowPlayingScreen(
     onVolumeChange: (Float) -> Unit,
     onQueueClick: () -> Unit,
     queueViewModel: QueueViewModel? = null,
-    onBrowseLibrary: () -> Unit = {},
-    showPlayerButton: Boolean = false,
-    onPlayerClick: () -> Unit = {},
     inlineQueueVisible: Boolean = true,
     modifier: Modifier = Modifier
 ) {
@@ -202,10 +199,7 @@ fun NowPlayingScreen(
                     onNextClick = onNextClick,
                     onSwitchGroupClick = onSwitchGroupClick,
                     onFavoriteClick = onFavoriteClick,
-                    queueViewModel = queueViewModel,
-                    onBrowseLibrary = onBrowseLibrary,
-                    showPlayerButton = showPlayerButton,
-                    onPlayerClick = onPlayerClick
+                    queueViewModel = queueViewModel
                 )
             }
             // TV without MA: landscape layout, no queue
@@ -230,9 +224,7 @@ fun NowPlayingScreen(
                     onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange,
                     onQueueClick = onQueueClick,
-                    showQueueButton = false,
-                    showPlayerButton = showPlayerButton,
-                    onPlayerClick = onPlayerClick
+                    showQueueButton = false
                 )
             }
             // Tablet: inline queue panel always visible
@@ -257,9 +249,6 @@ fun NowPlayingScreen(
                     onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange,
                     queueViewModel = inlineQueueViewModel,
-                    onBrowseLibrary = onBrowseLibrary,
-                    showPlayerButton = showPlayerButton,
-                    onPlayerClick = onPlayerClick,
                     queueVisible = inlineQueueVisible
                 )
             }
@@ -283,9 +272,7 @@ fun NowPlayingScreen(
                     onSwitchGroupClick = onSwitchGroupClick,
                     onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange,
-                    onQueueClick = onQueueClick,
-                    showPlayerButton = showPlayerButton,
-                    onPlayerClick = onPlayerClick
+                    onQueueClick = onQueueClick
                 )
             }
             else -> {
@@ -308,9 +295,7 @@ fun NowPlayingScreen(
                     onSwitchGroupClick = onSwitchGroupClick,
                     onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange,
-                    onQueueClick = onQueueClick,
-                    showPlayerButton = showPlayerButton,
-                    onPlayerClick = onPlayerClick
+                    onQueueClick = onQueueClick
                 )
             }
         }
@@ -355,8 +340,6 @@ private fun NowPlayingPortrait(
     isQueueActive: Boolean = false,
     albumArtFraction: Float = 0.7f,
     compactControls: Boolean = false,
-    showPlayerButton: Boolean = false,
-    onPlayerClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -456,8 +439,6 @@ private fun NowPlayingPortrait(
             showFavorite = isMaConnected,
             isFavorite = false, // TODO: Track favorite state
             onFavoriteClick = onFavoriteClick,
-            showPlayerButton = showPlayerButton,
-            onPlayerClick = onPlayerClick,
             playButtonSize = AdaptiveDefaults.playButtonSize(formFactor),
             controlButtonSize = AdaptiveDefaults.controlButtonSize(formFactor)
         )
@@ -509,8 +490,6 @@ private fun NowPlayingLandscape(
     onQueueClick: () -> Unit,
     showQueueButton: Boolean = true,
     showSecondaryRow: Boolean = true,
-    showPlayerButton: Boolean = false,
-    onPlayerClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -613,8 +592,6 @@ private fun NowPlayingLandscape(
                 showFavorite = isMaConnected,
                 isFavorite = false,
                 onFavoriteClick = onFavoriteClick,
-                showPlayerButton = showPlayerButton,
-                onPlayerClick = onPlayerClick,
                 playButtonSize = AdaptiveDefaults.playButtonSize(formFactor),
                 controlButtonSize = AdaptiveDefaults.controlButtonSize(formFactor)
             )
@@ -664,9 +641,6 @@ private fun NowPlayingWithQueuePanel(
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     queueViewModel: QueueViewModel,
-    onBrowseLibrary: () -> Unit,
-    showPlayerButton: Boolean = false,
-    onPlayerClick: () -> Unit = {},
     queueVisible: Boolean = true,
     modifier: Modifier = Modifier
 ) {
@@ -704,9 +678,7 @@ private fun NowPlayingWithQueuePanel(
                     onVolumeChange = onVolumeChange,
                     onQueueClick = {},
                     showQueueButton = false,
-                    showSecondaryRow = true,
-                    showPlayerButton = showPlayerButton,
-                    onPlayerClick = onPlayerClick
+                    showSecondaryRow = true
                 )
             } else {
                 // Queue visible or portrait: portrait-style vertical stack fits the narrow column
@@ -732,9 +704,7 @@ private fun NowPlayingWithQueuePanel(
                     onQueueClick = {},
                     showQueueButton = false,
                     albumArtFraction = 0.5f,
-                    compactControls = queueVisible,
-                    showPlayerButton = showPlayerButton,
-                    onPlayerClick = onPlayerClick
+                    compactControls = queueVisible
                 )
             }
         }
@@ -762,7 +732,6 @@ private fun NowPlayingWithQueuePanel(
                 ) {
                     QueueSheetContent(
                         viewModel = queueViewModel,
-                        onBrowseLibrary = onBrowseLibrary,
                         currentTrackTitle = metadata.title
                     )
                 }
@@ -796,9 +765,6 @@ private fun NowPlayingTv(
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     queueViewModel: QueueViewModel?,
-    onBrowseLibrary: () -> Unit,
-    showPlayerButton: Boolean = false,
-    onPlayerClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val formFactor = LocalFormFactor.current
@@ -965,24 +931,6 @@ private fun NowPlayingTv(
                         Spacer(modifier = Modifier.width(12.dp))
                     }
 
-                    // Speaker / Group button (MA only)
-                    if (showPlayerButton) {
-                        FilledTonalIconButton(
-                            onClick = onPlayerClick,
-                            modifier = Modifier
-                                .size(secondarySize)
-                                .tvFocusable()
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_speaker_group),
-                                contentDescription = stringResource(R.string.accessibility_player_button),
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(12.dp))
-                    }
-
                     // Queue Toggle
                     if (queueViewModel != null) {
                         FilledTonalIconButton(
@@ -1028,7 +976,6 @@ private fun NowPlayingTv(
                     queueViewModel?.let { vm ->
                         QueueSheetContent(
                             viewModel = vm,
-                            onBrowseLibrary = onBrowseLibrary,
                             currentTrackTitle = metadata.title
                         )
                     }

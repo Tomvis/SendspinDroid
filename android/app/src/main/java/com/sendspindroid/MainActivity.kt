@@ -117,7 +117,6 @@ import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.adaptive.determineFormFactor
 import com.sendspindroid.ui.adaptive.isTvDevice
 import com.sendspindroid.ui.theme.SendSpinTheme
-import com.sendspindroid.ui.main.NavTab
 
 /**
  * Main activity for the SendSpinDroid audio streaming client.
@@ -417,40 +416,6 @@ class MainActivity : AppCompatActivity() {
             message,
             Snackbar.LENGTH_SHORT
         ).show()
-    }
-
-    /**
-     * Shows a Snackbar with an Undo action for reversible operations.
-     *
-     * The operation is deferred until the snackbar dismisses naturally.
-     * If the user taps Undo, the operation is cancelled and onUndo is called.
-     *
-     * @param message The message to display
-     * @param onUndo Called when the user taps Undo (restore the item)
-     * @param onDismissed Called when snackbar dismisses without Undo (execute the deletion)
-     */
-    fun showUndoSnackbar(
-        message: String,
-        onUndo: () -> Unit,
-        onDismissed: () -> Unit = {}
-    ) {
-        val snackbar = Snackbar.make(
-            snackbarView,
-            message,
-            Snackbar.LENGTH_LONG
-        )
-        snackbar.setAction("Undo") {
-            onUndo()
-        }
-        snackbar.addCallback(object : Snackbar.Callback() {
-            override fun onDismissed(transientBottomBar: Snackbar?, event: Int) {
-                if (event != DISMISS_EVENT_ACTION) {
-                    // Dismissed without pressing Undo -> execute the actual operation
-                    onDismissed()
-                }
-            }
-        })
-        snackbar.show()
     }
 
     /**
@@ -808,8 +773,6 @@ class MainActivity : AppCompatActivity() {
      * The ComposeView hosts AppShell which provides:
      * - Server list (Compose)
      * - Now Playing screen (Compose)
-     * - Navigation tabs with browse content (Compose)
-     * - Mini player (Compose)
      * - Toolbar (Compose)
      *
      * The XML layout remains underneath for backward compatibility while
@@ -929,12 +892,7 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         },
-                        onExitAppClick = { onExitAppClicked() },
-                        onShowSuccess = { message -> showSuccessSnackbar(message) },
-                        onShowError = { message -> showErrorSnackbar(message) },
-                        onShowUndoSnackbar = { message, onUndo, onDismissed ->
-                            showUndoSnackbar(message, onUndo, onDismissed)
-                        }
+                        onExitAppClick = { onExitAppClicked() }
                     )
                 }
             }
@@ -960,9 +918,6 @@ class MainActivity : AppCompatActivity() {
     // Track whether navigation content is currently shown (vs full player)
     // Legacy field - navigation is now Compose-based but some callbacks still reference this
     private var isNavigationContentVisible = false
-
-    // Current selected navigation tab (legacy - navigation is now Compose-based)
-    private var currentNavTab: Int = 0
 
     // setupBottomNavigation() removed - navigation is now Compose-based (AppShell)
     private fun setupBottomNavigation() {
@@ -1128,11 +1083,6 @@ class MainActivity : AppCompatActivity() {
     private fun setupBackPressHandler() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                // Check if a Compose detail screen is showing
-                if (viewModel.navigateDetailBack()) {
-                    return
-                }
-
                 // Legacy path: XML-based navigation content
                 if (isNavigationContentVisible) {
                     if (supportFragmentManager.backStackEntryCount > 0) {
@@ -1199,8 +1149,6 @@ class MainActivity : AppCompatActivity() {
         applyFullScreenMode()
         // Re-apply mini-player position (picks up changes made in Settings)
         updateMiniPlayerPosition()
-        // Re-sync Compose mini-player position (picks up changes made in Settings)
-        viewModel.setMiniPlayerPosition(UserSettings.miniPlayerPosition)
         // Re-evaluate keep screen on (picks up setting changes + current playback state)
         updateKeepScreenOn(mediaController?.isPlaying == true)
         // Re-sync UI state with MediaController
@@ -2611,12 +2559,6 @@ class MainActivity : AppCompatActivity() {
         if (existing != null) return
 
         val fragment = QueueSheetFragment.newInstance()
-        fragment.onBrowseLibrary = {
-            // Navigate to Library tab when "Browse Library" is tapped from empty queue
-            // Navigation is now Compose-based via ViewModel
-            viewModel.setCurrentNavTab(NavTab.LIBRARY)
-            viewModel.setNavigationContentVisible(true)
-        }
         fragment.show(supportFragmentManager, QueueSheetFragment.TAG)
     }
 
@@ -3452,12 +3394,10 @@ class MainActivity : AppCompatActivity() {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
             android.R.id.home -> {
-                // Toolbar back button -- pop Compose detail or legacy fragment
-                if (!viewModel.navigateDetailBack()) {
-                    if (supportFragmentManager.backStackEntryCount > 0) {
-                        supportFragmentManager.popBackStack()
-                        updateToolbarForNavigation()
-                    }
+                // Toolbar back button -- pop legacy fragment
+                if (supportFragmentManager.backStackEntryCount > 0) {
+                    supportFragmentManager.popBackStack()
+                    updateToolbarForNavigation()
                 }
                 true
             }

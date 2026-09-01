@@ -86,7 +86,6 @@ fun SettingsScreen(
     val playerName by viewModel.playerName.collectAsStateWithLifecycle()
     val fullscreenMode by viewModel.fullscreenMode.collectAsStateWithLifecycle()
     val keepScreenOn by viewModel.keepScreenOn.collectAsStateWithLifecycle()
-    val miniPlayerPosition by viewModel.miniPlayerPosition.collectAsStateWithLifecycle()
     val layoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
     val syncOffset by viewModel.syncOffset.collectAsStateWithLifecycle()
     val preferredCodec by viewModel.preferredCodec.collectAsStateWithLifecycle()
@@ -156,16 +155,6 @@ fun SettingsScreen(
                 summary = stringResource(R.string.pref_keep_screen_on_summary),
                 checked = keepScreenOn,
                 onCheckedChange = { viewModel.setKeepScreenOn(it) }
-            )
-            SegmentedButtonPreference(
-                title = stringResource(R.string.pref_mini_player_position_title),
-                summary = stringResource(R.string.pref_mini_player_position_summary),
-                options = listOf(
-                    stringResource(R.string.pref_mini_player_position_top) to UserSettings.MiniPlayerPosition.TOP,
-                    stringResource(R.string.pref_mini_player_position_bottom) to UserSettings.MiniPlayerPosition.BOTTOM
-                ),
-                selectedOption = miniPlayerPosition,
-                onOptionSelected = { viewModel.setMiniPlayerPosition(it) }
             )
             SegmentedButtonPreference(
                 title = stringResource(R.string.pref_layout_mode_title),

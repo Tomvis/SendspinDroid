@@ -80,9 +80,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _keepScreenOn = MutableStateFlow(UserSettings.keepScreenOn)
     val keepScreenOn: StateFlow<Boolean> = _keepScreenOn.asStateFlow()
 
-    private val _miniPlayerPosition = MutableStateFlow(UserSettings.miniPlayerPosition)
-    val miniPlayerPosition: StateFlow<UserSettings.MiniPlayerPosition> = _miniPlayerPosition.asStateFlow()
-
     private val _layoutMode = MutableStateFlow(UserSettings.layoutMode)
     val layoutMode: StateFlow<UserSettings.LayoutMode> = _layoutMode.asStateFlow()
 
@@ -170,11 +167,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setKeepScreenOn(enabled: Boolean) {
         prefs.edit().putBoolean(UserSettings.KEY_KEEP_SCREEN_ON, enabled).apply()
         _keepScreenOn.value = enabled
-    }
-
-    fun setMiniPlayerPosition(position: UserSettings.MiniPlayerPosition) {
-        UserSettings.setMiniPlayerPosition(position)
-        _miniPlayerPosition.value = position
     }
 
     fun setLayoutMode(mode: UserSettings.LayoutMode) {
