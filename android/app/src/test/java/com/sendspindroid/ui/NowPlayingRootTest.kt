@@ -44,4 +44,14 @@ class NowPlayingRootTest {
         }
         assertEquals("AppShell must not import MA or browse packages", emptyList<String>(), offending)
     }
+
+    @Test
+    fun nowPlayingScreenIsStillRendered() {
+        val rendersNowPlaying = appShellLines().any { it.contains("NowPlayingScreen(") }
+        assertEquals(
+            "AppShell must still render NowPlayingScreen -- these tests only assert absence of browse code",
+            true,
+            rendersNowPlaying
+        )
+    }
 }

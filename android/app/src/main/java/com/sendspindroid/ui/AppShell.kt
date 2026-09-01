@@ -1,6 +1,5 @@
 package com.sendspindroid.ui
 
-import android.content.res.Configuration
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,12 +21,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
-import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
-import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffoldDefaults
-import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,7 +30,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,8 +47,6 @@ import com.sendspindroid.ui.adaptive.tvFocusable
 import com.sendspindroid.ui.player.PlayerBottomSheet
 import com.sendspindroid.ui.player.PlayerViewModel
 import com.sendspindroid.ui.queue.QueueViewModel
-
-private const val TAG = "AppShell"
 
 /**
  * Root Compose shell for the entire app.
@@ -77,9 +68,6 @@ private const val TAG = "AppShell"
  * @param onQueueClick Open queue view
  * @param onDisconnectClick Disconnect from server
  * @param onAddServerClick FAB: launch add server wizard
- * @param onShowSuccess Show success snackbar message
- * @param onShowError Show error snackbar message
- * @param onShowUndoSnackbar Show undo snackbar (for playlist deletion)
  */
 @Composable
 fun AppShell(
@@ -98,9 +86,6 @@ fun AppShell(
     onSettingsClick: () -> Unit,
     onEditServerClick: () -> Unit,
     onExitAppClick: () -> Unit,
-    onShowSuccess: (String) -> Unit,
-    onShowError: (String) -> Unit,
-    onShowUndoSnackbar: (message: String, onUndo: () -> Unit, onDismissed: () -> Unit) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
@@ -131,9 +116,6 @@ fun AppShell(
                 onSettingsClick = onSettingsClick,
                 onEditServerClick = onEditServerClick,
                 onExitAppClick = onExitAppClick,
-                onShowSuccess = onShowSuccess,
-                onShowError = onShowError,
-                onShowUndoSnackbar = onShowUndoSnackbar,
                 modifier = modifier
             )
         }
@@ -177,10 +159,8 @@ private fun ServerListShell(
 /**
  * Shell for the connected state.
  *
- * Uses Scaffold (TopAppBar + overflow menu) nested inside NavigationSuiteScaffold
- * (auto-switches BottomNav / NavigationRail / Drawer based on window size class).
- *
- * Now Playing is the only destination; SendSpin defines no browse surface.
+ * Uses Scaffold (TopAppBar + overflow menu). Now Playing is the only destination;
+ * SendSpin defines no browse surface.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -198,9 +178,6 @@ private fun ConnectedShell(
     onSettingsClick: () -> Unit,
     onEditServerClick: () -> Unit,
     onExitAppClick: () -> Unit,
-    onShowSuccess: (String) -> Unit,
-    onShowError: (String) -> Unit,
-    onShowUndoSnackbar: (message: String, onUndo: () -> Unit, onDismissed: () -> Unit) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val formFactor = LocalFormFactor.current
@@ -356,7 +333,7 @@ private fun ConnectedShell(
          AdaptiveDefaults.showBrowseQueueSidebar(formFactor) ||
          formFactor == FormFactor.HEADUNIT) && isMaConnected
 
-    // Content composable shared between both layouts
+    // Content area passed to Scaffold
     val contentArea: @Composable (PaddingValues) -> Unit = { innerPadding ->
         NowPlayingScreen(
             viewModel = viewModel,
@@ -377,64 +354,11 @@ private fun ConnectedShell(
         )
     }
 
-    if (!isMaConnected) {
-        // No MA -> just Scaffold with top bar, no bottom nav
-        Scaffold(
-            modifier = modifier,
-            topBar = topBar,
-            content = contentArea
-        )
-    } else {
-        // MA connected -> NavigationSuiteScaffold with the Now Playing nav item
-        // Override navigation type based on form factor and orientation:
-        // - Phone landscape: force NavigationRail (auto-detect sometimes stays on BottomNav)
-        // - Tablet portrait: force BottomNav (default gives Rail, but portrait tablets should
-        //   match phone portrait behavior)
-        // - HEADUNIT: force BottomNav
-        // - Everything else: use adaptive default
-        val configuration = LocalConfiguration.current
-        val isPhoneLandscape = configuration.smallestScreenWidthDp < 600 &&
-            configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        val isTabletPortrait = (formFactor == FormFactor.TABLET_7 || formFactor == FormFactor.TABLET_10) &&
-            configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-        val navSuiteType = if (isPhoneLandscape) {
-            NavigationSuiteType.NavigationRail
-        } else if (isTabletPortrait || formFactor == FormFactor.HEADUNIT) {
-            NavigationSuiteType.NavigationBar
-        } else {
-            NavigationSuiteScaffoldDefaults.calculateFromAdaptiveInfo(currentWindowAdaptiveInfo())
-        }
-
-        NavigationSuiteScaffold(
-            modifier = modifier,
-            layoutType = navSuiteType,
-            navigationSuiteItems = {
-                // Now Playing tab (replaces mini player on TV; not needed on phone/tablet
-                // since the mini player handles returning to the now playing screen)
-                if (!AdaptiveDefaults.showMiniPlayer(formFactor)) {
-                    item(
-                        icon = {
-                            Icon(
-                                painter = painterResource(id = R.drawable.ic_nav_now_playing),
-                                contentDescription = stringResource(R.string.nav_now_playing)
-                            )
-                        },
-                        label = { Text(stringResource(R.string.nav_now_playing)) },
-                        selected = true,
-                        onClick = {
-                            viewModel.clearDetailNavigation()
-                            viewModel.setNavigationContentVisible(false)
-                        }
-                    )
-                }
-            }
-        ) {
-            Scaffold(
-                topBar = topBar,
-                content = contentArea
-            )
-        }
-    }
+    Scaffold(
+        modifier = modifier,
+        topBar = topBar,
+        content = contentArea
+    )
 
     // Player / Speaker Group bottom sheet
     if (showPlayerSheet && isMaConnected) {

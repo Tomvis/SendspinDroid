@@ -136,10 +136,6 @@ object AdaptiveDefaults {
         FormFactor.HEADUNIT -> 0.45f
     }
 
-    /** Whether to show the mini player (TV and head unit don't need it) */
-    fun showMiniPlayer(formFactor: FormFactor): Boolean =
-        formFactor != FormFactor.TV && formFactor != FormFactor.HEADUNIT
-
     /**
      * Whether to show the mini player as a side panel (phone landscape only).
      * Uses smallestScreenWidthDp rather than formFactor because phones in landscape

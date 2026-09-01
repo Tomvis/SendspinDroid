@@ -929,12 +929,7 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         },
-                        onExitAppClick = { onExitAppClicked() },
-                        onShowSuccess = { message -> showSuccessSnackbar(message) },
-                        onShowError = { message -> showErrorSnackbar(message) },
-                        onShowUndoSnackbar = { message, onUndo, onDismissed ->
-                            showUndoSnackbar(message, onUndo, onDismissed)
-                        }
+                        onExitAppClick = { onExitAppClicked() }
                     )
                 }
             }
