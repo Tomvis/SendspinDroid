@@ -148,7 +148,7 @@ Delete only the names that print as ORPHANED. `ic_nav_home`, `ic_nav_library` an
 `ic_nav_search` were used by these screens -- expect them in the list, but let the
 check decide rather than assuming.
 
-Use the word-boundary word boundaries shown in the grep: a substring match makes `ic_nav_home` look live
+Keep the word-boundary markers shown in the grep pattern: a substring match makes `ic_nav_home` look live
 when only `ic_nav_home_selected` survives, and the reverse.
 
 - [ ] **Step 7: Verify build and full suite**
