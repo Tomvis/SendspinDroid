@@ -39,7 +39,6 @@ fun PlaybackControls(
     onNextClick: () -> Unit,
     modifier: Modifier = Modifier,
     showSecondaryRow: Boolean = true,
-    compactLayout: Boolean = false,
     isSwitchGroupEnabled: Boolean = false,
     onSwitchGroupClick: () -> Unit = {},
     showFavorite: Boolean = false,
@@ -62,24 +61,6 @@ fun PlaybackControls(
             // Derived icon sizes
             val playIconSize = playButtonSize * 0.67f
             val controlIconSize = controlButtonSize * 0.5f
-
-            // Switch Group (inline when compact)
-            if (compactLayout) {
-                FilledTonalIconButton(
-                    onClick = onSwitchGroupClick,
-                    enabled = isSwitchGroupEnabled,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .tvFocusable()
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_swap_horiz),
-                        contentDescription = stringResource(R.string.accessibility_switch_group_button),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-            }
 
             // Previous Button
             FilledTonalIconButton(
@@ -138,34 +119,10 @@ fun PlaybackControls(
                     modifier = Modifier.size(controlIconSize)
                 )
             }
-
-            // Favorite (inline when compact)
-            if (compactLayout && showFavorite) {
-                Spacer(modifier = Modifier.width(8.dp))
-                FilledTonalIconButton(
-                    onClick = onFavoriteClick,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .tvFocusable()
-                ) {
-                    Icon(
-                        painter = painterResource(
-                            if (isFavorite) R.drawable.ic_favorite
-                            else R.drawable.ic_favorite_border
-                        ),
-                        contentDescription = stringResource(R.string.accessibility_favorite_track),
-                        modifier = Modifier.size(20.dp),
-                        tint = if (isFavorite)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
         }
 
-        // Secondary Row (only when not compact and enabled)
-        if (showSecondaryRow && !compactLayout) {
+        // Secondary Row (only when enabled)
+        if (showSecondaryRow) {
             Spacer(modifier = Modifier.height(12.dp))
 
             Row(
