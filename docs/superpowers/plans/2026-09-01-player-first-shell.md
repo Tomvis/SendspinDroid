@@ -445,13 +445,28 @@ of Task 2 -- re-check with grep before deleting, since intervening work may have
 added one.
 
 1. `ui/queue/QueueSheetContent.kt` -- an `OutlinedButton` labelled to browse the
-   library renders inside `QueueEmptyContent` (around line 695). Its
-   `onBrowseLibrary` callback now resolves to `NowPlayingScreen`'s `= {}`
-   default, so on tablet and TV with the inline queue panel and an empty queue a
-   user sees a button that does nothing. Delete the button. Then delete the
-   `onBrowseLibrary` parameter from `QueueSheetContent`, from `QueueEmptyContent`,
-   and from `NowPlayingScreen` -- including its `= {}` default -- so the dead
-   callback chain goes with it rather than being left as an ignored parameter.
+   library renders inside `QueueEmptyContent` (around line 695). Delete the button.
+
+   There are TWO independent `onBrowseLibrary` chains and both are now dead.
+   Delete both:
+
+   - **Compose chain:** the `onBrowseLibrary` parameter on `QueueSheetContent`,
+     on `QueueEmptyContent`, and on `NowPlayingScreen` -- including
+     `NowPlayingScreen`'s `= {}` default, which is what currently swallows the
+     click. Leaving the default in place would relocate the dead stub rather
+     than remove it.
+   - **Legacy fragment chain:** `QueueSheetFragment.kt:31` declares
+     `var onBrowseLibrary: (() -> Unit)? = null`, assigned from
+     `MainActivity.kt:2566` to a lambda calling
+     `viewModel.setNavigationContentVisible(true)`. Delete the property, the
+     assignment block in `MainActivity`, and any call through it.
+
+   **Do NOT touch `setNavigationContentVisible` or `isNavigationContentVisible`
+   themselves.** The flow has roughly nine live readers in `MainActivity`
+   (including the back-press path at :967 and the MA-disconnect handler at
+   :2608). It is part of the unfinished legacy-to-Compose migration, not the
+   Music Assistant removal, and untangling it belongs to the follow-up plan.
+   Deleting only the browse callback that fed it is correct and sufficient here.
 2. `ui/adaptive/AdaptiveDefaults.kt` -- delete `showSideMiniPlayer` and
    `sideMiniPlayerWidth`. Both lost their only callers when Task 2 removed
    `SideMiniPlayerBar`.
