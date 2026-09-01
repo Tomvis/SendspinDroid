@@ -345,6 +345,20 @@ git commit -m "refactor(auto): drop Music Assistant branches from the browse tre
 | `NowPlayingHeadUnit.kt` | `QueueUiState` and `QueueViewModel` imports |
 | `MainActivity.kt` | `QueueSheetFragment` import, `showQueueSheet()`, the `onQueueClick = { showQueueSheet() }` lambda, and the call at :729 |
 | `AdaptiveDefaults.kt` | `showInlineQueuePanel`, `hasTvQueueSidebar`, `showBrowseQueueSidebar` -- delete each ONLY if it ends with zero callers |
+| `playback/PlaybackService.kt` | the Android Auto now-playing queue -- `MEDIA_ID_MA_QUEUE_ITEM_PREFIX`, `populatePlayerQueue()`, `createMaQueueMediaItem()`, and the `onGetItem` / playback branches that resolve that prefix. Reassigned here from Task 2; see below |
+
+**The Android Auto now-playing queue comes out here too.** Task 2 left it in place
+because a MediaSession queue is a different mechanism from a library browse tree, which
+was a reasonable reading. But it is built from `MaQueueItem` -- Music Assistant data --
+and SendSpin supplies no queue state to replace it. Leaving it would mean Android Auto
+still shows an MA-sourced queue after this task removes the in-app queue for exactly
+that reason.
+
+Keep `MusicAssistant.queueUpdates` itself: `PlaybackService` also uses it to prefetch
+about a second before a track change, which is a playback optimisation rather than a
+queue surface. Delete only the Auto queue construction that consumes it. If removing
+the Auto queue leaves `queueUpdates` with no remaining consumer, say so in your report
+rather than deleting it -- a later plan owns that call.
 
 Note `queueViewModel: QueueViewModel? = null` in `NowPlayingScreen`. That nullable default is exactly the shape that hides a dead chain -- delete the parameter, not just its supplier.
 
