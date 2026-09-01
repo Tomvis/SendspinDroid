@@ -456,6 +456,11 @@ class SendSpinPlayer : Player {
         sendSpinClient?.previous()
     }
 
+    // Deliberately hardcoded true, not derived from getPreviousMediaItemIndex()/
+    // getNextMediaItemIndex() (which return C.INDEX_UNSET -- there is no queue).
+    // Media3's BasePlayer-style derivation would make these false, which disables
+    // the skip buttons on Android Auto, the notification, and the lock screen.
+    // SendSpin always allows previous/next; the server handles the logic.
     override fun hasPreviousMediaItem(): Boolean = true
 
     override fun hasNextMediaItem(): Boolean = true
@@ -811,7 +816,8 @@ class SendSpinPlayer : Player {
                 // Required for Android Auto's playFromMediaId -> onAddMediaItems routing
                 Player.COMMAND_SET_MEDIA_ITEM,
                 Player.COMMAND_PREPARE,
-                // Enables the Player.seekTo(mediaItemIndex, positionMs) overload
+                // Kept for MediaSession compatibility; the overload delegates to
+                // the no-op seekTo(positionMs)
                 Player.COMMAND_SEEK_TO_MEDIA_ITEM
             )
             .build()

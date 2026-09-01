@@ -154,7 +154,8 @@ class SendSpinPlayerTest {
             "updateQueueItems",
             "onQueueItemSelected",
             "MultiItemTimeline",
-            "queueMediaItems"
+            "queueMediaItems",
+            "currentQueueIndex"
         ).filter { source.contains(it) }
         org.junit.Assert.assertEquals(
             "SendSpin supplies no queue state, so the player has no multi-item timeline",
