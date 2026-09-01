@@ -58,13 +58,6 @@ class SendSpinPlayer : Player {
     private var sendSpinClient: SendSpin? = null
     private var syncAudioPlayer: SyncAudioPlayer? = null
 
-    /**
-     * Callback invoked when the user selects a queue item (e.g., from Android Auto's
-     * native queue UI). The parameter is the mediaId of the selected queue item.
-     * Set by PlaybackService to bridge queue item taps to MA's playQueueItem().
-     */
-    var onQueueItemSelected: ((mediaId: String) -> Unit)? = null
-
     // Listener management - CopyOnWriteArrayList prevents ConcurrentModificationException
     // if a listener callback adds/removes listeners during iteration
     private val listeners = CopyOnWriteArrayList<Player.Listener>()
@@ -91,10 +84,6 @@ class SendSpinPlayer : Player {
 
     // Timeline for position reporting
     private var currentTimeline: Timeline = Timeline.EMPTY
-
-    // Queue items for Android Auto native queue display
-    private var queueMediaItems: List<MediaItem> = emptyList()
-    private var currentQueueIndex: Int = 0
 
     // ========================================================================
     // Configuration Methods
@@ -227,8 +216,6 @@ class SendSpinPlayer : Player {
             currentBufferedPositionMs = 0
             currentMediaItem = null
             currentTimeline = Timeline.EMPTY
-            queueMediaItems = emptyList()
-            currentQueueIndex = 0
         } else if (syncAudioPlayer == null) {
             // Connected but no audio yet
             updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
@@ -238,10 +225,6 @@ class SendSpinPlayer : Player {
     /**
      * Updates the current media item with track metadata.
      * This is required for lock screen and notification display.
-     *
-     * Queue-aware: if queue is populated, updates the current item in-place within
-     * the multi-item timeline to maintain Media3's invariant that
-     * getCurrentMediaItemIndex() < timeline.getWindowCount() at all times.
      */
     fun updateMediaItem(title: String?, artist: String?, album: String?, durationMs: Long) {
         android.util.Log.d(TAG, "updateMediaItem: $title / $artist / $album")
@@ -258,68 +241,13 @@ class SendSpinPlayer : Player {
             .build()
 
         currentDurationMs = durationMs
-
-        if (queueMediaItems.isNotEmpty() && currentQueueIndex < queueMediaItems.size) {
-            // Queue is active -- update current item in-place, keep MultiItemTimeline
-            val mutableQueue = queueMediaItems.toMutableList()
-            mutableQueue[currentQueueIndex] = newItem
-            queueMediaItems = mutableQueue
-            currentMediaItem = newItem
-            currentTimeline = MultiItemTimeline(queueMediaItems, durationMs)
-        } else {
-            // No queue -- single-item mode
-            currentMediaItem = newItem
-            queueMediaItems = emptyList()
-            currentQueueIndex = 0
-            currentTimeline = SingleItemTimeline(newItem, durationMs)
-        }
+        currentMediaItem = newItem
+        currentTimeline = SingleItemTimeline(newItem, durationMs)
 
         // Notify listeners of timeline change
         listeners.forEach { listener ->
             listener.onTimelineChanged(currentTimeline, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE)
             listener.onMediaItemTransition(currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
-        }
-    }
-
-    /**
-     * Updates the queue items displayed in Android Auto's native queue UI.
-     *
-     * Called by PlaybackService when the MA queue is fetched. This populates the
-     * player's timeline with all queue items so Android Auto shows the full queue
-     * when the user taps the native queue button.
-     *
-     * @param items List of MediaItems representing the queue
-     * @param currentIndex Index of the currently playing item
-     */
-    fun updateQueueItems(items: List<MediaItem>, currentIndex: Int) {
-        val validIndex = currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0))
-        android.util.Log.d(TAG, "updateQueueItems: ${items.size} items, currentIndex=$validIndex")
-
-        if (items.isEmpty()) {
-            queueMediaItems = emptyList()
-            currentQueueIndex = 0
-            // Fall back to single-item timeline if queue is empty
-            if (currentMediaItem != null) {
-                currentTimeline = SingleItemTimeline(currentMediaItem!!, currentDurationMs)
-            }
-            return
-        }
-
-        // Update ALL state BEFORE notifying listeners (atomic consistency).
-        // Media3's PlayerWrapper validates currentMediaItemIndex < timeline.getWindowCount()
-        // at the exact moment onTimelineChanged fires -- everything must be consistent.
-        val oldMediaItem = currentMediaItem
-        queueMediaItems = items
-        currentQueueIndex = validIndex
-        currentMediaItem = items[validIndex]
-        currentTimeline = MultiItemTimeline(items, currentDurationMs)
-
-        // Notify timeline change
-        listeners.forEach { it.onTimelineChanged(currentTimeline, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE) }
-
-        // If the current item changed, notify media item transition
-        if (oldMediaItem?.mediaId != currentMediaItem?.mediaId) {
-            listeners.forEach { it.onMediaItemTransition(currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) }
         }
     }
 
@@ -493,20 +421,7 @@ class SendSpinPlayer : Player {
     }
 
     override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
-        if (queueMediaItems.isNotEmpty() && mediaItemIndex in queueMediaItems.indices
-            && mediaItemIndex != currentQueueIndex) {
-            // User tapped a different queue item -- update local state and notify
-            android.util.Log.d(TAG, "seekTo queue item index=$mediaItemIndex")
-            currentQueueIndex = mediaItemIndex
-            currentMediaItem = queueMediaItems[mediaItemIndex]
-            onQueueItemSelected?.invoke(queueMediaItems[mediaItemIndex].mediaId)
-
-            listeners.forEach { listener ->
-                listener.onMediaItemTransition(currentMediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_SEEK)
-            }
-        } else {
-            seekTo(positionMs)
-        }
+        seekTo(positionMs)
     }
 
     override fun seekToDefaultPosition() {
@@ -596,31 +511,17 @@ class SendSpinPlayer : Player {
 
     override fun getCurrentPeriodIndex(): Int = currentMediaItemIndex
 
-    override fun getCurrentMediaItemIndex(): Int {
-        return if (queueMediaItems.isNotEmpty()) currentQueueIndex else 0
-    }
+    override fun getCurrentMediaItemIndex(): Int = 0
 
     @Deprecated("Deprecated in Java")
     override fun getCurrentWindowIndex(): Int = currentMediaItemIndex
 
-    override fun getNextMediaItemIndex(): Int {
-        return if (queueMediaItems.isNotEmpty() && currentQueueIndex < queueMediaItems.size - 1) {
-            currentQueueIndex + 1
-        } else {
-            C.INDEX_UNSET
-        }
-    }
+    override fun getNextMediaItemIndex(): Int = C.INDEX_UNSET
 
     @Deprecated("Deprecated in Java")
     override fun getNextWindowIndex(): Int = nextMediaItemIndex
 
-    override fun getPreviousMediaItemIndex(): Int {
-        return if (queueMediaItems.isNotEmpty() && currentQueueIndex > 0) {
-            currentQueueIndex - 1
-        } else {
-            C.INDEX_UNSET
-        }
-    }
+    override fun getPreviousMediaItemIndex(): Int = C.INDEX_UNSET
 
     @Deprecated("Deprecated in Java")
     override fun getPreviousWindowIndex(): Int = previousMediaItemIndex
@@ -628,15 +529,10 @@ class SendSpinPlayer : Player {
     override fun getCurrentMediaItem(): MediaItem? = currentMediaItem
 
     override fun getMediaItemCount(): Int {
-        return if (queueMediaItems.isNotEmpty()) queueMediaItems.size
-        else if (currentMediaItem != null) 1
-        else 0
+        return if (currentMediaItem != null) 1 else 0
     }
 
     override fun getMediaItemAt(index: Int): MediaItem {
-        if (queueMediaItems.isNotEmpty() && index in queueMediaItems.indices) {
-            return queueMediaItems[index]
-        }
         if (index == 0 && currentMediaItem != null) {
             return currentMediaItem!!
         }
@@ -915,7 +811,7 @@ class SendSpinPlayer : Player {
                 // Required for Android Auto's playFromMediaId -> onAddMediaItems routing
                 Player.COMMAND_SET_MEDIA_ITEM,
                 Player.COMMAND_PREPARE,
-                // Required for Android Auto's native queue item selection
+                // Enables the Player.seekTo(mediaItemIndex, positionMs) overload
                 Player.COMMAND_SEEK_TO_MEDIA_ITEM
             )
             .build()
@@ -1030,63 +926,4 @@ private class SingleItemTimeline(
     }
 
     override fun getUidOfPeriod(periodIndex: Int): Any = 0
-}
-
-/**
- * A Timeline with multiple media items, used for Android Auto's native queue display.
- *
- * Each queue item becomes a window in the timeline. Android Auto reads the timeline
- * to populate its built-in queue UI (the list shown when tapping the queue button
- * on the Now Playing screen).
- *
- * @param items List of MediaItems representing the queue
- * @param currentDurationMs Duration of the currently playing track (used for the current item)
- */
-@UnstableApi
-private class MultiItemTimeline(
-    private val items: List<MediaItem>,
-    private val currentDurationMs: Long
-) : Timeline() {
-
-    override fun getWindowCount(): Int = items.size
-
-    override fun getWindow(windowIndex: Int, window: Window, defaultPositionProjectionUs: Long): Window {
-        val item = items.getOrNull(windowIndex) ?: items[0]
-        window.set(
-            /* uid= */ windowIndex,
-            /* mediaItem= */ item,
-            /* manifest= */ null,
-            /* presentationStartTimeMs= */ C.TIME_UNSET,
-            /* windowStartTimeMs= */ C.TIME_UNSET,
-            /* elapsedRealtimeEpochOffsetMs= */ C.TIME_UNSET,
-            /* isSeekable= */ false,
-            /* isDynamic= */ false,
-            /* liveConfiguration= */ null,
-            /* defaultPositionUs= */ 0,
-            /* durationUs= */ C.TIME_UNSET,
-            /* firstPeriodIndex= */ windowIndex,
-            /* lastPeriodIndex= */ windowIndex,
-            /* positionInFirstPeriodUs= */ 0
-        )
-        return window
-    }
-
-    override fun getPeriodCount(): Int = items.size
-
-    override fun getPeriod(periodIndex: Int, period: Period, setIds: Boolean): Period {
-        period.set(
-            /* id= */ periodIndex,
-            /* uid= */ periodIndex,
-            /* windowIndex= */ periodIndex,
-            /* durationUs= */ C.TIME_UNSET,
-            /* positionInWindowUs= */ 0
-        )
-        return period
-    }
-
-    override fun getIndexOfPeriod(uid: Any): Int {
-        return if (uid is Int && uid in items.indices) uid else C.INDEX_UNSET
-    }
-
-    override fun getUidOfPeriod(periodIndex: Int): Any = periodIndex
 }

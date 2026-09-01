@@ -3,7 +3,6 @@ package com.sendspindroid.playback
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import io.mockk.every
 import io.mockk.mockk
@@ -20,8 +19,8 @@ import org.junit.Test
  *
  * Covers:
  * - playWhenReady listener notification from server updates
- * - seekTo media item invoking queue callback
  * - setError exposing error via getPlayerError and state transitions
+ * - the timeline stays single-item only (SendSpin has no queue state)
  */
 class SendSpinPlayerTest {
 
@@ -95,68 +94,6 @@ class SendSpinPlayerTest {
     }
 
     // =========================================================================
-    // seekTo media item invokes onQueueItemSelected
-    // =========================================================================
-
-    @Test
-    fun `seekTo mediaItemIndex invokes onQueueItemSelected callback`() {
-        var selectedMediaId: String? = null
-        player.onQueueItemSelected = { mediaId -> selectedMediaId = mediaId }
-
-        // Set up a queue with multiple items
-        val items = listOf(
-            MediaItem.Builder().setMediaId("track-1").build(),
-            MediaItem.Builder().setMediaId("track-2").build(),
-            MediaItem.Builder().setMediaId("track-3").build()
-        )
-        player.updateQueueItems(items, 0)
-
-        // Seek to a different queue item
-        player.seekTo(/* mediaItemIndex= */ 2, /* positionMs= */ 0L)
-
-        assertEquals("track-3", selectedMediaId)
-    }
-
-    @Test
-    fun `seekTo same mediaItemIndex does not invoke callback`() {
-        var callbackCount = 0
-        player.onQueueItemSelected = { callbackCount++ }
-
-        val items = listOf(
-            MediaItem.Builder().setMediaId("track-1").build(),
-            MediaItem.Builder().setMediaId("track-2").build()
-        )
-        player.updateQueueItems(items, 0)
-
-        // Seek to the currently playing item
-        player.seekTo(/* mediaItemIndex= */ 0, /* positionMs= */ 0L)
-
-        assertEquals(0, callbackCount)
-    }
-
-    @Test
-    fun `seekTo mediaItemIndex notifies onMediaItemTransition`() {
-        val listener = mockk<Player.Listener>(relaxed = true)
-        player.addListener(listener)
-        player.onQueueItemSelected = {}
-
-        val items = listOf(
-            MediaItem.Builder().setMediaId("track-1").build(),
-            MediaItem.Builder().setMediaId("track-2").build()
-        )
-        player.updateQueueItems(items, 0)
-
-        player.seekTo(1, 0L)
-
-        verify {
-            listener.onMediaItemTransition(
-                match { it.mediaId == "track-2" },
-                Player.MEDIA_ITEM_TRANSITION_REASON_SEEK
-            )
-        }
-    }
-
-    // =========================================================================
     // setError exposes via getPlayerError
     // =========================================================================
 
@@ -204,5 +141,25 @@ class SendSpinPlayerTest {
         player.clearError()
 
         verify(exactly = 0) { listener.onPlayerErrorChanged(any()) }
+    }
+
+    // =========================================================================
+    // Timeline stays single-item -- SendSpin supplies no queue state
+    // =========================================================================
+
+    @Test
+    fun timelineIsAlwaysSingleItem() {
+        val source = java.io.File("src/main/java/com/sendspindroid/playback/SendSpinPlayer.kt").readText()
+        val offending = listOf(
+            "updateQueueItems",
+            "onQueueItemSelected",
+            "MultiItemTimeline",
+            "queueMediaItems"
+        ).filter { source.contains(it) }
+        org.junit.Assert.assertEquals(
+            "SendSpin supplies no queue state, so the player has no multi-item timeline",
+            emptyList<String>(),
+            offending
+        )
     }
 }

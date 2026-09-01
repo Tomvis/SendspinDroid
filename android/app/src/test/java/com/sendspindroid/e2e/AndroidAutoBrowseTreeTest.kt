@@ -1,7 +1,5 @@
 package com.sendspindroid.e2e
 
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
 import com.sendspindroid.playback.SendSpinPlayer
 import io.mockk.mockk
 import org.junit.Assert.*
@@ -10,16 +8,15 @@ import org.junit.Test
 /**
  * E2E Test 4: Android Auto browse tree
  *
- * Tests the browse tree navigation through SendSpinPlayer's queue and timeline
- * management. The full MediaBrowser -> MediaLibrarySession -> PlaybackService
+ * Tests the browse tree navigation through SendSpinPlayer's single-item timeline
+ * and Player contract. The full MediaBrowser -> MediaLibrarySession -> PlaybackService
  * chain requires an instrumented test (Android framework), but the data layer
  * and Player contract can be verified in unit tests.
  *
  * What IS testable here:
- * - SendSpinPlayer's timeline construction (single-item and multi-item)
+ * - SendSpinPlayer's single-item timeline construction
  * - Available commands for Android Auto (COMMAND_SEEK_TO_NEXT, etc.)
  * - MediaItem metadata structure (title, artist, album)
- * - Queue display through multi-item timeline
  * - Connection state reporting to MediaSession
  *
  * What requires instrumented/manual testing:
@@ -33,10 +30,8 @@ import org.junit.Test
  * 1. Connect phone to Android Auto head unit or DHU (Desktop Head Unit)
  * 2. Open SendSpinDroid in Android Auto
  * 3. Verify root shows: Discovered Servers, Saved Servers categories
- * 4. If connected with MA: verify Playlists, Albums, Artists, Radio categories
- * 5. Navigate into Albums -> select album -> verify tracks listed
- * 6. Play a track -> verify Now Playing screen shows metadata
- * 7. Tap queue button -> verify queue is populated
+ * 4. Navigate into a server -> connect -> verify playback starts
+ * 5. Play a track -> verify Now Playing screen shows metadata
  */
 class AndroidAutoBrowseTreeTest : E2ETestBase() {
 
@@ -76,29 +71,6 @@ class AndroidAutoBrowseTreeTest : E2ETestBase() {
         val timeline = player.currentTimeline
         assertEquals("Single-item timeline should have 1 window", 1, timeline.windowCount)
         assertEquals("Single-item timeline should have 1 period", 1, timeline.periodCount)
-    }
-
-    @Test
-    fun `multi-item queue creates multi-window timeline`() {
-        val items = (1..5).map { i ->
-            MediaItem.Builder()
-                .setMediaId("track_$i")
-                .setMediaMetadata(
-                    MediaMetadata.Builder()
-                        .setTitle("Track $i")
-                        .setArtist("Artist")
-                        .setAlbumTitle("Album")
-                        .build()
-                )
-                .build()
-        }
-
-        player.updateQueueItems(items, currentIndex = 2)
-
-        val timeline = player.currentTimeline
-        assertEquals("Multi-item timeline should have 5 windows", 5, timeline.windowCount)
-        assertEquals("Multi-item timeline should have 5 periods", 5, timeline.periodCount)
-        assertEquals("Current index should be 2", 2, player.currentMediaItemIndex)
     }
 
     @Test
