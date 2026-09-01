@@ -971,8 +971,6 @@ class MainActivity : AppCompatActivity() {
     private fun showNavigationContent(fragment: Fragment) {
         if (!isNavigationContentVisible) {
             isNavigationContentVisible = true
-            // Sync state to ViewModel for Compose UI
-            viewModel.setNavigationContentVisible(true)
             Log.d(TAG, "Showing navigation content")
 
             // Content visibility: show nav fragment, hide others
@@ -1008,8 +1006,6 @@ class MainActivity : AppCompatActivity() {
     private fun hideNavigationContent() {
         if (isNavigationContentVisible) {
             isNavigationContentVisible = false
-            // Sync state to ViewModel for Compose UI
-            viewModel.setNavigationContentVisible(false)
             Log.d(TAG, "Hiding navigation content, returning to full player")
 
             // Hide nav content and both mini players
@@ -1186,7 +1182,6 @@ class MainActivity : AppCompatActivity() {
         // Reset navigation state -- we're leaving browsing/player for the server list
         if (isNavigationContentVisible) {
             isNavigationContentVisible = false
-            viewModel.setNavigationContentVisible(false)
         }
 
         // Set toolbar to app name

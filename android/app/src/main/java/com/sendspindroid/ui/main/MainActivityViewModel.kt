@@ -87,12 +87,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     val volume: StateFlow<Float> = _volume.asStateFlow()
 
     // ========================================================================
-    // Navigation State
-    // ========================================================================
-
-    private val _isNavigationContentVisible = MutableStateFlow(false)
-
-    // ========================================================================
     // Reconnection State
     // ========================================================================
 
@@ -186,14 +180,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     }
 
     // ========================================================================
-    // Navigation Updates
-    // ========================================================================
-
-    fun setNavigationContentVisible(visible: Boolean) {
-        _isNavigationContentVisible.value = visible
-    }
-
-    // ========================================================================
     // Reconnection Updates
     // ========================================================================
 
@@ -244,7 +230,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     fun resetToServerList() {
         _connectionState.value = AppConnectionState.ServerList
         _currentConnectedServerId.value = null
-        _isNavigationContentVisible.value = false
         _reconnectingState.value = null
         _reconnectingToServer.value = null
         _isConnectionLoading.value = false
