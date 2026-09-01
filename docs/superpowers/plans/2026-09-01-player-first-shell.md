@@ -560,7 +560,11 @@ git commit -m "docs(plan): record player-first shell device verification"
 
 At the end of this plan the app is Now Playing first, but Music Assistant is not fully disconnected from the live code path. Verified per package:
 
-- `com.sendspindroid.ui.navigation` is genuinely orphaned: no file outside the package imports from it.
+- `com.sendspindroid.ui.navigation` has no PRODUCTION callers outside the package, but it is
+  not import-free: the test `android/app/src/test/java/com/sendspindroid/ui/compose/SearchScreenResultsTest.kt:8`
+  imports `ui.navigation.search.SearchViewModel` and uses `SearchViewModel.SearchState` in four
+  test methods. That test must be deleted or rewritten in the same change that deletes the package,
+  or the test source set stops compiling.
 - `com.sendspindroid.ui.detail` is **not** orphaned. It stays alive through one edge: `ui/queue/QueueSheetContent.kt:134` calls `SaveQueueAsPlaylistDialog`, and `ui/queue/SaveQueueAsPlaylistDialog.kt:49` imports `ui.detail.components.BulkAddState` to drive its playlist-save flow.
 - `com.sendspindroid.ui.queue` is **not** orphaned - it is the live queue surface, referenced from `AppShell.kt:47,323,340`, `ui/main/NowPlayingScreen.kt:69-70,733,977`, `ui/main/NowPlayingHeadUnit.kt:51-52`, and `MainActivity.kt:89,2562-2566`.
 - `com.sendspindroid.musicassistant` is **not** orphaned either. It is the live MA WebSocket/API client and its data models, referenced well outside the doomed browse packages: `MainActivity.kt`, `playback/PlaybackService.kt`, `SendSpinApp.kt`, `playback/AutoVoiceSearch.kt`, `ui/main/NowPlayingHeadUnit.kt`, `ui/server/AddServerWizardActivity.kt` / `AddServerWizardViewModel.kt`, and all three files under `ui/queue/`.
