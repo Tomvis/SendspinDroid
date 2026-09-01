@@ -733,3 +733,50 @@ Remaining after this plan:
 
 - **Plan A** -- cut remote/proxy: `app/remote/`, `shared/remote/`, the `io.getstream:stream-webrtc-android` dependency, `SignalingClient`, `MaProxyImageFetcher`, the MA API DataChannel plumbing, `SendSpin.kt`'s four MA-aware lines, and the wizard's Proxy/Remote modes.
 - **Plan C** -- retire whatever survives in `musicassistant/` once Plan A and this plan are both done.
+
+---
+
+## Device verification record (Task 6)
+
+Verified `8ba3dcf` (`refactor(playback): fix round 1 for queue-machinery deletion`), the tip
+of `feat/remove-browse-queue` at the time of this run. Device: Relndoo T901_US tablet,
+Android 15 (API 35), serial `T901YCU250305206`, USB-connected. Server: Music Assistant at
+`ws://10.0.2.8:8927/sendspin` ("MA Production"). Build: `:app:assembleDebug`, `BUILD
+SUCCESSFUL`; installed with `adb install -r`. Logcat captured with `logcat -G 16M`, deleted
+after this record was written. Full detail in
+`.superpowers/sdd/2026-09-01-remove-browse-and-queue/task-6-report.md`.
+
+| Item | Result | Evidence |
+|---|---|---|
+| Disconnected root = server picker, no tab bar/nav rail | PASS | Fresh-launch screenshot: "Welcome to SendspinDroid", Quick Connect list, no chrome |
+| Connected: Now Playing root, artwork/title/artist/album, progress advances | PASS | Screenshots 5s apart show elapsed time 1:30 -> 1:48 during playback |
+| Transport: pause | PASS | `SendSpinPlayer: setPlayWhenReady: false` -> server `group/update {state:"stopped"}` |
+| Transport: play | PASS | `SendSpinPlayer: setPlayWhenReady: true` -> server `group/update {state:"playing"}` + `stream/start` |
+| Transport: next | PASS | `Custom command: com.sendspindroid.NEXT` -> server `stream/end`/`stream/start` + new track metadata |
+| Transport: previous | PASS | `Custom command: com.sendspindroid.PREVIOUS` -> server `stream/end`/`stream/start` |
+| Transport: volume | PASS | `Custom command: com.sendspindroid.SET_VOLUME`, `SendSpin: setVolume: 80%` -> server `server/state {controller.volume:80}` |
+| Skip buttons enabled and functional | PASS | Visibly enabled every screenshot; both produced full server round-trips |
+| No queue surface (portrait + landscape) | PASS | No queue button/sheet/panel in the rendered Compose UI in either orientation |
+| No browse surface | PASS | Overflow menu = Stats for Nerds, Edit Server, Switch Server, App Settings, Exit App only |
+| No crashes | PASS | 0 `FATAL EXCEPTION`/`AndroidRuntime` across ~7.5 min, 15,599 log lines |
+| Android Auto | NOT VERIFIED | No Android Auto companion app installed on the device; DHU had nothing to connect to. Static read of `AutoBrowseTree.kt` shows only server-discovery/selection code, no playlist/album/artist/radio/search branches -- consistent with intent but not a live substitute |
+| Form factors | Portrait + landscape verified; no foldable/TV/head-unit hardware available | Landscape: two-column layout, no queue panel, no crash |
+
+Non-defect notes:
+- Fresh install showed `Cannot start auto-reconnect: no server info available`, contrary to
+  the expectation of an already-paired auto-connect; connected manually via the visible
+  Quick Connect button instead. This is connection-persistence behavior, outside the scope
+  of the five browse/queue-removal tasks.
+- Investigated and cleared a static-source finding: `MainActivity.kt`'s
+  `observeMaConnectionState()` still toggles a legacy XML `queueButton` (plus
+  `favoriteButton`/`bottomNavigation`) based on `MusicAssistant.connectionState`. This was
+  already found and deliberately left by Task 3 (`task-3-report.md` lines 131-147) because
+  `setupComposeShell()` unconditionally detaches the entire legacy `coordinatorLayout` from
+  the view tree at startup. Independently confirmed both in source
+  (`MainActivity.kt:788`) and live (logcat: `Compose shell: replacing content view` at
+  launch and on every rotation, before any interaction) -- the legacy queue button never
+  enters the rendered tree. Not a defect.
+- Did not exercise the documented pre-existing backgrounding defect (issue #254); all
+  transport tests ran on a single fresh launch per instruction.
+
+No defects found in the work under test.
