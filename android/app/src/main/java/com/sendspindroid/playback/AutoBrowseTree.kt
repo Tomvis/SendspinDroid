@@ -97,6 +97,20 @@ object AutoBrowseTree {
         }
     }
 
+    /**
+     * Guidance row for a browse request whose parentId this build no longer
+     * recognizes -- e.g. a stale Android Auto subscription to a Music
+     * Assistant node from a previous build (Auto restores the last-browsed
+     * id). Never return an empty list here: Android Auto renders that as a
+     * blank "unable to load content" screen (see the class-level invariant).
+     */
+    fun unknownParentItem(parentId: String): MediaItem {
+        return messageItem(
+            mediaId = "$MEDIA_ID_MESSAGE_PREFIX$parentId",
+            title = "Nothing to show"
+        )
+    }
+
     /** A browsable (folder) node. */
     fun browsableItem(
         mediaId: String,

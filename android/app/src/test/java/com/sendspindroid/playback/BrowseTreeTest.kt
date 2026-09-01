@@ -227,6 +227,23 @@ class BrowseTreeTest {
     }
 
     @Test
+    fun `unrecognized parentId returns guidance instead of empty`() {
+        // Regression guard: Android Auto persists browse subscriptions and
+        // restores the last-browsed node, so a user upgrading from a build
+        // that had a now-deleted Music Assistant tab (e.g. "ma_albums") can
+        // re-subscribe to a parentId this build no longer serves. That must
+        // never resolve to an empty list.
+        val item = AutoBrowseTree.unknownParentItem("ma_albums")
+
+        assertTrue(
+            "Guidance item's media ID should be namespaced under the message prefix",
+            item.mediaId.startsWith(AutoBrowseTree.MEDIA_ID_MESSAGE_PREFIX)
+        )
+        assertEquals(false, item.mediaMetadata.isPlayable)
+        assertEquals(false, item.mediaMetadata.isBrowsable)
+    }
+
+    @Test
     fun `server list waits for first mDNS discovery before answering`() = runTest {
         // First browse races mDNS: the flow is empty at call time and a
         // server appears 1s later, inside the 3s discovery window.

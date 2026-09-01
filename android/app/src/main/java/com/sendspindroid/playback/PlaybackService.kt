@@ -2758,8 +2758,10 @@ class PlaybackService : MediaLibraryService() {
                 val items = when (parentId) {
                     MEDIA_ID_DISCOVERED -> getDiscoveredServers()
                     else -> {
+                        // Never hand Android Auto an empty list here -- see the
+                        // invariant documented on AutoBrowseTree.unknownParentItem.
                         Log.w(TAG, "Unknown parentId for onGetChildren: $parentId")
-                        emptyList()
+                        listOf(AutoBrowseTree.unknownParentItem(parentId))
                     }
                 }
                 LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
