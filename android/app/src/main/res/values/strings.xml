@@ -155,10 +155,6 @@
     <string name="pref_full_screen_summary">Hide status bar and navigation bar. Swipe from edges to reveal.</string>
     <string name="pref_keep_screen_on_title">Keep Screen On</string>
     <string name="pref_keep_screen_on_summary">Prevent screen from dimming while audio is playing</string>
-    <string name="pref_mini_player_position_title">Mini Player Position</string>
-    <string name="pref_mini_player_position_summary">Where the mini player appears when browsing</string>
-    <string name="pref_mini_player_position_top">Top</string>
-    <string name="pref_mini_player_position_bottom">Bottom</string>
     <string name="pref_layout_mode_title">Layout Mode</string>
     <string name="pref_layout_mode_summary">Override automatic layout detection for specialized displays</string>
     <string name="pref_layout_mode_auto">Auto</string>
@@ -523,13 +519,6 @@
     <string name="favorite_error">Could not add to favorites</string>
     <string name="favorite_no_track">No track currently playing</string>
 
-    <!-- Bottom Navigation -->
-    <string name="nav_home">Home</string>
-    <string name="nav_search">Search</string>
-    <string name="nav_library">Library</string>
-    <string name="nav_playlists">Playlists</string>
-    <string name="nav_now_playing">Now Playing</string>
-
     <!-- Playlists -->
     <string name="playlist_empty">No playlists yet</string>
     <string name="playlist_tracks_empty">This playlist has no tracks</string>
@@ -697,7 +686,6 @@
     <string name="action_cancel">Cancel</string>
     <string name="action_create">Create</string>
     <string name="action_delete">Delete</string>
-    <string name="action_back">Back</string>
     <string name="action_menu">Menu</string>
     <string name="action_shuffle">Shuffle</string>
     <string name="action_up">Up</string>
@@ -819,27 +807,7 @@
     <string name="stats_reanchors">Reanchors</string>
 
     <!-- Toast / error messages - playback -->
-    <string name="error_no_uri_play">Cannot play: no URI available</string>
-    <string name="error_no_uri_queue">Cannot add to queue: no URI available</string>
-    <string name="error_no_uri_play_next">Cannot play next: no URI available</string>
-    <string name="error_play_failed">Failed to play: %s</string>
-    <string name="error_queue_failed">Failed to add to queue: %s</string>
-    <string name="error_play_next_failed">Failed to play next: %s</string>
     <string name="error_player_unavailable">Player is not available. Try reconnecting to the server.</string>
-    <string name="success_added_to_queue">Added to queue: %s</string>
-    <string name="success_playing_next">Playing next: %s</string>
-    <string name="success_added_to_playlist">Added to %s</string>
-    <string name="error_add_track_failed">Failed to add track</string>
-    <string name="snackbar_deleted">Deleted %s</string>
-    <string name="snackbar_track_removed">Track removed</string>
-
-    <!-- Bulk operations -->
-    <string name="bulk_fetching_tracks">Fetching tracks...</string>
-    <string name="bulk_no_tracks_found">No tracks found</string>
-    <string name="bulk_adding_tracks">Adding %d tracks...</string>
-    <string name="bulk_added_to_playlist">Added %1$s to %2$s</string>
-    <string name="bulk_failed_add_playlist">Failed to add to playlist</string>
-    <string name="bulk_failed_fetch_tracks">Failed to fetch tracks</string>
 
     <!-- Save queue operations -->
     <string name="save_queue_adding_tracks">Adding %d tracks\u2026</string>

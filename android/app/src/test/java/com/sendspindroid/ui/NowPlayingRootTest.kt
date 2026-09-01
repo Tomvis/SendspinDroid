@@ -6,12 +6,13 @@ import org.junit.Test
 
 /**
  * SendSpinDroid is a SendSpin player. The protocol defines no library,
- * browse, or search concept, so Now Playing is the only root destination
- * and connection state must not select a browse tab.
+ * browse, or search concept, so Now Playing is the only root destination.
  *
- * AppShell encodes Now Playing as selectedNavTab == null && currentDetail
- * == null, so the rule is enforced by asserting that nothing in the file
- * selects NavTab.HOME or reacts to connection state by changing the tab.
+ * AppShell no longer has browse navigation state to assert on (selectedNavTab
+ * and currentDetail were deleted along with the browse UI), so these tests
+ * grep AppShell.kt's source text directly: no NavTab reference, no
+ * detail-navigation reference, no import from the musicassistant/navigation/
+ * detail packages, and NowPlayingScreen is still rendered.
  */
 class NowPlayingRootTest {
 

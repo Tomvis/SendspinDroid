@@ -773,8 +773,6 @@ class MainActivity : AppCompatActivity() {
      * The ComposeView hosts AppShell which provides:
      * - Server list (Compose)
      * - Now Playing screen (Compose)
-     * - Navigation tabs with browse content (Compose)
-     * - Mini player (Compose)
      * - Toolbar (Compose)
      *
      * The XML layout remains underneath for backward compatibility while
@@ -1151,8 +1149,6 @@ class MainActivity : AppCompatActivity() {
         applyFullScreenMode()
         // Re-apply mini-player position (picks up changes made in Settings)
         updateMiniPlayerPosition()
-        // Re-sync Compose mini-player position (picks up changes made in Settings)
-        viewModel.setMiniPlayerPosition(UserSettings.miniPlayerPosition)
         // Re-evaluate keep screen on (picks up setting changes + current playback state)
         updateKeepScreenOn(mediaController?.isPlaying == true)
         // Re-sync UI state with MediaController
