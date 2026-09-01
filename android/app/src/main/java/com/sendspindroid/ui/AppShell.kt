@@ -277,8 +277,6 @@ private fun ConnectedShell(
     // Detail navigation state
     val currentDetail by viewModel.currentDetail.collectAsStateWithLifecycle()
 
-    val browseNavTabs = emptyList<Pair<NavTab, Pair<Int, Int>>>()
-
     // Detail navigation callbacks (push onto ViewModel back stack)
     val onAlbumClick: (String, String, String) -> Unit = { albumId, albumName, provider ->
         viewModel.navigateToDetail(DetailDestination.Album(albumId, albumName, provider))
@@ -655,25 +653,6 @@ private fun ConnectedShell(
                             browseQueueVisible = false
                             selectedNavTab = null
                             viewModel.setNavigationContentVisible(false)
-                        }
-                    )
-                }
-                browseNavTabs.forEach { (tab, iconAndLabel) ->
-                    val (iconRes, labelRes) = iconAndLabel
-                    item(
-                        icon = {
-                            Icon(
-                                painter = painterResource(id = iconRes),
-                                contentDescription = stringResource(labelRes)
-                            )
-                        },
-                        label = { Text(stringResource(labelRes)) },
-                        selected = selectedNavTab == tab,
-                        onClick = {
-                            viewModel.clearDetailNavigation()
-                            selectedNavTab = tab
-                            viewModel.setCurrentNavTab(tab)
-                            viewModel.setNavigationContentVisible(true)
                         }
                     )
                 }
