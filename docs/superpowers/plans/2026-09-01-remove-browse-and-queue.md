@@ -139,7 +139,7 @@ git show HEAD -- android/app/src/main/java/com/sendspindroid/ui/navigation   | g
 while read -r ref; do
   name="${ref##*.}"
   kind=$(echo "$ref" | cut -d. -f2)
-  n=$(grep -rl "R\.$kind\.$name\|@$kind/$name" android/app/src --include=*.kt --include=*.xml 2>/dev/null | wc -l)
+  n=$(grep -rl "R\.$kind\.$name\b\|@$kind/$name\b" android/app/src --include=*.kt --include=*.xml 2>/dev/null | wc -l)
   [ "$n" -eq 0 ] && echo "ORPHANED: $kind/$name"
 done < /tmp/candidates.txt
 ```
@@ -148,7 +148,7 @@ Delete only the names that print as ORPHANED. `ic_nav_home`, `ic_nav_library` an
 `ic_nav_search` were used by these screens -- expect them in the list, but let the
 check decide rather than assuming.
 
-Use `` word boundaries as shown: a substring match makes `ic_nav_home` look live
+Use the `` word boundaries shown in the grep: a substring match makes `ic_nav_home` look live
 when only `ic_nav_home_selected` survives, and the reverse.
 
 - [ ] **Step 7: Verify build and full suite**
