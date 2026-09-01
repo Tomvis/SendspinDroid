@@ -3,16 +3,12 @@ package com.sendspindroid.ui.main
 import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import com.sendspindroid.UserSettings
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.model.UnifiedServer
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
 
 /**
  * ViewModel for MainActivity.
@@ -97,22 +93,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     private val _isNavigationContentVisible = MutableStateFlow(false)
     val isNavigationContentVisible: StateFlow<Boolean> = _isNavigationContentVisible.asStateFlow()
-
-    private val _currentNavTab = MutableStateFlow(NavTab.HOME)
-    val currentNavTab: StateFlow<NavTab> = _currentNavTab.asStateFlow()
-
-    // Detail navigation back stack (supports nested navigation e.g. Artist -> Album)
-    private val _detailBackStack = MutableStateFlow<List<DetailDestination>>(emptyList())
-    val detailBackStack: StateFlow<List<DetailDestination>> = _detailBackStack.asStateFlow()
-
-    // M-23: Derive via map + stateIn instead of a leaked coroutine with stale-read risk.
-    // The previous pattern used MutableStateFlow + viewModelScope.launch { collect {} }
-    // which could read stale values during rapid updates. The map/stateIn approach is
-    // declarative and guaranteed to stay in sync.
-    /** The currently visible detail destination, or null if browsing. */
-    val currentDetail: StateFlow<DetailDestination?> = _detailBackStack
-        .map { it.lastOrNull() }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, _detailBackStack.value.lastOrNull())
 
     // ========================================================================
     // Reconnection State
@@ -217,33 +197,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     fun setNavigationContentVisible(visible: Boolean) {
         _isNavigationContentVisible.value = visible
-    }
-
-    fun setCurrentNavTab(tab: NavTab) {
-        _currentNavTab.value = tab
-    }
-
-    /** Push a detail destination onto the navigation stack. */
-    fun navigateToDetail(destination: DetailDestination) {
-        Log.d(TAG, "Navigate to detail: $destination")
-        _detailBackStack.value = _detailBackStack.value + destination
-    }
-
-    /**
-     * Pop the top detail destination off the stack.
-     * @return true if a destination was popped, false if the stack was already empty.
-     */
-    fun navigateDetailBack(): Boolean {
-        val current = _detailBackStack.value
-        if (current.isEmpty()) return false
-        Log.d(TAG, "Navigate detail back (stack depth: ${current.size})")
-        _detailBackStack.value = current.dropLast(1)
-        return true
-    }
-
-    /** Clear the entire detail navigation stack (e.g. on disconnect). */
-    fun clearDetailNavigation() {
-        _detailBackStack.value = emptyList()
     }
 
     // ========================================================================

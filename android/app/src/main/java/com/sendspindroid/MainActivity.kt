@@ -117,7 +117,6 @@ import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.adaptive.determineFormFactor
 import com.sendspindroid.ui.adaptive.isTvDevice
 import com.sendspindroid.ui.theme.SendSpinTheme
-import com.sendspindroid.ui.main.NavTab
 
 /**
  * Main activity for the SendSpinDroid audio streaming client.
@@ -922,9 +921,6 @@ class MainActivity : AppCompatActivity() {
     // Legacy field - navigation is now Compose-based but some callbacks still reference this
     private var isNavigationContentVisible = false
 
-    // Current selected navigation tab (legacy - navigation is now Compose-based)
-    private var currentNavTab: Int = 0
-
     // setupBottomNavigation() removed - navigation is now Compose-based (AppShell)
     private fun setupBottomNavigation() {
         // Bottom navigation and mini player are now handled by Compose AppShell
@@ -1089,11 +1085,6 @@ class MainActivity : AppCompatActivity() {
     private fun setupBackPressHandler() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                // Check if a Compose detail screen is showing
-                if (viewModel.navigateDetailBack()) {
-                    return
-                }
-
                 // Legacy path: XML-based navigation content
                 if (isNavigationContentVisible) {
                     if (supportFragmentManager.backStackEntryCount > 0) {
@@ -2573,9 +2564,6 @@ class MainActivity : AppCompatActivity() {
 
         val fragment = QueueSheetFragment.newInstance()
         fragment.onBrowseLibrary = {
-            // Navigate to Library tab when "Browse Library" is tapped from empty queue
-            // Navigation is now Compose-based via ViewModel
-            viewModel.setCurrentNavTab(NavTab.LIBRARY)
             viewModel.setNavigationContentVisible(true)
         }
         fragment.show(supportFragmentManager, QueueSheetFragment.TAG)
@@ -3413,12 +3401,10 @@ class MainActivity : AppCompatActivity() {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
             android.R.id.home -> {
-                // Toolbar back button -- pop Compose detail or legacy fragment
-                if (!viewModel.navigateDetailBack()) {
-                    if (supportFragmentManager.backStackEntryCount > 0) {
-                        supportFragmentManager.popBackStack()
-                        updateToolbarForNavigation()
-                    }
+                // Toolbar back button -- pop legacy fragment
+                if (supportFragmentManager.backStackEntryCount > 0) {
+                    supportFragmentManager.popBackStack()
+                    updateToolbarForNavigation()
                 }
                 true
             }
