@@ -1,7 +1,5 @@
 package com.sendspindroid.playback
 
-import android.net.Uri
-import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import com.sendspindroid.model.UnifiedServer
@@ -115,9 +113,7 @@ object AutoBrowseTree {
     fun browsableItem(
         mediaId: String,
         title: String,
-        subtitle: String? = null,
-        extras: Bundle? = null,
-        iconRes: Int = 0
+        subtitle: String? = null
     ): MediaItem {
         return MediaItem.Builder()
             .setMediaId(mediaId)
@@ -128,12 +124,6 @@ object AutoBrowseTree {
                     .setIsPlayable(false)
                     .setIsBrowsable(true)
                     .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
-                    .apply {
-                        if (extras != null) setExtras(extras)
-                        if (iconRes != 0) {
-                            setArtworkUri(Uri.parse("android.resource://com.sendspindroid/$iconRes"))
-                        }
-                    }
                     .build()
             )
             .build()
