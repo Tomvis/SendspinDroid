@@ -297,6 +297,15 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var decoderReady = false
 
+    // Identifies the stream a chunk belongs to, mirroring
+    // SyncAudioPlayer.streamGeneration one layer down. onAudioChunk snapshots
+    // it on WS-IO at enqueue time and the decode worker re-checks it before
+    // decoding, so chunks from a superseded stream are discarded no matter how
+    // long they sat on the main dispatch queue or in decodeChannel. Ordering
+    // and drains can both be defeated by in-flight work; a tag cannot.
+    // Single-writer: only the WS-IO stream callbacks mutate it.
+    @Volatile
+    private var decodeGeneration = 0
 
     // Playback state exposed as StateFlow (like Python CLI's AppState)
     private val _playbackState = MutableStateFlow(PlaybackState())
@@ -585,7 +594,11 @@ class PlaybackService : MediaLibraryService() {
      * for the H-4 + M-8 rationale.
      */
     private sealed class DecodeTask {
-        data class Chunk(val serverTimeMicros: Long, val audioData: ByteArray) : DecodeTask() {
+        data class Chunk(
+            val serverTimeMicros: Long,
+            val audioData: ByteArray,
+            val generation: Int,
+        ) : DecodeTask() {
             // Override equals/hashCode because data classes with ByteArray use
             // reference equality by default, which is surprising. In practice
             // DecodeTask instances are only compared in tests.
@@ -593,10 +606,12 @@ class PlaybackService : MediaLibraryService() {
                 if (this === other) return true
                 if (other !is Chunk) return false
                 return serverTimeMicros == other.serverTimeMicros &&
+                    generation == other.generation &&
                     audioData.contentEquals(other.audioData)
             }
             override fun hashCode(): Int {
                 var result = serverTimeMicros.hashCode()
+                result = 31 * result + generation
                 result = 31 * result + audioData.contentHashCode()
                 return result
             }
@@ -1136,6 +1151,13 @@ class PlaybackService : MediaLibraryService() {
      * installed (matches the previous onAudioChunk behavior).
      */
     private suspend fun handleDecodeChunk(t: DecodeTask.Chunk) {
+        // Drop chunks belonging to a stream that has since ended or been
+        // replaced. Popping and discarding costs microseconds, so a ~30-second
+        // look-ahead backlog clears near-instantly instead of grinding through
+        // syncAudioPlayer.queueChunk back-pressure at real-time rate -- that
+        // stall is what delayed decoder reconfiguration in issue #114.
+        if (t.generation != decodeGeneration) return
+
         val decoder = audioDecoder
         val pcmData: ByteArray = try {
             when {
@@ -1489,6 +1511,13 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
+            // Invalidate every chunk from the stream being replaced. Bumping
+            // here -- on WS-IO, before anything new is queued -- means chunks
+            // already in flight toward decodeChannel carry the old tag and are
+            // dropped by the worker. That is what stops a track change from
+            // replaying ~30s of the previous track's look-ahead buffer (#114).
+            decodeGeneration++
+
             // Post decoder lifecycle to the single-owner decode worker via the
             // channel. FIFO ordering between StartStream and any subsequent
             // Chunk tasks ensures the new decoder is in place before its
@@ -1578,6 +1607,10 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onStreamEnd() {
             Log.i(TAG, "[cmd-trace] T2 onStreamEnd ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
+
+            // Invalidate the ending stream's pre-buffered chunks (issue #114).
+            decodeGeneration++
+
             mainHandler.post {
                 Log.i(TAG, "[cmd-trace] T3 onStreamEnd.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
                 Log.i(TAG, "Stream end - server terminated playback")
@@ -1602,8 +1635,13 @@ class PlaybackService : MediaLibraryService() {
             // corrupts codec state (this is exactly the regression PR #142
             // introduced via drop-oldest). Suspend-on-full is the
             // correctness property; see design doc H-4 / M-8 rationale.
+
+            // Snapshot on WS-IO so the tag reflects the stream this chunk
+            // actually arrived on, not whatever is current by the time the
+            // launched coroutine runs on the main dispatcher.
+            val generation = decodeGeneration
             serviceScope.launch {
-                decodeChannel.send(DecodeTask.Chunk(serverTimeMicros, audioData))
+                decodeChannel.send(DecodeTask.Chunk(serverTimeMicros, audioData, generation))
             }
         }
 
