@@ -176,7 +176,8 @@ git commit -m "refactor(ui): delete the orphaned browse package"
 
 **Files:**
 - Modify: `android/app/src/main/java/com/sendspindroid/playback/AutoBrowseTree.kt` (253 lines)
-- Modify: `android/app/src/main/java/com/sendspindroid/playback/PlaybackService.kt` (4,285 lines) -- the `onGetChildren` / `onGetItem` / `onSearch` MA branches and the `MusicAssistant.getPlaylists` / `getAlbums` / `getArtists` / `getRadioStations` / `search` helpers
+- Modify: `android/app/src/main/java/com/sendspindroid/playback/PlaybackService.kt` (4,285 lines) -- the `onGetChildren` / `onGetItem` / `onSearch` MA branches, the `MusicAssistant.getPlaylists` / `getAlbums` / `getArtists` / `getRadioStations` / `search` helpers, and the voice-search path at roughly :3783-3835
+- Delete: `android/app/src/main/java/com/sendspindroid/playback/AutoVoiceSearch.kt` (Music Assistant library search for Android Auto voice commands -- see Step 3)
 - Test: `android/app/src/test/java/com/sendspindroid/playback/AutoBrowseTreeTest.kt`
 
 **Interfaces:**
@@ -271,6 +272,27 @@ In `AutoBrowseTree.kt`: delete the MA constants, the tree nodes that expose Play
 In `PlaybackService.kt`: delete the `onGetChildren` and `onGetItem` branches that match MA media IDs, the `onSearch` implementation if it only ever searched Music Assistant, and the private helpers that call `MusicAssistant.getPlaylists` / `getAlbums` / `getArtists` / `getRadioStations` / `search`. Delete the MA media-ID constants mirrored at the top of the file.
 
 If `onSearch` becomes an override whose body no longer does anything meaningful, delete the override entirely rather than leaving it returning an empty result -- an empty override is a vestigial stub.
+
+**Android Auto voice search goes with it.** This is not optional and the test above
+forces it: `playbackServiceCallsNoLibraryMethods` asserts `MusicAssistant.search` is
+absent, and the voice-search path is what calls it.
+
+- `playback/AutoVoiceSearch.kt` imports `com.sendspindroid.musicassistant.SearchResults`
+  and exposes `pickFromResults`, `unavailableMessage` and `noRecentTracksMessage`.
+- `PlaybackService.kt` drives it at roughly :3783-3835 -- the `onSearch` / voice-command
+  path that turns "play X" from a car into a Music Assistant library search.
+
+Delete `AutoVoiceSearch.kt` and the PlaybackService voice-search path together. Then
+check whether `notifyVoiceSearchError` and any voice-search-only string resources are
+left with zero callers, and delete those too.
+
+Why it cannot be kept: voice search is Music Assistant LIBRARY search. SendSpin's
+protocol defines no search message and no library, so there is nothing for a
+SendSpin-native voice search to query. It only ever worked while MA was connected.
+There is no port, only deletion.
+
+Keep the MediaSession voice controls that do not need a library -- play, pause, next,
+previous. Those are transport commands, not search, and they continue to work in Auto.
 
 Do NOT remove `MusicAssistant.initialize`, `queueUpdates`, `connectionState`, `MaProxyImageFetcher`, or the DataChannel calls. Those serve artwork, prefetch and connection state, and belong to later plans.
 
