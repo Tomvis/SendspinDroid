@@ -267,8 +267,6 @@ private fun NowPlayingPortrait(
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
-    albumArtFraction: Float = 0.7f,
-    compactControls: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -283,7 +281,7 @@ private fun NowPlayingPortrait(
         AlbumArtCard(
             artworkSource = artworkSource,
             isBuffering = isBuffering,
-            modifier = Modifier.fillMaxWidth(albumArtFraction)
+            modifier = Modifier.fillMaxWidth(0.7f)
         )
 
         Spacer(modifier = Modifier.height(24.dp))
@@ -362,7 +360,6 @@ private fun NowPlayingPortrait(
             onPlayPauseClick = onPlayPauseClick,
             onNextClick = onNextClick,
             showSecondaryRow = true,
-            compactLayout = compactControls,
             isSwitchGroupEnabled = controlsEnabled,
             onSwitchGroupClick = onSwitchGroupClick,
             showFavorite = isMaConnected,
@@ -409,7 +406,6 @@ private fun NowPlayingLandscape(
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
-    showSecondaryRow: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -506,7 +502,6 @@ private fun NowPlayingLandscape(
                 onPreviousClick = onPreviousClick,
                 onPlayPauseClick = onPlayPauseClick,
                 onNextClick = onNextClick,
-                showSecondaryRow = showSecondaryRow,
                 isSwitchGroupEnabled = controlsEnabled,
                 onSwitchGroupClick = onSwitchGroupClick,
                 showFavorite = isMaConnected,

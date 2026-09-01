@@ -91,7 +91,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     // ========================================================================
 
     private val _isNavigationContentVisible = MutableStateFlow(false)
-    val isNavigationContentVisible: StateFlow<Boolean> = _isNavigationContentVisible.asStateFlow()
 
     // ========================================================================
     // Reconnection State
