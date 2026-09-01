@@ -41,7 +41,10 @@ Delete the user-facing paths first so nothing can reach the stack while it is be
 - Modify: `android/app/src/main/java/com/sendspindroid/MainActivity.kt` (imports at :83-84 and their call sites)
 - Modify: `android/app/src/main/java/com/sendspindroid/ui/server/AddServerWizardActivity.kt` (:30 `RemoteConnection`, :35 `QrScannerDialog`, the scan handler around :343)
 - Modify: `android/app/src/main/java/com/sendspindroid/ui/server/AddServerWizardViewModel.kt` (`remoteId`, proxy fields)
-- Modify: `android/app/src/main/java/com/sendspindroid/ui/wizard/WizardNavigation.kt` (`RemoteAccessMethod` at :58-62)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/wizard/WizardNavigation.kt` (`RemoteAccessMethod` at :58-62, AND six `WizardStep` values -- see below)
+- Delete: `android/app/src/main/java/com/sendspindroid/ui/wizard/steps/RemoteQuestionStep.kt` (134 lines)
+- Delete: `android/app/src/main/java/com/sendspindroid/ui/wizard/steps/RemoteSetupStep.kt` (321 lines)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/wizard/AddServerWizardScreen.kt` (remote/proxy state, actions and the `ProxyAuthMode` enum -- see below)
 - Modify: `android/app/src/main/res/layout/item_saved_proxy_server.xml` (delete if unreferenced after)
 - Test: `android/app/src/test/java/com/sendspindroid/ui/RemoteUiGoneTest.kt`
 
@@ -52,6 +55,32 @@ Delete the user-facing paths first so nothing can reach the stack while it is be
 **Note on `QrScannerDialog`:** it has exactly two callers, `RemoteConnectDialog.kt:119` and `AddServerWizardActivity.kt:343`, and both scan a remote ID. Deleting it removes the app's only QR *scanning* capability. The pairing flow *displays* a QR code for other devices to scan and does not scan one, so nothing else needs it today. Say so in your report -- if a future pairing flow wants to scan a token, this is the code it would restore.
 
 **On `RemoteAccessMethod`:** it has three values -- `NONE`, `REMOTE_ID`, `PROXY`. Removing two leaves a single-valued enum, which is a vestigial type. If `NONE` is the only survivor and the enum is only used to branch, delete the enum and collapse its consumers to the local path. Report what you found either way.
+
+**The wizard's remote surface is larger than it looks.** A grep for `RemoteAccessMethod`
+finds the enum; it does not find the six wizard STEPS that exist to configure remote
+access, nor the state machine driving them. All of the following go:
+
+`WizardNavigation.kt` -- delete these six `WizardStep` values and every branch that
+reaches them:
+
+- `MA_RemoteQuestion`, `MA_RemoteSetup`, `MA_TestRemote`
+- `MA_RemoteOnlySetup`, `MA_TestRemoteOnly`, `MA_LoginRemote`
+
+KEEP the Music Assistant LOCAL steps -- `MA_NetworkQuestion`, `MA_FindServer`,
+`MA_TestLocal`, `MA_Login`, `MA_Finish` -- and the whole SendSpin path. The split is by
+CAPABILITY, not by name prefix: this plan removes remote access wherever it appears, and
+a later plan removes Music Assistant entirely. Deleting an `MA_` step because of its
+prefix would take local setup with it.
+
+`AddServerWizardScreen.kt` -- delete `remoteId`, `proxyUrl`, `proxyAuthMode`, the
+`ProxyAuthMode` enum (around :483), the `SelectRemoteMethod` and `UpdateProxyAuthMode`
+actions, and the `remoteAccessMethod` state field. Note its default is
+`RemoteAccessMethod.REMOTE_ID` (around :461), so the wizard currently defaults to a path
+this plan deletes -- whatever replaces it must default to the local path.
+
+`steps/RemoteQuestionStep.kt` and `steps/RemoteSetupStep.kt` are deleted whole. Check
+whether `steps/TestingStep.kt` or `steps/FinishStep.kt` branch on remote state and
+collapse those branches to the local path rather than leaving them unreachable.
 
 - [ ] **Step 1: Write the failing test**
 
