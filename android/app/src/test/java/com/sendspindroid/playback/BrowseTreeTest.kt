@@ -10,7 +10,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -51,8 +50,8 @@ class BrowseTreeTest {
     // ========== Root children ==========
 
     @Test
-    fun `root shows Connect when MA unavailable and disconnected`() {
-        val children = AutoBrowseTree.rootChildren(maAvailable = false, isConnected = false)
+    fun `root shows Connect when disconnected`() {
+        val children = AutoBrowseTree.rootChildren(isConnected = false)
 
         assertEquals(1, children.size)
         assertEquals(AutoBrowseTree.MEDIA_ID_DISCOVERED, children[0].mediaId)
@@ -62,8 +61,8 @@ class BrowseTreeTest {
     }
 
     @Test
-    fun `root shows Connect with Connected subtitle when connected without MA`() {
-        val children = AutoBrowseTree.rootChildren(maAvailable = false, isConnected = true)
+    fun `root shows Connect with Connected subtitle when connected`() {
+        val children = AutoBrowseTree.rootChildren(isConnected = true)
 
         assertEquals(1, children.size)
         assertEquals("Connect", children[0].mediaMetadata.title)
@@ -71,41 +70,9 @@ class BrowseTreeTest {
     }
 
     @Test
-    fun `root shows library categories when MA is available`() {
-        val children = AutoBrowseTree.rootChildren(maAvailable = true, isConnected = true)
-
-        assertEquals(
-            listOf(
-                AutoBrowseTree.MEDIA_ID_MA_PLAYLISTS,
-                AutoBrowseTree.MEDIA_ID_MA_ALBUMS,
-                AutoBrowseTree.MEDIA_ID_MA_ARTISTS,
-                AutoBrowseTree.MEDIA_ID_MA_RADIO,
-            ),
-            children.map { it.mediaId }
-        )
-        assertEquals(
-            listOf("Playlists", "Albums", "Artists", "Radio"),
-            children.map { it.mediaMetadata.title.toString() }
-        )
-    }
-
-    @Test
     fun `root never returns an empty list`() {
-        assertTrue(AutoBrowseTree.rootChildren(maAvailable = false, isConnected = false).isNotEmpty())
-        assertTrue(AutoBrowseTree.rootChildren(maAvailable = false, isConnected = true).isNotEmpty())
-        assertTrue(AutoBrowseTree.rootChildren(maAvailable = true, isConnected = true).isNotEmpty())
-    }
-
-    @Test
-    fun `library categories are browsable not playable`() {
-        val children = AutoBrowseTree.rootChildren(maAvailable = true, isConnected = true)
-
-        children.forEach { item ->
-            assertEquals("${item.mediaMetadata.title} should be browsable",
-                true, item.mediaMetadata.isBrowsable)
-            assertEquals("${item.mediaMetadata.title} should not be playable",
-                false, item.mediaMetadata.isPlayable)
-        }
+        assertTrue(AutoBrowseTree.rootChildren(isConnected = false).isNotEmpty())
+        assertTrue(AutoBrowseTree.rootChildren(isConnected = true).isNotEmpty())
     }
 
     // ========== Server list ("Connect" node) ==========
@@ -295,38 +262,5 @@ class BrowseTreeTest {
         assertEquals(1, items.size)
         assertEquals("Saved", items[0].mediaMetadata.title)
         assertEquals(0L, currentTime)
-    }
-
-    @Test
-    fun `MA category nodes replace empty results with a message row`() {
-        val categories = listOf(
-            AutoBrowseTree.MEDIA_ID_MA_PLAYLISTS to "No playlists found",
-            AutoBrowseTree.MEDIA_ID_MA_ALBUMS to "No albums found",
-            AutoBrowseTree.MEDIA_ID_MA_ARTISTS to "No artists found",
-            AutoBrowseTree.MEDIA_ID_MA_RADIO to "No radio stations found",
-            AutoBrowseTree.MEDIA_ID_MA_PLAYLIST_PREFIX + "id~provider" to "No tracks found",
-            AutoBrowseTree.MEDIA_ID_MA_ALBUM_PREFIX + "id~provider" to "No tracks found",
-            AutoBrowseTree.MEDIA_ID_MA_ARTIST_PREFIX + "id~provider" to "No albums found",
-        )
-
-        categories.forEach { (parentId, expectedTitle) ->
-            val items = AutoBrowseTree.withEmptyState(parentId, emptyList())
-            assertEquals("$parentId should get exactly one message row", 1, items.size)
-            assertEquals(expectedTitle, items[0].mediaMetadata.title)
-            assertEquals(false, items[0].mediaMetadata.isPlayable)
-            assertEquals(false, items[0].mediaMetadata.isBrowsable)
-            assertTrue(items[0].mediaId.startsWith(AutoBrowseTree.MEDIA_ID_MESSAGE_PREFIX))
-        }
-    }
-
-    @Test
-    fun `withEmptyState passes non-empty lists through unchanged`() {
-        val item = AutoBrowseTree.playableServerItem("Test", "10.0.0.1:8927")
-
-        val items = AutoBrowseTree.withEmptyState(AutoBrowseTree.MEDIA_ID_MA_PLAYLISTS, listOf(item))
-
-        assertEquals(1, items.size)
-        assertEquals(item.mediaId, items[0].mediaId)
-        assertFalse(items[0].mediaId.startsWith(AutoBrowseTree.MEDIA_ID_MESSAGE_PREFIX))
     }
 }

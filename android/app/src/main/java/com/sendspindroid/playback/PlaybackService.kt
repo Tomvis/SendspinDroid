@@ -58,12 +58,7 @@ import com.sendspindroid.model.PlaybackState
 import com.sendspindroid.model.PlaybackStateType
 import com.sendspindroid.model.SyncStats
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.musicassistant.MaAlbum
-import com.sendspindroid.musicassistant.MaArtist
-import com.sendspindroid.musicassistant.MaPlaylist
 import com.sendspindroid.musicassistant.MaQueueItem
-import com.sendspindroid.musicassistant.MaRadio
-import com.sendspindroid.musicassistant.MaTrack
 import com.sendspindroid.musicassistant.MusicAssistant
 import com.sendspindroid.musicassistant.QueueUpdate
 import com.sendspindroid.sendspin.SendSpin
@@ -164,59 +159,8 @@ class PlaybackService : MediaLibraryService() {
     // mDNS discovery for Android Auto browse tree
     private var browseDiscoveryManager: NsdDiscoveryManager? = null
 
-    // ========================================================================
-    // Music Assistant Browse Tree - Cache & Helpers
-    // ========================================================================
-
-    /** Simple time-based cache entry. */
-    private data class CacheEntry<T>(val data: T, val time: Long = System.currentTimeMillis()) {
-        fun expired(ttl: Long) = System.currentTimeMillis() - time > ttl
-    }
-
-    // MA list caches
-    private var maPlaylistsCache: CacheEntry<List<MediaItem>>? = null
-    private var maAlbumsCache: CacheEntry<List<MediaItem>>? = null
-    private var maArtistsCache: CacheEntry<List<MediaItem>>? = null
-    private var maRadioCache: CacheEntry<List<MediaItem>>? = null
-
-    // MA drill-down caches (keyed by item ID)
-    private val maPlaylistTracksCache = mutableMapOf<String, CacheEntry<List<MediaItem>>>()
-    private val maAlbumTracksCache = mutableMapOf<String, CacheEntry<List<MediaItem>>>()
-    private val maArtistAlbumsCache = mutableMapOf<String, CacheEntry<List<MediaItem>>>()
-
-    // MA search result cache
-    private var maSearchResultsCache: List<MediaItem>? = null
-
     // Generation counter for populatePlayerQueue() to discard stale async results
     private var queuePopulateGeneration = 0L
-
-    /** Clears all MA caches (called on MA disconnect). */
-    private fun clearMaCaches() {
-        maPlaylistsCache = null
-        maAlbumsCache = null
-        maArtistsCache = null
-        maRadioCache = null
-        maPlaylistTracksCache.clear()
-        maAlbumTracksCache.clear()
-        maArtistAlbumsCache.clear()
-        maSearchResultsCache = null
-    }
-
-    /** Encodes a URI to Base64 URL-safe string for use in media IDs. */
-    private fun encodeMediaUri(uri: String): String {
-        return android.util.Base64.encodeToString(
-            uri.toByteArray(Charsets.UTF_8),
-            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING
-        )
-    }
-
-    /** Decodes a Base64 URL-safe media ID back to a URI. */
-    private fun decodeMediaUri(encoded: String): String {
-        return String(
-            android.util.Base64.decode(encoded, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING),
-            Charsets.UTF_8
-        )
-    }
 
     /** Bridges a suspend function into a ListenableFuture for MediaLibrarySession callbacks. */
     private fun <T> suspendToFuture(block: suspend () -> T): ListenableFuture<T> {
@@ -540,37 +484,15 @@ class PlaybackService : MediaLibraryService() {
         // Android Auto content style hint keys
         private const val CONTENT_STYLE_BROWSABLE = AutoBrowseTree.CONTENT_STYLE_BROWSABLE
         private const val CONTENT_STYLE_PLAYABLE = AutoBrowseTree.CONTENT_STYLE_PLAYABLE
-        private const val CONTENT_STYLE_SINGLE_ITEM = AutoBrowseTree.CONTENT_STYLE_SINGLE_ITEM
-        private const val CONTENT_STYLE_GROUP_TITLE = AutoBrowseTree.CONTENT_STYLE_GROUP_TITLE
         private const val CONTENT_STYLE_LIST = AutoBrowseTree.CONTENT_STYLE_LIST
-        private const val CONTENT_STYLE_GRID = AutoBrowseTree.CONTENT_STYLE_GRID
-
-        // Music Assistant browse tree media IDs
-        private const val MEDIA_ID_MA_PLAYLISTS = AutoBrowseTree.MEDIA_ID_MA_PLAYLISTS
-        private const val MEDIA_ID_MA_ALBUMS = AutoBrowseTree.MEDIA_ID_MA_ALBUMS
-        private const val MEDIA_ID_MA_ARTISTS = AutoBrowseTree.MEDIA_ID_MA_ARTISTS
-        private const val MEDIA_ID_MA_RADIO = AutoBrowseTree.MEDIA_ID_MA_RADIO
-
-        // MA item prefixes (for drill-down into children)
-        private const val MEDIA_ID_MA_PLAYLIST_PREFIX = AutoBrowseTree.MEDIA_ID_MA_PLAYLIST_PREFIX
-        private const val MEDIA_ID_MA_ALBUM_PREFIX = AutoBrowseTree.MEDIA_ID_MA_ALBUM_PREFIX
-        private const val MEDIA_ID_MA_ARTIST_PREFIX = AutoBrowseTree.MEDIA_ID_MA_ARTIST_PREFIX
 
         // How long the "Connect" browse node waits for the first mDNS result
         // before showing the "No servers found" guidance row. Keeps the first
         // browse on Android Auto from racing discovery and rendering empty.
         private const val BROWSE_DISCOVERY_WAIT_MS = 3_000L
 
-        // MA leaf item prefixes (playable, URI encoded as Base64)
-        private const val MEDIA_ID_MA_TRACK_PREFIX = "ma_track_"
-        private const val MEDIA_ID_MA_RADIO_ITEM_PREFIX = "ma_radio_item_"
-
         // MA Queue item prefix (for native Now Playing queue)
         private const val MEDIA_ID_MA_QUEUE_ITEM_PREFIX = "ma_qi_"
-
-        // MA cache TTLs
-        private const val MA_LIST_CACHE_TTL_MS = 5 * 60 * 1000L   // 5 minutes
-        private const val MA_DETAIL_CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes
 
         // Exposes the coordinator's network state for in-process observers (e.g. MainActivity).
         // Updated by the service's existing coordinator.networkState collector.
@@ -2773,23 +2695,6 @@ class PlaybackService : MediaLibraryService() {
             .build()
 
         Log.d(TAG, "MediaLibrarySession initialized with browse tree support")
-
-        // Watch MA connection state to refresh browse tree root when Library appears/disappears
-        serviceScope.launch {
-            var wasAvailable = MusicAssistant.connectionState.value is TransportState.Ready
-            MusicAssistant.connectionState.collect { state ->
-                val isNowAvailable = state is TransportState.Ready
-                if (isNowAvailable != wasAvailable) {
-                    Log.i(TAG, "MA availability changed: $wasAvailable -> $isNowAvailable")
-                    wasAvailable = isNowAvailable
-                    if (!isNowAvailable) {
-                        clearMaCaches()
-                    }
-                    // Notify that root children changed (Library folder appears/disappears)
-                    mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
-                }
-            }
-        }
     }
 
     private inner class LibraryCallback : MediaLibrarySession.Callback {
@@ -2820,9 +2725,9 @@ class PlaybackService : MediaLibraryService() {
                 )
                 .build()
 
-            // Build LibraryParams with search support and content style defaults
+            // Build LibraryParams with content style defaults. Search is not
+            // advertised: SendSpin defines no library to search.
             val extras = Bundle().apply {
-                putBoolean("android.media.browse.SEARCH_SUPPORTED", true)
                 putInt(CONTENT_STYLE_BROWSABLE, CONTENT_STYLE_LIST)
                 putInt(CONTENT_STYLE_PLAYABLE, CONTENT_STYLE_LIST)
             }
@@ -2848,11 +2753,14 @@ class PlaybackService : MediaLibraryService() {
                 )
             }
 
-            // Async path: server discovery (bounded mDNS wait) and MA data fetches
+            // Async path: server discovery (bounded mDNS wait)
             return suspendToFuture {
                 val items = when (parentId) {
                     MEDIA_ID_DISCOVERED -> getDiscoveredServers()
-                    else -> getMaChildren(parentId)
+                    else -> {
+                        Log.w(TAG, "Unknown parentId for onGetChildren: $parentId")
+                        emptyList()
+                    }
                 }
                 LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
             }
@@ -2881,14 +2789,6 @@ class PlaybackService : MediaLibraryService() {
             mediaItems: List<MediaItem>
         ): ListenableFuture<List<MediaItem>> {
             Log.d(TAG, "onAddMediaItems: ${mediaItems.size} items")
-
-            // Voice search (VC-1): "OK Google, play X on SendSpinDroid"
-            // arrives with requestMetadata.searchQuery set
-            val searchQuery = mediaItems.firstOrNull()?.requestMetadata?.searchQuery
-            if (searchQuery != null) {
-                Log.d(TAG, "Voice search detected: query='$searchQuery'")
-                return handleVoiceSearch(searchQuery, mediaItems)
-            }
 
             val updatedItems = mediaItems.map { item ->
                 val mediaId = item.mediaId
@@ -2961,7 +2861,7 @@ class PlaybackService : MediaLibraryService() {
                             .setUri("sendspin://$serverAddress")
                             .build()
                     }
-                    // MA media items (tracks, playlists, albums, radio)
+                    // MA queue items (native Now Playing queue)
                     mediaId.startsWith("ma_") -> {
                         Log.d(TAG, "MA media item selected: $mediaId")
                         handleMaMediaItem(mediaId)
@@ -2971,84 +2871,6 @@ class PlaybackService : MediaLibraryService() {
             }
 
             return Futures.immediateFuture(updatedItems)
-        }
-
-        override fun onSearch(
-            session: MediaLibrarySession,
-            browser: MediaSession.ControllerInfo,
-            query: String,
-            params: LibraryParams?
-        ): ListenableFuture<LibraryResult<Void>> {
-            Log.d(TAG, "onSearch: query='$query'")
-
-            // The root always advertises SEARCH_SUPPORTED, so report zero
-            // results instead of an error when MA isn't available. Android
-            // Auto then shows its own "no results" UI rather than a failure.
-            if (MusicAssistant.connectionState.value !is TransportState.Ready) {
-                maSearchResultsCache = emptyList()
-                session.notifySearchResultChanged(browser, query, 0, params)
-                return Futures.immediateFuture(LibraryResult.ofVoid())
-            }
-
-            // Execute search async, cache results, notify when done
-            serviceScope.launch {
-                try {
-                    val result = MusicAssistant.search(
-                        query = query,
-                        limit = 25,
-                        libraryOnly = false
-                    )
-                    val searchResults = result.getOrNull()
-                    if (searchResults != null) {
-                        // Build flat list grouped by type (contiguous blocks with group titles)
-                        val items = mutableListOf<MediaItem>()
-                        searchResults.tracks.forEach { items.add(withGroupTitle(createMaTrackItem(it), "Songs")) }
-                        searchResults.albums.forEach { items.add(withGroupTitle(createMaAlbumItem(it), "Albums")) }
-                        searchResults.artists.forEach { items.add(withGroupTitle(createMaArtistItem(it), "Artists")) }
-                        searchResults.playlists.forEach { items.add(withGroupTitle(createMaPlaylistItem(it), "Playlists")) }
-                        searchResults.radios.forEach { items.add(withGroupTitle(createMaRadioItem(it), "Radio")) }
-                        maSearchResultsCache = items.filter { it != MediaItem.EMPTY }
-                        Log.d(TAG, "Search returned ${maSearchResultsCache?.size} results")
-                    } else {
-                        maSearchResultsCache = emptyList()
-                        Log.d(TAG, "Search returned no results")
-                    }
-                    // Notify browser that search results are ready
-                    session.notifySearchResultChanged(browser, query,
-                        maSearchResultsCache?.size ?: 0, params)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Search failed", e)
-                    maSearchResultsCache = emptyList()
-                    session.notifySearchResultChanged(browser, query, 0, params)
-                }
-            }
-
-            return Futures.immediateFuture(LibraryResult.ofVoid())
-        }
-
-        override fun onGetSearchResult(
-            session: MediaLibrarySession,
-            browser: MediaSession.ControllerInfo,
-            query: String,
-            page: Int,
-            pageSize: Int,
-            params: LibraryParams?
-        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
-            Log.d(TAG, "onGetSearchResult: query='$query', page=$page, pageSize=$pageSize")
-
-            val results = maSearchResultsCache ?: emptyList()
-            // Paginate
-            val startIndex = page * pageSize
-            val endIndex = minOf(startIndex + pageSize, results.size)
-            val pageResults = if (startIndex < results.size) {
-                results.subList(startIndex, endIndex)
-            } else {
-                emptyList()
-            }
-
-            return Futures.immediateFuture(
-                LibraryResult.ofItemList(ImmutableList.copyOf(pageResults), params)
-            )
         }
 
         override fun onConnect(
@@ -3385,8 +3207,7 @@ class PlaybackService : MediaLibraryService() {
     }
 
     private fun getRootChildren(): List<MediaItem> {
-        val maAvailable = MusicAssistant.connectionState.value is TransportState.Ready
-        return AutoBrowseTree.rootChildren(maAvailable, isConnected())
+        return AutoBrowseTree.rootChildren(isConnected())
     }
 
     private suspend fun getDiscoveredServers(): List<MediaItem> {
@@ -3443,266 +3264,6 @@ class PlaybackService : MediaLibraryService() {
             }
         })
         browseDiscoveryManager?.startDiscovery()
-    }
-
-    /**
-     * Async routing for MA browse tree nodes.
-     * Called from onGetChildren for any parentId not handled by the sync path.
-     */
-    private suspend fun getMaChildren(parentId: String): List<MediaItem> {
-        val items = when (parentId) {
-            MEDIA_ID_MA_PLAYLISTS -> getMaPlaylists()
-            MEDIA_ID_MA_ALBUMS -> getMaAlbums()
-            MEDIA_ID_MA_ARTISTS -> getMaArtists()
-            MEDIA_ID_MA_RADIO -> getMaRadioStations()
-            else -> when {
-                parentId.startsWith(MEDIA_ID_MA_PLAYLIST_PREFIX) -> {
-                    getMaPlaylistTracks(parentId)
-                }
-                parentId.startsWith(MEDIA_ID_MA_ALBUM_PREFIX) -> {
-                    getMaAlbumTracks(parentId)
-                }
-                parentId.startsWith(MEDIA_ID_MA_ARTIST_PREFIX) -> {
-                    getMaArtistAlbums(parentId)
-                }
-                else -> {
-                    Log.w(TAG, "Unknown parentId for MA children: $parentId")
-                    emptyList()
-                }
-            }
-        }
-        // Never hand Android Auto an empty list -- it renders as a blank
-        // "unable to load content" screen (Play Auto quality rejection).
-        return AutoBrowseTree.withEmptyState(parentId, items)
-    }
-
-    // ========================================================================
-    // Music Assistant Item Builders
-    // ========================================================================
-
-    private fun createMaTrackItem(track: MaTrack): MediaItem {
-        val uri = track.uri ?: return MediaItem.EMPTY
-        return MediaItem.Builder()
-            .setMediaId("$MEDIA_ID_MA_TRACK_PREFIX${encodeMediaUri(uri)}")
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(track.name)
-                    .setSubtitle(track.artist)
-                    .setArtist(track.artist)
-                    .setAlbumTitle(track.album)
-                    .setIsPlayable(true)
-                    .setIsBrowsable(false)
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
-                    .apply {
-                        track.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    private fun createMaPlaylistItem(playlist: MaPlaylist): MediaItem {
-        val subtitle = if (playlist.trackCount > 0) "${playlist.trackCount} tracks" else null
-        // Encode provider in mediaId as: ma_playlist_ID~PROVIDER
-        val mediaId = "$MEDIA_ID_MA_PLAYLIST_PREFIX${MaMediaId.encode(playlist.playlistId, playlist.provider)}"
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(playlist.name)
-                    .setSubtitle(subtitle)
-                    .setIsPlayable(true)   // Tap to play entire playlist
-                    .setIsBrowsable(true)  // Drill into tracks
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_PLAYLIST)
-                    .apply {
-                        playlist.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    private fun createMaAlbumItem(album: MaAlbum): MediaItem {
-        val subtitle = buildString {
-            album.artist?.let { append(it) }
-            album.year?.let {
-                if (isNotEmpty()) append(" - ")
-                append(it)
-            }
-        }.ifEmpty { null }
-        // Encode provider in mediaId as: ma_album_ID~PROVIDER
-        val mediaId = "$MEDIA_ID_MA_ALBUM_PREFIX${MaMediaId.encode(album.albumId, album.provider)}"
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(album.name)
-                    .setSubtitle(subtitle)
-                    .setArtist(album.artist)
-                    .setIsPlayable(true)   // Tap to play entire album
-                    .setIsBrowsable(true)  // Drill into tracks
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_ALBUM)
-                    .setExtras(Bundle().apply {
-                        putInt(CONTENT_STYLE_SINGLE_ITEM, CONTENT_STYLE_GRID)
-                    })
-                    .apply {
-                        album.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    private fun createMaArtistItem(artist: MaArtist): MediaItem {
-        // Encode provider in mediaId as: ma_artist_ID~PROVIDER
-        val mediaId = "$MEDIA_ID_MA_ARTIST_PREFIX${MaMediaId.encode(artist.artistId, artist.provider)}"
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(artist.name)
-                    .setIsPlayable(false)  // Browse only (shows albums)
-                    .setIsBrowsable(true)
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_ARTIST)
-                    .setExtras(Bundle().apply {
-                        putInt(CONTENT_STYLE_SINGLE_ITEM, CONTENT_STYLE_GRID)
-                    })
-                    .apply {
-                        artist.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    private fun createMaRadioItem(radio: MaRadio): MediaItem {
-        val uri = radio.uri ?: return MediaItem.EMPTY
-        return MediaItem.Builder()
-            .setMediaId("$MEDIA_ID_MA_RADIO_ITEM_PREFIX${encodeMediaUri(uri)}")
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(radio.name)
-                    .setSubtitle(radio.provider)
-                    .setIsPlayable(true)
-                    .setIsBrowsable(false)
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
-                    .apply {
-                        radio.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    /**
-     * Wraps a MediaItem with a group title extra for Android Auto search result grouping.
-     * Items with the same group title are displayed together under a section header.
-     */
-    private fun withGroupTitle(item: MediaItem, title: String): MediaItem {
-        val existingExtras = item.mediaMetadata.extras
-        val extras = Bundle().apply {
-            if (existingExtras != null) putAll(existingExtras)
-            putString(CONTENT_STYLE_GROUP_TITLE, title)
-        }
-        return item.buildUpon()
-            .setMediaMetadata(
-                item.mediaMetadata.buildUpon()
-                    .setExtras(extras)
-                    .build()
-            )
-            .build()
-    }
-
-    // ========================================================================
-    // Music Assistant Category Listing Methods (suspend)
-    // ========================================================================
-
-    private suspend fun getMaPlaylists(): List<MediaItem> {
-        maPlaylistsCache?.takeUnless { it.expired(MA_LIST_CACHE_TTL_MS) }?.let { return it.data }
-
-        val result = MusicAssistant.getPlaylists(limit = 100)
-        val items = result.getOrNull()?.map { createMaPlaylistItem(it) } ?: emptyList()
-        maPlaylistsCache = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaAlbums(): List<MediaItem> {
-        maAlbumsCache?.takeUnless { it.expired(MA_LIST_CACHE_TTL_MS) }?.let { return it.data }
-
-        val result = MusicAssistant.getAlbums(limit = 100)
-        val items = result.getOrNull()?.map { createMaAlbumItem(it) } ?: emptyList()
-        maAlbumsCache = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaArtists(): List<MediaItem> {
-        maArtistsCache?.takeUnless { it.expired(MA_LIST_CACHE_TTL_MS) }?.let { return it.data }
-
-        val result = MusicAssistant.getArtists(limit = 100)
-        val items = result.getOrNull()?.map { createMaArtistItem(it) } ?: emptyList()
-        maArtistsCache = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaRadioStations(): List<MediaItem> {
-        maRadioCache?.takeUnless { it.expired(MA_LIST_CACHE_TTL_MS) }?.let { return it.data }
-
-        val result = MusicAssistant.getRadioStations(limit = 100)
-        val items = result.getOrNull()?.map { createMaRadioItem(it) } ?: emptyList()
-        maRadioCache = CacheEntry(items)
-        return items
-    }
-
-    // ========================================================================
-    // Music Assistant Drill-Down Methods (suspend)
-    // ========================================================================
-
-    private suspend fun getMaPlaylistTracks(parentId: String): List<MediaItem> {
-        // Parse parentId: "ma_playlist_ID~PROVIDER" or fallback to "ma_playlist_ID"
-        val (actualPlaylistId, provider) =
-            MaMediaId.decode(parentId.removePrefix(MEDIA_ID_MA_PLAYLIST_PREFIX))
-
-        val cacheKey = MaMediaId.encode(actualPlaylistId, provider)
-        maPlaylistTracksCache[cacheKey]
-            ?.takeUnless { it.expired(MA_DETAIL_CACHE_TTL_MS) }
-            ?.let { return it.data }
-
-        val result = MusicAssistant.getPlaylistTracks(actualPlaylistId, provider)
-        val items = result.getOrNull()?.map { createMaTrackItem(it) } ?: emptyList()
-        maPlaylistTracksCache[cacheKey] = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaAlbumTracks(parentId: String): List<MediaItem> {
-        // Parse parentId: "ma_album_ID~PROVIDER" or fallback to "ma_album_ID"
-        val (actualAlbumId, provider) =
-            MaMediaId.decode(parentId.removePrefix(MEDIA_ID_MA_ALBUM_PREFIX))
-
-        val cacheKey = MaMediaId.encode(actualAlbumId, provider)
-        maAlbumTracksCache[cacheKey]
-            ?.takeUnless { it.expired(MA_DETAIL_CACHE_TTL_MS) }
-            ?.let { return it.data }
-
-        val result = MusicAssistant.getAlbumTracks(actualAlbumId, provider)
-        val items = result.getOrNull()?.map { createMaTrackItem(it) } ?: emptyList()
-        maAlbumTracksCache[cacheKey] = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaArtistAlbums(parentId: String): List<MediaItem> {
-        // Parse parentId: "ma_artist_ID~PROVIDER" or fallback to "ma_artist_ID"
-        val (actualArtistId, provider) =
-            MaMediaId.decode(parentId.removePrefix(MEDIA_ID_MA_ARTIST_PREFIX))
-
-        val cacheKey = MaMediaId.encode(actualArtistId, provider)
-        maArtistAlbumsCache[cacheKey]
-            ?.takeUnless { it.expired(MA_DETAIL_CACHE_TTL_MS) }
-            ?.let { return it.data }
-
-        val result = MusicAssistant.getArtistDetails(actualArtistId, provider)
-        val items = result.getOrNull()?.albums?.map { createMaAlbumItem(it) } ?: emptyList()
-        maArtistAlbumsCache[cacheKey] = CacheEntry(items)
-        return items
     }
 
     /**
@@ -3770,116 +3331,13 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
-    // ========================================================================
-    // Voice Search (VC-1 requirement for Android Auto)
-    // ========================================================================
-
-    /**
-     * Handles voice search from Android Auto ("OK Google, play X on SendSpin Player").
-     * In Media3, voice search arrives via onAddMediaItems with requestMetadata.searchQuery set.
-     *
-     * - Empty/blank query ("play music"): plays recently played tracks
-     * - Non-empty query: searches MA library and plays the best result
-     *   (track > playlist > album, see AutoVoiceSearch.pickFromResults)
-     *
-     * Every dead end produces user-facing feedback instead of a silent no-op:
-     * disconnected requests set a player error with connect guidance; failures
-     * while connected send a transient session error so active playback is
-     * not disturbed.
-     */
-    private fun handleVoiceSearch(
-        query: String,
-        originalItems: List<MediaItem>
-    ): ListenableFuture<List<MediaItem>> {
-        if (MusicAssistant.connectionState.value !is TransportState.Ready) {
-            Log.w(TAG, "Voice search: MA not available")
-            val connected = isConnected()
-            val message = AutoVoiceSearch.unavailableMessage(connected)
-            if (!connected) {
-                // Nothing is playing and nothing can play. Surface actionable
-                // guidance on the car screen instead of a silent no-op (Play
-                // Auto quality: the app must respond to voice actions).
-                // Cleared automatically on the next successful connect.
-                sendSpinPlayer?.setError(message)
-            } else {
-                // Connected to a plain SendSpin server (no MA): playback may
-                // be active, so use a transient session error rather than
-                // putting the player into an error state.
-                notifyVoiceSearchError(message)
-            }
-            return Futures.immediateFuture(originalItems)
-        }
-
-        return suspendToFuture {
-            try {
-                if (query.isBlank()) {
-                    // "Play music on SendSpin Player" - play recently played
-                    Log.d(TAG, "Voice search: empty query, playing recent")
-                    val recent = MusicAssistant.getRecentlyPlayed(limit = 1)
-                    val recentUri = recent.getOrNull()?.firstOrNull()?.uri
-                    if (recentUri != null) {
-                        MusicAssistant.playMedia(recentUri, mediaType = "track")
-                    } else {
-                        Log.w(TAG, "Voice search: no recent tracks to play")
-                        notifyVoiceSearchError(AutoVoiceSearch.noRecentTracksMessage())
-                    }
-                } else {
-                    // "Play Beatles on SendSpin Player" - search and play best result
-                    Log.d(TAG, "Voice search: searching for '$query'")
-                    val result = MusicAssistant.search(
-                        query = query,
-                        limit = 5,
-                        libraryOnly = false
-                    )
-                    when (val pick = AutoVoiceSearch.pickFromResults(result.getOrNull())) {
-                        is AutoVoiceSearch.Pick.Track -> {
-                            Log.d(TAG, "Voice search: playing track '${pick.name}'")
-                            MusicAssistant.playMedia(pick.uri, mediaType = "track")
-                        }
-                        is AutoVoiceSearch.Pick.Playlist -> {
-                            Log.d(TAG, "Voice search: playing playlist '${pick.name}'")
-                            MusicAssistant.playMedia(pick.playlistId, mediaType = "playlist")
-                        }
-                        is AutoVoiceSearch.Pick.Album -> {
-                            Log.d(TAG, "Voice search: playing album '${pick.name}'")
-                            MusicAssistant.playMedia(pick.albumId, mediaType = "album")
-                        }
-                        AutoVoiceSearch.Pick.NoResults -> {
-                            Log.w(TAG, "Voice search: no results for '$query'")
-                            notifyVoiceSearchError(AutoVoiceSearch.noResultsMessage(query))
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Voice search failed", e)
-                notifyVoiceSearchError(AutoVoiceSearch.searchFailedMessage())
-            }
-            // Return original items with a dummy URI so media3 framework doesn't error
-            originalItems.map { item ->
-                item.buildUpon()
-                    .setUri("sendspin://voice-search")
-                    .build()
-            }
-        }
-    }
-
-    /**
-     * Surfaces a non-fatal voice search failure to the car screen / media
-     * notification. Unlike SendSpinPlayer.setError this does not put the
-     * player into an error state, so active playback is unaffected.
-     */
-    private fun notifyVoiceSearchError(message: String) {
-        mainHandler.post {
-            mediaSession?.sendError(SessionError(SessionError.ERROR_INVALID_STATE, message))
-        }
-    }
-
     // Music Assistant MA Playback Dispatch
     // ========================================================================
 
     /**
-     * Handles playback for MA media IDs from the browse tree.
-     * Called from onAddMediaItems when a ma_* media ID is tapped.
+     * Handles playback for MA queue-item media IDs from the native Now
+     * Playing queue. Called from onAddMediaItems when a ma_* media ID is
+     * tapped.
      */
     private fun handleMaMediaItem(mediaId: String): MediaItem {
         serviceScope.launch {
@@ -3889,34 +3347,6 @@ class PlaybackService : MediaLibraryService() {
                         val queueItemId = mediaId.removePrefix(MEDIA_ID_MA_QUEUE_ITEM_PREFIX)
                         Log.d(TAG, "MA: Playing queue item id=$queueItemId")
                         MusicAssistant.playQueueItem(queueItemId)
-                    }
-                    mediaId.startsWith(MEDIA_ID_MA_TRACK_PREFIX) -> {
-                        val encoded = mediaId.removePrefix(MEDIA_ID_MA_TRACK_PREFIX)
-                        val uri = decodeMediaUri(encoded)
-                        Log.d(TAG, "MA: Playing track uri=$uri")
-                        MusicAssistant.playMedia(uri, mediaType = "track")
-                    }
-                    mediaId.startsWith(MEDIA_ID_MA_RADIO_ITEM_PREFIX) -> {
-                        val encoded = mediaId.removePrefix(MEDIA_ID_MA_RADIO_ITEM_PREFIX)
-                        val uri = decodeMediaUri(encoded)
-                        Log.d(TAG, "MA: Playing radio uri=$uri")
-                        MusicAssistant.playMedia(uri, mediaType = "radio")
-                    }
-                    mediaId.startsWith(MEDIA_ID_MA_PLAYLIST_PREFIX) -> {
-                        // Parse mediaId: "ma_playlist_ID~PROVIDER" or fallback to "ma_playlist_ID"
-                        val (playlistId, provider) =
-                            MaMediaId.decode(mediaId.removePrefix(MEDIA_ID_MA_PLAYLIST_PREFIX))
-                        val uri = "$provider://playlist/$playlistId"
-                        Log.d(TAG, "MA: Playing playlist uri=$uri")
-                        MusicAssistant.playMedia(uri, mediaType = "playlist")
-                    }
-                    mediaId.startsWith(MEDIA_ID_MA_ALBUM_PREFIX) -> {
-                        // Parse mediaId: "ma_album_ID~PROVIDER" or fallback to "ma_album_ID"
-                        val (albumId, provider) =
-                            MaMediaId.decode(mediaId.removePrefix(MEDIA_ID_MA_ALBUM_PREFIX))
-                        val uri = "$provider://album/$albumId"
-                        Log.d(TAG, "MA: Playing album uri=$uri")
-                        MusicAssistant.playMedia(uri, mediaType = "album")
                     }
                     else -> {
                         Log.w(TAG, "MA: Unknown media ID for playback: $mediaId")
@@ -3962,54 +3392,8 @@ class PlaybackService : MediaLibraryService() {
                 val server = UnifiedServerRepository.getServerByAddress(address)
                 server?.let { AutoBrowseTree.playableServerItem(it.name, it.local?.address ?: address) }
             }
-            // MA category folders (root-level tabs)
-            mediaId == MEDIA_ID_MA_PLAYLISTS -> {
-                AutoBrowseTree.browsableItem(MEDIA_ID_MA_PLAYLISTS, "Playlists")
-            }
-            mediaId == MEDIA_ID_MA_ALBUMS -> {
-                AutoBrowseTree.browsableItem(MEDIA_ID_MA_ALBUMS, "Albums")
-            }
-            mediaId == MEDIA_ID_MA_ARTISTS -> {
-                AutoBrowseTree.browsableItem(MEDIA_ID_MA_ARTISTS, "Artists")
-            }
-            mediaId == MEDIA_ID_MA_RADIO -> {
-                AutoBrowseTree.browsableItem(MEDIA_ID_MA_RADIO, "Radio")
-            }
-            // MA items - search through caches
-            mediaId.startsWith("ma_") -> {
-                findMaItemInCaches(mediaId)
-            }
             else -> null
         }
-    }
-
-    /**
-     * Searches all MA caches for an item by media ID.
-     * Used by onGetItem to resolve individual MA items.
-     */
-    private fun findMaItemInCaches(mediaId: String): MediaItem? {
-        // Search list caches
-        val allCaches = listOfNotNull(
-            maPlaylistsCache?.data,
-            maAlbumsCache?.data,
-            maArtistsCache?.data,
-            maRadioCache?.data,
-            maSearchResultsCache
-        )
-        for (cache in allCaches) {
-            cache.find { it.mediaId == mediaId }?.let { return it }
-        }
-        // Search drill-down caches
-        for ((_, entry) in maPlaylistTracksCache) {
-            entry.data.find { it.mediaId == mediaId }?.let { return it }
-        }
-        for ((_, entry) in maAlbumTracksCache) {
-            entry.data.find { it.mediaId == mediaId }?.let { return it }
-        }
-        for ((_, entry) in maArtistAlbumsCache) {
-            entry.data.find { it.mediaId == mediaId }?.let { return it }
-        }
-        return null
     }
 
     @OptIn(UnstableApi::class)
