@@ -342,6 +342,9 @@ Keep `MiniPlayerView.kt` (301 lines, zero MA references) and `ConnectionLoadingS
 - Delete: `android/app/src/main/java/com/sendspindroid/ui/player/PlayerSheetContent.kt` (425 lines, MA grouping)
 - Delete: `android/app/src/main/java/com/sendspindroid/ui/player/PlayerBottomSheet.kt` (33 lines, thin wrapper over the above)
 - Delete (conditional): `android/app/src/main/java/com/sendspindroid/ui/main/components/QueueButton.kt`
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/queue/QueueSheetContent.kt` (remove the dead "Browse library" button, see Step 3b)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/adaptive/AdaptiveDefaults.kt` (remove `showSideMiniPlayer` and `sideMiniPlayerWidth`, see Step 3b)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/main/components/MiniPlayer.kt` (remove `MiniPlayerSide`, see Step 3b)
 - Modify: `android/app/src/main/java/com/sendspindroid/ui/AppShell.kt:100-101, 291, 720`
 - Test: `android/app/src/test/java/com/sendspindroid/ui/player/PlayerPackagePurityTest.kt`
 
@@ -432,6 +435,32 @@ If that returns only the definition, delete it:
 ```bash
 git rm android/app/src/main/java/com/sendspindroid/ui/main/components/QueueButton.kt
 ```
+
+- [ ] **Step 3b: Clear the orphans Task 2 left behind**
+
+Task 2's deletions orphaned four declarations that fall outside its authorized
+file scope. They belong to this task because it already owns the queue entry
+point and the player package. Each was verified to have zero callers at the end
+of Task 2 -- re-check with grep before deleting, since intervening work may have
+added one.
+
+1. `ui/queue/QueueSheetContent.kt` -- an `OutlinedButton` labelled to browse the
+   library renders inside `QueueEmptyContent` (around line 695). Its
+   `onBrowseLibrary` callback now resolves to `NowPlayingScreen`'s `= {}`
+   default, so on tablet and TV with the inline queue panel and an empty queue a
+   user sees a button that does nothing. Delete the button. Then delete the
+   `onBrowseLibrary` parameter from `QueueSheetContent`, from `QueueEmptyContent`,
+   and from `NowPlayingScreen` -- including its `= {}` default -- so the dead
+   callback chain goes with it rather than being left as an ignored parameter.
+2. `ui/adaptive/AdaptiveDefaults.kt` -- delete `showSideMiniPlayer` and
+   `sideMiniPlayerWidth`. Both lost their only callers when Task 2 removed
+   `SideMiniPlayerBar`.
+3. `ui/main/components/MiniPlayer.kt` -- delete `MiniPlayerSide`, orphaned by the
+   same deletion. Keep `MiniPlayer` itself: `ui/main/MiniPlayerComposeView.kt`
+   still calls it for the legacy View-based path used by `MainActivity`.
+
+Do not delete `AdaptiveDefaults.showMiniPlayer` here -- Task 2's fix round may
+already have removed it. If it still exists and has zero callers, delete it.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
