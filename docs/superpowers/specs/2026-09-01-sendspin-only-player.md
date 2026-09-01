@@ -208,6 +208,51 @@ no protocol counterpart, and `SaveQueueAsPlaylistDialog` writes to a Music
 Assistant playlist -- a library-write feature outside the player role. Removing
 it also unblocks `ui/detail`.
 
+## What the WebRTC transport actually was (recorded 2026-09-01, before deletion)
+
+Decision 3 stands -- remote/WebRTC is cut. But the original justification in this spec
+was partly wrong, and the correction is worth keeping, because the code is recoverable
+from git while the analysis is not.
+
+**The transport was not Music Assistant infrastructure.** `remote/WebRTCTransport.kt`
+implemented `SendSpinTransport` -- a peer of `WebSocketTransport`, not an add-on -- and
+opened a DataChannel named `"sendspin"` carrying the full SendSpin protocol, binary
+audio frames included. Remote SendSpin *playback* genuinely worked over it. A second,
+separate `"ma-api"` DataChannel carried Music Assistant's control API; that half was
+genuinely MA-specific.
+
+Which parts were actually coupled to Music Assistant:
+
+| Component | MA-coupled | Note |
+|---|---|---|
+| `WebRTCTransport` | No | carried the SendSpin protocol itself |
+| `SignalingClient` | Default only | `signalingUrl: String = DEFAULT_SIGNALING_URL` was a PARAMETER, defaulting to `wss://signaling.music-assistant.io/ws` |
+| ICE servers | No | public STUN: Google x2, Cloudflare, Home Assistant |
+| `"ma-api"` DataChannel, `getMaApiDataChannel` | Yes | MA control API tunnel |
+| `MaProxyImageFetcher` | Yes | see artwork note below |
+
+**Artwork did not need the proxy.** `MaProxyImageFetcher` existed because "in REMOTE
+mode, images hosted on the MA server (via `/imageproxy`) can't be reached" -- it tunnelled
+MA's HTTP artwork URLs. SendSpin carries artwork natively as binary message types 8-11
+(`ARTWORK_BASE = 8`, channels 0-3), so a SendSpin-native remote connection would receive
+artwork over the same DataChannel as audio, with no proxy at all.
+
+**The open question that was never answered.** SendSpin is a synchronized player and
+`SendspinTimeFilter` has no remote-specific handling -- the same Kalman filter runs over
+WAN as over LAN. Measured locally on a Relndoo T901_US: ~475 us sync error at ~16 ms RTT.
+Whether that holds over internet latency and jitter was never tested. Any future
+SendSpin-native remote design must answer this first: if sync cannot hold, remote
+playback is a broken feature no matter how clean the transport is. Bandwidth is the
+secondary constraint -- PCM 48k/2ch/16-bit is roughly 1.5 Mbps sustained; Opus or FLAC
+is far less.
+
+**Why it is still being cut.** The signaling endpoint was a third-party dependency for a
+SendSpin-only app, the WebRTC native library is a large APK cost, and the sync question
+is unanswered. A future remote story should be designed against the SendSpin spec rather
+than inherited from Music Assistant's signaling infrastructure. The six existing test
+files under `remote/` and `e2e/RemoteConnectWebRTCTest.kt` are worth reading before
+rebuilding.
+
 ## Out of scope
 
 - A SendSpin-native remote access design (deferred; see decision 3)
