@@ -327,6 +327,8 @@ With no UI path and no Music Assistant plumbing, the transports themselves are o
 - Modify: `android/app/src/main/java/com/sendspindroid/coordinator/ConnectionSelector.kt` (remote/proxy selection branches)
 - Modify: `android/app/src/main/java/com/sendspindroid/playback/PlaybackService.kt` (`COMMAND_CONNECT_REMOTE` and `COMMAND_CONNECT_PROXY` at :404-405, their advertisement at :2877-2878, their handlers at :2932 and :2946, and the `ARG_REMOTE_ID` / `ARG_PROXY_URL` keys)
 - Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/MaConnectionMode.kt` (`REMOTE`, `PROXY`)
+- Modify: `android/app/src/main/java/com/sendspindroid/musicassistant/MusicAssistant.kt` (`ConnectionMode.REMOTE` / `PROXY` branches at :39-40, :286, :289, :544 -- NARROWLY AUTHORIZED, see below)
+- Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/MaCommandClient.kt` (`IMAGE_PROXY_SCHEME` at :55 and its use at :2299, orphaned once `ConnectionMode.REMOTE` is gone)
 - Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/transport/BaseWebSocketTransport.kt` (:29 KDoc references `ProxyWebSocketTransport`)
 - Modify: `android/app/src/main/java/com/sendspindroid/ui/main/ServerListItem.kt` (:223-237 still renders remote and proxy badges for saved servers -- display-only, reaches nothing, but it advertises a capability the app no longer has)
 - Delete these tests: `app/src/test/.../e2e/ProxyConnectAuthTest.kt`, `e2e/RemoteConnectWebRTCTest.kt`, `remote/RemoteConnectionParseTest.kt`, `remote/RemoteConnectionValidationTest.kt`, `remote/WebRTCFactoryLifecycleTest.kt`, `shared/.../remote/RemoteCertificateVerifierTest.kt`, `remote/SignalingClientConnectRaceTest.kt`, `remote/SignalingClientRemoteIdTest.kt`, `shared/.../transport/ProxyWebSocketTransportTest.kt`
@@ -336,6 +338,23 @@ With no UI path and no Music Assistant plumbing, the transports themselves are o
 **Interfaces:**
 - Consumes: no UI path (Task 1), no MA plumbing (Task 2).
 - Produces: `com.sendspindroid.remote` no longer exists in either module. `ConnectionMode` and `MaConnectionMode` offer only `LOCAL`.
+
+**Narrow authorization to edit `com.sendspindroid.musicassistant`.** That package is
+otherwise off-limits and Plan C owns it -- but `ConnectionMode.REMOTE` and `PROXY`, which
+this task deletes, still have live consumers inside it. You ARE authorized to remove:
+
+- the `ConnectionMode.REMOTE` / `PROXY` mapping arms in `MusicAssistant.kt` (:39-40)
+- the remote and proxy branches at `MusicAssistant.kt:286`, `:289` and `:544`
+- `MaCommandClient.IMAGE_PROXY_SCHEME` (:55) and the `"$IMAGE_PROXY_SCHEME://"`
+  construction at :2299, which an earlier task correctly left because it was still
+  reachable through `ConnectionMode.REMOTE`
+
+Nothing else in that package. Do NOT touch `MusicAssistant.initialize`, `queueUpdates`,
+`connectionState`, or anything serving playback or server setup. If a deletion here
+appears to orphan something further inside `musicassistant`, STOP and report it rather
+than cascading -- specifically, `MaApiTransport.httpProxy` (:142),
+`MaWebSocketTransport.httpProxy` (:254) and `MaCommandMultiplexer`'s proxy bookkeeping are
+already known orphans reserved for Plan C, and are NOT yours.
 
 **A SECOND remote path exists that no import grep can find.** Task 1's implementer
 discovered it; it is a blocker for this task, not an optional extra.
