@@ -535,6 +535,40 @@ cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew 
 
 Expected: no output. Record the APK size before and after with `ls -la app/build/outputs/apk/debug/app-debug.apk` around a rebuild -- the native library is large and the saving is worth knowing.
 
+- [ ] **Step 5b: Clear the orphans the transport deletion left behind**
+
+The previous task's review found eight leftovers. All but the last are self-created
+orphans of that deletion, and this task is the sweep that owns them. Re-verify each with
+a grep before removing it -- intervening work may have added a consumer.
+
+1. `sendspin/SendSpin.kt` -- four now-dead imports: `Json`, `JsonPrimitive`,
+   `buildJsonObject`, `jsonObject` (around :49-53). Their only users were the deleted
+   proxy auth-message builder and auth-failure parser. `contentOrNull` and
+   `jsonPrimitive` are still live -- do NOT remove those two.
+2. `sendspin/SendSpin.kt:88` -- `private val context: Context` is now completely unused.
+   Remove it and the constructor argument, then fix the twelve call sites. If that turns
+   out to ripple further than twelve sites, leave it and say so rather than cascading.
+3. `res/values/strings.xml:355-356` -- `accessibility_connection_remote` and
+   `accessibility_connection_proxy`. Their sole consumer was the badge block deleted from
+   `ServerListItem.kt`. Note that the drawables `ic_cloud_connected` and `ic_vpn_key` are
+   still referenced by `NetworkQuestionStep.kt:89` -- leave those.
+4. `logging/AppLog.kt:59` and `logging/LogCategory.kt:22,33` -- `AppLog.Remote` and
+   `LogCategory.Remote` are orphaned. There is no settings-UI blast radius: `LogCategory`
+   has zero consumers outside the `logging/` package. The KDoc table at `LogCategory.kt:22`
+   also still maps `remote/` to a package that no longer exists.
+5. `ui/main/components/ServerListItem.kt:220` -- a stray blank line where the badge blocks
+   were removed.
+6. `sendspin/SendSpin.kt:1005` -- `disconnectForReselection`'s KDoc still says the outer
+   loop "picks the right mode for whatever network we are on now". There is one mode now.
+   Fix that sentence only; the same KDoc's stale "AutoReconnectManager" reference predates
+   this plan, so leave it and note it.
+7. `test/.../coordinator/ConnectionCoordinatorTest.kt:86` -- the test named
+   `connect retries when first method fails and tries next method` can no longer test
+   that, since the priority list is now `[LOCAL]` alone. It passes only because its
+   assertion is the weak `attemptedMethods.isNotEmpty()`. Rename it to describe what it
+   actually verifies, or retarget it to assert the single-method behaviour. Do not simply
+   delete it -- it still guards that the loop attempts something.
+
 - [ ] **Step 6: Run the preference and resource sweeps**
 
 Run the persisted-preference sweep from the checks at the top of this plan and report the result. `albumArtistsOnly` and `cachedPlayerId` are already known orphans and are NOT yours to fix -- note any others.
@@ -609,6 +643,16 @@ grep -E "FATAL EXCEPTION|AndroidRuntime|UnsatisfiedLinkError" remote-verify.txt
 - [ ] **Step 6: Record the result and commit**
 
 Append a verification record: device model, Android version, APK size before and after, what was exercised, PASS/FAIL per item, what could not be verified, and any defect found.
+
+**Also check this specific degradation, identified during Task 3's review.** A saved
+server that has only remote or proxy data and NO local address now runs the full
+11-attempt, roughly four-minute backoff schedule making zero connect attempts before
+reporting `Failed` -- because the priority list is `[LOCAL]` and `serverHasMethod(LOCAL)`
+is false. `PlaybackService.handleAutoConnect` also starts a foreground service before
+discovering there is nothing to connect to. This is inherent to cutting remote access
+rather than a defect, but to a user it looks like a hang. If you can construct such a
+saved record, verify what the UI actually shows during those four minutes and report it.
+If you cannot, say so and mark it NOT VERIFIED.
 
 ```bash
 git add docs/superpowers/plans/2026-09-01-cut-remote-access.md
