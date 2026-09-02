@@ -8,7 +8,6 @@ import com.google.android.material.color.DynamicColors
 import com.sendspindroid.diagnostics.Telemetry
 import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.CrashHandler
-import com.sendspindroid.musicassistant.MaProxyImageFetcher
 import com.sendspindroid.musicassistant.MaSettings
 
 class SendSpinApp : Application(), ImageLoaderFactory {
@@ -30,16 +29,10 @@ class SendSpinApp : Application(), ImageLoaderFactory {
     }
 
     /**
-     * Provides the app-wide singleton ImageLoader with custom components.
-     *
-     * Includes [MaProxyImageFetcher.Factory] to handle `ma-proxy://` URIs
-     * for loading images over the WebRTC DataChannel in REMOTE mode.
+     * Provides the app-wide singleton ImageLoader.
      */
     override fun newImageLoader(): ImageLoader {
         val builder = ImageLoader.Builder(this)
-            .components {
-                add(MaProxyImageFetcher.Factory())
-            }
 
         if (UserSettings.lowMemoryMode) {
             // Disable all caching to minimize memory footprint

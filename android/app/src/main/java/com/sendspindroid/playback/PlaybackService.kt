@@ -620,9 +620,6 @@ class PlaybackService : MediaLibraryService() {
         if (!com.sendspindroid.UserSettings.lowMemoryMode) {
             imageLoader = ImageLoader.Builder(this)
                 .crossfade(true)
-                .components {
-                    add(com.sendspindroid.musicassistant.MaProxyImageFetcher.Factory())
-                }
                 .build()
         } else {
             Log.i(TAG, "Low Memory Mode: Skipping ImageLoader initialization")
@@ -1326,11 +1323,7 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.d(TAG, "Metadata update: $title / $artist / $album")
 
-                // In REMOTE mode, the server sends artwork URLs pointing to its own
-                // address (e.g., https://music.example.com/imageproxy?...) which aren't
-                // reachable from the remote client. Rewrite to ma-proxy:// scheme so
-                // Coil's MaProxyImageFetcher can fetch via the WebRTC DataChannel.
-                val effectiveArtworkUrl = rewriteArtworkUrlForRemote(artworkUrl)
+                val effectiveArtworkUrl = artworkUrl
 
                 _playbackState.value = _playbackState.value.withMetadata(
                     title = title.ifEmpty { null },
@@ -1711,33 +1704,7 @@ class PlaybackService : MediaLibraryService() {
     }
 
     private fun isValidArtworkUrl(url: String): Boolean {
-        return url.startsWith("http://") || url.startsWith("https://") ||
-                url.startsWith("${com.sendspindroid.musicassistant.MaProxyImageFetcher.SCHEME}://")
-    }
-
-    /**
-     * In REMOTE mode, rewrite server-local imageproxy URLs to use the
-     * `ma-proxy://` scheme so they're fetched via the WebRTC DataChannel.
-     *
-     * The server sends artwork URLs pointing to its own address (e.g.,
-     * `https://music.example.com/imageproxy?provider=x&path=y`), which
-     * aren't reachable from a remote client. We extract the `/imageproxy`
-     * path and rewrite to `ma-proxy:///imageproxy?provider=x&path=y`.
-     *
-     * Non-imageproxy URLs (e.g., CDN URLs) are returned as-is since they're
-     * accessible from anywhere.
-     */
-    private fun rewriteArtworkUrlForRemote(url: String): String {
-        if (url.isEmpty()) return url
-        if (currentConnectionMode != ConnectionMode.REMOTE) return url
-
-        val proxyIndex = url.indexOf("/imageproxy")
-        if (proxyIndex >= 0) {
-            val pathAndQuery = url.substring(proxyIndex)
-            return "${com.sendspindroid.musicassistant.MaProxyImageFetcher.SCHEME}://$pathAndQuery"
-        }
-
-        return url
+        return url.startsWith("http://") || url.startsWith("https://")
     }
 
     /**
@@ -2162,9 +2129,6 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Notifies MusicAssistant that a server connection was established.
      * Looks up the server by ID and triggers MA availability check.
-     *
-     * For REMOTE mode, also passes the WebRTC "ma-api" DataChannel to
-     * MusicAssistant so it can create a DataChannel transport.
      */
     private fun notifyMusicAssistantConnected() {
         val serverId = currentServerId
@@ -2177,14 +2141,6 @@ class PlaybackService : MediaLibraryService() {
         if (server == null) {
             Log.w(TAG, "Server not found in repository: $serverId")
             return
-        }
-
-        // In REMOTE mode, pass the MA API DataChannel to MusicAssistant
-        if (currentConnectionMode == ConnectionMode.REMOTE) {
-            val maChannel = sendSpinClient?.getMaApiDataChannel()
-            val bufferedMessages = sendSpinClient?.drainMaApiMessageBuffer() ?: emptyList()
-            Log.d(TAG, "REMOTE mode: MA API DataChannel ${if (maChannel != null) "available" else "not available"}, buffered=${bufferedMessages.size}")
-            MusicAssistant.setMaApiDataChannel(maChannel, bufferedMessages)
         }
 
         Log.d(TAG, "Notifying MusicAssistant: server=${server.name}, isMusicAssistant=${server.isMusicAssistant}")

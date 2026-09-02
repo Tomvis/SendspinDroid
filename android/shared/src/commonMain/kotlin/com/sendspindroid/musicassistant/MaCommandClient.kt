@@ -51,7 +51,6 @@ class MaCommandClient(private val settings: MaSettingsProvider) {
 
         /**
          * Scheme used for proxying image URLs through the MA API DataChannel.
-         * Matches MaProxyImageFetcher.SCHEME on Android.
          */
         const val IMAGE_PROXY_SCHEME = "ma-proxy"
 
