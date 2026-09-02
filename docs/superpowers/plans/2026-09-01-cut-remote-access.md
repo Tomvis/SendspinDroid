@@ -328,6 +328,7 @@ With no UI path and no Music Assistant plumbing, the transports themselves are o
 - Modify: `android/app/src/main/java/com/sendspindroid/playback/PlaybackService.kt` (`COMMAND_CONNECT_REMOTE` and `COMMAND_CONNECT_PROXY` at :404-405, their advertisement at :2877-2878, their handlers at :2932 and :2946, and the `ARG_REMOTE_ID` / `ARG_PROXY_URL` keys)
 - Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/MaConnectionMode.kt` (`REMOTE`, `PROXY`)
 - Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/transport/BaseWebSocketTransport.kt` (:29 KDoc references `ProxyWebSocketTransport`)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/main/ServerListItem.kt` (:223-237 still renders remote and proxy badges for saved servers -- display-only, reaches nothing, but it advertises a capability the app no longer has)
 - Delete these tests: `app/src/test/.../e2e/ProxyConnectAuthTest.kt`, `e2e/RemoteConnectWebRTCTest.kt`, `remote/RemoteConnectionParseTest.kt`, `remote/RemoteConnectionValidationTest.kt`, `remote/WebRTCFactoryLifecycleTest.kt`, `shared/.../remote/RemoteCertificateVerifierTest.kt`, `remote/SignalingClientConnectRaceTest.kt`, `remote/SignalingClientRemoteIdTest.kt`, `shared/.../transport/ProxyWebSocketTransportTest.kt`
 - Modify: `android/app/src/test/java/com/sendspindroid/sendspin/SendSpinClientDisconnectTest.kt` (references `ProxyWebSocketTransport` in comments and setup)
 - Test: extend `RemoteUiGoneTest.kt` from Task 1
