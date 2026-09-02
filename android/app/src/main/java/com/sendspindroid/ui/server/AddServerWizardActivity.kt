@@ -317,7 +317,6 @@ class AddServerWizardActivity : FragmentActivity() {
     private suspend fun testLocalConnection(address: String): Result<Int> {
         Log.d(TAG, "Testing local connection to: $address")
         val transient = SendSpin(
-            context = applicationContext,
             deviceName = android.os.Build.MODEL,
             callback = noopSendSpinCallback,
         )

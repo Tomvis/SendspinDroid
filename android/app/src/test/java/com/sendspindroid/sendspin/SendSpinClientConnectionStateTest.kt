@@ -1,6 +1,5 @@
 package com.sendspindroid.sendspin
 
-import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.preference.PreferenceManager
@@ -32,7 +31,6 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendSpinConnectionStateTest {
 
-    private lateinit var mockContext: Context
     private lateinit var mockCallback: SendSpin.Callback
     private lateinit var client: SendSpin
 
@@ -61,10 +59,9 @@ class SendSpinConnectionStateTest {
         val mockPrefs = mockk<SharedPreferences>(relaxed = true)
         every { PreferenceManager.getDefaultSharedPreferences(any()) } returns mockPrefs
 
-        mockContext = mockk(relaxed = true)
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin(mockContext, "TestDevice", mockCallback)
+        client = SendSpin("TestDevice", mockCallback)
     }
 
     @After

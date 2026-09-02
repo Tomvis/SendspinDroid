@@ -1,6 +1,5 @@
 package com.sendspindroid.e2e
 
-import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.preference.PreferenceManager
@@ -35,7 +34,6 @@ import org.junit.Before
 @OptIn(ExperimentalCoroutinesApi::class)
 abstract class E2ETestBase {
 
-    protected lateinit var mockContext: Context
     protected lateinit var mockCallback: SendSpin.Callback
     protected lateinit var client: SendSpin
     protected lateinit var fakeTransport: FakeTransport
@@ -74,10 +72,9 @@ abstract class E2ETestBase {
         val mockPrefs = mockk<SharedPreferences>(relaxed = true)
         every { PreferenceManager.getDefaultSharedPreferences(any()) } returns mockPrefs
 
-        mockContext = mockk(relaxed = true)
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin(mockContext, "E2ETestDevice", mockCallback)
+        client = SendSpin("E2ETestDevice", mockCallback)
 
         // Create fake transport and server
         fakeTransport = FakeTransport()

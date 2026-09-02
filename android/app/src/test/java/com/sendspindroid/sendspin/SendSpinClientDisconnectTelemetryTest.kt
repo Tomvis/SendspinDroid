@@ -1,6 +1,5 @@
 package com.sendspindroid.sendspin
 
-import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.preference.PreferenceManager
@@ -43,7 +42,6 @@ import java.util.concurrent.atomic.AtomicInteger
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendSpinDisconnectTelemetryTest {
 
-    private lateinit var mockContext: Context
     private lateinit var mockCallback: SendSpin.Callback
     private lateinit var client: SendSpin
 
@@ -77,10 +75,9 @@ class SendSpinDisconnectTelemetryTest {
         val mockPrefs = mockk<SharedPreferences>(relaxed = true)
         every { PreferenceManager.getDefaultSharedPreferences(any()) } returns mockPrefs
 
-        mockContext = mockk(relaxed = true)
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin(mockContext, "TestDevice", mockCallback)
+        client = SendSpin("TestDevice", mockCallback)
 
         // Seed connection info so the disconnect paths execute fully.
         setField("serverAddress", "127.0.0.1:8080")

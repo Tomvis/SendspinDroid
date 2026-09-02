@@ -352,8 +352,6 @@
     <!-- Accessibility - Unified Server -->
     <string name="accessibility_server_card">Server %1$s, %2$s</string>
     <string name="accessibility_connection_local">Local connection available</string>
-    <string name="accessibility_connection_remote">Remote connection available</string>
-    <string name="accessibility_connection_proxy">Proxy connection available</string>
     <string name="accessibility_discovered_server">Discovered server, tap to quick connect</string>
 
     <!-- Default Server -->

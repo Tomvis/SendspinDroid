@@ -1,6 +1,5 @@
 package com.sendspindroid.sendspin
 
-import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.sendspindroid.UserSettings
@@ -46,11 +45,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.SocketException
 import java.net.SocketTimeoutException
@@ -85,7 +80,6 @@ import javax.net.ssl.SSLHandshakeException
  * - Time filter freeze/thaw during reconnection
  */
 class SendSpin(
-    private val context: Context,
     private val deviceName: String,
     private val callback: Callback
 ) : SendSpinProtocolHandler(TAG) {
@@ -1002,8 +996,8 @@ class SendSpin(
      * [userInitiatedDisconnect]. Fires `onDisconnected(wasUserInitiated=false,
      * wasReconnectExhausted=false)`, which MainActivity's STATE_DISCONNECTED
      * handler interprets as "start AutoReconnectManager" -- the outer reconnect
-     * loop re-runs `ConnectionSelector` fresh and picks the right mode for
-     * whatever network we are on now.
+     * loop re-runs `ConnectionSelector` fresh and reconnects for whatever
+     * network we are on now.
      *
      * The reason for existing: [disconnect] is a user action (tap 'Switch Server'
      * etc.) and explicitly suppresses auto-reconnect. We want the opposite here:

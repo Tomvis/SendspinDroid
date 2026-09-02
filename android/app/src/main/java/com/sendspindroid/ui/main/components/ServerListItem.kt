@@ -217,7 +217,6 @@ private fun ConnectionMethodIcons(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-
     }
 }
 

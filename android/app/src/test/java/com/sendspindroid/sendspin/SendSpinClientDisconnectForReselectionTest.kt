@@ -1,6 +1,5 @@
 package com.sendspindroid.sendspin
 
-import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.preference.PreferenceManager
@@ -27,7 +26,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendSpinDisconnectForReselectionTest {
 
-    private lateinit var mockContext: Context
     private lateinit var mockCallback: SendSpin.Callback
     private lateinit var client: SendSpin
     private lateinit var fakeTransport: FakeTransport
@@ -76,10 +74,9 @@ class SendSpinDisconnectForReselectionTest {
         val mockPrefs = mockk<SharedPreferences>(relaxed = true)
         every { PreferenceManager.getDefaultSharedPreferences(any()) } returns mockPrefs
 
-        mockContext = mockk(relaxed = true)
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin(mockContext, "TestDevice", mockCallback)
+        client = SendSpin("TestDevice", mockCallback)
         fakeTransport = FakeTransport()
 
         // Seed connected-state so disconnectForReselection has something to tear down.

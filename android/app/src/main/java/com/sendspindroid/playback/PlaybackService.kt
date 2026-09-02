@@ -1008,7 +1008,6 @@ class PlaybackService : MediaLibraryService() {
             // Use user-configured player name, falls back to device model
             val playerName = com.sendspindroid.UserSettings.getPlayerName()
             sendSpinClient = SendSpin(
-                context = applicationContext,
                 deviceName = playerName,
                 callback = SendSpinClientCallback()
             )

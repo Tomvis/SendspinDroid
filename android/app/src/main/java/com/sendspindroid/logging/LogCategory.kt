@@ -19,7 +19,6 @@ package com.sendspindroid.logging
  * | `network/`, `discovery/`               | `Network`        |
  * | `playback/`                            | `Playback`       |
  * | `musicassistant/`                      | `MusicAssistant` |
- * | `remote/`                              | `Remote`         |
  * | `ui/`                                  | `UI`             |
  * | root, settings, boot receiver, etc.    | `App`            |
  */
@@ -30,7 +29,6 @@ enum class LogCategory(val tag: String) {
     Network("SendSpin.Network"),
     Playback("SendSpin.Playback"),
     MusicAssistant("SendSpin.MA"),
-    Remote("SendSpin.Remote"),
     UI("SendSpin.UI"),
     App("SendSpin.App");
 }

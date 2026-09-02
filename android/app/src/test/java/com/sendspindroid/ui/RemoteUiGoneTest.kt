@@ -72,4 +72,29 @@ class RemoteUiGoneTest {
         val f = File(root, "com/sendspindroid/sendspin/transport/ProxyWebSocketTransport.kt")
         assertFalse("ProxyWebSocketTransport must be deleted", f.exists())
     }
+
+    @Test
+    fun webRtcDependencyIsGone() {
+        val gradle = File("build.gradle.kts")
+        require(gradle.exists()) { "app build.gradle.kts not found at " + gradle.absolutePath }
+        val offending = gradle.readLines()
+            .map { it.trim() }
+            .filter { !it.startsWith("//") && it.contains("webrtc") }
+        assertEquals("the WebRTC dependency must be removed", emptyList<String>(), offending)
+    }
+
+    @Test
+    fun noSourceImportsWebRtc() {
+        val roots = listOf(File("src/main/java"), File("src/test/java"))
+        val offending = roots
+            .filter { it.isDirectory }
+            .flatMap { it.walkTopDown().filter { f -> f.isFile && f.name.endsWith(".kt") } }
+            .flatMap { file ->
+                file.readLines()
+                    .map { it.trim() }
+                    .filter { it.startsWith("import org.webrtc") }
+                    .map { file.name + ": " + it }
+            }
+        assertEquals("no source may import org.webrtc", emptyList<String>(), offending)
+    }
 }
