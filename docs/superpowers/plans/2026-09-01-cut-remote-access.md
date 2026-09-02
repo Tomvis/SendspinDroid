@@ -668,3 +668,56 @@ At the end of this plan the app connects only over the local network or to a man
 `com.sendspindroid.musicassistant` still exists and is still load-bearing for playback, artwork and server setup. Plan C owns retiring it. Verify its remaining consumers with a fresh grep before planning against it, and note that `MusicAssistant.playMedia` was already fully orphaned by the browse-and-queue removal.
 
 The analysis of what the WebRTC transport actually was -- that it carried the SendSpin protocol rather than only Music Assistant control, that the signaling URL was a parameter, that artwork rides the protocol natively as binary types 8-11, and that clock sync over WAN was never tested -- is recorded in the spec under "What the WebRTC transport actually was". Read it before designing any future remote-access story.
+
+---
+
+## Task 5 device verification record
+
+**Device:** Relndoo T901_US tablet, serial `T901YCU250305206`, Android 15 (SDK 35),
+build `Relndoo_T901_A15_T606_20250225`. **Build under test:** `app-debug.apk` from
+`d5f9054` (Task 4's final commit).
+
+**APK size:** before 73,570,030 bytes (per Task 4's report) -> after 22,665,458 bytes
+(measured on disk and confirmed identical after `install -r` to the device this
+session) -- a 50,904,572-byte (69%) drop, consistent with removing the WebRTC native
+library, QR reader, and CameraX artifacts.
+
+| Item | Result |
+|---|---|
+| a. APK size drop is real | PASS -- 22,665,458 bytes matches the reported figure exactly |
+| b. No crash / no `UnsatisfiedLinkError` on launch | PASS -- clean `am start`, `MainActivity` resumed, `onCreate` completes (NsdDiscoveryManager, DefaultServerPinger, Compose content view, notification-permission request all logged), zero `FATAL EXCEPTION` / `AndroidRuntime` crash / `UnsatisfiedLinkError` in a 16 MiB threadtime capture; `CAMERA` confirmed absent from the installed manifest's permission set |
+| c. Local playback end to end (Now Playing, transport commands act on server) | NOT VERIFIED -- blocked, see below |
+| d. Artwork renders over direct HTTP | NOT VERIFIED -- blocked, see below |
+| e. Pairing QR code still displays | NOT VERIFIED -- blocked, see below |
+| f. No remote/proxy option in wizard; manual entry works | NOT VERIFIED -- blocked, see below |
+| g. Auto-reconnect after Wi-Fi toggle | NOT VERIFIED -- blocked, see below |
+| h. Legacy remote-only saved server (~4 min apparent hang) | NOT VERIFIED -- could not construct/observe (requires UI access, see below) |
+
+**What blocked c-h:** two compounding issues, the second self-inflicted. (1) A
+pre-existing device quirk: `KEYCODE_WAKEUP` left `PowerManager` reporting
+`mWakefulness=Awake` while `WindowManager` still considered every window (including
+the launcher/wallpaper, not just the app) `isSleeping=true` / `*noSurface`, so every
+`screencap` came back solid black despite `MainActivity` being the correctly resumed,
+focused activity underneath -- a real `KEYCODE_POWER` sleep/wake cycle was needed to
+get a genuinely rendering display, and that diagnosis consumed most of the session.
+(2) While chasing that, an `adb reboot` was issued to try to clear the stuck state,
+which reset the device to requiring its actual lock-screen PIN
+(`dumpsys lock_settings` shows `CredentialType: PIN`, not the "swipe only" lock its
+`DevicePolicyManager` quality field of `0`/unspecified suggested). Pre-reboot, the
+device had cached trust from a prior physical unlock, which is what let ADB automation
+reach a resumed `MainActivity` at all; post-reboot, `strongAuthRequired=0x1` and no
+swipe, `wm dismiss-keyguard`, or biometric path substitutes for the PIN. The PIN was
+not guessed at (repeated failures risk a lockout/wipe). The display itself was
+confirmed working again post-reboot (full-color wallpaper visible once woken via
+`KEYCODE_POWER`), so the remaining blocker for c-h is purely the PIN lock, not the
+app or the earlier display quirk.
+
+**Defects found:** none in the areas actually verified (a, b). No claim is made about
+c-h.
+
+**Recommendation:** unlock the tablet's lock screen with its PIN (physically, or hand
+the PIN to the next verification session) and re-run steps 3-6 (checks c-h) against
+the same installed build -- no rebuild or reinstall needed.
+
+Full detail: `.superpowers/sdd/2026-09-01-cut-remote-access/task-5-report.md` (not
+committed; gitignored under `.superpowers/sdd/`).
