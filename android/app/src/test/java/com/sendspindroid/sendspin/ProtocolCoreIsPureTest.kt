@@ -13,10 +13,22 @@ import org.junit.Test
  */
 class ProtocolCoreIsPureTest {
 
+    /**
+     * Both source roots that make up the SendSpin protocol core: the Android-side
+     * code in this module and the multiplatform code shared with other targets.
+     * Each root is required to exist and be a directory -- if either is moved or
+     * renamed, this fails loudly instead of silently scanning zero files from it
+     * and reporting a vacuous "no MA references found".
+     */
     private fun protocolSources(): List<File> {
-        val dir = File("src/main/java/com/sendspindroid/sendspin")
-        require(dir.isDirectory) { "protocol core not found at " + dir.absolutePath }
-        return dir.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }.toList()
+        val roots = listOf(
+            File("src/main/java/com/sendspindroid/sendspin"),
+            File("../shared/src/commonMain/kotlin/com/sendspindroid/sendspin")
+        )
+        return roots.flatMap { dir ->
+            require(dir.isDirectory) { "protocol core not found at " + dir.absolutePath }
+            dir.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }.toList()
+        }
     }
 
     @Test

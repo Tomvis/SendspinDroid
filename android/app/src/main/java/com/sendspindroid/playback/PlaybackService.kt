@@ -1323,13 +1323,11 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.d(TAG, "Metadata update: $title / $artist / $album")
 
-                val effectiveArtworkUrl = artworkUrl
-
                 _playbackState.value = _playbackState.value.withMetadata(
                     title = title.ifEmpty { null },
                     artist = artist.ifEmpty { null },
                     album = album.ifEmpty { null },
-                    artworkUrl = effectiveArtworkUrl.ifEmpty { null },
+                    artworkUrl = artworkUrl.ifEmpty { null },
                     durationMs = durationMs,
                     positionMs = positionMs,
                     playbackSpeed = playbackSpeed
@@ -1365,11 +1363,11 @@ class PlaybackService : MediaLibraryService() {
                     binaryArtwork = null
                 }
 
-                if (effectiveArtworkUrl.isEmpty()) {
+                if (artworkUrl.isEmpty()) {
                     lastArtworkUrl = null
-                } else if (effectiveArtworkUrl != lastArtworkUrl || titleChanged) {
-                    lastArtworkUrl = effectiveArtworkUrl
-                    fetchArtwork(effectiveArtworkUrl)
+                } else if (artworkUrl != lastArtworkUrl || titleChanged) {
+                    lastArtworkUrl = artworkUrl
+                    fetchArtwork(artworkUrl)
                 }
 
                 updateMediaMetadata(title, artist, album)

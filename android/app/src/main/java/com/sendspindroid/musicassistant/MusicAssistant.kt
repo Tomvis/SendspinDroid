@@ -45,7 +45,7 @@ private fun ConnectionMode.toMaMode(): MaConnectionMode = when (this) {
  *
  * LOCAL  -> ws://<host>:<port>/ws  (via WebSocketUrlBuilder for correct IPv6 handling)
  * PROXY  -> strips /sendspin suffix, converts http->ws, appends /ws
- * REMOTE -> sentinel URL "webrtc://ma-api" (signals DataChannel transport)
+ * REMOTE -> sentinel URL "webrtc://ma-api"
  */
 private fun MaEndpoint.toApiUrl(): String = when (this) {
     is MaEndpoint.Local -> {
