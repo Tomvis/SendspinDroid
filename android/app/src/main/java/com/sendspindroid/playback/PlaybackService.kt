@@ -74,7 +74,6 @@ import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.NetworkEvaluator
 import com.sendspindroid.network.NetworkState
-import com.sendspindroid.network.TransportType
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.DefaultMediaNotificationProvider
@@ -2640,10 +2639,7 @@ class PlaybackService : MediaLibraryService() {
                             .find { it.id == serverId }
                         if (server != null) {
                             // Use ConnectionSelector to pick the best method
-                            networkEvaluator?.evaluateCurrentNetwork()
-                            val netState = networkEvaluator?.networkState?.value
-                                ?: NetworkState(TransportType.UNKNOWN)
-                            val selected = ConnectionSelector.selectConnection(server, netState)
+                            val selected = ConnectionSelector.selectConnection(server)
 
                             when (selected) {
                                 is ConnectionSelector.SelectedConnection.Local -> {

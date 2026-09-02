@@ -79,7 +79,6 @@ import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.DefaultServerPinger
-import com.sendspindroid.network.NetworkEvaluator
 import com.sendspindroid.ui.server.AddServerWizardActivity
 import com.sendspindroid.ui.server.UnifiedServerConnector
 import com.sendspindroid.coordinator.TransportState
@@ -188,9 +187,8 @@ class MainActivity : AppCompatActivity() {
     // Server being reconnected to (for tracking during auto-reconnect)
     private var reconnectingToServer: UnifiedServer? = null
 
-    // Default server pinger for remote/proxy auto-connect when mDNS unavailable
+    // Default server pinger for auto-connect when mDNS hasn't found the server yet
     private var defaultServerPinger: DefaultServerPinger? = null
-    private var networkEvaluator: NetworkEvaluator? = null
 
     // Charging state receiver for adaptive ping intervals
     private var chargingReceiver: BroadcastReceiver? = null
@@ -1218,8 +1216,8 @@ class MainActivity : AppCompatActivity() {
         // Check for default server and auto-connect after a brief delay
         checkDefaultServerAutoConnect()
 
-        // Start default server pinger for remote/proxy connections
-        // (mDNS only finds local servers; this pings remote/proxy when on cellular or away from home)
+        // Start default server pinger for when mDNS hasn't found the server yet
+        // (mDNS announcements can be missed; this pings the server directly to catch that case)
         if (!userManuallyDisconnected) {
             defaultServerPinger?.start()
         }
@@ -1458,20 +1456,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Initializes the DefaultServerPinger for remote/proxy auto-connect.
+     * Initializes the DefaultServerPinger for auto-connect when mDNS hasn't
+     * found the default server yet.
      *
-     * When the default server isn't discovered via mDNS (user on cellular,
-     * server only has remote/proxy config, etc.), this pinger periodically
-     * checks if the server is reachable and triggers auto-connect on success.
+     * When the default server isn't discovered via mDNS (e.g. its
+     * announcement was missed), this pinger periodically checks if the
+     * server is reachable and triggers auto-connect on success.
      */
     private fun initializeDefaultServerPinger() {
-        // Initialize NetworkEvaluator for connection priority decisions
-        networkEvaluator = NetworkEvaluator(this)
-        networkEvaluator?.evaluateCurrentNetwork()
-
         // Initialize the pinger
         defaultServerPinger = DefaultServerPinger(
-            networkEvaluator = networkEvaluator!!,
             onServerReachable = { server ->
                 runOnUiThread {
                     // Only connect if conditions still allow
@@ -2096,7 +2090,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun setupUnifiedServers() {
         // Initialize the connector for handling unified server connections
-        unifiedServerConnector = UnifiedServerConnector(this) { selected ->
+        unifiedServerConnector = UnifiedServerConnector { selected ->
             // Callback when connection method is selected
             Log.d(TAG, "Connection method selected: ${ConnectionSelector.getConnectionDescription(selected)}")
         }

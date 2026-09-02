@@ -40,7 +40,6 @@ import kotlin.coroutines.resume
  * ## Usage
  * ```kotlin
  * val pinger = DefaultServerPinger(
- *     networkEvaluator = networkEvaluator,
  *     onServerReachable = { server -> onUnifiedServerSelected(server) }
  * )
  *
@@ -57,7 +56,6 @@ import kotlin.coroutines.resume
  * ```
  */
 class DefaultServerPinger(
-    private val networkEvaluator: NetworkEvaluator,
     private val onServerReachable: (UnifiedServer) -> Unit
 ) {
 
@@ -154,14 +152,13 @@ class DefaultServerPinger(
     }
 
     /**
-     * Called when network type changes (WiFi ↔ cellular).
-     * Triggers an immediate ping with updated network priorities.
+     * Called when network type changes (WiFi <-> cellular).
+     * Triggers an immediate ping.
      */
     fun onNetworkChanged() {
         if (!isRunning.get()) return
 
         Log.i(TAG, "Network changed - triggering immediate ping")
-        networkEvaluator.evaluateCurrentNetwork()
         pingNow()
     }
 

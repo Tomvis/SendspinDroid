@@ -27,14 +27,10 @@ object ConnectionSelector {
      * and the user's preference allows it.
      *
      * @param server The unified server with configured connection methods
-     * @param networkState Current network state from NetworkEvaluator (unused --
-     *   local is the only connection method left, so network type no longer
-     *   affects selection; retained for API compatibility with callers).
      * @return The selected connection, or null if none is available
      */
     fun selectConnection(
-        server: UnifiedServer,
-        networkState: NetworkState
+        server: UnifiedServer
     ): SelectedConnection? {
         return when (server.connectionPreference) {
             ConnectionPreference.LOCAL_ONLY, ConnectionPreference.AUTO -> {
@@ -57,10 +53,9 @@ object ConnectionSelector {
 
     /**
      * Returns the connection priority order. Local is the only supported
-     * connection method, so this is always a single-element list regardless
-     * of transport type.
+     * connection method, so this is always a single-element list.
      */
-    fun getPriorityOrder(transportType: TransportType): List<ConnectionType> =
+    fun getPriorityOrder(): List<ConnectionType> =
         listOf(ConnectionType.LOCAL)
 
     /**

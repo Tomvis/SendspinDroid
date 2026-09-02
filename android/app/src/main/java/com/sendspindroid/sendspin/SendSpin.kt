@@ -946,7 +946,7 @@ class SendSpin(
     }
 
     /**
-     * Common preparation for both local and remote connections.
+     * Common preparation before establishing a connection.
      */
     private fun prepareForConnection() {
         _connectionState.value = TransportState.Connecting
@@ -1002,8 +1002,8 @@ class SendSpin(
      * The reason for existing: [disconnect] is a user action (tap 'Switch Server'
      * etc.) and explicitly suppresses auto-reconnect. We want the opposite here:
      * the user did nothing wrong, the network changed out from under us, and the
-     * inner reconnect loop is going to spin forever on the wrong mode. Yield
-     * cleanly and let the outer loop re-select.
+     * inner reconnect loop would otherwise keep retrying on the network that just
+     * went away. Yield cleanly and let the outer loop reconnect on the new network.
      */
     fun disconnectForReselection() {
         stopStallWatchdog()

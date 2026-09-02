@@ -46,7 +46,7 @@ sealed class NetworkEvent {
     /**
      * The active network's identity changed (different [networkHandle]).
      * Indicates a transport handover (e.g., WiFi -> Cellular). The reconnect
-     * loop should re-run ConnectionSelector against the new network.
+     * loop should re-attempt the local connection on the new network.
      */
     data class IdentityChanged(val networkHandle: Long) : NetworkEvent()
 
@@ -65,7 +65,7 @@ sealed class NetworkEvent {
  * Phase 2B: absorbs the retry loop entirely. AutoReconnectManager.kt deletes
  * after this phase. The loop preserves today's behavior:
  * - 11-attempt backoff schedule (500ms, 1s, 2s, 4s, 8s, 15s, 30s, 60s x 4)
- * - Per-attempt iteration over LOCAL / REMOTE / PROXY in priority order
+ * - Per-attempt local connection retry (LOCAL is the only method left)
  * - 2s debounce on network-availability skip
  * - 500ms minimum stabilization delay after network-triggered skip
  *
@@ -378,7 +378,7 @@ class ConnectionCoordinator(
     }
 
     private fun priorityMethodsForCurrentNetwork(): List<ConnectionType> {
-        return ConnectionSelector.getPriorityOrder(_networkState.value.transportType)
+        return ConnectionSelector.getPriorityOrder()
     }
 
     private fun serverHasMethod(server: UnifiedServer, method: ConnectionType): Boolean = when (method) {

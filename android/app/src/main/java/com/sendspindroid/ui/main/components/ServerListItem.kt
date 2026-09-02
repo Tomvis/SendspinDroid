@@ -195,7 +195,7 @@ private fun StatusIndicator(
 }
 
 /**
- * Connection method icons (WiFi, Cloud, VPN).
+ * Connection method icons (WiFi).
  */
 @Composable
 private fun ConnectionMethodIcons(
