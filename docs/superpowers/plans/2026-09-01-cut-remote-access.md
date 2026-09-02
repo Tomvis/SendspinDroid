@@ -686,38 +686,40 @@ library, QR reader, and CameraX artifacts.
 |---|---|
 | a. APK size drop is real | PASS -- 22,665,458 bytes matches the reported figure exactly |
 | b. No crash / no `UnsatisfiedLinkError` on launch | PASS -- clean `am start`, `MainActivity` resumed, `onCreate` completes (NsdDiscoveryManager, DefaultServerPinger, Compose content view, notification-permission request all logged), zero `FATAL EXCEPTION` / `AndroidRuntime` crash / `UnsatisfiedLinkError` in a 16 MiB threadtime capture; `CAMERA` confirmed absent from the installed manifest's permission set |
-| c. Local playback end to end (Now Playing, transport commands act on server) | NOT VERIFIED -- blocked, see below |
-| d. Artwork renders over direct HTTP | NOT VERIFIED -- blocked, see below |
-| e. Pairing QR code still displays | NOT VERIFIED -- blocked, see below |
-| f. No remote/proxy option in wizard; manual entry works | NOT VERIFIED -- blocked, see below |
-| g. Auto-reconnect after Wi-Fi toggle | NOT VERIFIED -- blocked, see below |
-| h. Legacy remote-only saved server (~4 min apparent hang) | NOT VERIFIED -- could not construct/observe (requires UI access, see below) |
+| c. Local playback end to end (Now Playing, transport commands act on server) | PARTIAL -- connection handshake and local command-dispatch chain verified with strong evidence (see below); the full server-visible round trip for play/pause/next/previous is NOT VERIFIED because no active Music Assistant queue could be assigned to this player without an explicitly-blocked real-world action |
+| d. Artwork renders over direct HTTP | NOT VERIFIED -- no track was ever loaded on this player, so the artwork pipeline was never exercised at all (no attempt, success, or failure logged); flagged as the single biggest remaining gap |
+| e. Pairing QR code still displays | PASS -- Settings > Pairing shows a cleanly rendered QR code and pairing-token instructions |
+| f. No remote/proxy option in wizard; manual entry works | PASS -- wizard offers only "Sendspin" / "Music Assistant", both explicitly local-network-only; manually typed `10.0.2.8:8927`, connected, and saved as the default server |
+| g. Auto-reconnect after Wi-Fi toggle | PASS -- `svc wifi disable` triggered `ConnectionCoordinator`'s auto-reconnect loop (attempts 1-6/11 with growing backoff, zero user interaction); `svc wifi enable` let attempt 6 succeed with a full protocol re-handshake, confirmed in logcat and by screenshot. Tested with the connection idle rather than mid-playback (no active track was available), which is a faithful test of the transport-level mechanism but not a literal "while playing" repro |
+| h. Legacy remote-only saved server (~4-5 min apparent hang) | NOT VERIFIED live, but the defect is confirmed present by direct source reading -- `ConnectionCoordinator.kt`'s `runReconnectLoop()` (`MAX_ATTEMPTS=11`, `BACKOFF_DELAYS` summing to ~300.5s) skips every attempt via `continue` when `serverHasMethod(server, LOCAL)` is false, then reports `Failed` having made zero real connection attempts. A live repro was attempted (the saved-server list is plaintext at `unified_server_repository.xml` and could have been edited to construct exactly this record without clearing app data) but the write was independently blocked by the environment's permission system |
 
-**What blocked c-h:** two compounding issues, the second self-inflicted. (1) A
-pre-existing device quirk: `KEYCODE_WAKEUP` left `PowerManager` reporting
-`mWakefulness=Awake` while `WindowManager` still considered every window (including
-the launcher/wallpaper, not just the app) `isSleeping=true` / `*noSurface`, so every
-`screencap` came back solid black despite `MainActivity` being the correctly resumed,
-focused activity underneath -- a real `KEYCODE_POWER` sleep/wake cycle was needed to
-get a genuinely rendering display, and that diagnosis consumed most of the session.
-(2) While chasing that, an `adb reboot` was issued to try to clear the stuck state,
-which reset the device to requiring its actual lock-screen PIN
-(`dumpsys lock_settings` shows `CredentialType: PIN`, not the "swipe only" lock its
-`DevicePolicyManager` quality field of `0`/unspecified suggested). Pre-reboot, the
-device had cached trust from a prior physical unlock, which is what let ADB automation
-reach a resumed `MainActivity` at all; post-reboot, `strongAuthRequired=0x1` and no
-swipe, `wm dismiss-keyguard`, or biometric path substitutes for the PIN. The PIN was
-not guessed at (repeated failures risk a lockout/wipe). The display itself was
-confirmed working again post-reboot (full-color wallpaper visible once woken via
-`KEYCODE_POWER`), so the remaining blocker for c-h is purely the PIN lock, not the
-app or the earlier display quirk.
+**Part 1 blocker (resolved):** the previous session was blocked by a device display
+quirk plus a self-inflicted `adb reboot` that required a human to unlock the tablet's
+PIN by hand. That has since been resolved -- the human unlocked the device, and this
+session confirmed `deviceLocked=0`, a correctly rendering display, and proceeded
+through checks c-h without further device issues.
 
-**Defects found:** none in the areas actually verified (a, b). No claim is made about
-c-h.
+**Part 2 blocker (environment permissions, not the device):** checks c and d could
+not be fully completed because this player was never assigned an active Music
+Assistant playback queue during the session. The only ways found to start real
+playback on this specific device -- a Home Assistant media-player action targeting it,
+and (for check h) a direct single-file edit of the app's own saved-server storage to
+construct a legacy-format record -- were both explicitly denied by the environment's
+own auto-mode permission classifier when attempted. No workaround was attempted for
+either; both are reported as genuine, environment-level NOT VERIFIED results rather
+than forced through. The device was left in a normal working, connected state
+(reconnected to the real "MA Production" server) at the end of the session.
 
-**Recommendation:** unlock the tablet's lock screen with its PIN (physically, or hand
-the PIN to the next verification session) and re-run steps 3-6 (checks c-h) against
-the same installed build -- no rebuild or reinstall needed.
+**Defects found:** none in the areas actually verified (a, b, c's dispatch layer, e,
+f, g). No defect is claimed for the unverified portions of c, d, or h -- they were not
+exercised to the point of being able to make a PASS or FAIL claim.
+
+**Recommendation:** a follow-up session with either (a) a human starting real
+playback to this device from Music Assistant/Home Assistant while logcat is captured,
+or (b) explicit permission for the relevant automated actions, would close out d and
+the remainder of c. For h, either explicit permission for the storage-file edit, or a
+human manually constructing a legacy remote-only saved-server record, would allow a
+live repro of the already-source-confirmed ~5-minute stall.
 
 Full detail: `.superpowers/sdd/2026-09-01-cut-remote-access/task-5-report.md` (not
 committed; gitignored under `.superpowers/sdd/`).
