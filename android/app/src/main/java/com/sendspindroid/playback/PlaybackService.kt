@@ -65,7 +65,6 @@ import com.sendspindroid.sendspin.SendSpinEndpoint
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.UnifiedServerRepository
 import com.sendspindroid.UserSettings
-import com.sendspindroid.UserSettings.ConnectionMode
 import com.sendspindroid.sendspin.SyncAudioPlayer
 import com.sendspindroid.sendspin.SyncAudioPlayerCallback
 import com.sendspindroid.sendspin.PlaybackState as SyncPlaybackState
@@ -141,7 +140,6 @@ class PlaybackService : MediaLibraryService() {
 
     // Current server connection info (for MA integration)
     private var currentServerId: String? = null
-    private var currentConnectionMode: ConnectionMode = ConnectionMode.LOCAL
 
     // Active server as a flow, consumed by ConnectionCoordinator.
     private val _currentServerFlow = MutableStateFlow<UnifiedServer?>(null)
@@ -401,8 +399,6 @@ class PlaybackService : MediaLibraryService() {
         const val COMMAND_PREVIOUS = "com.sendspindroid.PREVIOUS"
         const val COMMAND_SWITCH_GROUP = "com.sendspindroid.SWITCH_GROUP"
         const val COMMAND_GET_STATS = "com.sendspindroid.GET_STATS"
-        const val COMMAND_CONNECT_REMOTE = "com.sendspindroid.CONNECT_REMOTE"
-        const val COMMAND_CONNECT_PROXY = "com.sendspindroid.CONNECT_PROXY"
 
         // Intent actions for service start (used by BootReceiver)
         const val ACTION_AUTO_CONNECT = "com.sendspindroid.ACTION_AUTO_CONNECT"
@@ -412,9 +408,6 @@ class PlaybackService : MediaLibraryService() {
         const val ARG_SERVER_ADDRESS = "server_address"
         const val ARG_SERVER_PATH = "server_path"
         const val ARG_VOLUME = "volume"
-        const val ARG_REMOTE_ID = "remote_id"
-        const val ARG_PROXY_URL = "proxy_url"
-        const val ARG_AUTH_TOKEN = "auth_token"
         const val ARG_SERVER_ID = "server_id"  // For MA integration
 
         // Session extras keys for metadata (service → controller)
@@ -642,16 +635,13 @@ class PlaybackService : MediaLibraryService() {
             scope = serviceScope,
             onDisconnectRequested = { disconnectFromServer() },
             connectAttempt = { server, method ->
+                // Local is the only connection method left; other ConnectionType
+                // values can no longer be satisfied (no remote/proxy transport).
                 val selected = when (method) {
                     com.sendspindroid.model.ConnectionType.LOCAL -> server.local?.let {
                         ConnectionSelector.SelectedConnection.Local(it.address, it.path)
                     }
-                    com.sendspindroid.model.ConnectionType.REMOTE -> server.remote?.let {
-                        ConnectionSelector.SelectedConnection.Remote(it.remoteId)
-                    }
-                    com.sendspindroid.model.ConnectionType.PROXY -> server.proxy?.let {
-                        ConnectionSelector.SelectedConnection.Proxy(it.url, it.authToken)
-                    }
+                    else -> null
                 } ?: return@ConnectionCoordinator false
                 connectViaSelectedConnection(server, selected)
             },
@@ -1951,82 +1941,6 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Connects to a SendSpin server via Music Assistant Remote Access.
-     *
-     * @param remoteId The 26-character Remote ID from Music Assistant settings
-     */
-    fun connectToRemoteServer(remoteId: String) {
-        Log.d(TAG, "Connecting to remote server via Remote ID: $remoteId")
-        lastDisconnectUserInitiated = false
-
-        // See connectToServer: announcing Connecting before the coordinator
-        // leaves Idle publishes DISCONNECTED instead.
-
-        try {
-            if (sendSpinClient?.isConnected == true) {
-                Log.d(TAG, "Already connected, disconnecting first...")
-                sendSpinClient?.disconnect()
-            }
-
-            // Read current device volume and set as initial volume for server and UI
-            val am = audioManager
-            if (am != null) {
-                val currentDeviceVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val volumePercent = ((currentDeviceVolume.toFloat() / maxVolume) * 100).toInt()
-                Log.d(TAG, "Setting initial volume from device: $currentDeviceVolume/$maxVolume = $volumePercent%")
-                sendSpinClient?.setInitialVolume(volumePercent)
-                _playbackState.value = _playbackState.value.copy(volume = volumePercent)
-            }
-
-            sendSpinClient?.connect(SendSpinEndpoint.Remote(remoteId))
-        } catch (e: Exception) {
-            Log.e(TAG, "Error connecting to remote server", e)
-            broadcastConnectionState(STATE_ERROR, errorMessage = "Remote connection failed: ${e.message}")
-        }
-    }
-
-    /**
-     * Connect to a SendSpin server via authenticated reverse proxy.
-     *
-     * This is for users who have Music Assistant exposed through Nginx Proxy Manager,
-     * Traefik, Caddy, or similar reverse proxies with token authentication.
-     *
-     * @param url The proxy URL (e.g., "https://ma.example.com/sendspin")
-     * @param authToken The long-lived authentication token from Music Assistant
-     */
-    fun connectToProxyServer(url: String, authToken: String) {
-        Log.d(TAG, "Connecting to proxy server: $url")
-        lastDisconnectUserInitiated = false
-
-        // See connectToServer: announcing Connecting before the coordinator
-        // leaves Idle publishes DISCONNECTED instead.
-
-        try {
-            if (sendSpinClient?.isConnected == true) {
-                Log.d(TAG, "Already connected, disconnecting first...")
-                sendSpinClient?.disconnect()
-            }
-
-            // Read current device volume and set as initial volume for server and UI
-            val am = audioManager
-            if (am != null) {
-                val currentDeviceVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val volumePercent = ((currentDeviceVolume.toFloat() / maxVolume) * 100).toInt()
-                Log.d(TAG, "Setting initial volume from device: $currentDeviceVolume/$maxVolume = $volumePercent%")
-                sendSpinClient?.setInitialVolume(volumePercent)
-                _playbackState.value = _playbackState.value.copy(volume = volumePercent)
-            }
-
-            sendSpinClient?.connect(SendSpinEndpoint.Proxy(url, authToken))
-        } catch (e: Exception) {
-            Log.e(TAG, "Error connecting to proxy server", e)
-            broadcastConnectionState(STATE_ERROR, errorMessage = "Proxy connection failed: ${e.message}")
-        }
-    }
-
-    /**
      * Broadcasts connection state to all connected MediaControllers via session extras.
      *
      * This allows MainActivity (and Android Auto) to react to connection state changes
@@ -2058,31 +1972,17 @@ class PlaybackService : MediaLibraryService() {
      * Call this before connecting when the server ID is known.
      *
      * @param serverId The UnifiedServer.id
-     * @param connectionMode The connection mode being used
      */
-    fun setCurrentServer(serverId: String?, connectionMode: ConnectionMode) {
+    fun setCurrentServer(serverId: String?) {
         currentServerId = serverId
-        currentConnectionMode = connectionMode
-        Log.d(TAG, "Set current server: $serverId, mode=$connectionMode")
+        Log.d(TAG, "Set current server: $serverId")
 
         _currentServerFlow.value = serverId?.let { UnifiedServerRepository.getServer(it) }
-
-        // Configure PROXY fallback for internal LOCAL->PROXY switchover in the
-        // reconnect loop. Only applies when connecting in LOCAL mode with a server
-        // that also has a PROXY config; cleared (null/null) otherwise so a later
-        // server-switch doesn't carry stale fallback data. Issue #126.
-        val proxy = if (connectionMode == ConnectionMode.LOCAL) {
-            serverId?.let { UnifiedServerRepository.getServer(it) }?.proxy
-        } else {
-            null
-        }
-        sendSpinClient?.setProxyFallback(proxy?.url, proxy?.authToken)
     }
 
     /**
      * Suspend-friendly connection wrapper used by the service-scoped
-     * AutoReconnectManager. Kicks off the appropriate connectToServer/
-     * connectToRemoteServer/connectToProxyServer call, then awaits the
+     * AutoReconnectManager. Kicks off connectToServer, then awaits the
      * SendSpin.connectionState transition to a terminal state.
      *
      * Returns true on Connected, false on Error or timeout.
@@ -2095,19 +1995,11 @@ class PlaybackService : MediaLibraryService() {
         val client = sendSpinClient ?: return false
 
         // Set the active server first so observers see context immediately.
-        setCurrentServer(server.id, when (selectedConnection) {
-            is ConnectionSelector.SelectedConnection.Local -> ConnectionMode.LOCAL
-            is ConnectionSelector.SelectedConnection.Remote -> ConnectionMode.REMOTE
-            is ConnectionSelector.SelectedConnection.Proxy -> ConnectionMode.PROXY
-        })
+        setCurrentServer(server.id)
 
         when (selectedConnection) {
             is ConnectionSelector.SelectedConnection.Local ->
                 connectToServer(selectedConnection.address, selectedConnection.path)
-            is ConnectionSelector.SelectedConnection.Remote ->
-                connectToRemoteServer(selectedConnection.remoteId)
-            is ConnectionSelector.SelectedConnection.Proxy ->
-                connectToProxyServer(selectedConnection.url, selectedConnection.authToken)
         }
 
         return withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
@@ -2142,7 +2034,7 @@ class PlaybackService : MediaLibraryService() {
         }
 
         Log.d(TAG, "Notifying MusicAssistant: server=${server.name}, isMusicAssistant=${server.isMusicAssistant}")
-        MusicAssistant.onServerConnected(server, currentConnectionMode)
+        MusicAssistant.onServerConnected(server)
     }
 
     /**
@@ -2756,16 +2648,8 @@ class PlaybackService : MediaLibraryService() {
 
                             when (selected) {
                                 is ConnectionSelector.SelectedConnection.Local -> {
-                                    setCurrentServer(server.id, ConnectionMode.LOCAL)
+                                    setCurrentServer(server.id)
                                     connectToServer(selected.address, selected.path)
-                                }
-                                is ConnectionSelector.SelectedConnection.Remote -> {
-                                    setCurrentServer(server.id, ConnectionMode.REMOTE)
-                                    connectToRemoteServer(selected.remoteId)
-                                }
-                                is ConnectionSelector.SelectedConnection.Proxy -> {
-                                    setCurrentServer(server.id, ConnectionMode.PROXY)
-                                    connectToProxyServer(selected.url, selected.authToken)
                                 }
                                 null -> {
                                     Log.w(TAG, "No connection method for saved server: ${server.name}")
@@ -2791,7 +2675,7 @@ class PlaybackService : MediaLibraryService() {
                             it.local?.address == serverAddress
                         }
                         if (unifiedServer != null) {
-                            setCurrentServer(unifiedServer.id, ConnectionMode.LOCAL)
+                            setCurrentServer(unifiedServer.id)
                         } else {
                             Log.w(TAG, "No UnifiedServer found for address: $serverAddress")
                         }
@@ -2828,8 +2712,6 @@ class PlaybackService : MediaLibraryService() {
             val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(SessionCommand(COMMAND_CONNECT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_CONNECT_AUTO, Bundle.EMPTY))
-                .add(SessionCommand(COMMAND_CONNECT_REMOTE, Bundle.EMPTY))
-                .add(SessionCommand(COMMAND_CONNECT_PROXY, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_DISCONNECT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_CANCEL_RECONNECT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_SET_VOLUME, Bundle.EMPTY))
@@ -2874,40 +2756,11 @@ class PlaybackService : MediaLibraryService() {
                     val serverId = args.getString(ARG_SERVER_ID)
                     if (address != null) {
                         // Set server info for MA integration before connecting
-                        setCurrentServer(serverId, ConnectionMode.LOCAL)
+                        setCurrentServer(serverId)
                         connectToServer(address, path)
                         Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                     } else {
                         Log.e(TAG, "CONNECT command missing server_address")
-                        Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
-                    }
-                }
-
-                COMMAND_CONNECT_REMOTE -> {
-                    val remoteId = args.getString(ARG_REMOTE_ID)
-                    val serverId = args.getString(ARG_SERVER_ID)
-                    if (remoteId != null) {
-                        // Set server info for MA integration before connecting
-                        setCurrentServer(serverId, ConnectionMode.REMOTE)
-                        connectToRemoteServer(remoteId)
-                        Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-                    } else {
-                        Log.e(TAG, "CONNECT_REMOTE command missing remote_id")
-                        Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
-                    }
-                }
-
-                COMMAND_CONNECT_PROXY -> {
-                    val url = args.getString(ARG_PROXY_URL)
-                    val token = args.getString(ARG_AUTH_TOKEN)
-                    val serverId = args.getString(ARG_SERVER_ID)
-                    if (url != null && token != null) {
-                        // Set server info for MA integration before connecting
-                        setCurrentServer(serverId, ConnectionMode.PROXY)
-                        connectToProxyServer(url, token)
-                        Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-                    } else {
-                        Log.e(TAG, "CONNECT_PROXY command missing proxy_url or auth_token")
                         Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
                     }
                 }
@@ -3310,20 +3163,12 @@ class PlaybackService : MediaLibraryService() {
         // Show foreground notification immediately (Android requires this within 10s)
         startForegroundServiceWithNotification(server.name)
 
-        // Connect using the server's preferred method
+        // Connect using the server's local address (the only connection method left).
         when {
             server.local != null -> {
                 // Re-resolve via mDNS first: a stored static IP can go stale
                 // (DHCP) and cause a refused connect on boot. See #158.
                 autoConnectLocalWithMdns(server)
-            }
-            server.remote != null -> {
-                Log.i(TAG, "Auto-connect: remote connection with ID ${server.remote!!.remoteId.take(8)}...")
-                connectToRemoteServer(server.remote!!.remoteId)
-            }
-            server.proxy != null -> {
-                Log.i(TAG, "Auto-connect: proxy connection to ${server.proxy!!.url}")
-                connectToProxyServer(server.proxy!!.url, server.proxy!!.authToken)
             }
             else -> {
                 Log.w(TAG, "Auto-connect: server ${server.name} has no configured connection methods")

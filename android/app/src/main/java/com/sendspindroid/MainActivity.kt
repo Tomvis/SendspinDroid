@@ -1504,63 +1504,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Performs a connection attempt for auto-reconnection.
-     * Returns true if connection was initiated successfully (doesn't wait for completion).
-     */
-    private suspend fun performAutoReconnect(
-        server: UnifiedServer,
-        selectedConnection: ConnectionSelector.SelectedConnection
-    ): Boolean {
-        val controller = mediaController
-        if (controller == null) {
-            Log.e(TAG, "Cannot auto-reconnect: MediaController not available")
-            return false
-        }
-
-        return try {
-            when (selectedConnection) {
-                is ConnectionSelector.SelectedConnection.Local -> {
-                    val args = Bundle().apply {
-                        putString(PlaybackService.ARG_SERVER_ADDRESS, selectedConnection.address)
-                        putString(PlaybackService.ARG_SERVER_PATH, selectedConnection.path)
-                        putString(PlaybackService.ARG_SERVER_ID, server.id)
-                    }
-                    val command = SessionCommand(PlaybackService.COMMAND_CONNECT, Bundle.EMPTY)
-                    controller.sendCustomCommand(command, args)
-                    Log.d(TAG, "Auto-reconnect: sent local connect command to ${selectedConnection.address}")
-                }
-                is ConnectionSelector.SelectedConnection.Remote -> {
-                    val args = Bundle().apply {
-                        putString(PlaybackService.ARG_REMOTE_ID, selectedConnection.remoteId)
-                        putString(PlaybackService.ARG_SERVER_ID, server.id)
-                    }
-                    val command = SessionCommand(PlaybackService.COMMAND_CONNECT_REMOTE, Bundle.EMPTY)
-                    controller.sendCustomCommand(command, args)
-                    Log.d(TAG, "Auto-reconnect: sent remote connect command")
-                }
-                is ConnectionSelector.SelectedConnection.Proxy -> {
-                    val args = Bundle().apply {
-                        putString(PlaybackService.ARG_PROXY_URL, selectedConnection.url)
-                        putString(PlaybackService.ARG_AUTH_TOKEN, selectedConnection.authToken)
-                        putString(PlaybackService.ARG_SERVER_ID, server.id)
-                    }
-                    val command = SessionCommand(PlaybackService.COMMAND_CONNECT_PROXY, Bundle.EMPTY)
-                    controller.sendCustomCommand(command, args)
-                    Log.d(TAG, "Auto-reconnect: sent proxy connect command")
-                }
-            }
-            // Note: We return true to indicate the command was sent.
-            // The actual success/failure will be determined by connection state change.
-            // For now, we optimistically assume the attempt was valid.
-            // A more robust implementation would wait for connection confirmation.
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Auto-reconnect: failed to send connect command", e)
-            false
-        }
-    }
-
-    /**
      * Starts auto-discovery for servers.
      * Called automatically when showing the server list view.
      */

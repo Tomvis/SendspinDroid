@@ -64,9 +64,6 @@ object UserSettings {
     const val KEY_UNPAIRED_ACCESS = "sendspin_unpaired_access"
     const val KEY_RECORD_MODE_PSK_ID = "sendspin_record_mode_psk_id"
 
-    // Connection mode preference key
-    const val KEY_LAST_CONNECTION_MODE = "last_connection_mode"
-
     const val KEY_LAST_REMOTE_ID = "last_remote_id"
     const val KEY_LAST_PROXY_URL = "last_proxy_url"
 
@@ -520,35 +517,6 @@ object UserSettings {
     }
 
     // ========== Remote Access Settings ==========
-
-    /**
-     * Connection mode for the app.
-     */
-    enum class ConnectionMode {
-        LOCAL,   // Direct WebSocket connection on local network
-        REMOTE,  // WebRTC connection via Music Assistant Remote Access
-        PROXY    // WebSocket via authenticated reverse proxy
-    }
-
-    /**
-     * Gets the last used connection mode.
-     * Defaults to LOCAL for first-time users.
-     */
-    fun getLastConnectionMode(): ConnectionMode {
-        val modeStr = prefs?.getString(KEY_LAST_CONNECTION_MODE, null)
-        return try {
-            if (modeStr != null) ConnectionMode.valueOf(modeStr) else ConnectionMode.LOCAL
-        } catch (e: Exception) {
-            ConnectionMode.LOCAL
-        }
-    }
-
-    /**
-     * Sets the last used connection mode.
-     */
-    fun setLastConnectionMode(mode: ConnectionMode) {
-        prefs?.edit()?.putString(KEY_LAST_CONNECTION_MODE, mode.name)?.apply()
-    }
 
     /**
      * Gets the last used Remote ID for quick reconnection.

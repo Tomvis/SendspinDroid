@@ -76,10 +76,9 @@ class SendSpinPreHandshakeReconnectTest {
 
         client = SendSpin(mockContext, "TestDevice", mockCallback)
 
-        // Seed connection info so canReconnect / hasConnectionInfo checks pass.
+        // Seed connection info so the hasConnectionInfo check passes.
         setField("serverAddress", "127.0.0.1:8080")
         setField("serverPath", "/sendspin")
-        setField("connectionMode", SendSpin.ConnectionMode.LOCAL)
 
         // Fake transport so onClosed's reconnect path can advance past the
         // hasConnectionInfo check without touching real networking.

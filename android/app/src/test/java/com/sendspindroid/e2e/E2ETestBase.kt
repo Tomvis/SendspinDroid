@@ -106,28 +106,20 @@ abstract class E2ETestBase {
      * This simulates what happens during a real connect() call:
      * 1. Sets the transport field
      * 2. Creates and registers a TransportEventListener
-     * 3. Sets connection mode and related state
+     * 3. Sets connection info
      */
     protected fun injectTransportAndConnect(
-        mode: SendSpin.ConnectionMode = SendSpin.ConnectionMode.LOCAL,
         serverAddress: String? = "192.168.1.100:8927",
         serverPath: String? = "/sendspin",
-        remoteId: String? = null,
-        authToken: String? = null
     ) {
         // Set connection state to Connecting via the existing MutableStateFlow
         val stateFlow: kotlinx.coroutines.flow.MutableStateFlow<TransportState> =
             getField(client, "_connectionState")
         stateFlow.value = TransportState.Connecting
 
-        // Set connection mode
-        setField(client, "connectionMode", mode)
-
         // Set connection info for reconnection
         if (serverAddress != null) setField(client, "serverAddress", serverAddress)
         if (serverPath != null) setField(client, "serverPath", serverPath)
-        if (remoteId != null) setField(client, "remoteId", remoteId)
-        if (authToken != null) setField(client, "authToken", authToken)
 
         // Reset disconnect flags
         setAtomicBoolean(client, "userInitiatedDisconnect", false)
@@ -153,13 +145,10 @@ abstract class E2ETestBase {
      * Perform a full handshake: inject transport, simulate connect, exchange hello.
      */
     protected fun connectAndHandshake(
-        mode: SendSpin.ConnectionMode = SendSpin.ConnectionMode.LOCAL,
         serverAddress: String? = "192.168.1.100:8927",
         serverPath: String? = "/sendspin",
-        remoteId: String? = null,
-        authToken: String? = null
     ) {
-        injectTransportAndConnect(mode, serverAddress, serverPath, remoteId, authToken)
+        injectTransportAndConnect(serverAddress, serverPath)
         fakeServer.completeHandshake()
     }
 

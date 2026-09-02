@@ -50,11 +50,6 @@ class MaCommandClient(private val settings: MaSettingsProvider) {
         private const val COMMAND_TIMEOUT_MS = 15000L
 
         /**
-         * Scheme used for proxying image URLs through the MA API DataChannel.
-         */
-        const val IMAGE_PROXY_SCHEME = "ma-proxy"
-
-        /**
          * Thumbnail size requested from MA's imageproxy. MA only accepts a fixed
          * set of sizes ({0, 80, 160, 256, 512, 1024}); any other value is rejected
          * with HTTP 400. 256 suits the browse/search grid thumbnails.
@@ -2288,21 +2283,16 @@ class MaCommandClient(private val settings: MaSettingsProvider) {
     /**
      * Extract image URI from MA item JSON.
      *
-     * Uses the current API URL and remote mode to construct appropriate image URLs.
-     * In REMOTE mode, server-local URLs are rewritten to use the proxy scheme.
+     * Uses the current API URL to construct appropriate image URLs.
      */
     internal fun extractImageUri(json: JsonObject): String {
         val ctx = transportContext
         val apiUrl = ctx.apiUrl ?: ""
         val remoteMode = ctx.isRemoteMode
-        val baseUrl = if (remoteMode) {
-            "$IMAGE_PROXY_SCHEME://"
-        } else {
-            apiUrl
-                .replace("/ws", "")
-                .replace("wss://", "https://")
-                .replace("ws://", "http://")
-        }
+        val baseUrl = apiUrl
+            .replace("/ws", "")
+            .replace("wss://", "https://")
+            .replace("ws://", "http://")
 
         // Try direct image field - can be a URL string or a JsonObject with path/provider
         val imageField = json["image"]

@@ -58,6 +58,11 @@ class MaCommandClientImageTest {
 
     @Test
     fun `extractImageUri rewrites imageproxy URL in remote mode`() {
+        // The "ma-proxy" scheme rewrite was removed with the WebRTC remote
+        // transport (IMAGE_PROXY_SCHEME was its only producer). isRemoteMode
+        // is no longer set true by any production code path -- this test
+        // exercises the test-only setTransport seam directly. With the
+        // scheme rewrite gone, the apiUrl is used as the base as-is.
         client.setTransport(null, "webrtc://ma-api", true)
 
         val json = parseJson("""
@@ -68,7 +73,7 @@ class MaCommandClientImageTest {
         """)
 
         val result = client.extractImageUri(json)
-        assertTrue(result.startsWith("ma-proxy://"))
+        assertTrue(result.startsWith("webrtc://ma-api"))
         assertTrue(result.contains("/imageproxy"))
     }
 

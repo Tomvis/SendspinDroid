@@ -3,7 +3,6 @@ package com.sendspindroid.musicassistant
 import android.content.Context
 import android.util.Log
 import com.sendspindroid.UserSettings
-import com.sendspindroid.UserSettings.ConnectionMode
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.coordinator.FailureReason
 import com.sendspindroid.coordinator.TransportState
@@ -32,13 +31,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
-
-/** Map app ConnectionMode to shared MaConnectionMode. */
-private fun ConnectionMode.toMaMode(): MaConnectionMode = when (this) {
-    ConnectionMode.LOCAL -> MaConnectionMode.LOCAL
-    ConnectionMode.REMOTE -> MaConnectionMode.REMOTE
-    ConnectionMode.PROXY -> MaConnectionMode.PROXY
-}
 
 /**
  * Derive the MA API WebSocket URL for this endpoint.
@@ -201,7 +193,6 @@ object MusicAssistant {
 
     // Current server info (when connected)
     private var currentServer: UnifiedServer? = null
-    private var currentConnectionMode: ConnectionMode? = null
     private var currentApiUrl: String? = null
 
     // Persistent MA API transport (replaces fire-and-forget WebSocket pattern)
@@ -275,43 +266,26 @@ object MusicAssistant {
     }
 
     /**
-     * Map a UnifiedServer + ConnectionMode to an MaEndpoint.
-     * Returns null if the server has no configuration for the given mode.
+     * Map a UnifiedServer to an MaEndpoint.
+     * Returns null if the server has no local configuration.
      */
-    private fun serverToMaEndpoint(server: UnifiedServer, mode: ConnectionMode): MaEndpoint? =
-        when (mode) {
-            ConnectionMode.LOCAL -> server.local?.let {
-                MaEndpoint.Local(it.address, MaSettings.getDefaultPort())
-            }
-            ConnectionMode.PROXY -> server.proxy?.let {
-                MaEndpoint.Proxy(it.url)
-            }
-            ConnectionMode.REMOTE -> {
-                val remote = server.remote
-                if (remote != null) {
-                    MaEndpoint.Remote(remote.remoteId)
-                } else {
-                    // No remote config: fall back to local or proxy if available
-                    server.local?.let { MaEndpoint.Local(it.address, MaSettings.getDefaultPort()) }
-                        ?: server.proxy?.let { MaEndpoint.Proxy(it.url) }
-                }
-            }
+    private fun serverToMaEndpoint(server: UnifiedServer): MaEndpoint? =
+        server.local?.let {
+            MaEndpoint.Local(it.address, MaSettings.getDefaultPort())
         }
 
     /**
      * Called by PlaybackService when a server connection is established.
      *
-     * Checks if MA API should be available for this server and connection mode,
-     * then attempts authentication if a token is stored.
+     * Checks if MA API should be available for this server, then attempts
+     * authentication if a token is stored.
      *
      * @param server The connected UnifiedServer
-     * @param connectionMode The active connection mode (LOCAL, REMOTE, or PROXY)
      */
-    fun onServerConnected(server: UnifiedServer, connectionMode: ConnectionMode) {
-        Log.d(TAG, "Server connected: ${server.name}, mode=$connectionMode, isMusicAssistant=${server.isMusicAssistant}")
+    fun onServerConnected(server: UnifiedServer) {
+        Log.d(TAG, "Server connected: ${server.name}, isMusicAssistant=${server.isMusicAssistant}")
 
         currentServer = server
-        currentConnectionMode = connectionMode
 
         // Check 1: Is this server a Music Assistant server?
         val hasStoredToken = MaSettings.getTokenForServer(server.id) != null
@@ -325,9 +299,9 @@ object MusicAssistant {
         }
 
         // Check 2: Can we reach the MA API?
-        val endpoint = serverToMaEndpoint(server, connectionMode)
+        val endpoint = serverToMaEndpoint(server)
         if (endpoint == null) {
-            Log.d(TAG, "No MA API endpoint available for connection mode $connectionMode")
+            Log.d(TAG, "No MA API endpoint available")
             _connectionState.value = TransportState.Idle
             return
         }
@@ -362,7 +336,6 @@ object MusicAssistant {
         commandClient.setTransport(null, null, false)
 
         currentServer = null
-        currentConnectionMode = null
         currentApiUrl = null
         currentServerInfo = null
         _connectionState.value = TransportState.Idle
@@ -478,7 +451,7 @@ object MusicAssistant {
         apiTransport = null
 
         val transport = createTransport(apiUrl)
-            ?: throw IOException("Cannot create MA API transport for mode $currentConnectionMode")
+            ?: throw IOException("Cannot create MA API transport for $apiUrl")
 
         authenticate(transport)
 
@@ -531,24 +504,13 @@ object MusicAssistant {
     }
 
     /**
-     * Create the appropriate MaApiTransport for the current connection mode.
+     * Create the MaApiTransport for the connected server.
      *
-     * LOCAL/PROXY: MaWebSocketTransport (persistent WebSocket to ws://host:8095/ws)
-     * REMOTE: MaWebSocketTransport, derived from a local or proxy URL if one
-     * is available for the server.
+     * MaWebSocketTransport: persistent WebSocket to ws://host:8095/ws.
      */
     private fun createTransport(apiUrl: String): MaApiTransport? {
         transportFactoryOverride?.let { return it(apiUrl) }
-        val mode = currentConnectionMode ?: return null
-
-        if (mode == ConnectionMode.REMOTE) {
-            val wsUrl = currentServer?.let { server ->
-                MaApiEndpoint.deriveFromLocal(server, MaSettings.getDefaultPort()) ?: MaApiEndpoint.deriveFromProxy(server)
-            }
-            return if (wsUrl != null) MaWebSocketTransport(wsUrl) else null
-        }
-
-        // LOCAL/PROXY: WebSocket transport
+        currentServer ?: return null
         return MaWebSocketTransport(apiUrl)
     }
 

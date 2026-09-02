@@ -2,9 +2,7 @@ package com.sendspindroid.network
 
 import android.util.Log
 import com.sendspindroid.UnifiedServerRepository
-import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.remote.SignalingClient
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import okhttp3.OkHttpClient
@@ -18,17 +16,17 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 
 /**
- * Periodically pings the default server via remote/proxy connections when mDNS
- * doesn't find it on the local network.
+ * Periodically pings the default server's local address when mDNS doesn't
+ * find it on the local network (e.g., the device is on cellular, or has
+ * temporarily lost the mDNS announcement).
  *
  * ## Purpose
- * mDNS only discovers servers on the local network. For users who:
- * - Are on cellular (no mDNS)
- * - Have a default server with only remote/proxy config
- * - Are away from the local network
+ * mDNS only discovers servers on the local network, and its announcements
+ * can be missed. This pinger enables auto-connect by checking if the
+ * default server's local address is directly reachable.
  *
- * This pinger enables auto-connect by checking if the default server is reachable
- * via configured remote or proxy methods.
+ * A server whose only configured method is remote or proxy (legacy data)
+ * cannot be reached at all -- those transports were removed.
  *
  * ## Adaptive Intervals
  * | Condition                | Interval |
@@ -38,11 +36,6 @@ import kotlin.coroutines.resume
  * | Background + not charging| 120s     |
  * | After failed ping        | Backoff (doubles, max 5 min) |
  * | Network change           | Immediate |
- *
- * ## Ping Strategy (based on NetworkEvaluator)
- * - WiFi/Ethernet: Try Local → Proxy → Remote
- * - Cellular: Skip Local → Proxy → Remote
- * - VPN: Proxy → Remote → Local
  *
  * ## Usage
  * ```kotlin
@@ -79,8 +72,6 @@ class DefaultServerPinger(
 
         // Ping timeouts
         private const val LOCAL_PING_TIMEOUT_MS = 3_000L
-        private const val REMOTE_PING_TIMEOUT_MS = 5_000L
-        private const val PROXY_PING_TIMEOUT_MS = 5_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -232,9 +223,11 @@ class DefaultServerPinger(
                     return@launch
                 }
 
-                // Check if server has remote or proxy config (only these can be pinged remotely)
-                if (defaultServer.remote == null && defaultServer.proxy == null && defaultServer.local == null) {
-                    Log.d(TAG, "Default server has no connection methods configured")
+                // Only a local address can be pinged; remote/proxy config (legacy
+                // data) has no transport left to reach it with.
+                val local = defaultServer.local
+                if (local == null) {
+                    Log.d(TAG, "Default server has no local address configured")
                     return@launch
                 }
 
@@ -249,55 +242,26 @@ class DefaultServerPinger(
 
                 Log.d(TAG, "Pinging default server: ${defaultServer.name}")
 
-                // Get network state for connection priority
-                networkEvaluator.evaluateCurrentNetwork()
-                val networkState = networkEvaluator.networkState.value
-                val priority = ConnectionSelector.getPriorityOrder(networkState.transportType)
-
-                Log.d(TAG, "Ping priority on ${networkState.transportType}: ${priority.joinToString()}")
-
-                // Try each method in priority order
-                for (method in priority) {
-                    if (!isRunning.get()) {
-                        Log.d(TAG, "Pinger stopped during ping attempt")
-                        return@launch
-                    }
-
-                    val success = when (method) {
-                        ConnectionType.LOCAL -> {
-                            defaultServer.local?.let { local ->
-                                pingLocal(local.address, local.path)
-                            } ?: false
-                        }
-                        ConnectionType.REMOTE -> {
-                            defaultServer.remote?.let { remote ->
-                                pingRemote(remote.remoteId)
-                            } ?: false
-                        }
-                        ConnectionType.PROXY -> {
-                            defaultServer.proxy?.let { proxy ->
-                                pingProxy(proxy.url)
-                            } ?: false
-                        }
-                    }
-
-                    if (success) {
-                        Log.i(TAG, "Default server reachable via $method - triggering connect")
-                        consecutiveFailures.set(0)
-
-                        // Trigger connection on main thread
-                        withContext(Dispatchers.Main) {
-                            if (isRunning.get()) {
-                                onServerReachable(defaultServer)
-                            }
-                        }
-                        return@launch
-                    }
+                if (!isRunning.get()) {
+                    Log.d(TAG, "Pinger stopped during ping attempt")
+                    return@launch
                 }
 
-                // All methods failed
+                if (pingLocal(local.address, local.path)) {
+                    Log.i(TAG, "Default server reachable via LOCAL - triggering connect")
+                    consecutiveFailures.set(0)
+
+                    // Trigger connection on main thread
+                    withContext(Dispatchers.Main) {
+                        if (isRunning.get()) {
+                            onServerReachable(defaultServer)
+                        }
+                    }
+                    return@launch
+                }
+
                 val failures = consecutiveFailures.incrementAndGet()
-                Log.d(TAG, "All ping methods failed (consecutive failures: $failures)")
+                Log.d(TAG, "Ping failed (consecutive failures: $failures)")
 
             } catch (e: CancellationException) {
                 throw e // Don't catch cancellation
@@ -389,111 +353,6 @@ class DefaultServerPinger(
                 false
             } catch (e: Exception) {
                 Log.d(TAG, "Local ping error: ${e.message}")
-                false
-            }
-        }
-    }
-
-    /**
-     * Pings a remote server via signaling.
-     * Returns true if we can reach the signaling server and the remote server responds.
-     */
-    private suspend fun pingRemote(remoteId: String): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                Log.d(TAG, "Ping remote: ${remoteId.take(8)}...")
-
-                withTimeout(REMOTE_PING_TIMEOUT_MS) {
-                    suspendCancellableCoroutine { cont ->
-                        val signalingClient = SignalingClient(remoteId)
-
-                        signalingClient.setListener(object : SignalingClient.Listener {
-                            override fun onServerConnected(iceServers: List<com.sendspindroid.remote.IceServerConfig>) {
-                                Log.d(TAG, "Remote ping success (server connected)")
-                                signalingClient.destroy()
-                                if (cont.isActive) cont.resume(true)
-                            }
-
-                            override fun onAnswer(sdp: String) {
-                                // Won't happen during ping
-                            }
-
-                            override fun onIceCandidate(candidate: com.sendspindroid.remote.IceCandidateInfo) {
-                                // Won't happen during ping
-                            }
-
-                            override fun onError(message: String) {
-                                Log.d(TAG, "Remote ping error: $message")
-                                signalingClient.destroy()
-                                if (cont.isActive) cont.resume(false)
-                            }
-
-                            override fun onDisconnected() {
-                                Log.d(TAG, "Remote ping: peer disconnected")
-                                signalingClient.destroy()
-                                if (cont.isActive) cont.resume(false)
-                            }
-                        })
-
-                        signalingClient.connect()
-
-                        cont.invokeOnCancellation {
-                            signalingClient.destroy()
-                        }
-                    }
-                }
-            } catch (e: TimeoutCancellationException) {
-                Log.d(TAG, "Remote ping timeout")
-                false
-            } catch (e: Exception) {
-                Log.d(TAG, "Remote ping error: ${e.message}")
-                false
-            }
-        }
-    }
-
-    /**
-     * Pings a proxy server via WebSocket handshake.
-     * Returns true if the WebSocket connection handshake succeeds.
-     */
-    private suspend fun pingProxy(url: String): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                // Convert http/https to ws/wss
-                val wsUrl = url.replace("^https://".toRegex(), "wss://")
-                    .replace("^http://".toRegex(), "ws://")
-
-                Log.d(TAG, "Ping proxy: $wsUrl")
-
-                withTimeout(PROXY_PING_TIMEOUT_MS) {
-                    suspendCancellableCoroutine { cont ->
-                        val request = Request.Builder()
-                            .url(wsUrl)
-                            .build()
-
-                        val webSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
-                            override fun onOpen(webSocket: WebSocket, response: Response) {
-                                Log.d(TAG, "Proxy ping success")
-                                webSocket.close(1000, "Ping complete")
-                                if (cont.isActive) cont.resume(true)
-                            }
-
-                            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                                Log.d(TAG, "Proxy ping failed: ${t.message}")
-                                if (cont.isActive) cont.resume(false)
-                            }
-                        })
-
-                        cont.invokeOnCancellation {
-                            webSocket.cancel()
-                        }
-                    }
-                }
-            } catch (e: TimeoutCancellationException) {
-                Log.d(TAG, "Proxy ping timeout")
-                false
-            } catch (e: Exception) {
-                Log.d(TAG, "Proxy ping error: ${e.message}")
                 false
             }
         }

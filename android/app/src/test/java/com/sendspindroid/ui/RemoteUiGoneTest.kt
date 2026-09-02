@@ -50,4 +50,26 @@ class RemoteUiGoneTest {
         require(source.exists()) { "wizard view model not found at " + source.absolutePath }
         assertTrue("manual address entry must survive", source.readText().contains("localAddress"))
     }
+
+    @Test
+    fun remoteTransportPackageIsDeletedFromApp() {
+        val dir = File("src/main/java/com/sendspindroid/remote")
+        assertFalse("app remote package must be deleted, found " + dir.absolutePath, dir.exists())
+    }
+
+    @Test
+    fun remoteTransportPackageIsDeletedFromShared() {
+        val root = File("../shared/src/commonMain/kotlin")
+        require(root.isDirectory) { "shared module not found at " + root.absolutePath + " -- module may have moved" }
+        val dir = File(root, "com/sendspindroid/remote")
+        assertFalse("shared remote package must be deleted, found " + dir.absolutePath, dir.exists())
+    }
+
+    @Test
+    fun proxyTransportIsDeleted() {
+        val root = File("../shared/src/commonMain/kotlin")
+        require(root.isDirectory) { "shared module not found at " + root.absolutePath + " -- module may have moved" }
+        val f = File(root, "com/sendspindroid/sendspin/transport/ProxyWebSocketTransport.kt")
+        assertFalse("ProxyWebSocketTransport must be deleted", f.exists())
+    }
 }

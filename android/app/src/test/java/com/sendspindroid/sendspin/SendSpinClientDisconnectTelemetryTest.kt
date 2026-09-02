@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Verifies the connection-health telemetry introduced by issue #128.
  *
  * State being tracked on every disconnect event:
- *  - lastDisconnectCode / lastDisconnectReason / lastDisconnectMode
+ *  - lastDisconnectCode / lastDisconnectReason
  *  - lastDisconnectAtMs (only for abnormal, non-user-initiated)
  *  - connectedAtMs cleared
  *
@@ -85,7 +85,6 @@ class SendSpinDisconnectTelemetryTest {
         // Seed connection info so the disconnect paths execute fully.
         setField("serverAddress", "127.0.0.1:8080")
         setField("serverPath", "/sendspin")
-        setField("connectionMode", SendSpin.ConnectionMode.LOCAL)
 
         val fakeTransport = object : SendSpinTransport {
             override val state = TransportState.Connected
@@ -112,7 +111,7 @@ class SendSpinDisconnectTelemetryTest {
     // =========================================================================
 
     @Test
-    fun `onClosed abnormal populates lastDisconnectCode, reason, mode, and lastDisconnectAtMs`() {
+    fun `onClosed abnormal populates lastDisconnectCode, reason, and lastDisconnectAtMs`() {
         setHandshakeComplete(true)
         val listener = buildTransportListener()
 

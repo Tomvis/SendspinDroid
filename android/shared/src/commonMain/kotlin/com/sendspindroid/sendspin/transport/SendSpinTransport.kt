@@ -3,12 +3,9 @@ package com.sendspindroid.sendspin.transport
 /**
  * Transport abstraction for SendSpin communication.
  *
- * This interface allows SendSpinClient to work with different transport mechanisms:
- * - **Local**: Direct WebSocket connection to server on local network
- * - **Remote**: WebRTC DataChannel via signaling server for internet access
- *
- * Both transports carry the same SendSpin protocol (JSON text + binary audio),
- * but differ in how the connection is established and maintained.
+ * This interface allows SendSpinClient to work with different transport mechanisms.
+ * The only implementation is [WebSocketTransport]: a direct WebSocket connection
+ * to a server on the local network.
  *
  * ## Transport Lifecycle
  * ```
@@ -112,10 +109,9 @@ interface SendSpinTransport {
          * spec describes.
          *
          * Only the handshake driver needs [rawUtf8]; everything else can keep
-         * using the String. Defaults to [onMessage] so transports that cannot
-         * supply raw bytes (WebRTC, proxy) keep working unchanged - they simply
-         * cannot carry the spec handshake, which is correct: those are custom
-         * connection methods outside it.
+         * using the String. Defaults to [onMessage] so a transport that cannot
+         * supply raw bytes keeps working unchanged - it simply cannot carry the
+         * spec handshake.
          */
         fun onMessage(text: String, rawUtf8: ByteArray) = onMessage(text)
 

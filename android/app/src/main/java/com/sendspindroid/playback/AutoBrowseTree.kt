@@ -147,10 +147,7 @@ object AutoBrowseTree {
 
     /** A playable row for a saved server (media ID keyed by server UUID). */
     fun savedServerItem(server: UnifiedServer): MediaItem {
-        val subtitle = server.local?.address
-            ?: if (server.proxy != null) "Proxy"
-            else if (server.remote != null) "Remote Access"
-            else ""
+        val subtitle = server.local?.address ?: ""
         return MediaItem.Builder()
             .setMediaId("$MEDIA_ID_SAVED_SERVER_PREFIX${server.id}")
             .setMediaMetadata(

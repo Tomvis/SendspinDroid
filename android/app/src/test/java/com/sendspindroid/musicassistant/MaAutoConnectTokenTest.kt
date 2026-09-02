@@ -4,7 +4,6 @@ import android.util.Log
 import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.model.LocalConnection
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.UserSettings.ConnectionMode
 import io.mockk.*
 import org.junit.After
 import org.junit.Assert.*
@@ -47,7 +46,6 @@ class MaAutoConnectTokenTest {
      */
     private fun simulateOnServerConnected(
         server: UnifiedServer,
-        connectionMode: ConnectionMode,
         hasStoredToken: Boolean,
         hasApiEndpoint: Boolean = true
     ): SimulatedResult {
@@ -86,7 +84,6 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
             hasStoredToken = true
         )
 
@@ -109,7 +106,6 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
             hasStoredToken = false
         )
 
@@ -133,7 +129,6 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
             hasStoredToken = false
         )
 
@@ -158,7 +153,6 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
             hasStoredToken = true
         )
 
@@ -176,7 +170,6 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
             hasStoredToken = true,
             hasApiEndpoint = false
         )

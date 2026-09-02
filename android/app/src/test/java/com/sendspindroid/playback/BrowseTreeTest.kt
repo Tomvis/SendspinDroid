@@ -157,7 +157,10 @@ class BrowseTreeTest {
     }
 
     @Test
-    fun `saved server with proxy shows Proxy subtitle`() = runTest {
+    fun `saved server with only legacy proxy or remote config shows no subtitle`() = runTest {
+        // Remote and proxy access were removed; a server whose only configured
+        // method is one of them (leftover from before this app version) has no
+        // reachable address to show as a subtitle.
         val items = AutoBrowseTree.serverListChildren(
             savedServers = listOf(
                 UnifiedServer(
@@ -166,20 +169,7 @@ class BrowseTreeTest {
                         url = "https://ma.example.com/sendspin",
                         authToken = "token123"
                     )
-                )
-            ),
-            discoveredServersFlow = MutableStateFlow(emptyList()),
-            discoveryWaitMs = 0L,
-        )
-
-        assertEquals(1, items.size)
-        assertEquals("Proxy", items[0].mediaMetadata.subtitle)
-    }
-
-    @Test
-    fun `saved server with remote shows Remote Access subtitle`() = runTest {
-        val items = AutoBrowseTree.serverListChildren(
-            savedServers = listOf(
+                ),
                 UnifiedServer(
                     id = "remote-1", name = "Remote Server",
                     remote = RemoteConnection(remoteId = "ABCDE12345FGHIJ67890KLMNOP")
@@ -189,8 +179,9 @@ class BrowseTreeTest {
             discoveryWaitMs = 0L,
         )
 
-        assertEquals(1, items.size)
-        assertEquals("Remote Access", items[0].mediaMetadata.subtitle)
+        assertEquals(2, items.size)
+        assertEquals("", items[0].mediaMetadata.subtitle)
+        assertEquals("", items[1].mediaMetadata.subtitle)
     }
 
     // ========== Play rejection regression: never-empty guarantees ==========

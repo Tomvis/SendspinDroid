@@ -35,8 +35,6 @@ import androidx.compose.ui.unit.sp
 import com.sendspindroid.R
 import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.model.LocalConnection
-import com.sendspindroid.model.ProxyConnection
-import com.sendspindroid.model.RemoteConnection
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.ui.adaptive.tvFocusable
 import com.sendspindroid.ui.theme.SendSpinTheme
@@ -220,25 +218,6 @@ private fun ConnectionMethodIcons(
             )
         }
 
-        if (server.remote != null) {
-            Icon(
-                painter = painterResource(R.drawable.ic_cloud_connected),
-                contentDescription = stringResource(R.string.accessibility_connection_remote),
-                modifier = Modifier
-                    .padding(end = 4.dp)
-                    .size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        if (server.proxy != null) {
-            Icon(
-                painter = painterResource(R.drawable.ic_vpn_key),
-                contentDescription = stringResource(R.string.accessibility_connection_proxy),
-                modifier = Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
     }
 }
 
@@ -256,7 +235,6 @@ private fun ServerListItemSavedPreview() {
                 name = "Living Room Speaker",
                 lastConnectedMs = System.currentTimeMillis() - 2 * 60 * 60 * 1000,
                 local = LocalConnection("192.168.1.100:8927"),
-                remote = RemoteConnection("ABCDE12345FGHIJ67890KLMNO1"),
                 isDefaultServer = true
             ),
             status = ServerItemStatus.ONLINE,
@@ -293,8 +271,7 @@ private fun ServerListItemConnectingPreview() {
             server = UnifiedServer(
                 id = "3",
                 name = "Bedroom Speaker",
-                local = LocalConnection("192.168.1.102:8927"),
-                proxy = ProxyConnection("https://proxy.example.com", "token123")
+                local = LocalConnection("192.168.1.102:8927")
             ),
             status = ServerItemStatus.CONNECTING,
             onClick = {},

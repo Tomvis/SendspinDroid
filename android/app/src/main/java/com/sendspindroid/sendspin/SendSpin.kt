@@ -5,8 +5,6 @@ import android.os.Build
 import android.util.Log
 import com.sendspindroid.UserSettings
 import com.sendspindroid.logging.AppLog
-import com.sendspindroid.remote.WebRTCTransport
-import com.sendspindroid.sendspin.transport.ProxyWebSocketTransport
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
@@ -69,20 +67,19 @@ import javax.net.ssl.SSLHandshakeException
  * Protocol spec: https://www.sendspin-audio.com/spec/
  *
  * ## Protocol Overview
- * 1. Connect via WebSocket (local) or WebRTC DataChannel (remote)
+ * 1. Connect via WebSocket
  * 2. Send client/hello with capabilities
  * 3. Receive server/hello with active roles
  * 4. Send client/time messages continuously for clock sync
  * 5. Receive binary audio chunks (type 4) with microsecond timestamps
  * 6. Play audio at computed client time using Kalman-filtered offset
  *
- * ## Connection Modes
+ * ## Connection Mode
  * - **Local**: Direct WebSocket to server on local network (ws://host:port/sendspin)
- * - **Remote**: WebRTC DataChannel via Music Assistant Remote Access (26-char Remote ID)
  *
  * This class extends SendSpinProtocolHandler for shared protocol logic
  * and implements client-specific concerns:
- * - Transport abstraction (WebSocket or WebRTC)
+ * - WebSocket transport
  * - Connection state machine (Disconnected/Connecting/Connected/Error)
  * - Reconnection with exponential backoff
  * - Time filter freeze/thaw during reconnection
@@ -124,13 +121,6 @@ class SendSpin(
         // server death with headroom for reconnect + resync inside the ~30s audio buffer.
         // Issue #127.
         private const val IDLE_STALL_TIMEOUT_MS = 20_000L
-
-        // After this many consecutive LOCAL-mode reconnect failures in a row, switch
-        // internally to PROXY if a fallback was configured via setProxyFallback().
-        // Prevents indefinite retry of a dead LAN address when the server is no longer
-        // reachable on this network. Issue #126.
-        private const val LOCAL_RECONNECT_FALLBACK_THRESHOLD = 3
-
     }
 
     /**
@@ -182,15 +172,6 @@ class SendSpin(
         fun onUnpaired(serverId: String?) {}
     }
 
-    /**
-     * Connection mode for the client.
-     */
-    enum class ConnectionMode {
-        LOCAL,   // Direct WebSocket on local network
-        REMOTE,  // WebRTC via Music Assistant Remote Access
-        PROXY    // WebSocket via authenticated reverse proxy
-    }
-
     // Dedicated single-thread dispatcher for timer-dominated work: stall
     // watchdog polling, reconnect backoff delays, TimeSyncManager's
     // periodic scheduler. Isolating this from Dispatchers.IO means timer
@@ -230,27 +211,14 @@ class SendSpin(
     private val _controllerState = MutableStateFlow<ControllerState?>(null)
     val controllerState: StateFlow<ControllerState?> = _controllerState.asStateFlow()
 
-    // Transport abstraction - can be WebSocket (local) or WebRTC (remote)
+    // Transport abstraction - WebSocket
     private var transport: SendSpinTransport? = null
-    private var connectionMode: ConnectionMode = ConnectionMode.LOCAL
 
     // Connection info (stored for reconnection)
     private var serverAddress: String? = null
     private var serverPath: String? = null
-    private var remoteId: String? = null
     private var serverName: String? = null
     private var serverId: String? = null
-
-    // Proxy authentication state
-    private var authToken: String? = null
-    private var awaitingAuthResponse = false
-
-    // Optional PROXY fallback config. When set and the client is reconnecting in
-    // LOCAL mode after [LOCAL_RECONNECT_FALLBACK_THRESHOLD] consecutive failures,
-    // the client switches internally to PROXY using these values instead of
-    // continuing to retry a dead LAN address. See setProxyFallback(). Issue #126.
-    private var proxyFallbackUrl: String? = null
-    private var proxyFallbackAuthToken: String? = null
 
     // Client identity - persisted across app launches
     private val clientId = UserSettings.getPlayerId()
@@ -306,7 +274,6 @@ class SendSpin(
     @Volatile private var lastDisconnectAtMs: Long? = null
     @Volatile private var lastDisconnectCode: Int? = null
     @Volatile private var lastDisconnectReason: String? = null
-    @Volatile private var lastDisconnectMode: ConnectionMode? = null
 
     val isConnected: Boolean
         get() = _connectionState.value is TransportState.Ready
@@ -910,7 +877,7 @@ class SendSpin(
         // (Keep it at least 1 so we don't re-freeze the time filter)
         reconnectAttempts.set(1)
 
-        // Immediately try to reconnect using the appropriate mode
+        // Immediately try to reconnect
         workScope.launch {
             if (userInitiatedDisconnect.get() || !reconnecting.get()) {
                 Log.d(TAG, "Reconnection cancelled before immediate retry")
@@ -920,24 +887,10 @@ class SendSpin(
             handshakeComplete = false
             stopTimeSync()
 
-            when (connectionMode) {
-                ConnectionMode.LOCAL -> {
-                    val savedAddress = serverAddress ?: return@launch
-                    val savedPath = serverPath ?: return@launch
-                    Log.d(TAG, "Immediate reconnecting to: $savedAddress path=$savedPath")
-                    createLocalTransport(savedAddress, savedPath)
-                }
-                ConnectionMode.REMOTE -> {
-                    val savedRemoteId = remoteId ?: return@launch
-                    Log.d(TAG, "Immediate reconnecting via Remote ID: $savedRemoteId")
-                    createRemoteTransport(savedRemoteId)
-                }
-                ConnectionMode.PROXY -> {
-                    val savedUrl = serverAddress ?: return@launch
-                    Log.d(TAG, "Immediate reconnecting via proxy: $savedUrl")
-                    createProxyTransport(savedUrl)
-                }
-            }
+            val savedAddress = serverAddress ?: return@launch
+            val savedPath = serverPath ?: return@launch
+            Log.d(TAG, "Immediate reconnecting to: $savedAddress path=$savedPath")
+            createLocalTransport(savedAddress, savedPath)
         }
     }
 
@@ -966,33 +919,13 @@ class SendSpin(
 
     /**
      * Connect to the given endpoint. Single entry point that replaces the
-     * three explicit connectLocal/Remote/Proxy methods. Phase 4 introduces
-     * this facade; the underlying methods stay for now (Task 3 migrates
-     * callers; legacy methods may be made private after the rename in Task 6).
+     * explicit connectLocal method. Phase 4 introduces this facade; the
+     * underlying method stays for now.
      */
     fun connect(endpoint: SendSpinEndpoint) {
         when (endpoint) {
             is SendSpinEndpoint.Local -> connectLocal(endpoint.address, endpoint.path)
-            is SendSpinEndpoint.Proxy -> connectProxy(endpoint.url, endpoint.authToken)
-            is SendSpinEndpoint.Remote -> connectRemote(endpoint.remoteId)
         }
-    }
-
-    /**
-     * Configure a PROXY fallback for LOCAL mode. When set, the client will switch
-     * internally to PROXY after [LOCAL_RECONNECT_FALLBACK_THRESHOLD] consecutive
-     * LOCAL-mode reconnect failures, instead of retrying the dead LAN address
-     * indefinitely. Closes the "moved off LAN but saved LOCAL address is still
-     * being tried" gap from issue #126.
-     *
-     * Call with (null, null) to clear (e.g., when switching servers, or when
-     * connecting to a server that has no PROXY configured).
-     *
-     * Safe to call at any time; takes effect on the next reconnect cycle.
-     */
-    fun setProxyFallback(url: String?, authToken: String?) {
-        proxyFallbackUrl = url
-        proxyFallbackAuthToken = authToken
     }
 
     /**
@@ -1012,71 +945,10 @@ class SendSpin(
         Log.d(TAG, "Connecting locally to: $address path=$normalizedPath")
         prepareForConnection()
 
-        connectionMode = ConnectionMode.LOCAL
         serverAddress = address
         serverPath = normalizedPath
-        remoteId = null
-        // Clear any stale PROXY credential so it can't be observed after a
-        // mode transition. createLocalTransport doesn't use it, but leaving a
-        // valid token in the field across modes is a code smell and a future
-        // footgun if any new reader forgets to re-check connectionMode.
-        authToken = null
 
         createLocalTransport(address, normalizedPath)
-    }
-
-    /**
-     * Connect to a SendSpin server via Music Assistant Remote Access.
-     *
-     * @param remoteId The 26-character Remote ID from Music Assistant settings
-     */
-    fun connectRemote(remoteId: String) {
-        if (isConnected) {
-            Log.w(TAG, "Already connected, disconnecting first")
-            disconnect()
-        }
-
-        Log.d(TAG, "Connecting remotely via Remote ID: $remoteId")
-        prepareForConnection()
-
-        connectionMode = ConnectionMode.REMOTE
-        this.remoteId = remoteId
-        serverAddress = null
-        serverPath = null
-        // Clear any stale PROXY credential; see connectLocal for rationale.
-        authToken = null
-
-        createRemoteTransport(remoteId)
-    }
-
-    /**
-     * Connect to a SendSpin server via authenticated reverse proxy.
-     *
-     * The connection flow is:
-     * 1. Connect WebSocket to the proxy URL (wss://domain.com/sendspin)
-     * 2. Send auth message with token and client_id
-     * 3. Wait for auth_ok response
-     * 4. Proceed with normal client/hello handshake
-     *
-     * @param url The proxy URL (e.g., "https://ma.example.com/sendspin")
-     * @param authToken The long-lived authentication token from Music Assistant
-     */
-    fun connectProxy(url: String, authToken: String) {
-        if (isConnected) {
-            Log.w(TAG, "Already connected, disconnecting first")
-            disconnect()
-        }
-
-        Log.d(TAG, "Connecting via proxy to: $url")
-        prepareForConnection()
-
-        connectionMode = ConnectionMode.PROXY
-        this.authToken = authToken
-        this.serverAddress = url  // Store full URL for reconnection
-        this.serverPath = null    // Path is included in URL
-        this.remoteId = null
-
-        createProxyTransport(url)
     }
 
     /**
@@ -1085,7 +957,6 @@ class SendSpin(
     private fun prepareForConnection() {
         _connectionState.value = TransportState.Connecting
         handshakeComplete = false
-        awaitingAuthResponse = false
         timeFilter.reset()
         resetSyncStateTracking()
 
@@ -1123,41 +994,6 @@ class SendSpin(
         wsTransport.setListener(TransportEventListener())
         wsTransport.connect()
     }
-
-    /**
-     * Create and connect a remote WebRTC transport.
-     */
-    private fun createRemoteTransport(remoteId: String) {
-        val rtcTransport = WebRTCTransport(context, remoteId)
-        transport = rtcTransport
-        rtcTransport.setListener(TransportEventListener())
-        rtcTransport.connect()
-    }
-
-    /**
-     * Create and connect a proxy WebSocket transport.
-     * Auth token is passed to the transport for inclusion in the HTTP upgrade request header.
-     */
-    private fun createProxyTransport(url: String) {
-        val proxyTransport = ProxyWebSocketTransport(
-            url = url,
-            authToken = authToken,
-            pingIntervalSeconds = getPingIntervalSeconds()
-        )
-        transport = proxyTransport
-        proxyTransport.setListener(TransportEventListener())
-        proxyTransport.connect()
-    }
-
-    /**
-     * Get the current connection mode.
-     */
-    fun getConnectionMode(): ConnectionMode = connectionMode
-
-    /**
-     * Get the Remote ID if connected via remote access.
-     */
-    fun getRemoteId(): String? = remoteId
 
     /**
      * Disconnect from the current server for reasons that should trigger an
@@ -1400,7 +1236,6 @@ class SendSpin(
         // actually trigger a retry cycle.
         lastDisconnectCode = code
         lastDisconnectReason = reasonText
-        lastDisconnectMode = connectionMode
         if (!isNormalClosure && !userInitiatedDisconnect.get()) {
             lastDisconnectAtMs = now
         }
@@ -1416,7 +1251,7 @@ class SendSpin(
         }
         AppLog.Network.i(
             "[disconnect] code=$codeField reason=${reasonText.ifBlank { "unknown" }} " +
-                "mode=$connectionMode uptime_s=$uptimeField " +
+                "uptime_s=$uptimeField " +
                 "attempts_total=${reconnectAttemptsTotal.get()}"
         )
     }
@@ -1429,17 +1264,8 @@ class SendSpin(
      * If network is unavailable, pauses without consuming an attempt.
      */
     private fun attemptReconnect() {
-        val savedServerName = serverName ?: serverAddress ?: remoteId ?: "Unknown"
-
-        // Verify we have connection info for the current mode
-        val canReconnect = when (connectionMode) {
-            ConnectionMode.LOCAL -> serverAddress != null
-            ConnectionMode.REMOTE -> remoteId != null
-            ConnectionMode.PROXY -> serverAddress != null && !authToken.isNullOrBlank()
-        }
-
-        if (!canReconnect) {
-            Log.w(TAG, "Cannot reconnect: no connection info saved for mode $connectionMode")
+        if (serverAddress == null) {
+            Log.w(TAG, "Cannot reconnect: no connection info saved")
             return
         }
 
@@ -1461,7 +1287,7 @@ class SendSpin(
             Log.w(TAG, "Reconnect cap reached ($prior >= $MAX_TOTAL_RECONNECT_ATTEMPTS) - giving up")
             AppLog.Network.w(
                 "[reconnect-exhausted] cap=$MAX_TOTAL_RECONNECT_ATTEMPTS " +
-                    "attempts_total=${reconnectAttemptsTotal.get()} mode=$connectionMode"
+                    "attempts_total=${reconnectAttemptsTotal.get()}"
             )
             reconnecting.set(false)
             reconnectJob?.cancel()
@@ -1473,36 +1299,6 @@ class SendSpin(
         val attempts = reconnectAttempts.incrementAndGet()
         // Lifetime counter survives across reconnect cycles. Issue #128.
         reconnectAttemptsTotal.incrementAndGet()
-
-        // LOCAL -> PROXY internal fallback: if LOCAL reconnect has failed
-        // [LOCAL_RECONNECT_FALLBACK_THRESHOLD] times in a row and a PROXY fallback
-        // is configured, switch modes internally instead of retrying a LAN address
-        // that is apparently unreachable on this network. Issue #126.
-        //
-        // Note: we intentionally do NOT call disconnectForReselection() here.
-        // That would trigger MainActivity.startReconnecting -> AutoReconnectManager,
-        // but AutoReconnectManager's performAutoReconnect() returns optimistically
-        // and would re-select LOCAL first, creating an infinite ping-pong. Doing
-        // the mode switch internally keeps this fix self-contained.
-        val fbUrl = proxyFallbackUrl
-        val fbToken = proxyFallbackAuthToken
-        if (connectionMode == ConnectionMode.LOCAL &&
-            attempts > LOCAL_RECONNECT_FALLBACK_THRESHOLD &&
-            !fbUrl.isNullOrBlank() &&
-            !fbToken.isNullOrBlank()) {
-            Log.i(TAG, "LOCAL reconnect failed $attempts times; switching internally to PROXY fallback")
-            connectionMode = ConnectionMode.PROXY
-            serverAddress = fbUrl
-            serverPath = null  // PROXY URL already carries the path; matches connectProxy()
-            authToken = fbToken
-            // Reset so PROXY attempt counting starts fresh (backoff from attempt 1).
-            reconnectAttempts.set(0)
-            // Re-invoke attemptReconnect so the PROXY path goes through the same
-            // freeze/backoff/transport-creation flow. This also re-checks
-            // canReconnect and userInitiatedDisconnect cleanly.
-            attemptReconnect()
-            return
-        }
 
         // On first reconnection attempt, freeze the time filter so a
         // successful reconnect to the same server can restore sync.
@@ -1556,25 +1352,10 @@ class SendSpin(
             // Transport creation does blocking IO -- switch dispatcher
             // from the single-thread timer to the IO pool.
             withContext(Dispatchers.IO) {
-                // Reconnect using the appropriate mode
-                when (connectionMode) {
-                    ConnectionMode.LOCAL -> {
-                        val address = serverAddress ?: return@withContext
-                        val path = serverPath ?: SendSpinProtocol.ENDPOINT_PATH
-                        Log.d(TAG, "Reconnecting to: $address path=$path (attempt $attempts)")
-                        createLocalTransport(address, path)
-                    }
-                    ConnectionMode.REMOTE -> {
-                        val id = remoteId ?: return@withContext
-                        Log.d(TAG, "Reconnecting via Remote ID: $id (attempt $attempts)")
-                        createRemoteTransport(id)
-                    }
-                    ConnectionMode.PROXY -> {
-                        val url = serverAddress ?: return@withContext
-                        Log.d(TAG, "Reconnecting via proxy: $url (attempt $attempts)")
-                        createProxyTransport(url)
-                    }
-                }
+                val address = serverAddress ?: return@withContext
+                val path = serverPath ?: SendSpinProtocol.ENDPOINT_PATH
+                Log.d(TAG, "Reconnecting to: $address path=$path (attempt $attempts)")
+                createLocalTransport(address, path)
             }
         }
     }
@@ -1637,15 +1418,14 @@ class SendSpin(
     // ========== Transport Event Listener ==========
 
     /**
-     * Unified event listener for both WebSocket and WebRTC transports.
+     * Unified event listener for the WebSocket transport.
      *
      * ## Reconnect-gate policy (issue #129)
      *
      * Both [onClosed] and [onFailure] trigger [attemptReconnect] under the same
      * core conditions:
      *   * Not a user-initiated disconnect (`!userInitiatedDisconnect`).
-     *   * Have connection info for the current mode (address + token for PROXY,
-     *     remoteId for REMOTE, address for LOCAL).
+     *   * Have connection info saved (address).
      *   * The failure is transient / unexpected (non-1000 close code for
      *     [onClosed]; `isRecoverable` exception class for [onFailure]).
      *
@@ -1662,37 +1442,17 @@ class SendSpin(
         override fun onConnected() {
             Log.d(TAG, "Transport connected")
 
-            if (connectionMode == ConnectionMode.PROXY && !authToken.isNullOrBlank()) {
-                // Proxy mode: send auth message first, then wait for auth_ok before hello.
-                // The SendSpin server protocol requires a JSON auth message as the first
-                // WebSocket message.
-                Log.d(TAG, "Sending proxy auth message (token ${authToken!!.length} chars)")
-                awaitingAuthResponse = true
-                val authMsg = buildJsonObject {
-                    put("type", JsonPrimitive("auth"))
-                    put("token", JsonPrimitive(authToken))
-                    put("client_id", JsonPrimitive(clientId))
-                }
-                val sent = transport?.send(authMsg.toString())
-                Log.d(TAG, "Auth message send result: $sent")
-            } else if (connectionMode == ConnectionMode.PROXY && authToken.isNullOrBlank()) {
-                // Proxy mode but no token available - auth will fail
-                Log.e(TAG, "Proxy connection has no auth token - server will reject")
-                _connectionState.value = TransportState.Failed(FailureReason.AuthRejected)
-                disconnect()
-            } else {
-                // Spec order: client/init is the FIRST frame on the socket.
-                // client/hello moves after the Noise handshake and travels
-                // encrypted like every other application message.
-                //
-                // There is no unencrypted branch here. Encryption has been
-                // mandatory since spec #84 (2026-06-29), and a fallback would be
-                // a second wire format that only ever runs when the first one
-                // breaks - the least tested path reached exactly when things are
-                // already going wrong.
-                Log.d(TAG, "Starting encrypted handshake")
-                startEncryptedHandshake()
-            }
+            // Spec order: client/init is the FIRST frame on the socket.
+            // client/hello moves after the Noise handshake and travels
+            // encrypted like every other application message.
+            //
+            // There is no unencrypted branch here. Encryption has been
+            // mandatory since spec #84 (2026-06-29), and a fallback would be
+            // a second wire format that only ever runs when the first one
+            // breaks - the least tested path reached exactly when things are
+            // already going wrong.
+            Log.d(TAG, "Starting encrypted handshake")
+            startEncryptedHandshake()
         }
 
         override fun onMessage(text: String, rawUtf8: ByteArray) {
@@ -1709,38 +1469,6 @@ class SendSpin(
 
         override fun onMessage(text: String) {
             lastByteReceivedAtMs.set(System.currentTimeMillis())
-            // Check for auth failure (server may send error if token is invalid)
-            if (connectionMode == ConnectionMode.PROXY && !handshakeComplete) {
-                try {
-                    val json = Json.parseToJsonElement(text).jsonObject
-                    val msgType = json["type"]?.jsonPrimitive?.contentOrNull ?: ""
-                    if (msgType == "auth_failed" || msgType == "error") {
-                        val msg = json["message"]?.jsonPrimitive?.contentOrNull ?: "Authentication failed"
-                        Log.e(TAG, "Proxy auth failed: $msg")
-                        awaitingAuthResponse = false
-                        _connectionState.value = TransportState.Failed(FailureReason.AuthRejected)
-                        disconnect()
-                        return
-                    }
-                } catch (e: Exception) {
-                    // Not a JSON message or doesn't have type field - continue normally
-                }
-            }
-
-            // Proxy auth is a wrapper around the socket, not a substitute for
-            // the Sendspin handshake: once the proxy has accepted us the
-            // session starts the same way every other session does, with
-            // client/init. It used to send a legacy client/hello here.
-            if (awaitingAuthResponse) {
-                Log.d(TAG, "Received auth-ack, starting encrypted handshake")
-                awaitingAuthResponse = false
-                startEncryptedHandshake()
-                // Consume the auth-ack message; do NOT forward it to the protocol handler.
-                // If the auth-ack were forwarded, it could be misinterpreted as a protocol
-                // message (e.g., a server/hello arriving before client/hello is sent).
-                return
-            }
-
             handleTextMessage(text)
         }
 
@@ -1770,11 +1498,7 @@ class SendSpin(
                 isNormalClosure = isNormalClosure,
             )
 
-            val hasConnectionInfo = when (connectionMode) {
-                ConnectionMode.LOCAL -> serverAddress != null
-                ConnectionMode.REMOTE -> remoteId != null
-                ConnectionMode.PROXY -> serverAddress != null && !authToken.isNullOrBlank()
-            }
+            val hasConnectionInfo = serverAddress != null
 
             if (!userInitiatedDisconnect.get() && !isNormalClosure && hasConnectionInfo) {
                 // Abnormal closure (not code 1000) - attempt reconnection. We no
@@ -1812,11 +1536,7 @@ class SendSpin(
                 isNormalClosure = false,
             )
 
-            val hasConnectionInfo = when (connectionMode) {
-                ConnectionMode.LOCAL -> serverAddress != null
-                ConnectionMode.REMOTE -> remoteId != null
-                ConnectionMode.PROXY -> serverAddress != null && !authToken.isNullOrBlank()
-            }
+            val hasConnectionInfo = serverAddress != null
 
             val shouldReconnect = !userInitiatedDisconnect.get() &&
                     hasConnectionInfo &&
