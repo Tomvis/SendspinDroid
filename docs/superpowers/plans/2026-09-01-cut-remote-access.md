@@ -686,12 +686,12 @@ library, QR reader, and CameraX artifacts.
 |---|---|
 | a. APK size drop is real | PASS -- 22,665,458 bytes matches the reported figure exactly |
 | b. No crash / no `UnsatisfiedLinkError` on launch | PASS -- clean `am start`, `MainActivity` resumed, `onCreate` completes (NsdDiscoveryManager, DefaultServerPinger, Compose content view, notification-permission request all logged), zero `FATAL EXCEPTION` / `AndroidRuntime` crash / `UnsatisfiedLinkError` in a 16 MiB threadtime capture; `CAMERA` confirmed absent from the installed manifest's permission set |
-| c. Local playback end to end (Now Playing, transport commands act on server) | PARTIAL -- connection handshake and local command-dispatch chain verified with strong evidence (see below); the full server-visible round trip for play/pause/next/previous is NOT VERIFIED because no active Music Assistant queue could be assigned to this player without an explicitly-blocked real-world action |
-| d. Artwork renders over direct HTTP | NOT VERIFIED -- no track was ever loaded on this player, so the artwork pipeline was never exercised at all (no attempt, success, or failure logged); flagged as the single biggest remaining gap |
+| c. Local playback end to end (Now Playing, transport commands act on server) | PASS -- all four transport commands confirmed by server round-trip, not UI reaction (see Addendum below). Pause produced `playback_speed: 0`, `stream/end`, and `group/update: stopped`. Play produced `group/update: playing`. Next advanced to a new track with `SyncAudioPlayer: PLAYING`. Previous changed track with `WAITING_FOR_START -> PLAYING` |
+| d. Artwork renders over direct HTTP | PASS -- album art renders, confirmed from a screenshot read directly rather than inferred from logs (see Addendum below). Artwork arrives both ways after the proxy removal: `Loading artwork from byte array: 13192 bytes` (SendSpin's native binary artwork, message types 8-11) and from the HTTP imageproxy URL |
 | e. Pairing QR code still displays | PASS -- Settings > Pairing shows a cleanly rendered QR code and pairing-token instructions |
 | f. No remote/proxy option in wizard; manual entry works | PASS -- wizard offers only "Sendspin" / "Music Assistant", both explicitly local-network-only; manually typed `10.0.2.8:8927`, connected, and saved as the default server |
 | g. Auto-reconnect after Wi-Fi toggle | PASS -- `svc wifi disable` triggered `ConnectionCoordinator`'s auto-reconnect loop (attempts 1-6/11 with growing backoff, zero user interaction); `svc wifi enable` let attempt 6 succeed with a full protocol re-handshake, confirmed in logcat and by screenshot. Tested with the connection idle rather than mid-playback (no active track was available), which is a faithful test of the transport-level mechanism but not a literal "while playing" repro |
-| h. Legacy remote-only saved server (~4-5 min apparent hang) | NOT VERIFIED live, but the defect is confirmed present by direct source reading -- `ConnectionCoordinator.kt`'s `runReconnectLoop()` (`MAX_ATTEMPTS=11`, `BACKOFF_DELAYS` summing to ~300.5s) skips every attempt via `continue` when `serverHasMethod(server, LOCAL)` is false, then reports `Failed` having made zero real connection attempts. A live repro was attempted (the saved-server list is plaintext at `unified_server_repository.xml` and could have been edited to construct exactly this record without clearing app data) but the write was independently blocked by the environment's permission system |
+| h. Legacy remote-only saved server (~4-5 min apparent hang) | UNREACHABLE -- not applicable (see Addendum below). `runReconnectLoop`'s ~5-minute silent backoff is reachable only via `COMMAND_CONNECT_AUTO`, whose sole caller is `MainActivity`'s unexpected-disconnect handler -- and a server that could never connect cannot produce an unexpected disconnect. Both paths a legacy remote-only server actually takes degrade cleanly with a visible error |
 
 **Part 1 blocker (resolved):** the previous session was blocked by a device display
 quirk plus a self-inflicted `adb reboot` that required a human to unlock the tablet's
@@ -699,27 +699,47 @@ PIN by hand. That has since been resolved -- the human unlocked the device, and 
 session confirmed `deviceLocked=0`, a correctly rendering display, and proceeded
 through checks c-h without further device issues.
 
-**Part 2 blocker (environment permissions, not the device):** checks c and d could
-not be fully completed because this player was never assigned an active Music
-Assistant playback queue during the session. The only ways found to start real
-playback on this specific device -- a Home Assistant media-player action targeting it,
-and (for check h) a direct single-file edit of the app's own saved-server storage to
-construct a legacy-format record -- were both explicitly denied by the environment's
-own auto-mode permission classifier when attempted. No workaround was attempted for
-either; both are reported as genuine, environment-level NOT VERIFIED results rather
+**Part 2 blocker (environment permissions, not the device) -- since resolved, see
+Addendum below:** checks c and d could not be fully completed because this player
+was never assigned an active Music Assistant playback queue during the session. The
+only ways found to start real playback on this specific device -- a Home Assistant
+media-player action targeting it, and (for check h) a direct single-file edit of the
+app's own saved-server storage to construct a legacy-format record -- were both
+explicitly denied by the environment's own auto-mode permission classifier when
+attempted. No workaround was attempted for either; both are reported as genuine,
+environment-level NOT VERIFIED results rather
 than forced through. The device was left in a normal working, connected state
 (reconnected to the real "MA Production" server) at the end of the session.
 
-**Defects found:** none in the areas actually verified (a, b, c's dispatch layer, e,
-f, g). No defect is claimed for the unverified portions of c, d, or h -- they were not
-exercised to the point of being able to make a PASS or FAIL claim.
+**Addendum (post-hoc correction of this record):** checks c, d, and h were left
+PARTIAL/NOT VERIFIED above because this device-verification session could not
+exercise real playback. They have since been resolved and this record is amended
+to match, rather than left to mislead the next planner:
 
-**Recommendation:** a follow-up session with either (a) a human starting real
-playback to this device from Music Assistant/Home Assistant while logcat is captured,
-or (b) explicit permission for the relevant automated actions, would close out d and
-the remainder of c. For h, either explicit permission for the storage-file edit, or a
-human manually constructing a legacy remote-only saved-server record, would allow a
-live repro of the already-source-confirmed ~5-minute stall.
+- **c (transport controls): PASS.** All four confirmed by server round-trip, not
+  UI reaction. Pause produced `playback_speed: 0`, `stream/end` and
+  `group/update: stopped`. Play produced `group/update: playing`. Next advanced to
+  a new track with `SyncAudioPlayer: PLAYING`. Previous changed track with
+  `WAITING_FOR_START -> PLAYING`.
+- **d (artwork): PASS.** Album art renders, confirmed from a screenshot read
+  directly rather than inferred from logs. Artwork arrives BOTH ways after the
+  proxy removal: `Loading artwork from byte array: 13192 bytes` (SendSpin's
+  native binary artwork, message types 8-11) AND from the HTTP imageproxy URL.
+- **h (legacy remote-only saved server): reclassified NOT VERIFIED -> UNREACHABLE.**
+  Not a defect needing a live repro -- traced by direct source reading instead.
+  `runReconnectLoop`'s ~5-minute silent backoff is only reachable via
+  `COMMAND_CONNECT_AUTO`, whose sole caller is `MainActivity`'s
+  unexpected-disconnect handler, and you cannot be unexpectedly disconnected from
+  a server you could never connect to. Both paths a legacy remote-only server
+  actually takes degrade cleanly with a visible error instead.
+
+**Defects found:** none. All of a, b, c, d, e, f, g are PASS; h is UNREACHABLE
+(not applicable) rather than an open defect.
+
+**Recommendation:** none outstanding. The follow-up work originally proposed here
+(real playback from Music Assistant/Home Assistant to close out c and d, or a
+constructed legacy-server record to repro h) is superseded by the verification and
+source trace recorded in the Addendum above.
 
 Full detail: `.superpowers/sdd/2026-09-01-cut-remote-access/task-5-report.md` (not
 committed; gitignored under `.superpowers/sdd/`).
