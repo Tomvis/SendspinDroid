@@ -210,7 +210,7 @@ private fun WizardStepContent(
 /**
  * Bottom bar with Back, Skip, and Next/Save buttons.
  *
- * Card-selection steps (ClientType, NetworkQuestion) have no buttons —
+ * Card-selection steps (ClientType, NetworkQuestion) have no buttons --
  * the user taps a card to navigate. Testing steps also have no buttons (auto-advance).
  * Finish steps show Back + Save. Config steps show Back + Next.
  */

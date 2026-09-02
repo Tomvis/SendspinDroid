@@ -180,7 +180,7 @@ class AddServerWizardActivity : FragmentActivity() {
                 startLocalConnectionTest()
             }
 
-            // MA Login step — test connection if no token yet
+            // MA Login step -- test connection if no token yet
             WizardStep.MA_Login -> {
                 if (viewModel.maToken != null) {
                     viewModel.onNext()

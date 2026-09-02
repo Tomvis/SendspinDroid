@@ -35,7 +35,7 @@ import java.io.IOException
  *
  * MA local path:
  *   ClientType → MA_NetworkQuestion → MA_FindServer → MA_TestLocal →
- *   MA_Login → MA_Finish
+ *   MA_Login -> MA_Finish
  */
 class AddServerWizardViewModel : ViewModel() {
 
@@ -497,7 +497,7 @@ class AddServerWizardViewModel : ViewModel() {
                 false
             }
 
-            // NetworkQuestion step — card tap navigates. Both answers land on
+            // NetworkQuestion step -- card tap navigates. Both answers land on
             // MA_FindServer: with remote access cut, "different network" just
             // means entering the server's address manually there.
             is WizardStepAction.SelectNetworkLocation -> {

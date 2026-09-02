@@ -19,7 +19,7 @@ enum class ClientMode {
  *
  * MA local path:
  *   ClientType → MA_NetworkQuestion → MA_FindServer → MA_TestLocal →
- *   MA_Login → MA_Finish
+ *   MA_Login -> MA_Finish
  */
 enum class WizardStep {
     // Entry point (all paths)
