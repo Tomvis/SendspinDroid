@@ -57,14 +57,29 @@ enum class AdmissionState {
 
     companion object {
         /**
-         * Derive the state from an accepted activation's [activities].
+         * Derive the state from an accepted activation.
          *
-         * PAIRING takes precedence so the function stays total: a conforming
-         * server never mixes pairing with another activity (see
-         * [ServerActivateRules.activitiesAllowed]), and if one did, pairing is
-         * the state with an operator action attached.
+         * [activeRoles] is checked FIRST, and it is not redundant with
+         * [activities]. `activitiesAllowed` admits the empty activity set for
+         * a long-term PSK (`activities.none { PAIRING }` is true of the empty
+         * set), and `playbackCapable` then admits roles alongside it - so a
+         * server may legitimately send empty `activities` WITH live roles. A
+         * derivation reading only `activities` reports AWAITING_APPROVAL for
+         * that session and hides a working player behind a notice telling the
+         * user to go approve something that is already approved.
+         *
+         * Roles are the direct evidence: if any are live the player can do its
+         * job, whatever the activity set says, and there is nothing to explain.
+         * Both blocked states have empty roles by construction - pairing
+         * quiesces them, and an unapproved client never receives any.
+         *
+         * PAIRING then takes precedence over the empty check so the function
+         * stays total: a conforming server never mixes pairing with another
+         * activity, and if one did, pairing is the state with an operator
+         * action attached.
          */
-        fun from(activities: Set<Activity>): AdmissionState = when {
+        fun from(activities: Set<Activity>, activeRoles: List<String>): AdmissionState = when {
+            activeRoles.isNotEmpty() -> READY
             Activity.PAIRING in activities -> PAIRING
             activities.isEmpty() -> AWAITING_APPROVAL
             else -> READY

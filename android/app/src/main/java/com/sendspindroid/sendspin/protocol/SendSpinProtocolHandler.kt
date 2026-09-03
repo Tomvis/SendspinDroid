@@ -938,7 +938,9 @@ abstract class SendSpinProtocolHandler(
                 activationSeen = true
                 Log.i(tag, "server/activate accepted: activities=${activate.activities} " +
                     "roles=${outcome.activeRoles}")
-                onAdmissionStateChanged(AdmissionState.from(activate.activities))
+                onAdmissionStateChanged(
+                    AdmissionState.from(activate.activities, outcome.activeRoles)
+                )
                 val pairing = Activity.PAIRING in activate.activities
 
                 // A pairing activation is answered with client/pair-finalize and
