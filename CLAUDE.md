@@ -128,7 +128,24 @@ Encoded semantic version: `MAJOR * 10000 + MINOR * 100 + PATCH`
 
 Examples: `2.0.0` = 20000, `2.1.3` = 20103, `10.5.22` = 100522
 
-Pre-release suffixes (alpha, beta, rc) do NOT affect the versionCode -- they only appear in versionName. A pre-release shares the same versionCode as its eventual stable release.
+**Pre-releases DO increment the versionCode.** Every build a user can install must carry
+a strictly higher versionCode than the one it replaces, or Android refuses the update, so
+a beta cannot share a code with anything else. Current practice is `base + N` for `BetaN`:
+
+| versionName | versionCode |
+|---|---|
+| `2.0.0-Beta4` | 20004 |
+| `2.0.0-Beta15` | 20015 |
+| `2.0.0-Beta16` | 20016 |
+
+Beta1 through Beta3 used `base + (N-1)` (20000, 20001, 20002). `20003` was skipped once,
+which realigned the series; from Beta4 onward it has been `base + N`, and that is the only
+rule to apply going forward.
+
+**Trap: 2.0.0 stable cannot be 20000.** The base is already spent -- Beta16 shipped as
+20016 -- and anything lower is a downgrade Android will not install over it. The first
+stable `2.0.0` needs at least 20017. Choose that number deliberately when the time comes
+instead of reading it off the base formula.
 
 ## License
 
