@@ -667,6 +667,41 @@ At the end of this plan the app connects only over the local network or to a man
 
 `com.sendspindroid.musicassistant` still exists and is still load-bearing for playback, artwork and server setup. Plan C owns retiring it. Verify its remaining consumers with a fresh grep before planning against it, and note that `MusicAssistant.playMedia` was already fully orphaned by the browse-and-queue removal.
 
+Plan C inherits the list below. It is consolidated here from the per-task reviews so it
+survives the deletion of this plan's working notes -- but every path was re-verified
+against the merged tree, and two entries carried forward from those notes were wrong, so
+re-verify rather than trusting it wholesale.
+
+- `MaApiTransport.httpProxy` (:142), `MaWebSocketTransport.httpProxy` (:254) and
+  `MaCommandMultiplexer`'s proxy bookkeeping. Orphaned by Task 2 and deliberately not
+  cascaded into: they span the shared module with roughly eight dedicated tests, and
+  chasing them at the tail of a 1,238-line deletion is how a cleanup turns into a defect.
+- `MaConnectionMode`'s now-unreachable values, plus `MaApiEndpoint.kt`, which collapsing
+  that enum would orphan.
+- `UnifiedServer.remote` / `UnifiedServer.proxy`, `ConnectionType` and
+  `ConnectionPreference`. Preserved on purpose: these are the PERSISTENCE FORMAT for
+  already-saved servers, so collapsing them is a data migration wearing a dead-code
+  cleanup's clothes. No test against a fresh install would catch a deserialization break.
+- The edit-mode erasure that follows from the entry above: `attemptSave()` rebuilds a
+  fresh `UnifiedServer` with `remote`/`proxy` null, so editing a legacy server silently
+  drops the fields the preservation was protecting. The data is inert, so impact is low,
+  but the legacy-record guarantee is not end to end.
+- `KEY_LAST_REMOTE_ID` and `KEY_LAST_PROXY_URL` (`UserSettings.kt`). The getters were
+  already dead; this plan deleted their only writers, at `MainActivity.kt:2154` and
+  `:2207`.
+- `KEY_LAST_CONNECTION_MODE`, `UserSettings.getDefaultPlayerName()` (:372),
+  `UserSettings.albumArtistsOnly` (:451) and `cachedPlayerId` (:99) -- zero consumers.
+  Note that `albumArtistsOnly` names two different things: the dead setting at :451, and
+  a live parameter on `MusicAssistant.getArtists` (:959) -> `MaCommandClient.getArtists`.
+  That whole chain is itself orphaned -- `getArtists` has no callers left after the
+  browse removal, the same category as `MusicAssistant.playMedia`.
+- `KEY_REMOTE_SERVERS` and `KEY_PROXY_SERVERS` encrypted prefs, which no surviving code
+  path can clear.
+- `shared/src/androidHostTest/kotlin/com/sendspindroid/musicassistant/MaCommandClientImageTest.kt`,
+  which still asserts an impossible `webrtc://ma-api` URL, and its now-dead subject.
+- The unreachable Android Auto row, and the pre-existing dead duplicate
+  `ui/server/ServerListScreen.kt`.
+
 The analysis of what the WebRTC transport actually was -- that it carried the SendSpin protocol rather than only Music Assistant control, that the signaling URL was a parameter, that artwork rides the protocol natively as binary types 8-11, and that clock sync over WAN was never tested -- is recorded in the spec under "What the WebRTC transport actually was". Read it before designing any future remote-access story.
 
 ---
