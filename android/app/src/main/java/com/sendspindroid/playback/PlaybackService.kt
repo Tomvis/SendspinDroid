@@ -2953,6 +2953,12 @@ class PlaybackService : MediaLibraryService() {
             bundle.putLong("time_filter_convergence_ms", timeFilter.convergenceTimeMillis)
         }
 
+        // Refresh network state before reading it: no NetworkEvaluator.Listener is
+        // registered, so without this the diagnostics bundle would stay frozen at
+        // whatever the network looked like at service start instead of reflecting
+        // the current network (e.g. a Wi-Fi to cellular handover).
+        networkEvaluator?.evaluateCurrentNetwork()
+
         // Get network stats from NetworkEvaluator
         networkEvaluator?.networkState?.value?.let { netState ->
             bundle.putString("network_type", netState.transportType.name)
