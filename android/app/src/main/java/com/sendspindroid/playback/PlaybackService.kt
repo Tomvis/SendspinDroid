@@ -61,6 +61,7 @@ import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.musicassistant.MusicAssistant
 import com.sendspindroid.musicassistant.QueueUpdate
 import com.sendspindroid.sendspin.SendSpin
+import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.sendspin.SendSpinEndpoint
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.UnifiedServerRepository
@@ -425,6 +426,13 @@ class PlaybackService : MediaLibraryService() {
         const val EXTRA_ERROR_MESSAGE = "error_message"
         const val EXTRA_WAS_USER_INITIATED = "was_user_initiated"
         const val EXTRA_WAS_RECONNECT_EXHAUSTED = "was_reconnect_exhausted"
+
+        /**
+         * Why a connected session cannot play, as an [AdmissionState] name.
+         * Only present while EXTRA_CONNECTION_STATE is STATE_CONNECTED - it
+         * describes an accepted activation, which no other state has.
+         */
+        const val EXTRA_ADMISSION_STATE = "admission_state"
 
         // Session extras keys for volume (server → controller)
         const val EXTRA_VOLUME = "volume"
@@ -1002,8 +1010,19 @@ class PlaybackService : MediaLibraryService() {
      * Initializes the native Kotlin SendSpin client.
      */
     @OptIn(UnstableApi::class)
+    /**
+     * Latest admission state for the live connection.
+     *
+     * Reset per connection: a stale value from a previous session would
+     * otherwise be published in the window between reconnecting and the first
+     * `server/activate` of the new session.
+     */
+    @Volatile
+    private var admissionState: AdmissionState = AdmissionState.READY
+
     private fun initializeSendSpinClient() {
         try {
+            admissionState = AdmissionState.READY
             // Use user-configured player name, falls back to device model
             val playerName = com.sendspindroid.UserSettings.getPlayerName()
             sendSpinClient = SendSpin(
@@ -1177,6 +1196,15 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onServerDiscovered(name: String, address: String) {
             Log.d(TAG, "Server discovered (ignored in service): $name at $address")
+        }
+
+        override fun onAdmissionStateChanged(state: AdmissionState) {
+            mainHandler.post {
+                if (admissionState == state) return@post
+                Log.i(TAG, "Admission state: $admissionState -> $state")
+                admissionState = state
+                broadcastSessionExtras()
+            }
         }
 
         override fun onStateChanged(state: String) {
@@ -1824,6 +1852,7 @@ class PlaybackService : MediaLibraryService() {
                 STATE_CONNECTED -> {
                     putString(EXTRA_CONNECTION_STATE, STATE_CONNECTED)
                     serverName?.let { putString(EXTRA_SERVER_NAME, it) }
+                    putString(EXTRA_ADMISSION_STATE, admissionState.name)
                 }
                 STATE_RECONNECTING -> {
                     putString(EXTRA_CONNECTION_STATE, STATE_RECONNECTING)

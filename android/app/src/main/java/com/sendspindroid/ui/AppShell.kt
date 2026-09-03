@@ -291,6 +291,7 @@ private fun ConnectedShell(
             onSwitchGroupClick = onSwitchGroupClick,
             onFavoriteClick = onFavoriteClick,
             onVolumeChange = onVolumeChange,
+            onOpenPairingClick = onSettingsClick,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)

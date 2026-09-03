@@ -4,6 +4,7 @@ import android.os.Build
 import android.util.Log
 import com.sendspindroid.UserSettings
 import com.sendspindroid.logging.AppLog
+import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
@@ -164,6 +165,16 @@ class SendSpin(
          *   record is deliberately retained.
          */
         fun onUnpaired(serverId: String?) {}
+
+        /**
+         * The connection was accepted but cannot carry playback, and why.
+         *
+         * Without this the two blocked states are invisible: the app connects,
+         * reports itself connected, and then sits with no roles and no
+         * explanation, which reads as a hang rather than as waiting on an
+         * action the operator has to take on the server.
+         */
+        fun onAdmissionStateChanged(state: AdmissionState) {}
     }
 
     // Dedicated single-thread dispatcher for timer-dominated work: stall
@@ -508,6 +519,11 @@ class SendSpin(
         // client sends nothing further. The new record is already visible to
         // pskCandidates(), which reads the store on every call.
         Log.i(TAG, "Pairing complete with $serverId - awaiting the server's re-handshake")
+    }
+
+    override fun onAdmissionStateChanged(state: AdmissionState) {
+        Log.i(TAG, "Admission state: $state")
+        callback.onAdmissionStateChanged(state)
     }
 
     /** The PSK that admitted this session; the re-handshake swaps it. */

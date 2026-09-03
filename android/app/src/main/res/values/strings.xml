@@ -698,4 +698,10 @@
     <string name="save_queue_failed_remove">Failed to remove existing tracks</string>
     <string name="save_queue_failed_create">Failed to create playlist</string>
     <string name="save_queue_failed_load_playlists">Failed to load playlists</string>
+    <!-- Admission notice: a connected session that cannot carry playback -->
+    <string name="admission_awaiting_approval_title">Waiting for approval</string>
+    <string name="admission_awaiting_approval_body">%1$s has not approved this player yet. Approve it on the server, or try starting playback on this player.</string>
+    <string name="admission_pairing_title">Pair this player</string>
+    <string name="admission_pairing_body">%1$s is waiting for a pairing token. Open Settings, then Pairing, to show the token for this device, then enter it on the server.</string>
+    <string name="admission_open_pairing">Open settings</string>
 </resources>

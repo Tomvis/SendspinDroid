@@ -938,6 +938,7 @@ abstract class SendSpinProtocolHandler(
                 activationSeen = true
                 Log.i(tag, "server/activate accepted: activities=${activate.activities} " +
                     "roles=${outcome.activeRoles}")
+                onAdmissionStateChanged(AdmissionState.from(activate.activities))
                 val pairing = Activity.PAIRING in activate.activities
 
                 // A pairing activation is answered with client/pair-finalize and
@@ -1006,6 +1007,15 @@ abstract class SendSpinProtocolHandler(
     protected open fun onPairAbort(reason: String) {
         sendPairAbort(reason)
     }
+
+    /**
+     * The accepted activation, projected to what the user needs to be told.
+     *
+     * Fires on every accepted `server/activate` rather than only on a change:
+     * activations are rare (handshake, a role change, a pairing transition),
+     * and the consumers hold it in state that already collapses repeats.
+     */
+    protected open fun onAdmissionStateChanged(state: AdmissionState) {}
 
     /**
      * `pair/abort` from the server.

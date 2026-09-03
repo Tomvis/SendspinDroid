@@ -35,6 +35,43 @@ data class ServerActivate(
     val unknownActivities: List<String>,
 )
 
+/**
+ * Why a connection is not usable, as the user needs to hear it.
+ *
+ * An accepted activation with no roles leaves the player unable to do
+ * anything, but `active_roles` alone does not say why: `pairing.md` gives
+ * empty roles both to a pairing activation and to a server "hold[ing] the
+ * connection at empty activities, ready to activate roles once approved".
+ * Those need different instructions - approve the player, versus pair it - so
+ * the state is derived from `activities`, which distinguishes them.
+ */
+enum class AdmissionState {
+    /** The connection is doing its job; say nothing. */
+    READY,
+
+    /** Held pending operator approval. The operator must approve this client. */
+    AWAITING_APPROVAL,
+
+    /** The server moved the connection into pairing. The operator must pair. */
+    PAIRING;
+
+    companion object {
+        /**
+         * Derive the state from an accepted activation's [activities].
+         *
+         * PAIRING takes precedence so the function stays total: a conforming
+         * server never mixes pairing with another activity (see
+         * [ServerActivateRules.activitiesAllowed]), and if one did, pairing is
+         * the state with an operator action attached.
+         */
+        fun from(activities: Set<Activity>): AdmissionState = when {
+            Activity.PAIRING in activities -> PAIRING
+            activities.isEmpty() -> AWAITING_APPROVAL
+            else -> READY
+        }
+    }
+}
+
 /** What the client must do about an activation. */
 sealed interface ActivationOutcome {
     /** Accept, with the roles that are now live. */

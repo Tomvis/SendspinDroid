@@ -40,6 +40,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sendspindroid.R
+import com.sendspindroid.ui.main.components.AdmissionNotice
+import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.FormFactor
@@ -73,6 +75,7 @@ fun NowPlayingScreen(
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
+    onOpenPairingClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
@@ -88,6 +91,7 @@ fun NowPlayingScreen(
     val positionMs by viewModel.positionMs.collectAsStateWithLifecycle()
     val durationMs by viewModel.durationMs.collectAsStateWithLifecycle()
     val positionUpdatedAt by viewModel.positionUpdatedAt.collectAsStateWithLifecycle()
+    val admissionState by viewModel.admissionState.collectAsStateWithLifecycle()
 
     // Don't show buffering spinner when paused -- SendSpin's audio stream stops on
     // pause, so Media3 reports STATE_BUFFERING even though the user intentionally paused.
@@ -106,6 +110,22 @@ fun NowPlayingScreen(
     if (connectionState is AppConnectionState.Connecting) {
         ConnectionProgress(
             serverName = serverName,
+            modifier = modifier
+        )
+        return
+    }
+
+    // A connection with no roles has nothing for the transport controls to
+    // act on, so replace them with what the operator has to do instead. Only
+    // while actually connected: the reconnect and error states have their own
+    // messaging, and a stale notice on top of those would contradict them.
+    if (connectionState is AppConnectionState.Connected &&
+        admissionState != AdmissionState.READY
+    ) {
+        AdmissionNotice(
+            state = admissionState,
+            serverName = serverName,
+            onOpenPairingClick = onOpenPairingClick,
             modifier = modifier
         )
         return

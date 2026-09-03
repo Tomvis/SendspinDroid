@@ -75,6 +75,7 @@ import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.coordinator.ReconnectStatus
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.playback.PlaybackService
+import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.network.ConnectionSelector
@@ -1601,6 +1602,14 @@ class MainActivity : AppCompatActivity() {
         if (connectionStateStr != null) {
             handleConnectionStateChange(connectionStateStr, extras)
         }
+
+        // The service sends this only while connected, so an absent value means
+        // "nothing to explain" - which is also the right answer for an unknown
+        // name from a newer service than this build understands.
+        val admission = extras.getString(PlaybackService.EXTRA_ADMISSION_STATE)
+            ?.let { name -> AdmissionState.entries.firstOrNull { it.name == name } }
+            ?: AdmissionState.READY
+        viewModel.updateAdmissionState(admission)
 
         // Handle metadata updates
         val title = extras.getString(PlaybackService.EXTRA_TITLE, "")

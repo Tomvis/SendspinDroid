@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.model.UnifiedServer
+import com.sendspindroid.sendspin.protocol.AdmissionState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,6 +54,19 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     private val _metadata = MutableStateFlow(TrackMetadata.EMPTY)
     val metadata: StateFlow<TrackMetadata> = _metadata.asStateFlow()
+
+    /**
+     * Why a connected session cannot play, or READY when it can.
+     *
+     * Defaults to READY so the guidance never flashes on screen before the
+     * first `server/activate` of a session arrives.
+     */
+    private val _admissionState = MutableStateFlow(AdmissionState.READY)
+    val admissionState: StateFlow<AdmissionState> = _admissionState.asStateFlow()
+
+    fun updateAdmissionState(state: AdmissionState) {
+        _admissionState.value = state
+    }
 
     private val _groupName = MutableStateFlow("")
     val groupName: StateFlow<String> = _groupName.asStateFlow()
