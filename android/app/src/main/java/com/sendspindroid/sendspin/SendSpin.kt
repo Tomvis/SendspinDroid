@@ -4,6 +4,7 @@ import android.os.Build
 import android.util.Log
 import com.sendspindroid.UserSettings
 import com.sendspindroid.logging.AppLog
+import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
@@ -45,6 +46,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
+import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.SocketException
@@ -164,6 +166,25 @@ class SendSpin(
          *   record is deliberately retained.
          */
         fun onUnpaired(serverId: String?) {}
+
+        /**
+         * The connection was accepted but cannot carry playback, and why.
+         *
+         * Without this the two blocked states are invisible: the app connects,
+         * reports itself connected, and then sits with no roles and no
+         * explanation, which reads as a hang rather than as waiting on an
+         * action the operator has to take on the server.
+         */
+        fun onAdmissionStateChanged(state: AdmissionState) {}
+
+        /** Show this dynamic pairing code to the operator. */
+        fun onDynamicPairingCodeEmitted(code: String) {}
+
+        /** Stop showing a dynamic pairing code (the attempt ended, one way or another). */
+        fun onDynamicPairingCodeCleared() {}
+
+        /** The dynamic pairing attempt is gesture-gated; show "Allow pairing". */
+        fun onDynamicPairingGestureRequested() {}
     }
 
     // Dedicated single-thread dispatcher for timer-dominated work: stall
@@ -481,9 +502,21 @@ class SendSpin(
             MessageBuilder.TRUST_NONE
         }
 
-    /** The live configuration, not a constant: a disabled method is not offered. */
-    override fun offeredPairMethods(): Set<String> =
-        if (pairingConfigStore.load().pairingPskEnabled) setOf("pairing_psk") else emptySet()
+    /**
+     * The live configuration, not a constant: a disabled method is not offered.
+     *
+     * `dynamic_pairing_code` is opt-in and defaults off: there is no capability
+     * signal in `server/hello` to test for it, and advertising it unconditionally
+     * broke the handshake against aiosendspin 9.1.1 (see
+     * [PairingConfig.dynamicPairingCodeEnabled]).
+     */
+    override fun offeredPairMethods(): Set<String> = buildSet {
+        val config = pairingConfigStore.load()
+        if (config.pairingPskEnabled) add("pairing_psk")
+        if (config.dynamicPairingCodeEnabled) {
+            add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName)
+        }
+    }
 
     /**
      * The `server_id` a pairing record binds to.
@@ -510,6 +543,23 @@ class SendSpin(
         Log.i(TAG, "Pairing complete with $serverId - awaiting the server's re-handshake")
     }
 
+    override fun onAdmissionStateChanged(state: AdmissionState) {
+        Log.i(TAG, "Admission state: $state")
+        callback.onAdmissionStateChanged(state)
+    }
+
+    override fun onDynamicPairingCodeEmitted(code: String) {
+        callback.onDynamicPairingCodeEmitted(code)
+    }
+
+    override fun onDynamicPairingCodeCleared() {
+        callback.onDynamicPairingCodeCleared()
+    }
+
+    override fun onDynamicPairingGestureRequested() {
+        callback.onDynamicPairingGestureRequested()
+    }
+
     /** The PSK that admitted this session; the re-handshake swaps it. */
     override fun matchedPsk(): Psk? = matchedPsk
 
@@ -522,6 +572,21 @@ class SendSpin(
         suppressAutoReconnect.set(true)
 
         callback?.onUnpaired(serverId)
+    }
+
+    /**
+     * A protocol-level failure that requires closing the socket.
+     *
+     * The base class only logs; nothing ever actually closed the transport,
+     * even though the spec allows no application-level message for these
+     * failures and "close the WebSocket, persist nothing" is a security
+     * property of pairing. Closing at the transport level - not
+     * `closeConnectionAfterFlush` or a goodbye - is deliberate: those send an
+     * application message first, and this path must send nothing at all.
+     */
+    override fun onProtocolFailure(reason: String) {
+        super.onProtocolFailure(reason)
+        transport?.close(1002, "protocol failure")
     }
 
     override fun closeConnectionAfterFlush() {
@@ -606,13 +671,35 @@ class SendSpin(
         onProtocolFailure(reason)
     }
 
-    override fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> =
-        if (pairingConfigStore.load().pairingPskEnabled) {
-            listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
-        } else {
-            // "An implemented method that is disabled is omitted."
-            emptyList()
+    override fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> = buildList {
+        val config = pairingConfigStore.load()
+        if (config.pairingPskEnabled) {
+            add(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
         }
+        // "An implemented method that is disabled is omitted." Opt-in and off
+        // by default (see offeredPairMethods) -- never in place of the
+        // (unimplemented) static_pairing_code, which pairing.md forbids
+        // combining with it.
+        if (config.dynamicPairingCodeEnabled) {
+            add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
+        }
+    }
+
+    /** Backs the Dynamic Pairing Code flow's brute-force counter (item 3.2's escalation gate). */
+    private val dynamicPairingCounterStore = object : PairingCounterStore {
+        override fun load(): Int = UserSettings.getPairingCodeFailures()
+        override fun save(value: Int) {
+            UserSettings.setPairingCodeFailures(value)
+        }
+    }
+
+    override fun pairingCounterStore(): PairingCounterStore = dynamicPairingCounterStore
+
+    /** The Noise handshake hash for the current session; null before one completes. */
+    override fun currentHandshakeHash(): ByteArray? = sessionFacts?.priorHandshakeHash
+
+    /** The negotiated AEAD suite, needed to wrap the dynamic flow's confirm/finalize secrets. */
+    override fun negotiatedCipherSuite(): NoiseCipherSuite? = sessionFacts?.suite
 
     override fun sendTextMessage(text: String) {
         val t = transport ?: return  // Silently drop if transport is gone (e.g. post-disconnect race)

@@ -25,7 +25,7 @@ class ServerActivateRulesTest {
         vararg activities: Activity,
         roles: List<String>? = null,
         method: String? = null,
-    ) = ServerActivate(activities.toSet(), roles, method, null, emptyList())
+    ) = ServerActivate(activities.toSet(), roles, method, emptyList())
 
     private fun evaluate(
         activate: ServerActivate,
@@ -93,7 +93,7 @@ class ServerActivateRulesTest {
         for (bad in listOf(setOf(Activity.PLAYBACK), emptySet(), setOf(Activity.MANAGEMENT))) {
             assertEquals(
                 ActivationOutcome.Close(ServerActivateRules.GOODBYE_UNAUTHORIZED),
-                evaluate(ServerActivate(bad, null, null, null, emptyList()), category = cat),
+                evaluate(ServerActivate(bad, null, null, emptyList()), category = cat),
                 "activities=$bad",
             )
         }
@@ -232,11 +232,14 @@ class ServerActivateRulesTest {
         val a = parse(
             """{"type":"server/activate","payload":{"activities":["playback"],
                "active_roles":["player@v1"],"pairing":{"method":"dynamic_pin","pin_length":6}}}"""
+            // pin_length is deliberately left in this fixture: it is not a field
+            // ServerActivate parses (the current spec has no such field, and the
+            // dynamic code is fixed at six digits), so this documents that an
+            // unrecognized key is tolerated rather than rejected.
         )!!
         assertEquals(setOf(Activity.PLAYBACK), a.activities)
         assertEquals(listOf("player@v1"), a.activeRoles)
         assertEquals("dynamic_pin", a.pairingMethod)
-        assertEquals(6, a.pinLength)
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.sendspindroid.sendspin.crypto
 
 import org.bouncycastle.crypto.digests.SHA256Digest
+import org.bouncycastle.crypto.digests.SHA512Digest
 import org.bouncycastle.crypto.engines.AESEngine
 import org.bouncycastle.crypto.macs.HMac
 import org.bouncycastle.crypto.modes.AEADCipher
@@ -108,3 +109,28 @@ private val secureRandom = java.security.SecureRandom()
 
 actual fun secureRandomBytes(size: Int): ByteArray =
     ByteArray(size).also { secureRandom.nextBytes(it) }
+
+actual fun sha512(vararg parts: ByteArray): ByteArray {
+    val digest = SHA512Digest()
+    for (part in parts) digest.update(part, 0, part.size)
+    val out = ByteArray(digest.digestSize)
+    digest.doFinal(out, 0)
+    return out
+}
+
+actual fun hmacSha512(key: ByteArray, data: ByteArray): ByteArray {
+    val mac = HMac(SHA512Digest())
+    mac.init(KeyParameter(key))
+    mac.update(data, 0, data.size)
+    val out = ByteArray(mac.macSize)
+    mac.doFinal(out, 0)
+    return out
+}
+
+actual fun x25519ScalarMult(scalar: ByteArray, basePoint: ByteArray): ByteArray {
+    require(scalar.size == 32) { "scalar must be 32 bytes, got ${scalar.size}" }
+    require(basePoint.size == 32) { "base point must be 32 bytes, got ${basePoint.size}" }
+    val out = ByteArray(32)
+    X25519.scalarMult(scalar, 0, basePoint, 0, out, 0)
+    return out
+}

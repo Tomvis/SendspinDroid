@@ -3,7 +3,6 @@ package com.sendspindroid.sendspin.protocol
 import com.sendspindroid.sendspin.crypto.PskCategory
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -30,10 +29,61 @@ data class ServerActivate(
     val activities: Set<Activity>,
     val activeRoles: List<String>?,
     val pairingMethod: String?,
-    val pinLength: Int?,
     /** Activities the client did not recognise; ignored, but worth logging. */
     val unknownActivities: List<String>,
 )
+
+/**
+ * Why a connection is not usable, as the user needs to hear it.
+ *
+ * An accepted activation with no roles leaves the player unable to do
+ * anything, but `active_roles` alone does not say why: `pairing.md` gives
+ * empty roles both to a pairing activation and to a server "hold[ing] the
+ * connection at empty activities, ready to activate roles once approved".
+ * Those need different instructions - approve the player, versus pair it - so
+ * the state is derived from `activities`, which distinguishes them.
+ */
+enum class AdmissionState {
+    /** The connection is doing its job; say nothing. */
+    READY,
+
+    /** Held pending operator approval. The operator must approve this client. */
+    AWAITING_APPROVAL,
+
+    /** The server moved the connection into pairing. The operator must pair. */
+    PAIRING;
+
+    companion object {
+        /**
+         * Derive the state from an accepted activation.
+         *
+         * [activeRoles] is checked FIRST, and it is not redundant with
+         * [activities]. `activitiesAllowed` admits the empty activity set for
+         * a long-term PSK (`activities.none { PAIRING }` is true of the empty
+         * set), and `playbackCapable` then admits roles alongside it - so a
+         * server may legitimately send empty `activities` WITH live roles. A
+         * derivation reading only `activities` reports AWAITING_APPROVAL for
+         * that session and hides a working player behind a notice telling the
+         * user to go approve something that is already approved.
+         *
+         * Roles are the direct evidence: if any are live the player can do its
+         * job, whatever the activity set says, and there is nothing to explain.
+         * Both blocked states have empty roles by construction - pairing
+         * quiesces them, and an unapproved client never receives any.
+         *
+         * PAIRING then takes precedence over the empty check so the function
+         * stays total: a conforming server never mixes pairing with another
+         * activity, and if one did, pairing is the state with an operator
+         * action attached.
+         */
+        fun from(activities: Set<Activity>, activeRoles: List<String>): AdmissionState = when {
+            activeRoles.isNotEmpty() -> READY
+            Activity.PAIRING in activities -> PAIRING
+            activities.isEmpty() -> AWAITING_APPROVAL
+            else -> READY
+        }
+    }
+}
 
 /** What the client must do about an activation. */
 sealed interface ActivationOutcome {
@@ -92,7 +142,6 @@ object ServerActivateRules {
             activeRoles = roles,
             // The client ignores `pairing` unless 'pairing' is in activities.
             pairingMethod = pairing?.get("method")?.jsonPrimitive?.contentOrNull,
-            pinLength = pairing?.get("pin_length")?.jsonPrimitive?.intOrNull,
             unknownActivities = unknown,
         )
     }

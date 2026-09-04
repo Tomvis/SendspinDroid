@@ -25,6 +25,8 @@ object MessageBuilder {
     data class PairMethodDescriptor(
         val wireName: String,
         val locations: List<String>,
+        val outChannels: List<String> = emptyList(),
+        val formats: List<String> = emptyList(),
     ) {
         companion object {
             /**
@@ -34,6 +36,21 @@ object MessageBuilder {
              * confirmed Music Assistant renders that hint accurately.
              */
             val PAIRING_PSK = PairMethodDescriptor("pairing_psk", listOf("device"))
+
+            /**
+             * `out_channels: ["display"]`, `formats: ["digits"]`. Never
+             * `speaker` -- accepting that channel would oblige this client to
+             * accept a server-supplied digit audio pack (ten clips, each with
+             * decode and size validation) for a device that already has a
+             * screen. "At most one" pairing-code method may be offered, so
+             * advertising this one permanently forecloses `static_pairing_code`.
+             */
+            val DYNAMIC_PAIRING_CODE = PairMethodDescriptor(
+                wireName = "dynamic_pairing_code",
+                locations = listOf("device"),
+                outChannels = listOf("display"),
+                formats = listOf("digits"),
+            )
         }
     }
 
@@ -133,6 +150,22 @@ object MessageBuilder {
                                     add(kotlinx.serialization.json.JsonPrimitive(location))
                                 }
                             })
+                            // Omitted rather than sent empty, so PAIRING_PSK's
+                            // wire shape is unchanged.
+                            if (method.outChannels.isNotEmpty()) {
+                                put("out_channels", buildJsonArray {
+                                    for (channel in method.outChannels) {
+                                        add(kotlinx.serialization.json.JsonPrimitive(channel))
+                                    }
+                                })
+                            }
+                            if (method.formats.isNotEmpty()) {
+                                put("formats", buildJsonArray {
+                                    for (format in method.formats) {
+                                        add(kotlinx.serialization.json.JsonPrimitive(format))
+                                    }
+                                })
+                            }
                         })
                     }
                 })
@@ -153,6 +186,61 @@ object MessageBuilder {
         }
         return message.toString()
     }
+
+    /**
+     * Build `client/pair-pending` for the Dynamic Pairing Code flow.
+     *
+     * Sent instead of `client/pair-init` while the attempt is gesture-gated
+     * (`DynamicPairingCodeFlow` in the `AwaitingGesture` state): it carries the
+     * attempt counter alone, with no commitment yet.
+     */
+    fun buildClientPairPending(pairingIndex: Int): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_PENDING)
+        put("payload", buildJsonObject {
+            put("pairing_index", pairingIndex)
+        })
+    }.toString()
+
+    /**
+     * Build `client/pair-init` for the Dynamic Pairing Code flow.
+     *
+     * `commit_B = SHA-256("sendspin-pair-commit-v1" || nonce_B)` ([PairingCode.commit]).
+     * Starts the attempt: `pairing_index` folds into the CPace `sid`.
+     */
+    fun buildClientPairInit(pairingIndex: Int, commitB: ByteArray): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_INIT)
+        put("payload", buildJsonObject {
+            put("pairing_index", pairingIndex)
+            put("commit_B", Base64Url.encode(commitB))
+        })
+    }.toString()
+
+    /**
+     * Build `client/pair-auth` for the Dynamic Pairing Code flow.
+     *
+     * Carries `Yb`, the client's CPace public share, as `pake_msg_2`.
+     */
+    fun buildClientPairAuth(pakeMsg2: ByteArray): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_AUTH)
+        put("payload", buildJsonObject {
+            put("pake_msg_2", Base64Url.encode(pakeMsg2))
+        })
+    }.toString()
+
+    /**
+     * Build `client/pair-confirm` for the Dynamic Pairing Code flow.
+     *
+     * @param clientKc the MCF key-confirmation tag `Tb`.
+     * @param wrappedNonceB the sealed opening of `nonce_B`, so the server can
+     *   check it against the `commit_B` sent in `client/pair-init`.
+     */
+    fun buildClientPairConfirm(clientKc: ByteArray, wrappedNonceB: ByteArray): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_CONFIRM)
+        put("payload", buildJsonObject {
+            put("client_kc", Base64Url.encode(clientKc))
+            put("wrapped_nonce_B", Base64Url.encode(wrappedNonceB))
+        })
+    }.toString()
 
     /**
      * Build `client/pair-finalize` for the Pairing PSK flow.
@@ -176,6 +264,20 @@ object MessageBuilder {
             })
         }.toString()
     }
+
+    /**
+     * Build `client/pair-finalize` for the Dynamic Pairing Code flow.
+     *
+     * Carries the new long-term PSK as `wrapped_psk`, sealed under the CPace
+     * ISK - the direct `long_term_psk` field belongs only to the Pairing PSK
+     * flow, which has no CPace exchange to wrap it with.
+     */
+    fun buildClientPairFinalizeWrapped(wrappedPsk: ByteArray): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_FINALIZE)
+        put("payload", buildJsonObject {
+            put("wrapped_psk", Base64Url.encode(wrappedPsk))
+        })
+    }.toString()
 
     /**
      * `pair/abort`.

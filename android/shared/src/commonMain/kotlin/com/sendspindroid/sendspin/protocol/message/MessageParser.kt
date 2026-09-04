@@ -1,5 +1,6 @@
 package com.sendspindroid.sendspin.protocol.message
 
+import com.sendspindroid.sendspin.crypto.Base64Url
 import com.sendspindroid.sendspin.protocol.ControllerState
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonNull
@@ -77,6 +78,40 @@ object MessageParser {
         val rtt = (clientReceivedMicros - clientTransmitted) - (serverTransmitted - serverReceived)
 
         return TimeMeasurement(offset, rtt, clientReceivedMicros)
+    }
+
+    /**
+     * Parse `server/pair-init` for the Dynamic Pairing Code flow.
+     *
+     * @return `nonce_A`, or null if the field is missing or not a 32-byte
+     *   base64url value. Both are protocol errors for the caller to raise.
+     */
+    fun parseServerPairInit(payload: JsonObject?): ByteArray? =
+        decodeFixed(payload, "nonce_A", 32)
+
+    /**
+     * Parse `server/pair-auth` for the Dynamic Pairing Code flow.
+     *
+     * @return `Ya`, the server's CPace public share, or null if `pake_msg_1`
+     *   is missing or not a 32-byte base64url value.
+     */
+    fun parseServerPairAuth(payload: JsonObject?): ByteArray? =
+        decodeFixed(payload, "pake_msg_1", 32)
+
+    /**
+     * Parse `server/pair-confirm` for the Dynamic Pairing Code flow.
+     *
+     * @return the MCF key-confirmation tag `Ta`, or null if `server_kc` is
+     *   missing or not a 64-byte base64url value.
+     */
+    fun parseServerPairConfirm(payload: JsonObject?): ByteArray? =
+        decodeFixed(payload, "server_kc", 64)
+
+    /** Decode a fixed-length base64url field, or null if absent/wrong length. */
+    private fun decodeFixed(payload: JsonObject?, key: String, byteLength: Int): ByteArray? {
+        val value = payload?.get(key)?.jsonPrimitive?.contentOrNull ?: return null
+        val bytes = Base64Url.decodeOrNull(value) ?: return null
+        return if (bytes.size == byteLength) bytes else null
     }
 
     /**

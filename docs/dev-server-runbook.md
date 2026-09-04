@@ -28,13 +28,36 @@ python -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
 
-pip install "aiosendspin[server]==9.1.0"
+pip install "aiosendspin[server] @ git+https://github.com/sendspin/aiosendspin@90feb19894793749eb017f9e1bb21929dc8fe94a"
 ```
 
-Pin 9.1.0: it is the version Music Assistant currently requires
-(`music_assistant/providers/sendspin/manifest.json`). `aiosendspin.noise.*` is not
-a stability-guaranteed API, so expect this script to need touching on
-aiosendspin 10.
+**This is not a released version, and the pin above is a deliberate stand-in.**
+As of this writing, aiosendspin 10.0.0 -- the version with the dynamic-pairing-code
+API this dev server needs -- exists only as a **draft GitHub release**
+(`draft=true`, `published_at=null`) with **no git tag**; it has not been
+published to PyPI. The dynamic-pairing-code surface
+(`PairMethod.DYNAMIC_PAIRING_CODE`, `run_dynamic_pairing_code_server`,
+`PairingCodeFormat`) exists only on the `aiosendspin` repository's `main`
+branch. The commit above is `main` as of 2026-08-31.
+
+Pin the exact commit SHA, never `@main`: acceptance evidence gathered against
+a branch that moves underneath it is not reproducible, and there would be no
+way to tell a real regression in SendSpinDroid from an unrelated upstream
+change landing on `main` between test runs.
+
+**Revisit this pin once aiosendspin 10.0.0 actually ships** (a real PyPI
+release with a git tag). At that point switch back to a normal version pin
+(`pip install "aiosendspin[server]>=10,<11"`, matching whatever Music
+Assistant has moved to by then) and drop this note. Until then, do not
+assume anyone reading this later can run `pip install aiosendspin==10.0.0`
+and get something that works -- it will not resolve to anything on PyPI.
+
+Prior to this, the script pinned `aiosendspin==9.1.0`, matching what Music
+Assistant currently requires (`music_assistant/providers/sendspin/manifest.json`).
+`aiosendspin.noise.*` is not a stability-guaranteed API, so expect renames
+across major versions -- the 10.x pairing module alone renamed `DYNAMIC_PIN`
+to `DYNAMIC_PAIRING_CODE`, `STATIC_PIN` to `STATIC_PAIRING_CODE`, and
+`decode_token` to `decode_psk_token` relative to 9.1.x.
 
 ## Running
 
@@ -71,6 +94,7 @@ The server reads commands on stdin while running:
 | `trust [id]` | make an unpaired (Sentinel-PSK) client playback-capable |
 | `untrust [id]` | revoke that |
 | `pair <token>` | pair using a `SP:0...` pairing token from the device (Phase 2) |
+| `pair-dynamic [id]` | pair using the six-digit dynamic pairing code shown on the device |
 | `unpair [id]` | drop the record and send `server/unpair` (exercises item 2.7) |
 | `quit` | stop |
 
@@ -88,6 +112,50 @@ Forget this and you get a clean handshake followed by a `server/activate` with a
 empty `active_roles` - which reads exactly like a bug in the client's
 `server/activate` handling (item 1.6). It is the single easiest way to lose a day
 on Phase 1. `--trust-all-unpaired` takes it off the table.
+
+## Dynamic pairing code procedure
+
+This exercises the CPace-based dynamic pairing flow end to end: the tablet
+displays a six-digit code, the operator reads it and types it at this
+server's console, and both sides derive a shared long-term PSK from a
+CPace exchange keyed by that code -- never by transmitting the code itself.
+
+1. Start the server as above and connect the tablet to it (manual entry or
+   discovery; see "Windows and WSL2" below if discovery does not find it).
+2. Confirm the tablet shows up: run `clients` at the console, or watch for
+   the `client connected: ...` log line.
+3. On the server console, run:
+   ```
+   pair-dynamic
+   ```
+   (or `pair-dynamic <client_id>` if more than one client is connected).
+   The console prints "initiating dynamic pairing; read the six digits off
+   the device screen" and then blocks waiting for input -- this is
+   `run_dynamic_pairing_code_server`'s `pairing_code_provider` callback,
+   which this script implements by reading a line from stdin.
+4. On the tablet, choose dynamic pairing. It displays a six-digit code.
+5. Read that code and type it at the server console, then press Enter, at
+   the prompt:
+   ```
+   Enter the pairing code shown on the device:
+   ```
+6. On success the console prints "pairing initiated" and the server logs the
+   client's pairing state moving to paired. Confirm:
+   - **The pairing record persists.** Check
+     `.dev/sendspin/pairing_store.json` (or your `--pairing-store` path) for
+     a new entry after the exchange completes, and confirm it survives a
+     server restart (`quit`, restart, `clients` should show the device as
+     `paired=True` on reconnect without repeating this procedure).
+   - **The re-handshake to the new long-term PSK succeeds.** The dynamic
+     pairing exchange itself runs over the *old* connection security; once
+     it finishes, the client is expected to reconnect (or the connection is
+     expected to renegotiate) using the newly stored PSK. Confirm the
+     tablet's connection stays healthy across that transition rather than
+     dropping and failing to come back.
+
+A wrong code produces a `pair/abort` with reason `pairing_code_mismatch`
+instead of a success -- see the device-acceptance checklist below for what to
+confirm about the client's recovery from that.
 
 ## Verifying the target is configured correctly
 
@@ -132,6 +200,52 @@ Then point the current app build (2.0.0-Beta14) at the running server. It must
 discover the server and then **fail to establish a session**, with the server
 logging the `client/hello`-first frame being rejected. That failure is the
 expected pre-Phase-1 baseline.
+
+## Device acceptance checklist
+
+Unit and instrumentation tests cover most of the dynamic-pairing-code
+implementation, but the items below only exist at the seam between the app,
+the OS, and a human, so they can only be verified by actually running this
+procedure against a real tablet and a real server. Work through this list
+during device acceptance and record the result of each:
+
+- **The four `activePairingMethod` out-of-sequence guards** in
+  `handleServerPairInit` / `Auth` / `Confirm` -- confirm the client rejects
+  or ignores a pairing message that arrives in the wrong order or for a
+  method that is not the one currently active, rather than crashing or
+  silently accepting it.
+- **`runDynamicPairingActions`' fail-closed path** when the handshake hash,
+  store, or cipher suite is null -- these are states that should be
+  unreachable in a real run; confirm that if one is somehow hit, the client
+  aborts the pairing rather than proceeding with missing material.
+- **The `dynamicPairingFlow` lazy-build versus reuse branch** -- pair once,
+  then pair again (e.g. after a successful `verify` or a second device) and
+  confirm the flow object is correctly rebuilt or reused rather than reusing
+  stale state from the first attempt.
+- **Every `DynamicPairingAction` arm in the handler dispatch loop** -- walk
+  through a full successful pairing and confirm each action the flow emits
+  is actually handled (not just the happy-path subset exercised by unit
+  tests with a fake transport).
+- **`resetForRehandshake()` clearing dynamic-flow fields mid-attempt** --
+  trigger a rehandshake (e.g. by forcing a reconnect) while a dynamic
+  pairing attempt is in progress and confirm no stale field from the
+  aborted attempt leaks into the next one.
+- **The `COMMAND_ALLOW_PAIRING` custom-command round trip and
+  `MainActivity.onAllowPairingClicked()`** -- confirm the gesture-gated
+  "Allow pairing" button actually reaches the service via the MediaSession
+  custom command and unblocks the pending pairing attempt.
+- **A wrong code producing `pair/abort` with `pairing_code_mismatch` and the
+  UI recovering** -- see step 4 in the plan; confirm the app shows a clear
+  failure state and lets the operator retry rather than getting stuck.
+- **Five failed attempts escalating the sixth to the gesture gate, and a
+  success de-escalating** -- confirm the attempt counter is per-pairing-
+  session state that a subsequent success actually clears, not a counter
+  that stays escalated forever once tripped.
+- **MediaSession IPC delivery, TalkBack announcing the code, and on-screen
+  legibility across a room** -- confirm the six digits reach the UI promptly
+  over the MediaSession IPC boundary, that TalkBack reads the code aloud
+  usably, and that the digits are legible at a normal viewing distance (not
+  just readable in a close-up screenshot).
 
 ## Resetting state
 

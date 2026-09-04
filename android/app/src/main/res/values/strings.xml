@@ -228,6 +228,8 @@
     <string name="pairing_token_copied">Pairing token copied</string>
     <string name="pairing_token_secret_warning">Treat this like a password: anyone who has it can pair with this device.</string>
     <string name="pairing_token_disabled">Pairing is turned off for this device.</string>
+    <string name="pref_dynamic_pairing_code_title">Dynamic pairing code</string>
+    <string name="pref_dynamic_pairing_code_summary">Most servers do not support this pairing method yet. Turning it on may prevent connecting to older servers.</string>
     <string name="debug_share_chooser_title">Share Debug Log</string>
     <string name="debug_log_exported">Debug log exported</string>
     <string name="debug_log_export_failed">Failed to export debug log</string>
@@ -698,4 +700,15 @@
     <string name="save_queue_failed_remove">Failed to remove existing tracks</string>
     <string name="save_queue_failed_create">Failed to create playlist</string>
     <string name="save_queue_failed_load_playlists">Failed to load playlists</string>
+    <!-- Admission notice: a connected session that cannot carry playback -->
+    <string name="admission_awaiting_approval_title">Waiting for approval</string>
+    <string name="admission_awaiting_approval_body">%1$s has not approved this player yet. Approve it on the server, or try starting playback on this player.</string>
+    <string name="admission_pairing_title">Pair this player</string>
+    <string name="admission_pairing_body">%1$s is waiting for a pairing token. Open Settings, then Pairing, to show the token for this device, then enter it on the server.</string>
+    <string name="admission_open_pairing">Open settings</string>
+    <string name="pairing_code_title">Enter this code on the server</string>
+    <string name="pairing_code_body">Type this code into %1$s to pair this player.</string>
+    <string name="pairing_allow_title">Allow pairing</string>
+    <string name="pairing_allow_body">Too many recent pairing attempts. Tap Allow pairing on this device to continue.</string>
+    <string name="pairing_allow_button">Allow pairing</string>
 </resources>
