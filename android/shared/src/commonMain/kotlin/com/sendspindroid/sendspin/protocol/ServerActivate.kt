@@ -3,7 +3,6 @@ package com.sendspindroid.sendspin.protocol
 import com.sendspindroid.sendspin.crypto.PskCategory
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -30,7 +29,6 @@ data class ServerActivate(
     val activities: Set<Activity>,
     val activeRoles: List<String>?,
     val pairingMethod: String?,
-    val pinLength: Int?,
     /** Activities the client did not recognise; ignored, but worth logging. */
     val unknownActivities: List<String>,
 )
@@ -144,7 +142,6 @@ object ServerActivateRules {
             activeRoles = roles,
             // The client ignores `pairing` unless 'pairing' is in activities.
             pairingMethod = pairing?.get("method")?.jsonPrimitive?.contentOrNull,
-            pinLength = pairing?.get("pin_length")?.jsonPrimitive?.intOrNull,
             unknownActivities = unknown,
         )
     }

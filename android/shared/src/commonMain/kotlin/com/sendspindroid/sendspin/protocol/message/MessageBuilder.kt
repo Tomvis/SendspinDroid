@@ -155,6 +155,61 @@ object MessageBuilder {
     }
 
     /**
+     * Build `client/pair-pending` for the Dynamic Pairing Code flow.
+     *
+     * Sent instead of `client/pair-init` while the attempt is gesture-gated
+     * (`DynamicPairingCodeFlow` in the `AwaitingGesture` state): it carries the
+     * attempt counter alone, with no commitment yet.
+     */
+    fun buildClientPairPending(pairingIndex: Int): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_PENDING)
+        put("payload", buildJsonObject {
+            put("pairing_index", pairingIndex)
+        })
+    }.toString()
+
+    /**
+     * Build `client/pair-init` for the Dynamic Pairing Code flow.
+     *
+     * `commit_B = SHA-256("sendspin-pair-commit-v1" || nonce_B)` ([PairingCode.commit]).
+     * Starts the attempt: `pairing_index` folds into the CPace `sid`.
+     */
+    fun buildClientPairInit(pairingIndex: Int, commitB: ByteArray): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_INIT)
+        put("payload", buildJsonObject {
+            put("pairing_index", pairingIndex)
+            put("commit_B", Base64Url.encode(commitB))
+        })
+    }.toString()
+
+    /**
+     * Build `client/pair-auth` for the Dynamic Pairing Code flow.
+     *
+     * Carries `Yb`, the client's CPace public share, as `pake_msg_2`.
+     */
+    fun buildClientPairAuth(pakeMsg2: ByteArray): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_AUTH)
+        put("payload", buildJsonObject {
+            put("pake_msg_2", Base64Url.encode(pakeMsg2))
+        })
+    }.toString()
+
+    /**
+     * Build `client/pair-confirm` for the Dynamic Pairing Code flow.
+     *
+     * @param clientKc the MCF key-confirmation tag `Tb`.
+     * @param wrappedNonceB the sealed opening of `nonce_B`, so the server can
+     *   check it against the `commit_B` sent in `client/pair-init`.
+     */
+    fun buildClientPairConfirm(clientKc: ByteArray, wrappedNonceB: ByteArray): String = buildJsonObject {
+        put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_CONFIRM)
+        put("payload", buildJsonObject {
+            put("client_kc", Base64Url.encode(clientKc))
+            put("wrapped_nonce_B", Base64Url.encode(wrappedNonceB))
+        })
+    }.toString()
+
+    /**
      * Build `client/pair-finalize` for the Pairing PSK flow.
      *
      * `pairing.md#client--server-clientpair-finalize`: "In the Pairing PSK
