@@ -662,7 +662,24 @@ abstract class SendSpinProtocolHandler(
     /** Install the transport produced by the handshake driver. */
     fun installEncryptedTransport(transport: NoiseTransport) {
         wireCodec = NoiseWireCodec(transport)
+        // This is the sole call site for a FRESH handshake - a re-handshake
+        // never calls it, going through resetForRehandshake() instead - so
+        // without this reset the counter would keep accumulating across
+        // reconnects on a reused SendSpin instance while each new server
+        // connection counts from 1, making our index look "ahead of the
+        // server's count".
+        resetPairingIndexForFreshHandshake()
         Log.i(tag, "Encrypted channel established")
+    }
+
+    /**
+     * Reset [dynamicPairingIndex] to 0: pairing_index counts "the number of
+     * pairing server/activate messages received since the last Noise
+     * handshake" (pairing.md line 335), and that count must restart on
+     * EVERY Noise handshake - fresh or re-handshake alike.
+     */
+    protected fun resetPairingIndexForFreshHandshake() {
+        dynamicPairingIndex = 0
     }
 
     /**
@@ -696,7 +713,7 @@ abstract class SendSpinProtocolHandler(
         // hash, and pairing_index counts "activations since the last Noise
         // handshake" - both go stale the moment a new handshake completes.
         dynamicPairingFlow = null
-        dynamicPairingIndex = 0
+        resetPairingIndexForFreshHandshake()
         dynamicAttemptTimeoutJob?.cancel()
         dynamicAttemptTimeoutJob = null
         activePairingMethod = null
@@ -953,7 +970,6 @@ abstract class SendSpinProtocolHandler(
             }
 
             is ActivationOutcome.Accept -> {
-                val first = !activationSeen
                 activities = activate.activities
                 activeRoles = outcome.activeRoles
                 activationSeen = true
@@ -971,14 +987,46 @@ abstract class SendSpinProtocolHandler(
                 // rejected as malformed - which is precisely how this failed
                 // against both Music Assistant builds.
                 //
-                // Withholding them costs nothing: the admissibility table grants
-                // no roles on a Pairing-PSK connection, so there is no player
-                // state worth reporting and no stream to synchronise to. The
-                // activation that follows the promotion starts them.
-                if (first && !pairing) {
-                    // Now, and only now, may we speak.
+                // pairing.md says "Pairing and playback are mutually exclusive
+                // on a connection", but its "Sequence violations" rule only
+                // covers a *pairing* message arriving out of order - it does
+                // not explicitly forbid client/time during pairing. We stop it
+                // anyway on the strength of that mutual-exclusivity statement
+                // plus the observed fact above: every real server rejects it.
+                // This is an interop-driven reading, not a quoted spec rule.
+                //
+                // Withholding them costs nothing while pairing: the
+                // admissibility table grants no roles on a Pairing-PSK
+                // connection, so there is no player state worth reporting and
+                // no stream to synchronise to.
+                //
+                // The dynamic flow's real sequence is: the server activates
+                // with EMPTY activities first (time sync starts), and only
+                // LATER activates into pairing (time sync must then stop) -
+                // so this cannot be gated on "first activation" the way the
+                // original Pairing-PSK-only version was. A later activation
+                // that leaves pairing must restore both, whether or not it is
+                // the first activation ever seen on this connection.
+                if (pairing) {
+                    stopTimeSync()
+                } else {
                     sendPlayerStateUpdate()
                     startTimeSync()
+                }
+
+                if (pairing) {
+                    // The client's own tally of "pairing activations since the
+                    // last Noise handshake" (pairing.md) - the value folded
+                    // into the CPace sid as `pairing_index`. Incremented for
+                    // EVERY accepted pairing activation, whatever the method:
+                    // the server's own count advances the same way. Counting
+                    // only dynamic activations would leave our tally lower
+                    // than the server's after a pairing_psk activation, and
+                    // the spec silently discards an index lower than the
+                    // server's count - the dynamic attempt would then never
+                    // start. Incremented before use, so the first pairing
+                    // activation on a session is index 1.
+                    dynamicPairingIndex += 1
                 }
 
                 // Every accepted activation is fed to the pairing flow, not
@@ -987,11 +1035,6 @@ abstract class SendSpinProtocolHandler(
                 // must then discard the PSK it generated.
                 if (pairing && activate.pairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
                     activePairingMethod = activate.pairingMethod
-                    // The client's own tally of "pairing activations since the
-                    // last Noise handshake" - the value folded into the CPace
-                    // sid as `pairing_index`. Incremented before use, so the
-                    // first attempt on a session is index 1.
-                    dynamicPairingIndex += 1
                     runDynamicPairingActions(
                         DynamicPairingEvent.PairingActivation(dynamicPairingIndex)
                     )
@@ -1379,7 +1422,11 @@ abstract class SendSpinProtocolHandler(
 
     private var dynamicAttemptTimeoutJob: Job? = null
 
-    /** Activations naming `dynamic_pairing_code` since the last Noise handshake. */
+    /**
+     * Accepted pairing activations (any method) since the last Noise
+     * handshake. Reset on every fresh handshake in [installEncryptedTransport]
+     * and on every re-handshake in [resetForRehandshake].
+     */
     private var dynamicPairingIndex = 0
 
     /** Backing store for the method's brute-force counter. Null on paths that never offer it. */
