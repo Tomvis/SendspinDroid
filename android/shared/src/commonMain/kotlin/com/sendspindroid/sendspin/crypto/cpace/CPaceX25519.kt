@@ -1,5 +1,6 @@
 package com.sendspindroid.sendspin.crypto.cpace
 
+import com.sendspindroid.sendspin.crypto.hmacSha512
 import com.sendspindroid.sendspin.crypto.sha512
 import com.sendspindroid.sendspin.crypto.x25519ScalarMult
 
@@ -82,4 +83,12 @@ object CPaceX25519 {
         lvCat(DSI_ISK.encodeToByteArray(), sid, k),
         transcriptIr(ya, ada, yb, adb)
     )
+
+    /** `mac_key = H("CPaceMac" || sid || ISK)`, section 10.4.5. */
+    fun macKey(sid: ByteArray, isk: ByteArray): ByteArray =
+        sha512("CPaceMac".encodeToByteArray(), sid, isk)
+
+    /** `T = MAC(mac_key, lv_cat(Y, AD))`. Sendspin pins the MAC to HMAC-SHA-512. */
+    fun mcfTag(macKey: ByteArray, y: ByteArray, ad: ByteArray): ByteArray =
+        hmacSha512(macKey, lvCat(y, ad))
 }
