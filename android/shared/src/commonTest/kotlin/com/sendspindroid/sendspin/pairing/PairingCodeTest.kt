@@ -62,6 +62,22 @@ class PairingCodeTest {
         assertEquals("123-456", PairingCode.group("123456"))
     }
 
+    /**
+     * This test exercises the zero-padding path in deriveDigits.
+     * nonceB reduces to 30310 mod 10^6, so padStart must fire to produce "030310".
+     * Without padStart, the result would be "30310" (5 digits), which would fail
+     * to authenticate against the server. This assertion must check the full
+     * string, not just length, to be load-bearing.
+     */
+    @Test
+    fun `zero-padding produces exactly six digits when needed`() {
+        val h = ByteArray(32)
+        val nonceA = ByteArray(32) { it.toByte() }
+        val nonceB = "8855508aade16ec573d21e6a485dfd0a7624085c1a14b5ecdd6485de0c6839a4"
+            .chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        assertEquals("030310", PairingCode.deriveDigits(h, nonceA, nonceB))
+    }
+
     private companion object {
         const val COMMIT_VECTOR =
             "ea08c0aee3c421ace702f31591b3d213e8c371a8a8e3b0be3fd405ed841755a3"
