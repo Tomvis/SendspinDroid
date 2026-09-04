@@ -17,8 +17,18 @@ private const val CURVE_A = 486662
 actual fun mapToCurveElligator2(u: ByteArray): ByteArray {
     require(u.size == 32) { "field element must be 32 bytes, got ${u.size}" }
 
+    // X25519Field.decode() silently clears bit 255 of the input (the
+    // RFC 7748 u-coordinate convention). The field element handed to
+    // map_to_curve here is a hash-to-field output, not an RFC 7748
+    // u-coordinate, so bit 255 must be folded back in: 2^255 == 19 (mod p)
+    // since p = 2^255 - 19.
     val uf = X25519Field.create()
     X25519Field.decode(u, 0, uf)
+    if ((u[31].toInt() and 0x80) != 0) {
+        val bit255AsNineteen = X25519Field.create()
+        bit255AsNineteen[0] = 19
+        X25519Field.add(uf, bit255AsNineteen, uf)
+    }
 
     val a = X25519Field.create()
     a[0] = CURVE_A
@@ -67,7 +77,7 @@ actual fun mapToCurveElligator2(u: ByteArray): ByteArray {
     // x = e2 ? x1 : x2
     val x = X25519Field.create()
     X25519Field.copy(x2, 0, x, 0)
-    X25519Field.cmov(if (isSquare) 1 else 0, x1, 0, x, 0)
+    X25519Field.cmov(if (isSquare) -1 else 0, x1, 0, x, 0)
 
     X25519Field.normalize(x)
     val out = ByteArray(32)
