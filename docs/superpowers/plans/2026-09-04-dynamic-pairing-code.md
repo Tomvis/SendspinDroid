@@ -1031,7 +1031,10 @@ print(json.dumps({
 `ci/conformance/cpace_oracle.py` already exists and its output is already
 embedded in the test below, so this step is a confirmation, not a generation:
 run `pip install cpace && python ci/conformance/cpace_oracle.py` and check the
-printed values match the constants in the test. If they differ, STOP and report
+printed values match the constants in the test. The script pins BOTH scalars and
+temporarily patches `secrets.token_bytes` to do it -- the library draws its
+scalars inside `start()`, so without that patch every run is random and the
+output could never be compared to anything. If they differ, STOP and report
 -- it means the installed `cpace` version changed behaviour, which is exactly
 the interop signal this vector exists to catch.
 
@@ -1124,20 +1127,20 @@ class CPaceResponderTest {
             "73656e647370696e2d706169722d70616b652d763100010203040506070809" +
             "0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000001"
         const val ORACLE_YA =
-            "9fe5d4369ccd0299dfeae5e52efb1ab15a28b286dc8dd89b7dd11f4c9f32eb28"
+            "9e9481280468a6ef3bb3c6b962d564f96b523ca957c41420319b0b2408de5861"
         const val ORACLE_YB =
             "ffc9edf7457e8acf737d5bb2099e50592ec1313dee9658df6a628954cee55135"
         const val ORACLE_YB_SCALAR =
             "025984ca800ed7505e9f20a4b92314c3721e16112fe1447bd807e2fcf9813398"
         const val ORACLE_ISK =
-            "d8235f0ee9ac764401d2f01474e96c565a5ef225c14c1c01dd35a9073f84bb8c" +
-            "a14a8cfdc169e7bddf79e06434270276ee2111f60ee91b9186ef05e1573de1d8"
+            "727136d942eec1e10f9cfc1cdb2426391f217e98348143b978045c747b4f25ee" +
+            "fc9f45864558c4329c2dc1a30424d84ec3965cb1da5863ea8e1239237f559f06"
         const val ORACLE_SERVER_KC =
-            "ed2bf3ee3d10ae525e93fafb1189147fd3fc65e53d6399fccc8c95f80fcad235" +
-            "d5319d060d01ffe0f0a5b9cdbd85a4f71254af3216e79775dda0095681e8bbfb"
+            "110fcfde4aa2b30072787f30d78eeefc4dbfe93b4310d594b79e91ed8f9c0a9e" +
+            "426040bf012f84fa68705f00e5b745c91c4d27a70cbb9e12b5e41c5db5fe5eb1"
         const val ORACLE_CLIENT_KC =
-            "546f758bdebc86771b46a55d042247a75fdd6eb8ea854357c11e135a8bc3429e" +
-            "f074c53382b946b8d275da732964a94bc7d93df70745c045d640fb5d2dcaf185"
+            "b3192b30dcf4f3d0fdbfb125dc17fb071984894762e0d0d0ad6b13272802194f" +
+            "e4aee13a7bd1bc6bbca50b6592a1fafc4e44c0258dfda4815b524ddee0acea0c"
     }
 }
 ```
