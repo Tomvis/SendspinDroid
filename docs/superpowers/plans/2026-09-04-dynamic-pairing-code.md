@@ -388,7 +388,7 @@ Add the import `org.bouncycastle.crypto.digests.SHA512Digest` to the jvmShared f
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :shared:testAndroidHostTest --tests "*Sha512PrimitivesTest*"`
-Expected: PASS, 7 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1432,7 +1432,7 @@ object PairingCode {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :shared:testAndroidHostTest --tests "*PairingCodeTest*"`
-Expected: PASS, 7 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1735,7 +1735,7 @@ In `UserSettings.kt`, alongside the other pairing keys, add:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :shared:testAndroidHostTest --tests "*PairingFailureCounterTest*"`
-Expected: PASS, 7 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Commit**
 
