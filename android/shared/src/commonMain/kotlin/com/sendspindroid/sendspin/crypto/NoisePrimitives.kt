@@ -62,3 +62,20 @@ class NoiseAeadFailure(message: String, cause: Throwable? = null) : Exception(me
 
 /** CSPRNG bytes. Backed by java.security.SecureRandom on both targets. */
 expect fun secureRandomBytes(size: Int): ByteArray
+
+/** SHA-512 over the concatenation of [parts]. */
+expect fun sha512(vararg parts: ByteArray): ByteArray
+
+/** HMAC-SHA-512. */
+expect fun hmacSha512(key: ByteArray, data: ByteArray): ByteArray
+
+/**
+ * X25519 scalar multiplication against an ARBITRARY base point.
+ *
+ * [x25519] is a Diffie-Hellman agreement; this is the same curve operation
+ * but named for its CPace use, where the base point is the password-derived
+ * generator rather than a peer's public key. Returns the raw 32-byte result,
+ * including the all-zero result for low-order inputs -- callers must apply
+ * the CPace abort check themselves (see `scalarMultVfy`).
+ */
+expect fun x25519ScalarMult(scalar: ByteArray, basePoint: ByteArray): ByteArray
