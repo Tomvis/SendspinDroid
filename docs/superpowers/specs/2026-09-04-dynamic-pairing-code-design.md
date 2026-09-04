@@ -273,3 +273,57 @@ the vulnerability the derived, handshake-bound code was designed to remove.
    tablet displays a six-digit code, the operator enters it, the pairing record
    persists, and the server's re-handshake to the new long-term PSK succeeds.
 8. Pairing PSK continues to work unchanged.
+
+## Device acceptance record (2026-09-04)
+
+Run against a Relndoo T901 tablet and a local aiosendspin server pinned to
+commit `90feb19` (see "The interop gap" -- 10.0.0 is still an unreleased draft).
+
+**Result: pairing completed end to end.**
+
+```
+CODE READ FROM DEVICE: 481010
+PAIRING SUCCEEDED
+POST-PAIR STATE: paired=True
+  security=ConnectionSecurity(psk_category=LONG_TERM, trust_level=USER)
+  roles=['player@v1', 'controller@v1', 'metadata@v1', 'artwork@v1']
+```
+
+`psk_category=LONG_TERM` is the load-bearing part: the connection was promoted
+off the Sentinel PSK to the newly agreed long-term PSK, so the server's in-band
+re-handshake completed without dropping the WebSocket. `trust_level` moved from
+`none` to `user`, and a connection that began with zero roles ended
+playback-capable across all four.
+
+Also verified on device: the opt-in gate (with the setting off, `client/hello`
+carries only `pairing_psk`), the `method_not_supported` abort when a server
+selects a method we do not offer, and both admission notices --
+`AWAITING_APPROVAL` and `PAIRING` with the six digits grouped `481-010`.
+
+### Two defects found only on device
+
+Both were invisible to 1,405 unit tests and five code reviews, and both lived in
+a state TRANSITION rather than in any state:
+
+**D1 - time sync collided with pairing.** The guard was
+`if (first && !pairing) { sendPlayerStateUpdate(); startTimeSync() }`, which only
+withholds on a FIRST activation. The dynamic flow activates with empty
+activities first (client starts time sync), then enters pairing while the burst
+is still running, so `client/time` arrived while the server awaited
+`client/pair-auth`. Note the spec does NOT explicitly forbid this: its "Sequence
+violations" rule covers only pairing messages out of sequence, and it marks
+`server/unpair` as "valid at any time regardless of the current activities"
+while saying no such thing about `client/time`. The fix rests on "Pairing and
+playback are mutually exclusive on a connection" plus the fact that every real
+server rejects it -- recorded so a later reader does not mistake it for quoted
+spec text.
+
+**D2 - `pairing_index` was wrong twice.** `pairing.md` defines it as "the number
+of pairing `server/activate` messages received since the last Noise handshake".
+It was reset only in `resetForRehandshake()`, never on a fresh handshake, and
+the `SendSpin` instance is reused across reconnects -- so it accumulated while
+each new server connection counted from 1, producing "pairing_index is ahead of
+the server's count". It also counted only `dynamic_pairing_code` activations,
+so a `pairing_psk` activation followed by a dynamic one would have left us
+LOWER than the server, which the spec says is silently discarded -- the attempt
+would simply never have started.
