@@ -232,6 +232,10 @@ class ServerActivateRulesTest {
         val a = parse(
             """{"type":"server/activate","payload":{"activities":["playback"],
                "active_roles":["player@v1"],"pairing":{"method":"dynamic_pin","pin_length":6}}}"""
+            // pin_length is deliberately left in this fixture: it is not a field
+            // ServerActivate parses (the current spec has no such field, and the
+            // dynamic code is fixed at six digits), so this documents that an
+            // unrecognized key is tolerated rather than rejected.
         )!!
         assertEquals(setOf(Activity.PLAYBACK), a.activities)
         assertEquals(listOf("player@v1"), a.activeRoles)
