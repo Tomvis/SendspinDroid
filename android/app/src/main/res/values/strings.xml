@@ -704,4 +704,9 @@
     <string name="admission_pairing_title">Pair this player</string>
     <string name="admission_pairing_body">%1$s is waiting for a pairing token. Open Settings, then Pairing, to show the token for this device, then enter it on the server.</string>
     <string name="admission_open_pairing">Open settings</string>
+    <string name="pairing_code_title">Enter this code on the server</string>
+    <string name="pairing_code_body">Type this code into %1$s to pair this player.</string>
+    <string name="pairing_allow_title">Allow pairing</string>
+    <string name="pairing_allow_body">Too many recent pairing attempts. Tap Allow pairing on this device to continue.</string>
+    <string name="pairing_allow_button">Allow pairing</string>
 </resources>

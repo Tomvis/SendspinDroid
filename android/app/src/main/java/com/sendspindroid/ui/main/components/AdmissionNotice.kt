@@ -39,14 +39,27 @@ fun AdmissionNotice(
     state: AdmissionState,
     serverName: String,
     onOpenPairingClick: () -> Unit,
+    pairingCode: String? = null,
+    gestureRequested: Boolean = false,
+    onAllowPairingClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val titleRes = when (state) {
-        AdmissionState.PAIRING -> R.string.admission_pairing_title
+    // Three shapes for AdmissionState.PAIRING: a code to show, a gesture to
+    // confirm, or (absent both) the Pairing PSK token guidance this branch
+    // has always shown. AWAITING_APPROVAL takes none of them.
+    val showingCode = state == AdmissionState.PAIRING && pairingCode != null
+    val showingGesture = state == AdmissionState.PAIRING && pairingCode == null && gestureRequested
+
+    val titleRes = when {
+        showingCode -> R.string.pairing_code_title
+        showingGesture -> R.string.pairing_allow_title
+        state == AdmissionState.PAIRING -> R.string.admission_pairing_title
         else -> R.string.admission_awaiting_approval_title
     }
-    val bodyRes = when (state) {
-        AdmissionState.PAIRING -> R.string.admission_pairing_body
+    val bodyRes = when {
+        showingCode -> R.string.pairing_code_body
+        showingGesture -> R.string.pairing_allow_body
+        state == AdmissionState.PAIRING -> R.string.admission_pairing_body
         else -> R.string.admission_awaiting_approval_body
     }
 
@@ -70,13 +83,21 @@ fun AdmissionNotice(
         Spacer(modifier = Modifier.height(12.dp))
 
         Text(
-            text = stringResource(bodyRes, serverName),
+            text = if (showingGesture) stringResource(bodyRes) else stringResource(bodyRes, serverName),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
 
-        if (state == AdmissionState.PAIRING) {
+        if (showingCode) {
+            Spacer(modifier = Modifier.height(24.dp))
+            PairingCodeDisplay(code = requireNotNull(pairingCode))
+        } else if (showingGesture) {
+            Spacer(modifier = Modifier.height(24.dp))
+            Button(onClick = onAllowPairingClick) {
+                Text(text = stringResource(R.string.pairing_allow_button))
+            }
+        } else if (state == AdmissionState.PAIRING) {
             Spacer(modifier = Modifier.height(24.dp))
             Button(onClick = onOpenPairingClick) {
                 Text(text = stringResource(R.string.admission_open_pairing))
@@ -105,6 +126,33 @@ private fun AdmissionNoticeAwaitingApprovalPreview() {
             state = AdmissionState.AWAITING_APPROVAL,
             serverName = "Living Room",
             onOpenPairingClick = {}
+        )
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun AdmissionNoticePairingCodePreview() {
+    SendSpinTheme {
+        AdmissionNotice(
+            state = AdmissionState.PAIRING,
+            serverName = "Living Room",
+            onOpenPairingClick = {},
+            pairingCode = "123456"
+        )
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun AdmissionNoticeAllowPairingPreview() {
+    SendSpinTheme {
+        AdmissionNotice(
+            state = AdmissionState.PAIRING,
+            serverName = "Living Room",
+            onOpenPairingClick = {},
+            gestureRequested = true,
+            onAllowPairingClick = {}
         )
     }
 }

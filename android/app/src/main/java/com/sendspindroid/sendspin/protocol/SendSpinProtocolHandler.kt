@@ -1144,6 +1144,16 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
+    /**
+     * The operator performed the "Allow pairing" gesture, ending a
+     * gesture-gated wait on an escalated attempt.
+     */
+    fun confirmDynamicPairingGesture() {
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+            runDynamicPairingActions(DynamicPairingEvent.WindowOpened)
+        }
+    }
+
     // ========== Pairing PSK flow (item 2.5) ==========
 
     /** One attempt at a time, owned by the connection. */

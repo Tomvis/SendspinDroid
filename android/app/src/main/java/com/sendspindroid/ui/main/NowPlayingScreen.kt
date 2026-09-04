@@ -76,6 +76,7 @@ fun NowPlayingScreen(
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     onOpenPairingClick: () -> Unit,
+    onAllowPairingClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
@@ -92,6 +93,8 @@ fun NowPlayingScreen(
     val durationMs by viewModel.durationMs.collectAsStateWithLifecycle()
     val positionUpdatedAt by viewModel.positionUpdatedAt.collectAsStateWithLifecycle()
     val admissionState by viewModel.admissionState.collectAsStateWithLifecycle()
+    val pairingCode by viewModel.pairingCode.collectAsStateWithLifecycle()
+    val pairingGestureRequested by viewModel.pairingGestureRequested.collectAsStateWithLifecycle()
 
     // Don't show buffering spinner when paused -- SendSpin's audio stream stops on
     // pause, so Media3 reports STATE_BUFFERING even though the user intentionally paused.
@@ -125,7 +128,10 @@ fun NowPlayingScreen(
         AdmissionNotice(
             state = admissionState,
             serverName = serverName,
+            pairingCode = pairingCode,
+            gestureRequested = pairingGestureRequested,
             onOpenPairingClick = onOpenPairingClick,
+            onAllowPairingClick = onAllowPairingClick,
             modifier = modifier
         )
         return

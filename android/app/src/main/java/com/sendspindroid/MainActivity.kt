@@ -861,6 +861,7 @@ class MainActivity : AppCompatActivity() {
                         onNextClick = { onNextClicked() },
                         onSwitchGroupClick = { onSwitchGroupClicked() },
                         onFavoriteClick = { onFavoriteClicked() },
+                        onAllowPairingClick = { onAllowPairingClicked() },
                         onVolumeChange = { volume ->
                             onVolumeChanged(volume)
                             viewModel.updateVolume(volume)
@@ -1611,6 +1612,12 @@ class MainActivity : AppCompatActivity() {
             ?: AdmissionState.READY
         viewModel.updateAdmissionState(admission)
 
+        // Both null/false when absent, matching "nothing to explain" above.
+        viewModel.updatePairingCode(extras.getString(PlaybackService.EXTRA_PAIRING_CODE))
+        viewModel.updatePairingGestureRequested(
+            extras.getBoolean(PlaybackService.EXTRA_PAIRING_GESTURE_REQUESTED, false)
+        )
+
         // Handle metadata updates
         val title = extras.getString(PlaybackService.EXTRA_TITLE, "")
         val artist = extras.getString(PlaybackService.EXTRA_ARTIST, "")
@@ -2331,6 +2338,18 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "Switch group clicked")
         val controller = mediaController ?: return
         val command = SessionCommand(PlaybackService.COMMAND_SWITCH_GROUP, Bundle.EMPTY)
+        controller.sendCustomCommand(command, Bundle.EMPTY)
+    }
+
+    /**
+     * Handles the "Allow pairing" gesture button click.
+     * Sends the allow-pairing command to PlaybackService, which forwards it
+     * to the dynamic pairing flow as a WindowOpened event.
+     */
+    private fun onAllowPairingClicked() {
+        Log.d(TAG, "Allow pairing clicked")
+        val controller = mediaController ?: return
+        val command = SessionCommand(PlaybackService.COMMAND_ALLOW_PAIRING, Bundle.EMPTY)
         controller.sendCustomCommand(command, Bundle.EMPTY)
     }
 

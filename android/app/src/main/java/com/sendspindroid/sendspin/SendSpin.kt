@@ -176,6 +176,15 @@ class SendSpin(
          * action the operator has to take on the server.
          */
         fun onAdmissionStateChanged(state: AdmissionState) {}
+
+        /** Show this dynamic pairing code to the operator. */
+        fun onDynamicPairingCodeEmitted(code: String) {}
+
+        /** Stop showing a dynamic pairing code (the attempt ended, one way or another). */
+        fun onDynamicPairingCodeCleared() {}
+
+        /** The dynamic pairing attempt is gesture-gated; show "Allow pairing". */
+        fun onDynamicPairingGestureRequested() {}
     }
 
     // Dedicated single-thread dispatcher for timer-dominated work: stall
@@ -534,6 +543,18 @@ class SendSpin(
     override fun onAdmissionStateChanged(state: AdmissionState) {
         Log.i(TAG, "Admission state: $state")
         callback.onAdmissionStateChanged(state)
+    }
+
+    override fun onDynamicPairingCodeEmitted(code: String) {
+        callback.onDynamicPairingCodeEmitted(code)
+    }
+
+    override fun onDynamicPairingCodeCleared() {
+        callback.onDynamicPairingCodeCleared()
+    }
+
+    override fun onDynamicPairingGestureRequested() {
+        callback.onDynamicPairingGestureRequested()
     }
 
     /** The PSK that admitted this session; the re-handshake swaps it. */

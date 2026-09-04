@@ -68,6 +68,22 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         _admissionState.value = state
     }
 
+    /** The dynamic pairing code to show the operator, or null when none is active. */
+    private val _pairingCode = MutableStateFlow<String?>(null)
+    val pairingCode: StateFlow<String?> = _pairingCode.asStateFlow()
+
+    fun updatePairingCode(code: String?) {
+        _pairingCode.value = code
+    }
+
+    /** Whether a dynamic pairing attempt is waiting on the "Allow pairing" gesture. */
+    private val _pairingGestureRequested = MutableStateFlow(false)
+    val pairingGestureRequested: StateFlow<Boolean> = _pairingGestureRequested.asStateFlow()
+
+    fun updatePairingGestureRequested(requested: Boolean) {
+        _pairingGestureRequested.value = requested
+    }
+
     private val _groupName = MutableStateFlow("")
     val groupName: StateFlow<String> = _groupName.asStateFlow()
 
@@ -247,6 +263,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         _reconnectingState.value = null
         _reconnectingToServer.value = null
         _isConnectionLoading.value = false
+        _pairingCode.value = null
+        _pairingGestureRequested.value = false
         resetPlaybackState()
     }
 }

@@ -84,7 +84,8 @@ class NowPlayingComposeView @JvmOverloads constructor(
                     onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange,
                     // This view has no navigation of its own.
-                    onOpenPairingClick = {}
+                    onOpenPairingClick = {},
+                    onAllowPairingClick = {}
                 )
             }
         }
