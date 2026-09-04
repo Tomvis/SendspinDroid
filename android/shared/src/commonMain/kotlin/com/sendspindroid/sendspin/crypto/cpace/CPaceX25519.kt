@@ -59,4 +59,27 @@ object CPaceX25519 {
         for (b in result) acc = acc or b.toInt()
         return if (acc == 0) null else result
     }
+
+    /**
+     * `transcript_ir(Ya, ADa, Yb, ADb)` = lv_cat(Ya, ADa) || lv_cat(Yb, ADb).
+     *
+     * Order is the initiator's values first. It is part of the binding, not a
+     * formatting choice: swapping them yields a different ISK, which is what
+     * stops a reflection attack.
+     */
+    fun transcriptIr(ya: ByteArray, ada: ByteArray, yb: ByteArray, adb: ByteArray): ByteArray =
+        lvCat(ya, ada) + lvCat(yb, adb)
+
+    /** `ISK = H(lv_cat(DSI_ISK, sid, K) || transcript_ir(...))`, section 7.2.3. */
+    fun deriveIsk(
+        sid: ByteArray,
+        k: ByteArray,
+        ya: ByteArray,
+        ada: ByteArray,
+        yb: ByteArray,
+        adb: ByteArray,
+    ): ByteArray = sha512(
+        lvCat(DSI_ISK.encodeToByteArray(), sid, k),
+        transcriptIr(ya, ada, yb, adb)
+    )
 }
