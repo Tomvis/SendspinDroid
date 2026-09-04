@@ -1,0 +1,780 @@
+# Cut Remote Access Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Remove the WebRTC and proxy remote-access stack, including its Music Assistant signaling dependency and the `io.getstream:stream-webrtc-android` native library, leaving local connection and manual address entry.
+
+**Architecture:** Deletion in dependency order, consumers before producers. The UI entry points go first so nothing can reach the stack, then the Music Assistant plumbing that rode on it, then the transports themselves, then the native dependency. Nothing is built -- the SendSpin wizard path already supports manual address entry via `localAddress`.
+
+**Tech Stack:** Kotlin, Jetpack Compose, JUnit4, MockK, Robolectric, WebRTC (being removed)
+
+**Spec:** `docs/superpowers/specs/2026-09-01-sendspin-only-player.md` (decision 3, plus the section "What the WebRTC transport actually was")
+
+## Global Constraints
+
+- No emojis in code, logs, or UI strings. ASCII only: `us` not the micro sign, `->` not an arrow glyph, `+/-` not the plus-minus glyph.
+- No self-citation in commits or comments. No mention of Claude or AI, no Co-Authored-By lines.
+- Build command prefix: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew <task>`
+- Every task ends with `:app:compileDebugKotlin` and `:app:testDebugUnitTest` passing. Run `:shared:testAndroidHostTest` too when `:shared` is touched.
+- NO VESTIGIAL STUBS. Delete declarations rather than emptying them. No parameter nothing reads, no default that swallows a call, no `if (true)`. Collapse conditionals to the surviving branch.
+- Clean up orphans YOUR change creates. Leave pre-existing dead code alone and note it.
+- Do NOT touch `com.sendspindroid.musicassistant` beyond the two items named in Task 2. The package is load-bearing for playback and server setup, and Plan C owns it.
+
+## Five checks that have each caught a real defect in this project
+
+Run these mechanically, not as things to bear in mind. Each one has cost a fix round.
+
+1. **Line numbers are locators, not addresses.** Every number here was read at plan time and shifts as you delete. Locate by symbol name; re-grep after each deletion.
+2. **Same-package files need no import.** A file declaring `package com.sendspindroid.remote` appears in no import grep. Search for package DECLARATIONS, in BOTH modules and every source set including `androidTest`.
+3. **Kotlin default arguments hide dead chains.** For every file you touch, enumerate parameters with defaults and prove a surviving caller passes a non-default value. Delete the parameter, not just the supplier.
+4. **A helper may carry a safety property unrelated to its purpose.** Read the KDoc of anything you delete. One earlier task removed an empty-state helper and silently removed a documented Android Auto invariant that had previously failed Google Play review.
+5. **Persisted preference keys hide deleted features.** A settings toggle for a removed feature evades import, default-argument AND resource sweeps: its strings are still referenced, its parameter is still read, and it imports nothing deleted. Walk `UserSettings.kt` properties against consumers OUTSIDE `ui/settings`. Two orphans are already known and are NOT yours to fix here: `albumArtistsOnly` and `cachedPlayerId`, both with zero consumers anywhere. Note any new ones you find.
+
+---
+
+### Task 1: Remove the remote and proxy UI entry points
+
+Delete the user-facing paths first so nothing can reach the stack while it is being dismantled.
+
+**Files:**
+- Delete: `android/app/src/main/java/com/sendspindroid/ui/remote/` (3 files, 588 lines: `RemoteConnectDialog.kt`, `ProxyConnectDialog.kt`, `QrScannerDialog.kt`)
+- Modify: `android/app/src/main/java/com/sendspindroid/MainActivity.kt` (imports at :83-84 and their call sites)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/server/AddServerWizardActivity.kt` (:30 `RemoteConnection`, :35 `QrScannerDialog`, the scan handler around :343)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/server/AddServerWizardViewModel.kt` (`remoteId`, proxy fields)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/wizard/WizardNavigation.kt` (`RemoteAccessMethod` at :58-62, AND six `WizardStep` values -- see below)
+- Delete: `android/app/src/main/java/com/sendspindroid/ui/wizard/steps/RemoteQuestionStep.kt` (134 lines)
+- Delete: `android/app/src/main/java/com/sendspindroid/ui/wizard/steps/RemoteSetupStep.kt` (321 lines)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/wizard/AddServerWizardScreen.kt` (remote/proxy state, actions and the `ProxyAuthMode` enum -- see below)
+- Modify: `android/app/src/main/res/layout/item_saved_proxy_server.xml` (delete if unreferenced after)
+- Test: `android/app/src/test/java/com/sendspindroid/ui/RemoteUiGoneTest.kt`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: no UI path reaches `com.sendspindroid.remote`. `RemoteAccessMethod` no longer offers `REMOTE_ID` or `PROXY`.
+
+**Note on `QrScannerDialog`:** it has exactly two callers, `RemoteConnectDialog.kt:119` and `AddServerWizardActivity.kt:343`, and both scan a remote ID. Deleting it removes the app's only QR *scanning* capability. The pairing flow *displays* a QR code for other devices to scan and does not scan one, so nothing else needs it today. Say so in your report -- if a future pairing flow wants to scan a token, this is the code it would restore.
+
+**On `RemoteAccessMethod`:** it has three values -- `NONE`, `REMOTE_ID`, `PROXY`. Removing two leaves a single-valued enum, which is a vestigial type. If `NONE` is the only survivor and the enum is only used to branch, delete the enum and collapse its consumers to the local path. Report what you found either way.
+
+**The wizard's remote surface is larger than it looks.** A grep for `RemoteAccessMethod`
+finds the enum; it does not find the six wizard STEPS that exist to configure remote
+access, nor the state machine driving them. All of the following go:
+
+`WizardNavigation.kt` -- delete these six `WizardStep` values and every branch that
+reaches them:
+
+- `MA_RemoteQuestion`, `MA_RemoteSetup`, `MA_TestRemote`
+- `MA_RemoteOnlySetup`, `MA_TestRemoteOnly`, `MA_LoginRemote`
+
+KEEP the Music Assistant LOCAL steps -- `MA_NetworkQuestion`, `MA_FindServer`,
+`MA_TestLocal`, `MA_Login`, `MA_Finish` -- and the whole SendSpin path. The split is by
+CAPABILITY, not by name prefix: this plan removes remote access wherever it appears, and
+a later plan removes Music Assistant entirely. Deleting an `MA_` step because of its
+prefix would take local setup with it.
+
+`AddServerWizardScreen.kt` -- delete `remoteId`, `proxyUrl`, `proxyAuthMode`, the
+`ProxyAuthMode` enum (around :483), the `SelectRemoteMethod` and `UpdateProxyAuthMode`
+actions, and the `remoteAccessMethod` state field. Note its default is
+`RemoteAccessMethod.REMOTE_ID` (around :461), so the wizard currently defaults to a path
+this plan deletes -- whatever replaces it must default to the local path.
+
+`steps/RemoteQuestionStep.kt` and `steps/RemoteSetupStep.kt` are deleted whole. Check
+whether `steps/TestingStep.kt` or `steps/FinishStep.kt` branch on remote state and
+collapse those branches to the local path rather than leaving them unreachable.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `android/app/src/test/java/com/sendspindroid/ui/RemoteUiGoneTest.kt`:
+
+```kotlin
+package com.sendspindroid.ui
+
+import java.io.File
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Remote access via Music Assistant's signaling server and via an authenticated
+ * reverse proxy is removed. SendSpin's spec defines no remote-access mechanism,
+ * and the signaling endpoint was a third-party dependency. Local connection and
+ * manual address entry remain.
+ */
+class RemoteUiGoneTest {
+
+    @Test
+    fun remoteUiPackageIsDeleted() {
+        val dir = File("src/main/java/com/sendspindroid/ui/remote")
+        assertFalse("ui/remote must be deleted, found " + dir.absolutePath, dir.exists())
+    }
+
+    @Test
+    fun nothingImportsTheRemoteUiPackage() {
+        val roots = listOf(File("src/main/java"), File("src/test/java"))
+        val offending = roots
+            .filter { it.isDirectory }
+            .flatMap { it.walkTopDown().filter { f -> f.isFile && f.name.endsWith(".kt") } }
+            .flatMap { file ->
+                file.readLines()
+                    .map { it.trim() }
+                    .filter { it.startsWith("import com.sendspindroid.ui.remote") }
+                    .map { file.name + ": " + it }
+            }
+        assertEquals("nothing may import ui.remote", emptyList<String>(), offending)
+    }
+
+    @Test
+    fun wizardOffersNoRemoteOrProxyMethod() {
+        val source = File("src/main/java/com/sendspindroid/ui/wizard/WizardNavigation.kt")
+        require(source.exists()) { "WizardNavigation.kt not found at " + source.absolutePath }
+        val text = source.readText()
+        val offending = listOf("REMOTE_ID", "PROXY").filter { text.contains(it) }
+        assertEquals("the wizard must offer no remote or proxy method", emptyList<String>(), offending)
+    }
+
+    @Test
+    fun localAddressEntrySurvives() {
+        val source = File("src/main/java/com/sendspindroid/ui/server/AddServerWizardViewModel.kt")
+        require(source.exists()) { "wizard view model not found at " + source.absolutePath }
+        assertTrue("manual address entry must survive", source.readText().contains("localAddress"))
+    }
+}
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*RemoteUiGoneTest*"`
+
+Expected: the first three FAIL. `localAddressEntrySurvives` PASSES already -- it is an over-deletion guard, not a driver.
+
+- [ ] **Step 3: Delete the UI, caller side first**
+
+Work outward-in so no definition is deleted while a caller survives:
+
+1. `MainActivity.kt` -- delete the `ProxyConnectDialog` and `RemoteConnectDialog` imports and every call site. If a menu item, button or handler existed only to open them, delete that too.
+2. `AddServerWizardActivity.kt` -- delete the `RemoteConnection` and `QrScannerDialog` imports, the QR scan handler around :343, and any wizard branch that routed to remote or proxy setup.
+3. `AddServerWizardViewModel.kt` -- delete `remoteId`, the proxy URL and auth fields, and anything that only fed them.
+4. `WizardNavigation.kt` -- remove `REMOTE_ID` and `PROXY` from `RemoteAccessMethod`, then apply the note above about the single-valued enum.
+5. Delete the package:
+
+```bash
+git rm -r android/app/src/main/java/com/sendspindroid/ui/remote
+```
+
+6. Check whether `item_saved_proxy_server.xml` still has a referencing layout or adapter; delete it if not.
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*RemoteUiGoneTest*"`
+
+Expected: PASS, 4 tests.
+
+- [ ] **Step 5: Verify build and full suite**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest`
+
+Expected: BUILD SUCCESSFUL. Compile errors naming `RemoteConnection` or `SignalingClient` are expected NOT to appear yet -- those are Task 3's. If they do, a caller was missed here.
+
+- [ ] **Step 6: Sweep orphaned resources**
+
+Extract every resource the deleted files referenced and keep only those now unreferenced:
+
+```bash
+git diff --cached -- android/app/src/main/java/com/sendspindroid/ui/remote \
+  | grep -oE "R\.(string|drawable|layout)\.[A-Za-z0-9_]+" | sort -u > /tmp/candidates.txt
+
+while read -r ref; do
+  name="${ref##*.}"
+  kind=$(echo "$ref" | cut -d. -f2)
+  n=$(grep -rl "R\.$kind\.$name\b\|@$kind/$name\b" android/app/src --include=*.kt --include=*.xml 2>/dev/null | wc -l)
+  [ "$n" -eq 0 ] && echo "ORPHANED: $kind/$name"
+done < /tmp/candidates.txt
+```
+
+Delete only what prints as ORPHANED. Keep the word-boundary markers -- without them a substring match makes `qr_scanner_hint` look live when only `qr_scanner_hint_long` survives.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add -A android/app/src
+git commit -m "refactor(ui): remove the remote and proxy connection UI"
+```
+
+---
+
+### Task 2: Remove the Music Assistant plumbing that rode on WebRTC
+
+Two Music Assistant features existed only because remote access tunnelled them. Both go now, before the transports they depend on.
+
+**`MaProxyImageFetcher`** tunnels Music Assistant's HTTP artwork URLs over the WebRTC DataChannel, because "in REMOTE mode, images hosted on the MA server (via `/imageproxy`) can't be reached". With remote access gone, artwork is fetched directly over HTTP on the local network. SendSpin also carries artwork natively as binary message types 8-11, so the protocol path is unaffected either way.
+
+**The `ma-api` DataChannel** carries Music Assistant's control API over WebRTC in REMOTE mode. `SendSpin.kt` exposes it through `getMaApiDataChannel()` and `drainMaApiMessageBuffer()` -- the only two Music-Assistant-aware functions in the entire SendSpin protocol core. Removing them makes that layer genuinely protocol-pure.
+
+**Files:**
+- Delete: `android/app/src/main/java/com/sendspindroid/musicassistant/MaProxyImageFetcher.kt`
+- Modify: `android/app/src/main/java/com/sendspindroid/SendSpinApp.kt` (:11 import, :41 Coil registration)
+- Modify: `android/app/src/main/java/com/sendspindroid/playback/PlaybackService.kt` (:624 second Coil registration, :1332 comment, :1715 and :1737 `ma-proxy://` URL rewriting, and the `setMaApiDataChannel` call)
+- Modify: `android/app/src/main/java/com/sendspindroid/sendspin/SendSpin.kt` (`getMaApiDataChannel` and `drainMaApiMessageBuffer`, around :1169-1181)
+- Modify: `android/app/src/main/java/com/sendspindroid/musicassistant/MusicAssistant.kt` (`setMaApiDataChannel` and the DataChannel transport wiring)
+- Delete: `android/app/src/main/java/com/sendspindroid/musicassistant/transport/MaDataChannelTransport.kt` and its test, if the DataChannel was its only source
+- Test: `android/app/src/test/java/com/sendspindroid/sendspin/ProtocolCoreIsPureTest.kt`
+
+**Interfaces:**
+- Consumes: a codebase with no remote UI (Task 1).
+- Produces: `com.sendspindroid.sendspin` contains zero Music Assistant references. Task 3 can then delete the transports without touching the protocol core.
+
+**Scope guard:** `MusicAssistant.kt` is otherwise off-limits. Touch only `setMaApiDataChannel` and whatever became unreachable because the DataChannel is gone. Do NOT remove `MusicAssistant.initialize`, `queueUpdates`, `connectionState`, or anything serving playback or server setup.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `android/app/src/test/java/com/sendspindroid/sendspin/ProtocolCoreIsPureTest.kt`:
+
+```kotlin
+package com.sendspindroid.sendspin
+
+import java.io.File
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * The SendSpin protocol core must know nothing about Music Assistant. Its only
+ * MA-aware surface was the ma-api DataChannel, which existed to tunnel MA's
+ * control API over WebRTC remote access. With remote access removed there is
+ * nothing left to tunnel.
+ */
+class ProtocolCoreIsPureTest {
+
+    private fun protocolSources(): List<File> {
+        val dir = File("src/main/java/com/sendspindroid/sendspin")
+        require(dir.isDirectory) { "protocol core not found at " + dir.absolutePath }
+        return dir.walkTopDown().filter { it.isFile && it.name.endsWith(".kt") }.toList()
+    }
+
+    @Test
+    fun protocolCoreHasNoMusicAssistantReferences() {
+        val offending = protocolSources().flatMap { file ->
+            file.readLines()
+                .map { it.trim() }
+                .filter { it.contains("musicassistant") || it.contains("MaApi") }
+                .map { file.name + ": " + it }
+        }
+        assertEquals("the protocol core must not reference Music Assistant", emptyList<String>(), offending)
+    }
+
+    @Test
+    fun protocolCoreStillExists() {
+        val names = protocolSources().map { it.name }
+        assertTrue("SendSpin.kt must survive", names.contains("SendSpin.kt"))
+        assertTrue("the protocol package must not be emptied", names.size > 5)
+    }
+}
+```
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*ProtocolCoreIsPureTest*"`
+
+Expected: `protocolCoreHasNoMusicAssistantReferences` FAILS, naming `SendSpin.kt`'s `getMaApiDataChannel` and `drainMaApiMessageBuffer`. `protocolCoreStillExists` PASSES -- an over-deletion guard.
+
+- [ ] **Step 3: Remove the image proxy**
+
+Delete `MaProxyImageFetcher.kt`. Then remove BOTH Coil registrations -- `SendSpinApp.kt:41` and `PlaybackService.kt:624`. Two registration sites is easy to half-fix; grep for `MaProxyImageFetcher` afterwards and confirm zero hits.
+
+In `PlaybackService.kt`, delete the `ma-proxy://` URL rewriting around :1715 and :1737 and collapse whatever conditional selected it, so artwork URLs pass through unmodified. Fix the stale comment at :1332 that describes fetching via the WebRTC DataChannel.
+
+- [ ] **Step 4: Remove the MA API DataChannel plumbing**
+
+In `SendSpin.kt`, delete `getMaApiDataChannel()` and `drainMaApiMessageBuffer()` and the `org.webrtc.DataChannel` import they needed.
+
+In `PlaybackService.kt`, delete the `setMaApiDataChannel` call and the buffered-message drain feeding it.
+
+In `MusicAssistant.kt`, delete `setMaApiDataChannel` and any transport-selection branch that chose the DataChannel path. If `MaDataChannelTransport` and `MaApiTransportFactory`'s DataChannel branch become unreachable, delete them and their tests -- verify with a grep first and report what you found.
+
+- [ ] **Step 5: Run the test to verify it passes**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*ProtocolCoreIsPureTest*"`
+
+Expected: PASS, 2 tests.
+
+- [ ] **Step 6: Verify build and full suite**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest`
+
+Expected: BUILD SUCCESSFUL.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add -A android/app/src
+git commit -m "refactor(musicassistant): remove the WebRTC image proxy and API DataChannel"
+```
+
+---
+
+### Task 3: Delete the transports
+
+With no UI path and no Music Assistant plumbing, the transports themselves are orphaned.
+
+**Files:**
+- Delete: `android/app/src/main/java/com/sendspindroid/remote/` (`WebRTCTransport.kt`, `RemoteConnection.kt`, and any siblings)
+- Delete: `android/shared/src/commonMain/kotlin/com/sendspindroid/remote/` (`SignalingClient.kt`, `IceCandidateInfo.kt`, `IceServerConfig.kt`, `RemoteCertificateVerifier.kt`)
+- Delete: `android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/transport/ProxyWebSocketTransport.kt`
+- Modify: `android/app/src/main/java/com/sendspindroid/sendspin/SendSpin.kt` (`createRemoteTransport` around :1130, the proxy transport creation around :1142, `ConnectionMode.REMOTE` and `PROXY` branches)
+- Modify: `android/app/src/main/java/com/sendspindroid/network/DefaultServerPinger.kt` (:7 `SignalingClient` import and the remote reachability probe around :408)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/server/UnifiedServerConnector.kt` (`connectRemote` :109, `connectProxy` :126, and the command dispatch around :166-180)
+- Modify: `android/app/src/main/java/com/sendspindroid/coordinator/ConnectionSelector.kt` (remote/proxy selection branches)
+- Modify: `android/app/src/main/java/com/sendspindroid/playback/PlaybackService.kt` (`COMMAND_CONNECT_REMOTE` and `COMMAND_CONNECT_PROXY` at :404-405, their advertisement at :2877-2878, their handlers at :2932 and :2946, and the `ARG_REMOTE_ID` / `ARG_PROXY_URL` keys)
+- Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/MaConnectionMode.kt` (`REMOTE`, `PROXY`)
+- Modify: `android/app/src/main/java/com/sendspindroid/musicassistant/MusicAssistant.kt` (`ConnectionMode.REMOTE` / `PROXY` branches at :39-40, :286, :289, :544 -- NARROWLY AUTHORIZED, see below)
+- Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/MaCommandClient.kt` (`IMAGE_PROXY_SCHEME` at :55 and its use at :2299, orphaned once `ConnectionMode.REMOTE` is gone)
+- Modify: `android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/transport/BaseWebSocketTransport.kt` (:29 KDoc references `ProxyWebSocketTransport`)
+- Modify: `android/app/src/main/java/com/sendspindroid/logging/RedactionFilter.kt` (:47 still lists `ma-proxy` in its URL regex)
+- Modify: `android/app/src/main/java/com/sendspindroid/ui/main/ServerListItem.kt` (:223-237 still renders remote and proxy badges for saved servers -- display-only, reaches nothing, but it advertises a capability the app no longer has)
+- Delete these tests: `app/src/test/.../e2e/ProxyConnectAuthTest.kt`, `e2e/RemoteConnectWebRTCTest.kt`, `remote/RemoteConnectionParseTest.kt`, `remote/RemoteConnectionValidationTest.kt`, `remote/WebRTCFactoryLifecycleTest.kt`, `shared/.../remote/RemoteCertificateVerifierTest.kt`, `remote/SignalingClientConnectRaceTest.kt`, `remote/SignalingClientRemoteIdTest.kt`, `shared/.../transport/ProxyWebSocketTransportTest.kt`
+- Modify: `android/app/src/test/java/com/sendspindroid/sendspin/SendSpinClientDisconnectTest.kt` (references `ProxyWebSocketTransport` in comments and setup)
+- Test: extend `RemoteUiGoneTest.kt` from Task 1
+
+**Interfaces:**
+- Consumes: no UI path (Task 1), no MA plumbing (Task 2).
+- Produces: `com.sendspindroid.remote` no longer exists in either module. `ConnectionMode` and `MaConnectionMode` offer only `LOCAL`.
+
+**Narrow authorization to edit `com.sendspindroid.musicassistant`.** That package is
+otherwise off-limits and Plan C owns it -- but `ConnectionMode.REMOTE` and `PROXY`, which
+this task deletes, still have live consumers inside it. You ARE authorized to remove:
+
+- the `ConnectionMode.REMOTE` / `PROXY` mapping arms in `MusicAssistant.kt` (:39-40)
+- the remote and proxy branches at `MusicAssistant.kt:286`, `:289` and `:544`
+- `MaCommandClient.IMAGE_PROXY_SCHEME` (:55) and the `"$IMAGE_PROXY_SCHEME://"`
+  construction at :2299, which an earlier task correctly left because it was still
+  reachable through `ConnectionMode.REMOTE`
+
+Nothing else in that package. Do NOT touch `MusicAssistant.initialize`, `queueUpdates`,
+`connectionState`, or anything serving playback or server setup. If a deletion here
+appears to orphan something further inside `musicassistant`, STOP and report it rather
+than cascading -- specifically, `MaApiTransport.httpProxy` (:142),
+`MaWebSocketTransport.httpProxy` (:254) and `MaCommandMultiplexer`'s proxy bookkeeping are
+already known orphans reserved for Plan C, and are NOT yours.
+
+**A SECOND remote path exists that no import grep can find.** Task 1's implementer
+discovered it; it is a blocker for this task, not an optional extra.
+
+`UnifiedServerConnector.connectRemote()` and `connectProxy()` do not import
+`com.sendspindroid.remote` at all. They dispatch MediaSession CUSTOM COMMANDS -- string
+constants `COMMAND_CONNECT_REMOTE` and `COMMAND_CONNECT_PROXY` declared on
+`PlaybackService`, carrying a remote ID or proxy URL in a `Bundle` under `ARG_REMOTE_ID`
+and `ARG_PROXY_URL`. `PlaybackService` advertises them in its available-command set and
+handles them by calling into exactly the code this task deletes.
+
+Because the coupling is by string and Bundle key rather than by type, neither an import
+sweep nor a type search reveals it. Delete the whole chain: the two connector functions,
+the two command constants, their advertisement in the session command set, both handlers,
+and the two argument keys. Then collapse `ConnectionSelector`'s remote and proxy selection
+branches to the local path.
+
+Check for other message-passing couplings while you are there: grep for `SessionCommand`,
+`ARG_`, and any Intent action or broadcast that names remote or proxy. Report what you
+find, including "nothing else".
+
+**On the connection-mode enums:** both reduce to a single value. A single-valued enum that is only used to branch is vestigial -- delete it and collapse its consumers. But check first whether either is persisted or serialized anywhere; if a stored value names `REMOTE` or `PROXY`, removing the constant changes how old data deserializes. Report what you find before deciding.
+
+- [ ] **Step 1: Extend the failing test**
+
+Add to `RemoteUiGoneTest.kt`:
+
+```kotlin
+    @Test
+    fun remoteTransportPackageIsDeletedFromApp() {
+        val dir = File("src/main/java/com/sendspindroid/remote")
+        assertFalse("app remote package must be deleted, found " + dir.absolutePath, dir.exists())
+    }
+
+    @Test
+    fun remoteTransportPackageIsDeletedFromShared() {
+        val root = File("../shared/src/commonMain/kotlin")
+        require(root.isDirectory) { "shared module not found at " + root.absolutePath + " -- module may have moved" }
+        val dir = File(root, "com/sendspindroid/remote")
+        assertFalse("shared remote package must be deleted, found " + dir.absolutePath, dir.exists())
+    }
+
+    @Test
+    fun proxyTransportIsDeleted() {
+        val root = File("../shared/src/commonMain/kotlin")
+        require(root.isDirectory) { "shared module not found at " + root.absolutePath + " -- module may have moved" }
+        val f = File(root, "com/sendspindroid/sendspin/transport/ProxyWebSocketTransport.kt")
+        assertFalse("ProxyWebSocketTransport must be deleted", f.exists())
+    }
+```
+
+The `require` guards matter: without them, a wrong relative path makes an absence assertion pass for the wrong reason.
+
+- [ ] **Step 2: Run it to make sure it fails**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*RemoteUiGoneTest*"`
+
+Expected: the three new tests FAIL.
+
+- [ ] **Step 3: Unwire, then delete**
+
+Callers first:
+
+1. `DefaultServerPinger.kt` -- delete the `SignalingClient` import and the remote reachability probe around :408, collapsing whatever conditional selected it.
+2. `SendSpin.kt` -- delete `createRemoteTransport`, the proxy transport creation, and the `ConnectionMode.REMOTE` / `PROXY` branches. Apply the single-valued-enum note.
+3. `MaConnectionMode.kt` -- same treatment.
+4. `BaseWebSocketTransport.kt:29` -- update the KDoc that lists `ProxyWebSocketTransport` as a subclass.
+5. `SendSpinClientDisconnectTest.kt` -- remove or retarget the parts that construct a `ProxyWebSocketTransport`. Keep any test covering surviving disconnect behaviour.
+
+Then delete:
+
+```bash
+git rm -r android/app/src/main/java/com/sendspindroid/remote
+git rm -r android/shared/src/commonMain/kotlin/com/sendspindroid/remote
+git rm android/shared/src/commonMain/kotlin/com/sendspindroid/sendspin/transport/ProxyWebSocketTransport.kt
+git rm android/app/src/test/java/com/sendspindroid/e2e/ProxyConnectAuthTest.kt
+git rm android/app/src/test/java/com/sendspindroid/e2e/RemoteConnectWebRTCTest.kt
+git rm -r android/app/src/test/java/com/sendspindroid/remote
+git rm -r android/shared/src/androidHostTest/kotlin/com/sendspindroid/remote
+git rm android/shared/src/androidHostTest/kotlin/com/sendspindroid/sendspin/transport/ProxyWebSocketTransportTest.kt
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*RemoteUiGoneTest*"`
+
+Expected: PASS, 7 tests.
+
+- [ ] **Step 5: Verify build and both suites**
+
+Run:
+```
+cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest
+cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :shared:testAndroidHostTest
+```
+
+Expected: both BUILD SUCCESSFUL. Report the test-count change and account for every removed test as covering deleted code.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A android
+git commit -m "refactor(transport): delete the WebRTC and proxy transports"
+```
+
+---
+
+### Task 4: Drop the WebRTC dependency and sweep orphans
+
+**Files:**
+- Modify: `android/app/build.gradle.kts` (:277 and the comment block above it)
+- Modify: `android/app/src/main/AndroidManifest.xml` (permissions only WebRTC needed, if any)
+- Test: extend `RemoteUiGoneTest.kt`
+
+**Interfaces:**
+- Consumes: a codebase with no `org.webrtc` references (Task 3).
+- Produces: `io.getstream:stream-webrtc-android` absent from the dependency tree.
+
+- [ ] **Step 1: Confirm nothing imports WebRTC**
+
+```bash
+grep -rn "org.webrtc" android/app/src android/shared/src --include=*.kt
+```
+
+Expected: no hits. If any remain, STOP -- Task 3 missed a consumer, and removing the dependency would break the build in a way that looks like a dependency problem rather than a missed deletion.
+
+- [ ] **Step 2: Extend the failing test**
+
+Add to `RemoteUiGoneTest.kt`:
+
+```kotlin
+    @Test
+    fun webRtcDependencyIsGone() {
+        val gradle = File("build.gradle.kts")
+        require(gradle.exists()) { "app build.gradle.kts not found at " + gradle.absolutePath }
+        val offending = gradle.readLines()
+            .map { it.trim() }
+            .filter { !it.startsWith("//") && it.contains("webrtc") }
+        assertEquals("the WebRTC dependency must be removed", emptyList<String>(), offending)
+    }
+
+    @Test
+    fun noSourceImportsWebRtc() {
+        val roots = listOf(File("src/main/java"), File("src/test/java"))
+        val offending = roots
+            .filter { it.isDirectory }
+            .flatMap { it.walkTopDown().filter { f -> f.isFile && f.name.endsWith(".kt") } }
+            .flatMap { file ->
+                file.readLines()
+                    .map { it.trim() }
+                    .filter { it.startsWith("import org.webrtc") }
+                    .map { file.name + ": " + it }
+            }
+        assertEquals("no source may import org.webrtc", emptyList<String>(), offending)
+    }
+```
+
+Note the filter excludes comment lines, so leaving an explanatory comment about the removal will not fail the test.
+
+- [ ] **Step 3: Run it to make sure it fails**
+
+Run: `cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:testDebugUnitTest --tests "*RemoteUiGoneTest*"`
+
+Expected: `webRtcDependencyIsGone` FAILS. `noSourceImportsWebRtc` should already PASS after Task 3.
+
+- [ ] **Step 4: Remove the dependency**
+
+Delete line :277 of `android/app/build.gradle.kts` and the "Remote Access (WebRTC + QR Scanning)" comment block above it. Check whether any QR-scanning library came in with it and is now unused; the wizard's QR scanner was deleted in Task 1.
+
+Check `AndroidManifest.xml` for permissions that existed only for WebRTC (camera for QR scanning, for instance) and remove any that no longer have a user.
+
+- [ ] **Step 5: Verify the dependency is actually gone**
+
+```bash
+cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:dependencies --configuration debugRuntimeClasspath | grep -i webrtc
+```
+
+Expected: no output. Record the APK size before and after with `ls -la app/build/outputs/apk/debug/app-debug.apk` around a rebuild -- the native library is large and the saving is worth knowing.
+
+- [ ] **Step 5b: Clear the orphans the transport deletion left behind**
+
+The previous task's review found eight leftovers. All but the last are self-created
+orphans of that deletion, and this task is the sweep that owns them. Re-verify each with
+a grep before removing it -- intervening work may have added a consumer.
+
+1. `sendspin/SendSpin.kt` -- four now-dead imports: `Json`, `JsonPrimitive`,
+   `buildJsonObject`, `jsonObject` (around :49-53). Their only users were the deleted
+   proxy auth-message builder and auth-failure parser. `contentOrNull` and
+   `jsonPrimitive` are still live -- do NOT remove those two.
+2. `sendspin/SendSpin.kt:88` -- `private val context: Context` is now completely unused.
+   Remove it and the constructor argument, then fix the twelve call sites. If that turns
+   out to ripple further than twelve sites, leave it and say so rather than cascading.
+3. `res/values/strings.xml:355-356` -- `accessibility_connection_remote` and
+   `accessibility_connection_proxy`. Their sole consumer was the badge block deleted from
+   `ServerListItem.kt`. Note that the drawables `ic_cloud_connected` and `ic_vpn_key` are
+   still referenced by `NetworkQuestionStep.kt:89` -- leave those.
+4. `logging/AppLog.kt:59` and `logging/LogCategory.kt:22,33` -- `AppLog.Remote` and
+   `LogCategory.Remote` are orphaned. There is no settings-UI blast radius: `LogCategory`
+   has zero consumers outside the `logging/` package. The KDoc table at `LogCategory.kt:22`
+   also still maps `remote/` to a package that no longer exists.
+5. `ui/main/components/ServerListItem.kt:220` -- a stray blank line where the badge blocks
+   were removed.
+6. `sendspin/SendSpin.kt:1005` -- `disconnectForReselection`'s KDoc still says the outer
+   loop "picks the right mode for whatever network we are on now". There is one mode now.
+   Fix that sentence only; the same KDoc's stale "AutoReconnectManager" reference predates
+   this plan, so leave it and note it.
+7. `test/.../coordinator/ConnectionCoordinatorTest.kt:86` -- the test named
+   `connect retries when first method fails and tries next method` can no longer test
+   that, since the priority list is now `[LOCAL]` alone. It passes only because its
+   assertion is the weak `attemptedMethods.isNotEmpty()`. Rename it to describe what it
+   actually verifies, or retarget it to assert the single-method behaviour. Do not simply
+   delete it -- it still guards that the loop attempts something.
+
+- [ ] **Step 6: Run the preference and resource sweeps**
+
+Run the persisted-preference sweep from the checks at the top of this plan and report the result. `albumArtistsOnly` and `cachedPlayerId` are already known orphans and are NOT yours to fix -- note any others.
+
+Then sweep resources orphaned by Tasks 1-3 using the extraction method in Task 1 Step 6, substituting each deleted path.
+
+- [ ] **Step 7: Verify build and both suites, then commit**
+
+```
+cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest
+cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :shared:testAndroidHostTest
+```
+
+```bash
+git add -A android
+git commit -m "build: drop the WebRTC dependency"
+```
+
+---
+
+### Task 5: Device verification
+
+**Files:**
+- Modify: `docs/superpowers/plans/2026-09-01-cut-remote-access.md` (append the verification record)
+
+**Interfaces:**
+- Consumes: the app produced by Tasks 1-4.
+- Produces: a verification record appended to this plan.
+
+- [ ] **Step 1: Build and install**
+
+```bash
+cd android && JAVA_HOME="C:/Program Files/Android/Android Studio/jbr" ./gradlew :app:assembleDebug
+"$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe" devices -l
+"$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe" -s <serial> install -r android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+A Relndoo T901_US tablet has been used throughout, serial `T901YCU250305206`. Pass `-s <serial>` on every adb command -- a stale offline emulator is also attached. In Git Bash, prefix commands containing device paths with `MSYS_NO_PATHCONV=1`.
+
+Record the APK size against the pre-change build; dropping a native library should be visible.
+
+- [ ] **Step 2: Capture logs**
+
+```bash
+A="$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe -s <serial>"
+$A logcat -c
+$A logcat -G 16M
+$A logcat -v threadtime > remote-verify.txt &
+$A shell am start -n com.sendspindroid/.MainActivity
+```
+
+The 16M buffer matters -- the default overflows during playback. Delete `remote-verify.txt` when done; do not commit it.
+
+- [ ] **Step 3: Verify local playback is unaffected**
+
+Connect to a SendSpin server on the local network and play. Confirm Now Playing renders with artwork and metadata, and that play, pause, next, previous and volume each act on the server -- check logcat for the outgoing command and the server response, not just the UI reacting.
+
+**Artwork is the specific risk in this plan.** Task 2 removed the image-proxy fetcher. On a local connection artwork should be fetched directly over HTTP. Confirm album art actually renders, and check logcat for image-load failures.
+
+- [ ] **Step 4: Verify the remote paths are gone**
+
+Confirm the server setup wizard offers no remote-ID or proxy option and no QR scanner, and that manual address entry still works -- add a server by typing its address and connect to it.
+
+- [ ] **Step 5: Check for crashes**
+
+```bash
+grep -E "FATAL EXCEPTION|AndroidRuntime|UnsatisfiedLinkError" remote-verify.txt
+```
+
+`UnsatisfiedLinkError` is worth grepping specifically: removing a native library can leave a dangling JNI reference that only fails at runtime, which no unit test would catch.
+
+- [ ] **Step 6: Record the result and commit**
+
+Append a verification record: device model, Android version, APK size before and after, what was exercised, PASS/FAIL per item, what could not be verified, and any defect found.
+
+**Also check this specific degradation, identified during Task 3's review.** A saved
+server that has only remote or proxy data and NO local address now runs the full
+11-attempt, roughly four-minute backoff schedule making zero connect attempts before
+reporting `Failed` -- because the priority list is `[LOCAL]` and `serverHasMethod(LOCAL)`
+is false. `PlaybackService.handleAutoConnect` also starts a foreground service before
+discovering there is nothing to connect to. This is inherent to cutting remote access
+rather than a defect, but to a user it looks like a hang. If you can construct such a
+saved record, verify what the UI actually shows during those four minutes and report it.
+If you cannot, say so and mark it NOT VERIFIED.
+
+```bash
+git add docs/superpowers/plans/2026-09-01-cut-remote-access.md
+git commit -m "docs(plan): record remote-access removal device verification"
+```
+
+---
+
+## Completion
+
+At the end of this plan the app connects only over the local network or to a manually entered address. `com.sendspindroid.remote` no longer exists in either module, `ProxyWebSocketTransport` is gone, the `io.getstream:stream-webrtc-android` native dependency is removed, and `com.sendspindroid.sendspin` contains zero Music Assistant references -- the protocol core is genuinely protocol-pure for the first time.
+
+`com.sendspindroid.musicassistant` still exists and is still load-bearing for playback, artwork and server setup. Plan C owns retiring it. Verify its remaining consumers with a fresh grep before planning against it, and note that `MusicAssistant.playMedia` was already fully orphaned by the browse-and-queue removal.
+
+Plan C inherits the list below. It is consolidated here from the per-task reviews so it
+survives the deletion of this plan's working notes -- but every path was re-verified
+against the merged tree, and two entries carried forward from those notes were wrong, so
+re-verify rather than trusting it wholesale.
+
+- `MaApiTransport.httpProxy` (:142), `MaWebSocketTransport.httpProxy` (:254) and
+  `MaCommandMultiplexer`'s proxy bookkeeping. Orphaned by Task 2 and deliberately not
+  cascaded into: they span the shared module with roughly eight dedicated tests, and
+  chasing them at the tail of a 1,238-line deletion is how a cleanup turns into a defect.
+- `MaConnectionMode`'s now-unreachable values, plus `MaApiEndpoint.kt`, which collapsing
+  that enum would orphan.
+- `UnifiedServer.remote` / `UnifiedServer.proxy`, `ConnectionType` and
+  `ConnectionPreference`. Preserved on purpose: these are the PERSISTENCE FORMAT for
+  already-saved servers, so collapsing them is a data migration wearing a dead-code
+  cleanup's clothes. No test against a fresh install would catch a deserialization break.
+- The edit-mode erasure that follows from the entry above: `attemptSave()` rebuilds a
+  fresh `UnifiedServer` with `remote`/`proxy` null, so editing a legacy server silently
+  drops the fields the preservation was protecting. The data is inert, so impact is low,
+  but the legacy-record guarantee is not end to end.
+- `KEY_LAST_REMOTE_ID` and `KEY_LAST_PROXY_URL` (`UserSettings.kt`). The getters were
+  already dead; this plan deleted their only writers, at `MainActivity.kt:2154` and
+  `:2207`.
+- `KEY_LAST_CONNECTION_MODE`, `UserSettings.getDefaultPlayerName()` (:372),
+  `UserSettings.albumArtistsOnly` (:451) and `cachedPlayerId` (:99) -- zero consumers.
+  Note that `albumArtistsOnly` names two different things: the dead setting at :451, and
+  a live parameter on `MusicAssistant.getArtists` (:959) -> `MaCommandClient.getArtists`.
+  That whole chain is itself orphaned -- `getArtists` has no callers left after the
+  browse removal, the same category as `MusicAssistant.playMedia`.
+- `KEY_REMOTE_SERVERS` and `KEY_PROXY_SERVERS` encrypted prefs, which no surviving code
+  path can clear.
+- `shared/src/androidHostTest/kotlin/com/sendspindroid/musicassistant/MaCommandClientImageTest.kt`,
+  which still asserts an impossible `webrtc://ma-api` URL, and its now-dead subject.
+- The unreachable Android Auto row, and the pre-existing dead duplicate
+  `ui/server/ServerListScreen.kt`.
+
+The analysis of what the WebRTC transport actually was -- that it carried the SendSpin protocol rather than only Music Assistant control, that the signaling URL was a parameter, that artwork rides the protocol natively as binary types 8-11, and that clock sync over WAN was never tested -- is recorded in the spec under "What the WebRTC transport actually was". Read it before designing any future remote-access story.
+
+---
+
+## Task 5 device verification record
+
+**Device:** Relndoo T901_US tablet, serial `T901YCU250305206`, Android 15 (SDK 35),
+build `Relndoo_T901_A15_T606_20250225`. **Build under test:** `app-debug.apk` from
+`d5f9054` (Task 4's final commit).
+
+**APK size:** before 73,570,030 bytes (per Task 4's report) -> after 22,665,458 bytes
+(measured on disk and confirmed identical after `install -r` to the device this
+session) -- a 50,904,572-byte (69%) drop, consistent with removing the WebRTC native
+library, QR reader, and CameraX artifacts.
+
+| Item | Result |
+|---|---|
+| a. APK size drop is real | PASS -- 22,665,458 bytes matches the reported figure exactly |
+| b. No crash / no `UnsatisfiedLinkError` on launch | PASS -- clean `am start`, `MainActivity` resumed, `onCreate` completes (NsdDiscoveryManager, DefaultServerPinger, Compose content view, notification-permission request all logged), zero `FATAL EXCEPTION` / `AndroidRuntime` crash / `UnsatisfiedLinkError` in a 16 MiB threadtime capture; `CAMERA` confirmed absent from the installed manifest's permission set |
+| c. Local playback end to end (Now Playing, transport commands act on server) | PASS -- all four transport commands confirmed by server round-trip, not UI reaction (see Addendum below). Pause produced `playback_speed: 0`, `stream/end`, and `group/update: stopped`. Play produced `group/update: playing`. Next advanced to a new track with `SyncAudioPlayer: PLAYING`. Previous changed track with `WAITING_FOR_START -> PLAYING` |
+| d. Artwork renders over direct HTTP | PASS -- album art renders, confirmed from a screenshot read directly rather than inferred from logs (see Addendum below). Artwork arrives both ways after the proxy removal: `Loading artwork from byte array: 13192 bytes` (SendSpin's native binary artwork, message types 8-11) and from the HTTP imageproxy URL |
+| e. Pairing QR code still displays | PASS -- Settings > Pairing shows a cleanly rendered QR code and pairing-token instructions |
+| f. No remote/proxy option in wizard; manual entry works | PASS -- wizard offers only "Sendspin" / "Music Assistant", both explicitly local-network-only; manually typed `10.0.2.8:8927`, connected, and saved as the default server |
+| g. Auto-reconnect after Wi-Fi toggle | PASS -- `svc wifi disable` triggered `ConnectionCoordinator`'s auto-reconnect loop (attempts 1-6/11 with growing backoff, zero user interaction); `svc wifi enable` let attempt 6 succeed with a full protocol re-handshake, confirmed in logcat and by screenshot. Tested with the connection idle rather than mid-playback (no active track was available), which is a faithful test of the transport-level mechanism but not a literal "while playing" repro |
+| h. Legacy remote-only saved server (~4-5 min apparent hang) | UNREACHABLE -- not applicable (see Addendum below). `runReconnectLoop`'s ~5-minute silent backoff is reachable only via `COMMAND_CONNECT_AUTO`, whose sole caller is `MainActivity`'s unexpected-disconnect handler -- and a server that could never connect cannot produce an unexpected disconnect. Both paths a legacy remote-only server actually takes degrade cleanly with a visible error |
+
+**Part 1 blocker (resolved):** the previous session was blocked by a device display
+quirk plus a self-inflicted `adb reboot` that required a human to unlock the tablet's
+PIN by hand. That has since been resolved -- the human unlocked the device, and this
+session confirmed `deviceLocked=0`, a correctly rendering display, and proceeded
+through checks c-h without further device issues.
+
+**Part 2 blocker (environment permissions, not the device) -- since resolved, see
+Addendum below:** checks c and d could not be fully completed because this player
+was never assigned an active Music Assistant playback queue during the session. The
+only ways found to start real playback on this specific device -- a Home Assistant
+media-player action targeting it, and (for check h) a direct single-file edit of the
+app's own saved-server storage to construct a legacy-format record -- were both
+explicitly denied by the environment's own auto-mode permission classifier when
+attempted. No workaround was attempted for either; both are reported as genuine,
+environment-level NOT VERIFIED results rather
+than forced through. The device was left in a normal working, connected state
+(reconnected to the real "MA Production" server) at the end of the session.
+
+**Addendum (post-hoc correction of this record):** checks c, d, and h were left
+PARTIAL/NOT VERIFIED above because this device-verification session could not
+exercise real playback. They have since been resolved and this record is amended
+to match, rather than left to mislead the next planner:
+
+- **c (transport controls): PASS.** All four confirmed by server round-trip, not
+  UI reaction. Pause produced `playback_speed: 0`, `stream/end` and
+  `group/update: stopped`. Play produced `group/update: playing`. Next advanced to
+  a new track with `SyncAudioPlayer: PLAYING`. Previous changed track with
+  `WAITING_FOR_START -> PLAYING`.
+- **d (artwork): PASS.** Album art renders, confirmed from a screenshot read
+  directly rather than inferred from logs. Artwork arrives BOTH ways after the
+  proxy removal: `Loading artwork from byte array: 13192 bytes` (SendSpin's
+  native binary artwork, message types 8-11) AND from the HTTP imageproxy URL.
+- **h (legacy remote-only saved server): reclassified NOT VERIFIED -> UNREACHABLE.**
+  Not a defect needing a live repro -- traced by direct source reading instead.
+  `runReconnectLoop`'s ~5-minute silent backoff is only reachable via
+  `COMMAND_CONNECT_AUTO`, whose sole caller is `MainActivity`'s
+  unexpected-disconnect handler, and you cannot be unexpectedly disconnected from
+  a server you could never connect to. Both paths a legacy remote-only server
+  actually takes degrade cleanly with a visible error instead.
+
+**Defects found:** none. All of a, b, c, d, e, f, g are PASS; h is UNREACHABLE
+(not applicable) rather than an open defect.
+
+**Recommendation:** none outstanding. The follow-up work originally proposed here
+(real playback from Music Assistant/Home Assistant to close out c and d, or a
+constructed legacy-server record to repro h) is superseded by the verification and
+source trace recorded in the Addendum above.
+
+Full detail: `.superpowers/sdd/2026-09-01-cut-remote-access/task-5-report.md` (not
+committed; gitignored under `.superpowers/sdd/`).

@@ -1,10 +1,7 @@
 package com.sendspindroid.playback
 
-import android.net.Uri
-import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
-import com.sendspindroid.R
 import com.sendspindroid.model.UnifiedServer
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -32,17 +29,6 @@ object AutoBrowseTree {
     const val MEDIA_ID_SERVER_PREFIX = "server_"
     const val MEDIA_ID_SAVED_SERVER_PREFIX = "saved_server_"
 
-    // Music Assistant category nodes
-    const val MEDIA_ID_MA_PLAYLISTS = "ma_playlists"
-    const val MEDIA_ID_MA_ALBUMS = "ma_albums"
-    const val MEDIA_ID_MA_ARTISTS = "ma_artists"
-    const val MEDIA_ID_MA_RADIO = "ma_radio"
-
-    // Music Assistant drill-down prefixes
-    const val MEDIA_ID_MA_PLAYLIST_PREFIX = "ma_playlist_"
-    const val MEDIA_ID_MA_ALBUM_PREFIX = "ma_album_"
-    const val MEDIA_ID_MA_ARTIST_PREFIX = "ma_artist_"
-
     // Non-interactive informational rows (neither playable nor browsable)
     const val MEDIA_ID_MESSAGE_PREFIX = "message_"
     const val MEDIA_ID_MESSAGE_NO_SERVERS = "${MEDIA_ID_MESSAGE_PREFIX}no_servers"
@@ -50,53 +36,19 @@ object AutoBrowseTree {
     // Android Auto content style hint keys
     const val CONTENT_STYLE_BROWSABLE = "android.media.browse.CONTENT_STYLE_BROWSABLE_HINT"
     const val CONTENT_STYLE_PLAYABLE = "android.media.browse.CONTENT_STYLE_PLAYABLE_HINT"
-    const val CONTENT_STYLE_SINGLE_ITEM = "android.media.browse.CONTENT_STYLE_SINGLE_ITEM_HINT"
-    const val CONTENT_STYLE_GROUP_TITLE = "android.media.browse.CONTENT_STYLE_GROUP_TITLE_HINT"
     const val CONTENT_STYLE_LIST = 1
-    const val CONTENT_STYLE_GRID = 2
 
     /**
-     * Root tabs. Mirrors the previous PlaybackService.getRootChildren():
-     * a single "Connect" node until Music Assistant is available, then the
-     * four MA library categories.
+     * Root tabs. SendSpin has no library, so the only root tab is the
+     * "Connect" node used to choose or switch a server from the car.
      */
-    fun rootChildren(maAvailable: Boolean, isConnected: Boolean): List<MediaItem> {
-        if (!maAvailable) {
-            return listOf(
-                browsableItem(
-                    mediaId = MEDIA_ID_DISCOVERED,
-                    title = "Connect",
-                    subtitle = if (isConnected) "Connected" else null
-                )
-            )
-        }
+    fun rootChildren(isConnected: Boolean): List<MediaItem> {
         return listOf(
             browsableItem(
-                mediaId = MEDIA_ID_MA_PLAYLISTS,
-                title = "Playlists",
-                iconRes = R.drawable.ic_auto_playlists
-            ),
-            browsableItem(
-                mediaId = MEDIA_ID_MA_ALBUMS,
-                title = "Albums",
-                extras = Bundle().apply {
-                    putInt(CONTENT_STYLE_PLAYABLE, CONTENT_STYLE_GRID)
-                },
-                iconRes = R.drawable.ic_auto_albums
-            ),
-            browsableItem(
-                mediaId = MEDIA_ID_MA_ARTISTS,
-                title = "Artists",
-                extras = Bundle().apply {
-                    putInt(CONTENT_STYLE_BROWSABLE, CONTENT_STYLE_GRID)
-                },
-                iconRes = R.drawable.ic_auto_artists
-            ),
-            browsableItem(
-                mediaId = MEDIA_ID_MA_RADIO,
-                title = "Radio",
-                iconRes = R.drawable.ic_auto_radio
-            ),
+                mediaId = MEDIA_ID_DISCOVERED,
+                title = "Connect",
+                subtitle = if (isConnected) "Connected" else null
+            )
         )
     }
 
@@ -144,28 +96,16 @@ object AutoBrowseTree {
     }
 
     /**
-     * Guards a Music Assistant children list against the empty case: an empty
-     * fetch result (no content, or a failed request) is replaced with a
-     * non-interactive message row appropriate for the node.
+     * Guidance row for a browse request whose parentId this build no longer
+     * recognizes -- e.g. a stale Android Auto subscription to a Music
+     * Assistant node from a previous build (Auto restores the last-browsed
+     * id). Never return an empty list here: Android Auto renders that as a
+     * blank "unable to load content" screen (see the class-level invariant).
      */
-    fun withEmptyState(parentId: String, items: List<MediaItem>): List<MediaItem> {
-        if (items.isNotEmpty()) return items
-        val title = when {
-            parentId == MEDIA_ID_MA_PLAYLISTS -> "No playlists found"
-            parentId == MEDIA_ID_MA_ALBUMS -> "No albums found"
-            parentId == MEDIA_ID_MA_ARTISTS -> "No artists found"
-            parentId == MEDIA_ID_MA_RADIO -> "No radio stations found"
-            parentId.startsWith(MEDIA_ID_MA_PLAYLIST_PREFIX) -> "No tracks found"
-            parentId.startsWith(MEDIA_ID_MA_ALBUM_PREFIX) -> "No tracks found"
-            parentId.startsWith(MEDIA_ID_MA_ARTIST_PREFIX) -> "No albums found"
-            else -> "Nothing to show"
-        }
-        return listOf(
-            messageItem(
-                mediaId = "$MEDIA_ID_MESSAGE_PREFIX$parentId",
-                title = title,
-                subtitle = "Check Music Assistant on your phone"
-            )
+    fun unknownParentItem(parentId: String): MediaItem {
+        return messageItem(
+            mediaId = "$MEDIA_ID_MESSAGE_PREFIX$parentId",
+            title = "Nothing to show"
         )
     }
 
@@ -173,9 +113,7 @@ object AutoBrowseTree {
     fun browsableItem(
         mediaId: String,
         title: String,
-        subtitle: String? = null,
-        extras: Bundle? = null,
-        iconRes: Int = 0
+        subtitle: String? = null
     ): MediaItem {
         return MediaItem.Builder()
             .setMediaId(mediaId)
@@ -186,12 +124,6 @@ object AutoBrowseTree {
                     .setIsPlayable(false)
                     .setIsBrowsable(true)
                     .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED)
-                    .apply {
-                        if (extras != null) setExtras(extras)
-                        if (iconRes != 0) {
-                            setArtworkUri(Uri.parse("android.resource://com.sendspindroid/$iconRes"))
-                        }
-                    }
                     .build()
             )
             .build()
@@ -215,10 +147,7 @@ object AutoBrowseTree {
 
     /** A playable row for a saved server (media ID keyed by server UUID). */
     fun savedServerItem(server: UnifiedServer): MediaItem {
-        val subtitle = server.local?.address
-            ?: if (server.proxy != null) "Proxy"
-            else if (server.remote != null) "Remote Access"
-            else ""
+        val subtitle = server.local?.address ?: ""
         return MediaItem.Builder()
             .setMediaId("$MEDIA_ID_SAVED_SERVER_PREFIX${server.id}")
             .setMediaMetadata(

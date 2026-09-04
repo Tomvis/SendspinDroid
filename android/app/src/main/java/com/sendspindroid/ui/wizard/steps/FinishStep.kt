@@ -32,7 +32,7 @@ import com.sendspindroid.ui.theme.SendSpinTheme
  * Final wizard step — name the server, set as default, and show a summary
  * of configured connections.
  *
- * Used for SS_Finish, MA_Finish, and MA_FinishRemoteOnly.
+ * Used for SS_Finish and MA_Finish.
  */
 @Composable
 fun FinishStep(
@@ -177,7 +177,6 @@ private fun FinishStepPreview() {
             isDefault = true,
             connectionSummary = listOf(
                 "Local: 192.168.1.100:8927",
-                "Remote ID: VVPN3-TLP34-...",
                 "Music Assistant: Authenticated"
             ),
             onNameChange = {},

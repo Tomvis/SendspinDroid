@@ -83,7 +83,7 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun `connect retries when first method fails and tries next method`() = runTest {
+    fun `connect retries the sole Local method and never falls through to remote or proxy`() = runTest {
         val attemptedMethods = mutableListOf<ConnectionType>()
         val coordinator = makeCoordinatorForRetryTest(
             connectAttempt = { _, method ->
@@ -96,10 +96,9 @@ class ConnectionCoordinatorTest {
         testScheduler.advanceTimeBy(700)
         testScheduler.runCurrent()
 
-        assertTrue(
-            "Should have attempted at least one method",
-            attemptedMethods.isNotEmpty(),
-        )
+        // The priority list is now [LOCAL] alone, so a server offering all
+        // three methods must still only ever see LOCAL attempted.
+        assertEquals(listOf(ConnectionType.LOCAL), attemptedMethods)
     }
 
     @Test

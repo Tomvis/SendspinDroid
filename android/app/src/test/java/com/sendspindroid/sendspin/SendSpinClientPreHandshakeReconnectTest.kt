@@ -1,6 +1,5 @@
 package com.sendspindroid.sendspin
 
-import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.preference.PreferenceManager
@@ -42,7 +41,6 @@ import java.net.UnknownHostException
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendSpinPreHandshakeReconnectTest {
 
-    private lateinit var mockContext: Context
     private lateinit var mockCallback: SendSpin.Callback
     private lateinit var client: SendSpin
 
@@ -71,15 +69,13 @@ class SendSpinPreHandshakeReconnectTest {
         val mockPrefs = mockk<SharedPreferences>(relaxed = true)
         every { PreferenceManager.getDefaultSharedPreferences(any()) } returns mockPrefs
 
-        mockContext = mockk(relaxed = true)
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin(mockContext, "TestDevice", mockCallback)
+        client = SendSpin("TestDevice", mockCallback)
 
-        // Seed connection info so canReconnect / hasConnectionInfo checks pass.
+        // Seed connection info so the hasConnectionInfo check passes.
         setField("serverAddress", "127.0.0.1:8080")
         setField("serverPath", "/sendspin")
-        setField("connectionMode", SendSpin.ConnectionMode.LOCAL)
 
         // Fake transport so onClosed's reconnect path can advance past the
         // hasConnectionInfo check without touching real networking.

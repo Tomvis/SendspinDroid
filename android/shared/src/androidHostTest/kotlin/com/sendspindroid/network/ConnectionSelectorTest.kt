@@ -30,11 +30,6 @@ class ConnectionSelectorTest {
         connectionPreference = preference
     )
 
-    private fun networkState(transport: TransportType) = NetworkState(
-        transportType = transport,
-        isConnected = true
-    )
-
     @Before
     fun setUp() {
         mockkObject(Log)
@@ -50,69 +45,28 @@ class ConnectionSelectorTest {
         unmockkAll()
     }
 
-    // --- Priority order ---
+    // --- Priority order: local only ---
 
     @Test
-    fun getPriorityOrder_wifi_localFirst() {
-        val order = ConnectionSelector.getPriorityOrder(TransportType.WIFI)
-        assertEquals(listOf(ConnectionType.LOCAL, ConnectionType.PROXY, ConnectionType.REMOTE), order)
-    }
-
-    @Test
-    fun getPriorityOrder_ethernet_localFirst() {
-        val order = ConnectionSelector.getPriorityOrder(TransportType.ETHERNET)
-        assertEquals(listOf(ConnectionType.LOCAL, ConnectionType.PROXY, ConnectionType.REMOTE), order)
-    }
-
-    @Test
-    fun getPriorityOrder_cellular_proxy_remote_local() {
-        assertEquals(
-            listOf(ConnectionType.PROXY, ConnectionType.REMOTE, ConnectionType.LOCAL),
-            ConnectionSelector.getPriorityOrder(TransportType.CELLULAR)
-        )
-    }
-
-    @Test
-    fun getPriorityOrder_vpn_proxyFirst() {
-        val order = ConnectionSelector.getPriorityOrder(TransportType.VPN)
-        assertEquals(listOf(ConnectionType.PROXY, ConnectionType.REMOTE, ConnectionType.LOCAL), order)
-    }
-
-    @Test
-    fun getPriorityOrder_unknown_proxyFirst() {
-        val order = ConnectionSelector.getPriorityOrder(TransportType.UNKNOWN)
-        assertEquals(listOf(ConnectionType.PROXY, ConnectionType.REMOTE, ConnectionType.LOCAL), order)
+    fun getPriorityOrder_localOnly() {
+        assertEquals(listOf(ConnectionType.LOCAL), ConnectionSelector.getPriorityOrder())
     }
 
     // --- Auto selection ---
 
     @Test
-    fun selectConnection_wifiWithAllMethods_selectsLocal() {
+    fun selectConnection_allMethodsConfigured_selectsLocal() {
         val result = ConnectionSelector.selectConnection(
-            server(local = localConn, remote = remoteConn, proxy = proxyConn),
-            networkState(TransportType.WIFI)
+            server(local = localConn, remote = remoteConn, proxy = proxyConn)
         )
         assertTrue(result is ConnectionSelector.SelectedConnection.Local)
         assertEquals("192.168.1.100", (result as ConnectionSelector.SelectedConnection.Local).address)
     }
 
     @Test
-    fun selectConnection_cellularWithAllMethods_selectsProxy() {
+    fun selectConnection_onlyLocal_selectsLocal() {
         val result = ConnectionSelector.selectConnection(
-            server(local = localConn, remote = remoteConn, proxy = proxyConn),
-            networkState(TransportType.CELLULAR)
-        )
-        assertTrue(result is ConnectionSelector.SelectedConnection.Proxy)
-    }
-
-    @Test
-    fun selectConnection_cellularOnlyLocal_selectsLocal() {
-        // Regression guard for #115: LOCAL must be attempted on cellular
-        // when it is the only configured connection (publicly-routable
-        // hostname case - e.g. user configured an AAAA-only DNS name).
-        val result = ConnectionSelector.selectConnection(
-            server(local = localConn),
-            networkState(TransportType.CELLULAR)
+            server(local = localConn)
         )
         assertTrue(
             "Expected Local selection but got $result",
@@ -121,19 +75,19 @@ class ConnectionSelectorTest {
     }
 
     @Test
-    fun selectConnection_wifiNoLocal_selectsProxy() {
+    fun selectConnection_noLocal_returnsNull() {
+        // A server with only remote/proxy configured (legacy data) has nothing
+        // this app can connect to any more.
         val result = ConnectionSelector.selectConnection(
-            server(remote = remoteConn, proxy = proxyConn),
-            networkState(TransportType.WIFI)
+            server(remote = remoteConn, proxy = proxyConn)
         )
-        assertTrue(result is ConnectionSelector.SelectedConnection.Proxy)
+        assertNull(result)
     }
 
     @Test
     fun selectConnection_noMethodsConfigured_returnsNull() {
         val result = ConnectionSelector.selectConnection(
-            server(),
-            networkState(TransportType.WIFI)
+            server()
         )
         assertNull(result)
     }
@@ -144,8 +98,7 @@ class ConnectionSelectorTest {
     fun selectConnection_localOnlyPreference_selectsLocal() {
         val result = ConnectionSelector.selectConnection(
             server(local = localConn, remote = remoteConn, proxy = proxyConn,
-                preference = ConnectionPreference.LOCAL_ONLY),
-            networkState(TransportType.CELLULAR)
+                preference = ConnectionPreference.LOCAL_ONLY)
         )
         assertTrue(result is ConnectionSelector.SelectedConnection.Local)
     }
@@ -154,30 +107,31 @@ class ConnectionSelectorTest {
     fun selectConnection_localOnlyPreference_noLocal_returnsNull() {
         val result = ConnectionSelector.selectConnection(
             server(remote = remoteConn, proxy = proxyConn,
-                preference = ConnectionPreference.LOCAL_ONLY),
-            networkState(TransportType.WIFI)
+                preference = ConnectionPreference.LOCAL_ONLY)
         )
         assertNull(result)
     }
 
     @Test
-    fun selectConnection_remoteOnlyPreference_selectsRemote() {
+    fun selectConnection_remoteOnlyPreference_returnsNull() {
+        // Remote access no longer exists; REMOTE_ONLY can never be satisfied,
+        // even when a local address is also configured.
         val result = ConnectionSelector.selectConnection(
             server(local = localConn, remote = remoteConn, proxy = proxyConn,
-                preference = ConnectionPreference.REMOTE_ONLY),
-            networkState(TransportType.WIFI)
+                preference = ConnectionPreference.REMOTE_ONLY)
         )
-        assertTrue(result is ConnectionSelector.SelectedConnection.Remote)
+        assertNull(result)
     }
 
     @Test
-    fun selectConnection_proxyOnlyPreference_selectsProxy() {
+    fun selectConnection_proxyOnlyPreference_returnsNull() {
+        // Proxy access no longer exists; PROXY_ONLY can never be satisfied,
+        // even when a local address is also configured.
         val result = ConnectionSelector.selectConnection(
             server(local = localConn, remote = remoteConn, proxy = proxyConn,
-                preference = ConnectionPreference.PROXY_ONLY),
-            networkState(TransportType.WIFI)
+                preference = ConnectionPreference.PROXY_ONLY)
         )
-        assertTrue(result is ConnectionSelector.SelectedConnection.Proxy)
+        assertNull(result)
     }
 
     // --- getConnectionDescription ---
@@ -189,21 +143,5 @@ class ConnectionSelectorTest {
         )
         assertTrue(desc.contains("192.168.1.50"))
         assertTrue(desc.contains("Local"))
-    }
-
-    @Test
-    fun getConnectionDescription_remote_returnsRemoteAccess() {
-        val desc = ConnectionSelector.getConnectionDescription(
-            ConnectionSelector.SelectedConnection.Remote("abc123")
-        )
-        assertEquals("Remote Access", desc)
-    }
-
-    @Test
-    fun getConnectionDescription_proxy_returnsProxy() {
-        val desc = ConnectionSelector.getConnectionDescription(
-            ConnectionSelector.SelectedConnection.Proxy("https://example.com", "token")
-        )
-        assertEquals("Proxy", desc)
     }
 }

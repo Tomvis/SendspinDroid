@@ -12,19 +12,14 @@ enum class ClientMode {
 /**
  * Wizard step enum for the branching Add Server flow.
  *
- * The wizard branches at ClientType based on user intent,
- * then further at MA_NetworkQuestion based on network situation.
+ * The wizard branches at ClientType based on user intent.
  *
  * SendSpin path:
  *   ClientType → SS_FindServer → SS_TestLocal → SS_Finish
  *
  * MA local path:
  *   ClientType → MA_NetworkQuestion → MA_FindServer → MA_TestLocal →
- *   MA_Login → MA_RemoteQuestion → [MA_RemoteSetup → MA_TestRemote →] MA_Finish
- *
- * MA remote-only path:
- *   ClientType → MA_NetworkQuestion → MA_RemoteOnlySetup →
- *   MA_TestRemoteOnly → MA_LoginRemote → MA_FinishRemoteOnly
+ *   MA_Login -> MA_Finish
  */
 enum class WizardStep {
     // Entry point (all paths)
@@ -40,25 +35,7 @@ enum class WizardStep {
     MA_FindServer,
     MA_TestLocal,
     MA_Login,
-    MA_RemoteQuestion,
-    MA_RemoteSetup,
-    MA_TestRemote,
-    MA_Finish,
-
-    // Music Assistant remote-only path
-    MA_RemoteOnlySetup,
-    MA_TestRemoteOnly,
-    MA_LoginRemote,
-    MA_FinishRemoteOnly
-}
-
-/**
- * User's choice for how to access the server remotely.
- */
-enum class RemoteAccessMethod {
-    NONE,       // Local only, no remote access
-    REMOTE_ID,  // Via Music Assistant Remote Access ID
-    PROXY       // Via authenticated reverse proxy
+    MA_Finish
 }
 
 /**

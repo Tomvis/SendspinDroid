@@ -1,6 +1,5 @@
 package com.sendspindroid.sendspin
 
-import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.preference.PreferenceManager
@@ -32,7 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Verifies the connection-health telemetry introduced by issue #128.
  *
  * State being tracked on every disconnect event:
- *  - lastDisconnectCode / lastDisconnectReason / lastDisconnectMode
+ *  - lastDisconnectCode / lastDisconnectReason
  *  - lastDisconnectAtMs (only for abnormal, non-user-initiated)
  *  - connectedAtMs cleared
  *
@@ -43,7 +42,6 @@ import java.util.concurrent.atomic.AtomicInteger
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendSpinDisconnectTelemetryTest {
 
-    private lateinit var mockContext: Context
     private lateinit var mockCallback: SendSpin.Callback
     private lateinit var client: SendSpin
 
@@ -77,15 +75,13 @@ class SendSpinDisconnectTelemetryTest {
         val mockPrefs = mockk<SharedPreferences>(relaxed = true)
         every { PreferenceManager.getDefaultSharedPreferences(any()) } returns mockPrefs
 
-        mockContext = mockk(relaxed = true)
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin(mockContext, "TestDevice", mockCallback)
+        client = SendSpin("TestDevice", mockCallback)
 
         // Seed connection info so the disconnect paths execute fully.
         setField("serverAddress", "127.0.0.1:8080")
         setField("serverPath", "/sendspin")
-        setField("connectionMode", SendSpin.ConnectionMode.LOCAL)
 
         val fakeTransport = object : SendSpinTransport {
             override val state = TransportState.Connected
@@ -112,7 +108,7 @@ class SendSpinDisconnectTelemetryTest {
     // =========================================================================
 
     @Test
-    fun `onClosed abnormal populates lastDisconnectCode, reason, mode, and lastDisconnectAtMs`() {
+    fun `onClosed abnormal populates lastDisconnectCode, reason, and lastDisconnectAtMs`() {
         setHandshakeComplete(true)
         val listener = buildTransportListener()
 

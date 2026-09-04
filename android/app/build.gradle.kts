@@ -74,15 +74,14 @@ android {
         // Ranges: MAJOR 0-9999, MINOR 0-99, PATCH 0-99
         // Example: 2.0.0 = 20000, 2.1.3 = 20103, 10.5.22 = 100522
         // Beta releases: bump by N from base, BetaN = base + N
-        // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta15 = 20015). Note this diverges
-        // from the global rule in CLAUDE.md ("pre-release shares the stable
-        // versionCode"); this fork bumps each beta so internal users get the
-        // newer build via Play.
-        versionCode = 20015
+        // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta16 = 20016). Every installable
+        // build needs a strictly higher code than the one it replaces, so a
+        // beta cannot share one; see the versionCode table in CLAUDE.md.
+        versionCode = 20016
 
         // versionName: User-visible version string
         // Follows semantic versioning (major.minor.patch[-prerelease])
-        versionName = "2.0.0-Beta15"
+        versionName = "2.0.0-Beta16"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -279,26 +278,14 @@ dependencies {
     // ViewModel KTX - Kotlin extensions for ViewModel
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.0")
 
-    // ========== Remote Access (WebRTC + QR Scanning) ==========
+    // Java-WebSocket - Lightweight WebSocket server for server-initiated connections
+    implementation("org.java-websocket:Java-WebSocket:1.6.0")
 
-    // WebRTC for Android - Enables remote connections via Music Assistant
-    // Uses DataChannel for SendSpin protocol over peer-to-peer connection
-    // Using Stream's maintained fork of Google WebRTC
-    implementation("io.getstream:stream-webrtc-android:1.3.4")
-
-    // ZXing-C++ Barcode Scanning - FOSS QR code scanning for Remote ID input
-    implementation("io.github.zxing-cpp:android:2.3.0")
-
-    // ZXing core - the *encoder*. zxing-cpp above ships only reader classes, so
-    // it cannot generate the pairing QR. Pure Java, no NDK, so it also runs in
-    // plain JVM unit tests, which is what lets PairingQrCodeTest scan its own
-    // output instead of merely asserting on the input.
+    // ZXing core - generates the pairing QR code shown in Settings
+    // (PairingQrImage). Encoder only; pure Java, no NDK, so it also runs in
+    // plain JVM unit tests, which is what lets PairingQrCodeTest decode its
+    // own output instead of merely asserting on the input.
     implementation("com.google.zxing:core:3.5.3")
-
-    // CameraX - Modern camera API for QR code scanner
-    implementation("androidx.camera:camera-camera2:1.4.1")
-    implementation("androidx.camera:camera-lifecycle:1.4.1")
-    implementation("androidx.camera:camera-view:1.4.1")
 
     // RECOMMENDED ADDITIONS FOR V2:
     // TODO: Add RecyclerView explicitly (currently transitive via Material)

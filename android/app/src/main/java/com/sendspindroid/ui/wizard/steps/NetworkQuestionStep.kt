@@ -87,8 +87,8 @@ fun NetworkQuestionStep(
 
         NetworkOptionCard(
             icon = R.drawable.ic_cloud_connected,
-            title = "No, I\u2019m remote",
-            description = "I\u2019m away from home or on mobile data. I\u2019ll connect using a Remote ID or proxy URL.",
+            title = "No, different network",
+            description = "I\u2019ll enter the server\u2019s address manually.",
             onClick = onRemote
         )
     }

@@ -1,6 +1,5 @@
 package com.sendspindroid.ui.server
 
-import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import androidx.media3.session.MediaController
@@ -8,19 +7,17 @@ import androidx.media3.session.SessionCommand
 import com.sendspindroid.UnifiedServerRepository
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.network.ConnectionSelector
-import com.sendspindroid.network.NetworkEvaluator
-import com.sendspindroid.network.NetworkState
 import com.sendspindroid.playback.PlaybackService
 
 /**
  * Helper class for connecting to unified servers.
  *
  * Encapsulates the logic of selecting the appropriate connection method
- * based on network state and sending the correct command to PlaybackService.
+ * and sending the correct command to PlaybackService.
  *
  * ## Usage
  * ```kotlin
- * val connector = UnifiedServerConnector(context) { method ->
+ * val connector = UnifiedServerConnector { method ->
  *     onConnectionMethodSelected(method)
  * }
  *
@@ -32,28 +29,14 @@ import com.sendspindroid.playback.PlaybackService
  * ```
  */
 class UnifiedServerConnector(
-    context: Context,
     private val onConnectionStarted: ((ConnectionSelector.SelectedConnection) -> Unit)? = null
 ) {
     companion object {
         private const val TAG = "UnifiedServerConnector"
     }
 
-    private val networkEvaluator = NetworkEvaluator(context)
-
-    init {
-        // Initialize network state
-        networkEvaluator.evaluateCurrentNetwork()
-    }
-
     /**
-     * Gets the current network state.
-     */
-    val networkState: NetworkState
-        get() = networkEvaluator.networkState.value
-
-    /**
-     * Connect to a unified server using auto-selection based on network type.
+     * Connect to a unified server using auto-selection.
      *
      * @param server The unified server to connect to
      * @param controller MediaController for sending commands
@@ -63,12 +46,8 @@ class UnifiedServerConnector(
         server: UnifiedServer,
         controller: MediaController
     ): ConnectionSelector.SelectedConnection? {
-        // Get current network state
-        networkEvaluator.evaluateCurrentNetwork()
-        val state = networkEvaluator.networkState.value
-
         // Select best connection method
-        val selected = ConnectionSelector.selectConnection(server, state)
+        val selected = ConnectionSelector.selectConnection(server)
         if (selected == null) {
             Log.w(TAG, "No connection method available for ${server.name}")
             return null
@@ -104,40 +83,6 @@ class UnifiedServerConnector(
     }
 
     /**
-     * Connect using remote access method.
-     */
-    fun connectRemote(
-        server: UnifiedServer,
-        controller: MediaController
-    ): Boolean {
-        val remote = server.remote ?: return false
-
-        val selected = ConnectionSelector.SelectedConnection.Remote(remote.remoteId)
-        executeConnection(selected, controller, server.id)
-        onConnectionStarted?.invoke(selected)
-
-        UnifiedServerRepository.updateLastConnected(server.id)
-        return true
-    }
-
-    /**
-     * Connect using proxy method.
-     */
-    fun connectProxy(
-        server: UnifiedServer,
-        controller: MediaController
-    ): Boolean {
-        val proxy = server.proxy ?: return false
-
-        val selected = ConnectionSelector.SelectedConnection.Proxy(proxy.url, proxy.authToken)
-        executeConnection(selected, controller, server.id)
-        onConnectionStarted?.invoke(selected)
-
-        UnifiedServerRepository.updateLastConnected(server.id)
-        return true
-    }
-
-    /**
      * Sends the appropriate command to PlaybackService based on connection type.
      *
      * @param selected The selected connection method with connection details
@@ -160,34 +105,6 @@ class UnifiedServerConnector(
                 controller.sendCustomCommand(command, args)
                 Log.d(TAG, "Sent local connect: ${selected.address}, serverId=$serverId")
             }
-
-            is ConnectionSelector.SelectedConnection.Remote -> {
-                val args = Bundle().apply {
-                    putString(PlaybackService.ARG_REMOTE_ID, selected.remoteId)
-                    serverId?.let { putString(PlaybackService.ARG_SERVER_ID, it) }
-                }
-                val command = SessionCommand(PlaybackService.COMMAND_CONNECT_REMOTE, Bundle.EMPTY)
-                controller.sendCustomCommand(command, args)
-                Log.d(TAG, "Sent remote connect: ${selected.remoteId}, serverId=$serverId")
-            }
-
-            is ConnectionSelector.SelectedConnection.Proxy -> {
-                val args = Bundle().apply {
-                    putString(PlaybackService.ARG_PROXY_URL, selected.url)
-                    putString(PlaybackService.ARG_AUTH_TOKEN, selected.authToken)
-                    serverId?.let { putString(PlaybackService.ARG_SERVER_ID, it) }
-                }
-                val command = SessionCommand(PlaybackService.COMMAND_CONNECT_PROXY, Bundle.EMPTY)
-                controller.sendCustomCommand(command, args)
-                Log.d(TAG, "Sent proxy connect: ${selected.url}, serverId=$serverId")
-            }
         }
-    }
-
-    /**
-     * Refresh the network state evaluation.
-     */
-    fun refreshNetworkState() {
-        networkEvaluator.evaluateCurrentNetwork()
     }
 }

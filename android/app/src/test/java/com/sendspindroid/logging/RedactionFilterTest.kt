@@ -26,7 +26,6 @@ class RedactionFilterTest {
     fun `redacts ws and wss and http URLs keeping the scheme`() {
         assertEquals("ws://<redacted>", filter.redact("ws://10.0.2.8:8927/ws"))
         assertEquals("https://<redacted>", filter.redact("https://music.home.example.com/imageproxy/abc?size=512"))
-        assertEquals("ma-proxy://<redacted>", filter.redact("ma-proxy:///imageproxy/deadbeef"))
     }
 
     @Test

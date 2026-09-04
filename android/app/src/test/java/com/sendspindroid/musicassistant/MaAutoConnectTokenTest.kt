@@ -4,7 +4,6 @@ import android.util.Log
 import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.model.LocalConnection
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.UserSettings.ConnectionMode
 import io.mockk.*
 import org.junit.After
 import org.junit.Assert.*
@@ -47,13 +46,11 @@ class MaAutoConnectTokenTest {
      */
     private fun simulateOnServerConnected(
         server: UnifiedServer,
-        connectionMode: ConnectionMode,
         hasStoredToken: Boolean,
-        hasMaApiChannel: Boolean = false,
         hasApiEndpoint: Boolean = true
     ): SimulatedResult {
         // Check 1: Is this server a Music Assistant server?
-        if (!server.isMusicAssistant && !hasStoredToken && !hasMaApiChannel) {
+        if (!server.isMusicAssistant && !hasStoredToken) {
             return SimulatedResult(TransportState.Idle, connectWithTokenCalled = false, loginRequired = false)
         }
 
@@ -87,7 +84,6 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
             hasStoredToken = true
         )
 
@@ -110,7 +106,6 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
             hasStoredToken = false
         )
 
@@ -124,7 +119,7 @@ class MaAutoConnectTokenTest {
     }
 
     @Test
-    fun `non-MA server without token or channel stays Idle`() {
+    fun `non-MA server without token stays Idle`() {
         val server = UnifiedServer(
             id = "server-3",
             name = "Regular Server",
@@ -134,9 +129,7 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
-            hasStoredToken = false,
-            hasMaApiChannel = false
+            hasStoredToken = false
         )
 
         assertFalse("connectWithToken should NOT be called", result.connectWithTokenCalled)
@@ -160,36 +153,10 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
             hasStoredToken = true
         )
 
         assertTrue("connectWithToken should be called for auto-detected MA", result.connectWithTokenCalled)
-    }
-
-    @Test
-    fun `non-MA server with DataChannel auto-detects as MA`() {
-        val server = UnifiedServer(
-            id = "server-5",
-            name = "Remote MA",
-            isMusicAssistant = false,
-            local = LocalConnection("192.168.1.10:8927")
-        )
-
-        val result = simulateOnServerConnected(
-            server = server,
-            connectionMode = ConnectionMode.REMOTE,
-            hasStoredToken = false,
-            hasMaApiChannel = true
-        )
-
-        // hasMaApiChannel passes the first check, but with no token -> Idle + loginRequired
-        assertEquals(
-            "Should reach Idle since no token",
-            TransportState.Idle,
-            result.state
-        )
-        assertTrue("loginRequired should fire since no token", result.loginRequired)
     }
 
     @Test
@@ -203,7 +170,6 @@ class MaAutoConnectTokenTest {
 
         val result = simulateOnServerConnected(
             server = server,
-            connectionMode = ConnectionMode.LOCAL,
             hasStoredToken = true,
             hasApiEndpoint = false
         )

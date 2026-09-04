@@ -113,13 +113,6 @@ data class ReconnectingState(
 }
 
 /**
- * Navigation tab for bottom navigation.
- */
-enum class NavTab {
-    HOME, SEARCH, LIBRARY, PLAYLISTS
-}
-
-/**
  * Server status for display in server list.
  */
 sealed class ServerStatus {
@@ -127,60 +120,6 @@ sealed class ServerStatus {
     object Offline : ServerStatus()
     data class Connecting(val progress: Float = 0f) : ServerStatus()
     data class Reconnecting(val attempt: Int, val nextRetrySeconds: Int) : ServerStatus()
-}
-
-/**
- * Detail screen navigation destination.
- *
- * Used as a back stack to support nested navigation (e.g. Artist -> Album -> back).
- */
-sealed class DetailDestination {
-    abstract val title: String
-
-    data class Album(
-        val albumId: String, 
-        val albumName: String,
-        val provider: String = "library"  // Default to library for backward compatibility
-    ) : DetailDestination() {
-        override val title: String get() = albumName
-    }
-
-    data class Artist(
-        val artistId: String, 
-        val artistName: String,
-        val provider: String = "library"  // Default to library for backward compatibility
-    ) : DetailDestination() {
-        override val title: String get() = artistName
-    }
-
-    data class Playlist(
-        val playlistId: String, 
-        val playlistName: String,
-        val provider: String = "library"  // Default to library for backward compatibility
-    ) : DetailDestination() {
-        override val title: String get() = playlistName
-    }
-
-    data class Podcast(
-        val podcastId: String,
-        val podcastName: String,
-        val podcastImageUri: String? = null,
-        val podcastPublisher: String? = null,
-        val totalEpisodes: Int = 0,
-        val provider: String = "library"  // Default to library for backward compatibility
-    ) : DetailDestination() {
-        override val title: String get() = podcastName
-    }
-
-    data class Audiobook(
-        val audiobookId: String,
-        val audiobookName: String,
-        val audiobookImageUri: String? = null,
-        val audiobookAuthor: String? = null,
-        val provider: String = "library"
-    ) : DetailDestination() {
-        override val title: String get() = audiobookName
-    }
 }
 
 /**

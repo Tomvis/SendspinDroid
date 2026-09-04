@@ -1,6 +1,5 @@
 package com.sendspindroid.musicassistant
 
-import com.sendspindroid.UserSettings.ConnectionMode
 import com.sendspindroid.model.LocalConnection
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.musicassistant.transport.MaApiTransport
@@ -74,7 +73,7 @@ class MusicAssistantReloginRaceTest {
             runCurrent() // ensure the collector is subscribed before we emit
 
             // Race: server connects, then immediately disconnects (WiFi -> cellular).
-            MusicAssistant.onServerConnected(testServer(), ConnectionMode.LOCAL)
+            MusicAssistant.onServerConnected(testServer())
             MusicAssistant.onServerDisconnected()
             advanceUntilIdle()
 
@@ -96,7 +95,7 @@ class MusicAssistantReloginRaceTest {
         val collector = launch { MusicAssistant.loginRequired.collect { emissions += it } }
         runCurrent()
 
-        MusicAssistant.onServerConnected(testServer(), ConnectionMode.LOCAL)
+        MusicAssistant.onServerConnected(testServer())
         advanceUntilIdle()
 
         assertEquals(

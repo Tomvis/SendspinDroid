@@ -1,10 +1,7 @@
 package com.sendspindroid.ui.server
 
 import android.app.Activity
-import android.app.UiModeManager
-import android.content.Context
 import android.content.Intent
-import android.content.res.Configuration
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
@@ -21,32 +18,23 @@ import com.sendspindroid.UnifiedServerRepository
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.model.ConnectionPreference
 import com.sendspindroid.model.LocalConnection
-import com.sendspindroid.model.ProxyConnection
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.musicassistant.MaSettings
 import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.network.NetworkEvaluator
 import com.sendspindroid.network.TransportType
-import com.sendspindroid.remote.RemoteConnection
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.SendSpinEndpoint
 import com.sendspindroid.sendspin.protocol.TrackMetadata
-import com.sendspindroid.musicassistant.MaAuthHelper
-import com.sendspindroid.musicassistant.transport.MaApiTransport
-import com.sendspindroid.ui.remote.QrScannerDialog
 import com.sendspindroid.ui.theme.SendSpinTheme
 import com.sendspindroid.ui.wizard.AddServerWizardScreen
 import com.sendspindroid.ui.wizard.ConnectionTestState
 import com.sendspindroid.ui.wizard.DiscoveredServerUi
-import com.sendspindroid.ui.wizard.ProxyAuthMode
-import com.sendspindroid.ui.wizard.RemoteAccessMethod
 import com.sendspindroid.ui.wizard.WizardStep
 import com.sendspindroid.ui.wizard.WizardStepAction
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 
@@ -101,12 +89,6 @@ class AddServerWizardActivity : FragmentActivity() {
 
     // Network evaluator for auto-detecting network type
     private var networkEvaluator: NetworkEvaluator? = null
-
-    // TV device detection (for QR scanner)
-    private val isTvDevice: Boolean by lazy {
-        val uiModeManager = getSystemService(Context.UI_MODE_SERVICE) as UiModeManager
-        uiModeManager.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -196,9 +178,8 @@ class AddServerWizardActivity : FragmentActivity() {
                 startLocalConnectionTest()
             }
 
-            // MA Login steps — test connection if no token yet
-            WizardStep.MA_Login,
-            WizardStep.MA_LoginRemote -> {
+            // MA Login step -- test connection if no token yet
+            WizardStep.MA_Login -> {
                 if (viewModel.maToken != null) {
                     viewModel.onNext()
                 } else {
@@ -206,36 +187,9 @@ class AddServerWizardActivity : FragmentActivity() {
                 }
             }
 
-            // Remote setup steps — validate and start test
-            WizardStep.MA_RemoteSetup,
-            WizardStep.MA_RemoteOnlySetup -> {
-                val method = viewModel.remoteAccessMethod.value
-                when (method) {
-                    RemoteAccessMethod.REMOTE_ID -> {
-                        if (viewModel.remoteId.isNotBlank()) {
-                            if (!validateRemoteId()) return
-                            startRemoteConnectionTest()
-                        } else {
-                            // No remote ID entered — skip test, go to next
-                            viewModel.onNext()
-                        }
-                    }
-                    RemoteAccessMethod.PROXY -> {
-                        if (viewModel.proxyUrl.isNotBlank()) {
-                            if (!validateProxy()) return
-                            startProxyConnectionTest()
-                        } else {
-                            viewModel.onNext()
-                        }
-                    }
-                    RemoteAccessMethod.NONE -> viewModel.onNext()
-                }
-            }
-
             // Finish steps — handled by onSave
             WizardStep.SS_Finish,
-            WizardStep.MA_Finish,
-            WizardStep.MA_FinishRemoteOnly -> {
+            WizardStep.MA_Finish -> {
                 // Handled by onSave
             }
 
@@ -255,7 +209,6 @@ class AddServerWizardActivity : FragmentActivity() {
             when (action) {
                 WizardStepAction.StartDiscovery -> startDiscovery()
                 WizardStepAction.TestMaConnection -> startMaConnectionTest()
-                WizardStepAction.ScanQrCode -> openQrScanner()
                 else -> { /* Handled by ViewModel */ }
             }
         }
@@ -329,22 +282,6 @@ class AddServerWizardActivity : FragmentActivity() {
     }
 
     // ========================================================================
-    // QR Scanner
-    // ========================================================================
-
-    private fun openQrScanner() {
-        if (isTvDevice) {
-            showToast(getString(R.string.qr_scanner_invalid))
-            return
-        }
-
-        QrScannerDialog.show(supportFragmentManager) { result ->
-            val cleanedId = result.replace("-", "").uppercase()
-            viewModel.remoteId = cleanedId
-        }
-    }
-
-    // ========================================================================
     // Connection Testing
     // ========================================================================
 
@@ -378,7 +315,6 @@ class AddServerWizardActivity : FragmentActivity() {
     private suspend fun testLocalConnection(address: String): Result<Int> {
         Log.d(TAG, "Testing local connection to: $address")
         val transient = SendSpin(
-            context = applicationContext,
             deviceName = android.os.Build.MODEL,
             callback = noopSendSpinCallback,
         )
@@ -414,167 +350,6 @@ class AddServerWizardActivity : FragmentActivity() {
         }
     }
 
-    private fun startRemoteConnectionTest() {
-        // Navigate to the correct testing step
-        val testStep = when (viewModel.currentStep.value) {
-            WizardStep.MA_RemoteSetup -> WizardStep.MA_TestRemote
-            WizardStep.MA_RemoteOnlySetup -> WizardStep.MA_TestRemoteOnly
-            else -> return
-        }
-        viewModel.navigateTo(testStep)
-
-        lifecycleScope.launch {
-            delay(500)
-
-            val result = testRemoteConnection(viewModel.remoteId)
-
-            result.fold(
-                onSuccess = { message ->
-                    delay(500)
-                    viewModel.onRemoteTestSuccess(message)
-                },
-                onFailure = { error ->
-                    Log.e(TAG, "Remote connection test failed", error)
-                    viewModel.onRemoteTestFailed(error.message ?: "Unknown error")
-                }
-            )
-        }
-    }
-
-    private suspend fun testRemoteConnection(remoteId: String): Result<String> {
-        return withContext(Dispatchers.IO) {
-            try {
-                val parsed = RemoteConnection.parseRemoteId(remoteId)
-                    ?: return@withContext Result.failure(IllegalArgumentException("Invalid Remote ID format"))
-
-                if (RemoteConnection.isValidRemoteId(parsed)) {
-                    Result.success("Remote ID format valid")
-                } else {
-                    Result.failure(IllegalArgumentException("Invalid Remote ID format"))
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Remote test exception", e)
-                Result.failure(e)
-            }
-        }
-    }
-
-    private fun startProxyConnectionTest() {
-        val testStep = when (viewModel.currentStep.value) {
-            WizardStep.MA_RemoteSetup -> WizardStep.MA_TestRemote
-            WizardStep.MA_RemoteOnlySetup -> WizardStep.MA_TestRemoteOnly
-            else -> return
-        }
-        viewModel.navigateTo(testStep)
-
-        lifecycleScope.launch {
-            delay(500)
-
-            val result = if (viewModel.proxyAuthMode == AddServerWizardViewModel.AUTH_LOGIN) {
-                testProxyLoginConnection()
-            } else {
-                testProxyTokenConnection()
-            }
-
-            result.fold(
-                onSuccess = { message ->
-                    delay(500)
-                    viewModel.onRemoteTestSuccess(message)
-                },
-                onFailure = { error ->
-                    Log.e(TAG, "Proxy connection test failed", error)
-                    viewModel.onRemoteTestFailed(error.message ?: "Unknown error")
-                }
-            )
-        }
-    }
-
-    private suspend fun testProxyLoginConnection(): Result<String> {
-        return try {
-            val normalizedUrl = viewModel.normalizeProxyUrl(viewModel.proxyUrl)
-            Log.d(TAG, "Testing proxy login connection to: $normalizedUrl")
-
-            val loginResult = MaAuthHelper.loginForToken(
-                url = normalizedUrl,
-                username = viewModel.proxyUsername,
-                password = viewModel.proxyPassword
-            )
-
-            viewModel.proxyToken = loginResult.accessToken
-            Log.d(TAG, "Proxy login successful, token obtained for user: ${loginResult.userName}")
-
-            Result.success("Authenticated as ${loginResult.userName}")
-        } catch (e: MaApiTransport.AuthenticationException) {
-            Log.e(TAG, "Proxy login auth failed", e)
-            Result.failure(Exception("Invalid credentials: ${e.message}"))
-        } catch (e: Exception) {
-            Log.e(TAG, "Proxy login exception", e)
-            Result.failure(e)
-        }
-    }
-
-    private suspend fun testProxyTokenConnection(): Result<String> {
-        val normalizedUrl = viewModel.normalizeProxyUrl(viewModel.proxyUrl)
-        Log.d(TAG, "Testing proxy token connection to: $normalizedUrl")
-        val transient = SendSpin(
-            context = applicationContext,
-            deviceName = android.os.Build.MODEL,
-            callback = noopSendSpinCallback,
-        )
-        transient.selfReconnectEnabled = false
-        transient.connect(SendSpinEndpoint.Proxy(url = normalizedUrl, authToken = viewModel.proxyToken))
-        return try {
-            val terminal = withTimeoutOrNull(TEST_TIMEOUT_MS) {
-                transient.connectionState.first {
-                    it is TransportState.Ready || it is TransportState.Failed
-                }
-            }
-            when (terminal) {
-                is TransportState.Ready ->
-                    Result.success("Proxy connection successful")
-                is TransportState.Failed ->
-                    Result.failure(IOException("Proxy connection failed: ${terminal.reason::class.simpleName}"))
-                null ->
-                    Result.failure(IOException("Proxy connection timed out"))
-                else ->
-                    Result.failure(IOException("Unexpected state: $terminal"))
-            }
-        } finally {
-            transient.destroy()
-        }
-    }
-
-    // ========================================================================
-    // Validation
-    // ========================================================================
-
-    private fun validateRemoteId(): Boolean {
-        if (viewModel.remoteId.isNotBlank()) {
-            val parsed = RemoteConnection.parseRemoteId(viewModel.remoteId)
-            if (parsed == null) {
-                showToast(getString(R.string.remote_id_invalid))
-                return false
-            }
-        }
-        return true
-    }
-
-    private fun validateProxy(): Boolean {
-        if (viewModel.proxyUrl.isNotBlank()) {
-            if (viewModel.proxyAuthMode == AddServerWizardViewModel.AUTH_TOKEN &&
-                viewModel.proxyToken.isBlank()) {
-                showToast(getString(R.string.auth_token_required))
-                return false
-            }
-            if (viewModel.proxyAuthMode == AddServerWizardViewModel.AUTH_LOGIN &&
-                (viewModel.proxyUsername.isBlank() || viewModel.proxyPassword.isBlank())) {
-                showToast(getString(R.string.credentials_required))
-                return false
-            }
-        }
-        return true
-    }
-
     // ========================================================================
     // Save
     // ========================================================================
@@ -591,11 +366,6 @@ class AddServerWizardActivity : FragmentActivity() {
         }
 
         val hasLocal = viewModel.localAddress.isNotBlank()
-        val hasRemote = viewModel.remoteId.isNotBlank() &&
-                        RemoteConnection.parseRemoteId(viewModel.remoteId) != null
-        val hasProxy = viewModel.proxyUrl.isNotBlank()
-
-        val parsedRemoteId = if (hasRemote) RemoteConnection.parseRemoteId(viewModel.remoteId) else null
         val serverId = viewModel.getServerId()
 
         val server = UnifiedServer(
@@ -605,15 +375,6 @@ class AddServerWizardActivity : FragmentActivity() {
             local = if (hasLocal) LocalConnection(
                 address = viewModel.localAddress,
                 path = "/sendspin"
-            ) else null,
-            remote = if (parsedRemoteId != null) com.sendspindroid.model.RemoteConnection(
-                remoteId = parsedRemoteId
-            ) else null,
-            proxy = if (hasProxy) ProxyConnection(
-                url = viewModel.normalizeProxyUrl(viewModel.proxyUrl),
-                authToken = viewModel.proxyToken,
-                username = if (viewModel.proxyAuthMode == AddServerWizardViewModel.AUTH_LOGIN)
-                    viewModel.proxyUsername else null
             ) else null,
             connectionPreference = ConnectionPreference.AUTO,
             isDiscovered = false,

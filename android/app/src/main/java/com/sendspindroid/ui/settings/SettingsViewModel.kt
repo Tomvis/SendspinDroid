@@ -80,9 +80,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _keepScreenOn = MutableStateFlow(UserSettings.keepScreenOn)
     val keepScreenOn: StateFlow<Boolean> = _keepScreenOn.asStateFlow()
 
-    private val _miniPlayerPosition = MutableStateFlow(UserSettings.miniPlayerPosition)
-    val miniPlayerPosition: StateFlow<UserSettings.MiniPlayerPosition> = _miniPlayerPosition.asStateFlow()
-
     private val _layoutMode = MutableStateFlow(UserSettings.layoutMode)
     val layoutMode: StateFlow<UserSettings.LayoutMode> = _layoutMode.asStateFlow()
 
@@ -105,9 +102,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _autoStartOnBoot = MutableStateFlow(UserSettings.autoStartOnBoot)
     val autoStartOnBoot: StateFlow<Boolean> = _autoStartOnBoot.asStateFlow()
-
-    private val _searchLibraryOnly = MutableStateFlow(UserSettings.searchLibraryOnly)
-    val searchLibraryOnly: StateFlow<Boolean> = _searchLibraryOnly.asStateFlow()
 
     private val _hasDefaultServer = MutableStateFlow(UnifiedServerRepository.getDefaultServer() != null)
     val hasDefaultServer: StateFlow<Boolean> = _hasDefaultServer.asStateFlow()
@@ -170,11 +164,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setKeepScreenOn(enabled: Boolean) {
         prefs.edit().putBoolean(UserSettings.KEY_KEEP_SCREEN_ON, enabled).apply()
         _keepScreenOn.value = enabled
-    }
-
-    fun setMiniPlayerPosition(position: UserSettings.MiniPlayerPosition) {
-        UserSettings.setMiniPlayerPosition(position)
-        _miniPlayerPosition.value = position
     }
 
     fun setLayoutMode(mode: UserSettings.LayoutMode) {
@@ -240,11 +229,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setAutoStartOnBoot(enabled: Boolean) {
         prefs.edit().putBoolean(UserSettings.KEY_AUTO_START_ON_BOOT, enabled).apply()
         _autoStartOnBoot.value = enabled
-    }
-
-    fun setSearchLibraryOnly(libraryOnly: Boolean) {
-        UserSettings.searchLibraryOnly = libraryOnly
-        _searchLibraryOnly.value = libraryOnly
     }
 
     /**

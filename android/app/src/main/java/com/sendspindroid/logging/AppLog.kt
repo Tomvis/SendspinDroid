@@ -56,7 +56,6 @@ object AppLog {
     val Network: Logger = Logger(LogCategory.Network)
     val Playback: Logger = Logger(LogCategory.Playback)
     val MusicAssistant: Logger = Logger(LogCategory.MusicAssistant)
-    val Remote: Logger = Logger(LogCategory.Remote)
     val UI: Logger = Logger(LogCategory.UI)
     val App: Logger = Logger(LogCategory.App)
 

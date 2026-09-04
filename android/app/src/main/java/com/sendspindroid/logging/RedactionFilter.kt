@@ -6,7 +6,7 @@ package com.sendspindroid.logging
  *
  * Combines two layers:
  * - **Pattern-based**: IP addresses (v4 + v6), scheme URLs (`ws`/`wss`/`http`/
- *   `https`/`ma-proxy`), JWTs, and labeled `key=value` tokens.
+ *   `https`), JWTs, and labeled `key=value` tokens.
  * - **Literal**: caller-supplied [sensitiveTerms] -- the saved servers' names and
  *   addresses, which are not otherwise pattern-matchable (a chosen name like
  *   "Living Room" or a LAN hostname can only be removed if we know it).
@@ -44,7 +44,7 @@ class RedactionFilter(sensitiveTerms: Collection<String> = emptyList()) {
         private const val IP = "<ip>"
         private const val TOKEN = "<token>"
 
-        private val URL = Regex("(wss?|https?|ma-proxy)://[^\\s\"'<>]+")
+        private val URL = Regex("(wss?|https?)://[^\\s\"'<>]+")
         private val IPV6_BRACKETED = Regex("\\[[0-9A-Fa-f:]+\\]")
         // Compressed IPv6 (must contain "::"); the lookbehind avoids eating a
         // preceding hextet/colon, and the trailing hex avoids matching a lone "::".

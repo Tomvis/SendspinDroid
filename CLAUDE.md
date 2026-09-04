@@ -26,7 +26,7 @@ Music Assistant (MA) code sits in the tree but is unused on this fork. It compil
 - When merging from upstream, accept MA-touching changes as-is.
 - Pure MA code lives under `android/app/src/main/java/com/sendspindroid/musicassistant/` and `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/`.
 - Files that mix SendSpin + MA logic (review carefully on upstream merges): `MainActivity.kt`, `AppShell.kt`, `NowPlayingScreen.kt`, `NowPlayingHeadUnit.kt`, `UserSettings.kt`.
-- `AppShell.kt` has **two Scaffolds** branched on `isMaConnected`: the `if (!isMaConnected)` branch is the LIVE path on this fork; the `else` branch (MA-connected NavigationSuiteScaffold) is effectively dead code. Any shell-level UI work (topBar, padding, rail) must land on the non-MA path first. Mirror into the MA branch only when required to keep both compiling.
+- `AppShell.kt` now has **one** Scaffold. Upstream's SendSpin-only refactor deleted the browse/queue/detail surfaces and with them the MA-connected `NavigationSuiteScaffold` branch, so there is no longer a live path and a dead path to keep in sync. Shell-level UI work (topBar, padding, the TV overflow overlay) lands there directly.
 
 ### Fork Policy: Android TV is the only target
 
@@ -191,7 +191,24 @@ Encoded semantic version: `MAJOR * 10000 + MINOR * 100 + PATCH`
 
 Examples: `2.0.0` = 20000, `2.1.3` = 20103, `10.5.22` = 100522
 
-Pre-release suffixes (alpha, beta, rc) do NOT affect the versionCode -- they only appear in versionName. A pre-release shares the same versionCode as its eventual stable release.
+**Pre-releases DO increment the versionCode.** Every build a user can install must carry
+a strictly higher versionCode than the one it replaces, or Android refuses the update, so
+a beta cannot share a code with anything else. Current practice is `base + N` for `BetaN`:
+
+| versionName | versionCode |
+|---|---|
+| `2.0.0-Beta4` | 20004 |
+| `2.0.0-Beta15` | 20015 |
+| `2.0.0-Beta16` | 20016 |
+
+Beta1 through Beta3 used `base + (N-1)` (20000, 20001, 20002). `20003` was skipped once,
+which realigned the series; from Beta4 onward it has been `base + N`, and that is the only
+rule to apply going forward.
+
+**Trap: 2.0.0 stable cannot be 20000.** The base is already spent -- Beta16 shipped as
+20016 -- and anything lower is a downgrade Android will not install over it. The first
+stable `2.0.0` needs at least 20017. Choose that number deliberately when the time comes
+instead of reading it off the base formula.
 
 ## License
 

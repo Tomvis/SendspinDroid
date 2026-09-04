@@ -58,12 +58,6 @@ import com.sendspindroid.model.PlaybackState
 import com.sendspindroid.model.PlaybackStateType
 import com.sendspindroid.model.SyncStats
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.musicassistant.MaAlbum
-import com.sendspindroid.musicassistant.MaArtist
-import com.sendspindroid.musicassistant.MaPlaylist
-import com.sendspindroid.musicassistant.MaQueueItem
-import com.sendspindroid.musicassistant.MaRadio
-import com.sendspindroid.musicassistant.MaTrack
 import com.sendspindroid.musicassistant.MusicAssistant
 import com.sendspindroid.musicassistant.QueueUpdate
 import com.sendspindroid.sendspin.SendSpin
@@ -71,7 +65,6 @@ import com.sendspindroid.sendspin.SendSpinEndpoint
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.UnifiedServerRepository
 import com.sendspindroid.UserSettings
-import com.sendspindroid.UserSettings.ConnectionMode
 import com.sendspindroid.sendspin.SyncAudioPlayer
 import com.sendspindroid.sendspin.SyncAudioPlayerCallback
 import com.sendspindroid.sendspin.PlaybackState as SyncPlaybackState
@@ -82,7 +75,6 @@ import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.NetworkEvaluator
 import com.sendspindroid.network.NetworkState
-import com.sendspindroid.network.TransportType
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.DefaultMediaNotificationProvider
@@ -173,7 +165,6 @@ class PlaybackService : MediaLibraryService() {
 
     // Current server connection info (for MA integration)
     private var currentServerId: String? = null
-    private var currentConnectionMode: ConnectionMode = ConnectionMode.LOCAL
 
     // Active server as a flow, consumed by ConnectionCoordinator.
     private val _currentServerFlow = MutableStateFlow<UnifiedServer?>(null)
@@ -190,32 +181,6 @@ class PlaybackService : MediaLibraryService() {
     // mDNS discovery for Android Auto browse tree
     private var browseDiscoveryManager: NsdDiscoveryManager? = null
 
-    // ========================================================================
-    // Music Assistant Browse Tree - Cache & Helpers
-    // ========================================================================
-
-    /** Simple time-based cache entry. */
-    private data class CacheEntry<T>(val data: T, val time: Long = System.currentTimeMillis()) {
-        fun expired(ttl: Long) = System.currentTimeMillis() - time > ttl
-    }
-
-    // MA list caches
-    private var maPlaylistsCache: CacheEntry<List<MediaItem>>? = null
-    private var maAlbumsCache: CacheEntry<List<MediaItem>>? = null
-    private var maArtistsCache: CacheEntry<List<MediaItem>>? = null
-    private var maRadioCache: CacheEntry<List<MediaItem>>? = null
-
-    // MA drill-down caches (keyed by item ID)
-    private val maPlaylistTracksCache = mutableMapOf<String, CacheEntry<List<MediaItem>>>()
-    private val maAlbumTracksCache = mutableMapOf<String, CacheEntry<List<MediaItem>>>()
-    private val maArtistAlbumsCache = mutableMapOf<String, CacheEntry<List<MediaItem>>>()
-
-    // MA search result cache
-    private var maSearchResultsCache: List<MediaItem>? = null
-
-    // Generation counter for populatePlayerQueue() to discard stale async results
-    private var queuePopulateGeneration = 0L
-
     // Generation counter for fetchArtwork() / onArtwork() so an in-flight
     // bitmap decode/fetch that finishes after a disconnect or track change
     // doesn't resurrect the prior track's artwork on lock screen / Android
@@ -229,34 +194,6 @@ class PlaybackService : MediaLibraryService() {
     // atomic on 32-bit ARM.
     @Volatile
     private var artworkGeneration = 0L
-
-    /** Clears all MA caches (called on MA disconnect). */
-    private fun clearMaCaches() {
-        maPlaylistsCache = null
-        maAlbumsCache = null
-        maArtistsCache = null
-        maRadioCache = null
-        maPlaylistTracksCache.clear()
-        maAlbumTracksCache.clear()
-        maArtistAlbumsCache.clear()
-        maSearchResultsCache = null
-    }
-
-    /** Encodes a URI to Base64 URL-safe string for use in media IDs. */
-    private fun encodeMediaUri(uri: String): String {
-        return android.util.Base64.encodeToString(
-            uri.toByteArray(Charsets.UTF_8),
-            android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING
-        )
-    }
-
-    /** Decodes a Base64 URL-safe media ID back to a URI. */
-    private fun decodeMediaUri(encoded: String): String {
-        return String(
-            android.util.Base64.decode(encoded, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING),
-            Charsets.UTF_8
-        )
-    }
 
     /** Bridges a suspend function into a ListenableFuture for MediaLibrarySession callbacks. */
     private fun <T> suspendToFuture(block: suspend () -> T): ListenableFuture<T> {
@@ -350,6 +287,15 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var decoderReady = false
 
+    // Identifies the stream a chunk belongs to, mirroring
+    // SyncAudioPlayer.streamGeneration one layer down. onAudioChunk snapshots
+    // it on WS-IO at enqueue time and the decode worker re-checks it before
+    // decoding, so chunks from a superseded stream are discarded no matter how
+    // long they sat on the main dispatch queue or in decodeChannel. Ordering
+    // and drains can both be defeated by in-flight work; a tag cannot.
+    // Single-writer: only the WS-IO stream callbacks mutate it.
+    @Volatile
+    private var decodeGeneration = 0
 
     // Playback state exposed as StateFlow (like Python CLI's AppState)
     private val _playbackState = MutableStateFlow(PlaybackState())
@@ -520,8 +466,6 @@ class PlaybackService : MediaLibraryService() {
         const val COMMAND_PREVIOUS = "com.sendspindroid.PREVIOUS"
         const val COMMAND_SWITCH_GROUP = "com.sendspindroid.SWITCH_GROUP"
         const val COMMAND_GET_STATS = "com.sendspindroid.GET_STATS"
-        const val COMMAND_CONNECT_REMOTE = "com.sendspindroid.CONNECT_REMOTE"
-        const val COMMAND_CONNECT_PROXY = "com.sendspindroid.CONNECT_PROXY"
 
         // Intent actions for service start (used by BootReceiver)
         const val ACTION_AUTO_CONNECT = "com.sendspindroid.ACTION_AUTO_CONNECT"
@@ -531,9 +475,6 @@ class PlaybackService : MediaLibraryService() {
         const val ARG_SERVER_ADDRESS = "server_address"
         const val ARG_SERVER_PATH = "server_path"
         const val ARG_VOLUME = "volume"
-        const val ARG_REMOTE_ID = "remote_id"
-        const val ARG_PROXY_URL = "proxy_url"
-        const val ARG_AUTH_TOKEN = "auth_token"
         const val ARG_SERVER_ID = "server_id"  // For MA integration
 
         // Session extras keys for metadata (service → controller)
@@ -610,37 +551,12 @@ class PlaybackService : MediaLibraryService() {
         // Android Auto content style hint keys
         private const val CONTENT_STYLE_BROWSABLE = AutoBrowseTree.CONTENT_STYLE_BROWSABLE
         private const val CONTENT_STYLE_PLAYABLE = AutoBrowseTree.CONTENT_STYLE_PLAYABLE
-        private const val CONTENT_STYLE_SINGLE_ITEM = AutoBrowseTree.CONTENT_STYLE_SINGLE_ITEM
-        private const val CONTENT_STYLE_GROUP_TITLE = AutoBrowseTree.CONTENT_STYLE_GROUP_TITLE
         private const val CONTENT_STYLE_LIST = AutoBrowseTree.CONTENT_STYLE_LIST
-        private const val CONTENT_STYLE_GRID = AutoBrowseTree.CONTENT_STYLE_GRID
-
-        // Music Assistant browse tree media IDs
-        private const val MEDIA_ID_MA_PLAYLISTS = AutoBrowseTree.MEDIA_ID_MA_PLAYLISTS
-        private const val MEDIA_ID_MA_ALBUMS = AutoBrowseTree.MEDIA_ID_MA_ALBUMS
-        private const val MEDIA_ID_MA_ARTISTS = AutoBrowseTree.MEDIA_ID_MA_ARTISTS
-        private const val MEDIA_ID_MA_RADIO = AutoBrowseTree.MEDIA_ID_MA_RADIO
-
-        // MA item prefixes (for drill-down into children)
-        private const val MEDIA_ID_MA_PLAYLIST_PREFIX = AutoBrowseTree.MEDIA_ID_MA_PLAYLIST_PREFIX
-        private const val MEDIA_ID_MA_ALBUM_PREFIX = AutoBrowseTree.MEDIA_ID_MA_ALBUM_PREFIX
-        private const val MEDIA_ID_MA_ARTIST_PREFIX = AutoBrowseTree.MEDIA_ID_MA_ARTIST_PREFIX
 
         // How long the "Connect" browse node waits for the first mDNS result
         // before showing the "No servers found" guidance row. Keeps the first
         // browse on Android Auto from racing discovery and rendering empty.
         private const val BROWSE_DISCOVERY_WAIT_MS = 3_000L
-
-        // MA leaf item prefixes (playable, URI encoded as Base64)
-        private const val MEDIA_ID_MA_TRACK_PREFIX = "ma_track_"
-        private const val MEDIA_ID_MA_RADIO_ITEM_PREFIX = "ma_radio_item_"
-
-        // MA Queue item prefix (for native Now Playing queue)
-        private const val MEDIA_ID_MA_QUEUE_ITEM_PREFIX = "ma_qi_"
-
-        // MA cache TTLs
-        private const val MA_LIST_CACHE_TTL_MS = 5 * 60 * 1000L   // 5 minutes
-        private const val MA_DETAIL_CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes
 
         // Exposes the coordinator's network state for in-process observers (e.g. MainActivity).
         // Updated by the service's existing coordinator.networkState collector.
@@ -664,7 +580,11 @@ class PlaybackService : MediaLibraryService() {
      * for the H-4 + M-8 rationale.
      */
     private sealed class DecodeTask {
-        data class Chunk(val serverTimeMicros: Long, val audioData: ByteArray) : DecodeTask() {
+        data class Chunk(
+            val serverTimeMicros: Long,
+            val audioData: ByteArray,
+            val generation: Int,
+        ) : DecodeTask() {
             // Override equals/hashCode because data classes with ByteArray use
             // reference equality by default, which is surprising. In practice
             // DecodeTask instances are only compared in tests.
@@ -672,10 +592,12 @@ class PlaybackService : MediaLibraryService() {
                 if (this === other) return true
                 if (other !is Chunk) return false
                 return serverTimeMicros == other.serverTimeMicros &&
+                    generation == other.generation &&
                     audioData.contentEquals(other.audioData)
             }
             override fun hashCode(): Int {
                 var result = serverTimeMicros.hashCode()
+                result = 31 * result + generation
                 result = 31 * result + audioData.contentHashCode()
                 return result
             }
@@ -794,9 +716,6 @@ class PlaybackService : MediaLibraryService() {
         if (!com.sendspindroid.UserSettings.lowMemoryMode) {
             imageLoader = ImageLoader.Builder(this)
                 .crossfade(true)
-                .components {
-                    add(com.sendspindroid.musicassistant.MaProxyImageFetcher.Factory())
-                }
                 .build()
         } else {
             Log.i(TAG, "Low Memory Mode: Skipping ImageLoader initialization")
@@ -819,16 +738,13 @@ class PlaybackService : MediaLibraryService() {
             scope = serviceScope,
             onDisconnectRequested = { disconnectFromServer() },
             connectAttempt = { server, method ->
+                // Local is the only connection method left; other ConnectionType
+                // values can no longer be satisfied (no remote/proxy transport).
                 val selected = when (method) {
                     com.sendspindroid.model.ConnectionType.LOCAL -> server.local?.let {
                         ConnectionSelector.SelectedConnection.Local(it.address, it.path)
                     }
-                    com.sendspindroid.model.ConnectionType.REMOTE -> server.remote?.let {
-                        ConnectionSelector.SelectedConnection.Remote(it.remoteId)
-                    }
-                    com.sendspindroid.model.ConnectionType.PROXY -> server.proxy?.let {
-                        ConnectionSelector.SelectedConnection.Proxy(it.url, it.authToken)
-                    }
+                    else -> null
                 } ?: return@ConnectionCoordinator false
                 connectViaSelectedConnection(server, selected)
             },
@@ -1133,7 +1049,6 @@ class PlaybackService : MediaLibraryService() {
             // Use user-configured player name, falls back to device model
             val playerName = com.sendspindroid.UserSettings.getPlayerName()
             sendSpinClient = SendSpin(
-                context = applicationContext,
                 deviceName = playerName,
                 callback = SendSpinClientCallback()
             )
@@ -1197,6 +1112,13 @@ class PlaybackService : MediaLibraryService() {
      * installed (matches the previous onAudioChunk behavior).
      */
     private suspend fun handleDecodeChunk(t: DecodeTask.Chunk) {
+        // Drop chunks belonging to a stream that has since ended or been
+        // replaced. Popping and discarding costs microseconds, so a ~30-second
+        // look-ahead backlog clears near-instantly instead of grinding through
+        // syncAudioPlayer.queueChunk back-pressure at real-time rate -- that
+        // stall is what delayed decoder reconfiguration in issue #114.
+        if (t.generation != decodeGeneration) return
+
         val decoder = audioDecoder
         val pcmData: ByteArray = try {
             when {
@@ -1514,11 +1436,7 @@ class PlaybackService : MediaLibraryService() {
                 Log.d(TAG, "Metadata update: $title / $artist / $album")
                 Log.d(TAG, "  extra fields: albumArtist=$albumArtist year=$year albumTrack=$albumTrack queueTrack=$queueTrack totalTracks=$totalTracks")
 
-                // In REMOTE mode, the server sends artwork URLs pointing to its own
-                // address (e.g., https://music.example.com/imageproxy?...) which aren't
-                // reachable from the remote client. Rewrite to ma-proxy:// scheme so
-                // Coil's MaProxyImageFetcher can fetch via the WebRTC DataChannel.
-                val effectiveArtworkUrl = rewriteArtworkUrlForRemote(artworkUrl.orEmpty())
+                val artworkUrlOrEmpty = artworkUrl.orEmpty()
 
                 // Int fields: 0 / absent maps to null so withMetadata applies
                 // its null-handling rules. Those rules: preserve prior on a
@@ -1548,7 +1466,7 @@ class PlaybackService : MediaLibraryService() {
                     artist = artistOrNull,
                     albumArtist = albumArtistOrNull,
                     album = albumOrNull,
-                    artworkUrl = effectiveArtworkUrl,
+                    artworkUrl = artworkUrlOrEmpty,
                     year = yearOrNull,
                     albumTrack = albumTrackOrNull,
                     queueTrack = queueTrack?.takeIf { it > 0 },
@@ -1584,7 +1502,7 @@ class PlaybackService : MediaLibraryService() {
                 if (titleChanged) {
                     lastTrackTitle = resolvedTitle
                     ++artworkGeneration
-                    if (effectiveArtworkUrl.isEmpty()) {
+                    if (artworkUrlOrEmpty.isEmpty()) {
                         urlArtwork = null
                         binaryArtwork = null
                     }
@@ -1622,14 +1540,11 @@ class PlaybackService : MediaLibraryService() {
                     durationMs = durationMs
                 )
 
-                // Populate the player's timeline with queue items for native queue UI
-                populatePlayerQueue()
-
-                if (effectiveArtworkUrl.isEmpty()) {
+                if (artworkUrlOrEmpty.isEmpty()) {
                     lastArtworkUrl = null
-                } else if (effectiveArtworkUrl != lastArtworkUrl || titleChanged) {
-                    lastArtworkUrl = effectiveArtworkUrl
-                    fetchArtwork(effectiveArtworkUrl)
+                } else if (artworkUrlOrEmpty != lastArtworkUrl || titleChanged) {
+                    lastArtworkUrl = artworkUrlOrEmpty
+                    fetchArtwork(artworkUrlOrEmpty)
                 }
             }
         }
@@ -1719,6 +1634,13 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
+            // Invalidate every chunk from the stream being replaced. Bumping
+            // here -- on WS-IO, before anything new is queued -- means chunks
+            // already in flight toward decodeChannel carry the old tag and are
+            // dropped by the worker. That is what stops a track change from
+            // replaying ~30s of the previous track's look-ahead buffer (#114).
+            decodeGeneration++
+
             // Post decoder lifecycle to the single-owner decode worker via the
             // channel. FIFO ordering between StartStream and any subsequent
             // Chunk tasks ensures the new decoder is in place before its
@@ -1838,6 +1760,10 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onStreamEnd() {
             Log.i(TAG, "[cmd-trace] T2 onStreamEnd ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
+
+            // Invalidate the ending stream's pre-buffered chunks (issue #114).
+            decodeGeneration++
+
             mainHandler.post {
                 Log.i(TAG, "[cmd-trace] T3 onStreamEnd.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
                 Log.i(TAG, "Stream end - server terminated playback")
@@ -1887,9 +1813,14 @@ class PlaybackService : MediaLibraryService() {
             // is ~150us/sec on Main -- negligible vs the frame budget.
             // ClosedSendChannelException is the benign shutdown race --
             // worker handles decoder release in its finally.
+            //
+            // Snapshot the generation on WS-IO so the tag reflects the stream
+            // this chunk actually arrived on, not whatever is current by the
+            // time the launched coroutine runs on the main dispatcher.
+            val generation = decodeGeneration
             serviceScope.launch {
                 try {
-                    decodeChannel.send(DecodeTask.Chunk(serverTimeMicros, audioData))
+                    decodeChannel.send(DecodeTask.Chunk(serverTimeMicros, audioData, generation))
                 } catch (e: ClosedSendChannelException) {
                     // benign: shutdown race
                 }
@@ -2136,33 +2067,7 @@ class PlaybackService : MediaLibraryService() {
     }
 
     private fun isValidArtworkUrl(url: String): Boolean {
-        return url.startsWith("http://") || url.startsWith("https://") ||
-                url.startsWith("${com.sendspindroid.musicassistant.MaProxyImageFetcher.SCHEME}://")
-    }
-
-    /**
-     * In REMOTE mode, rewrite server-local imageproxy URLs to use the
-     * `ma-proxy://` scheme so they're fetched via the WebRTC DataChannel.
-     *
-     * The server sends artwork URLs pointing to its own address (e.g.,
-     * `https://music.example.com/imageproxy?provider=x&path=y`), which
-     * aren't reachable from a remote client. We extract the `/imageproxy`
-     * path and rewrite to `ma-proxy:///imageproxy?provider=x&path=y`.
-     *
-     * Non-imageproxy URLs (e.g., CDN URLs) are returned as-is since they're
-     * accessible from anywhere.
-     */
-    private fun rewriteArtworkUrlForRemote(url: String): String {
-        if (url.isEmpty()) return url
-        if (currentConnectionMode != ConnectionMode.REMOTE) return url
-
-        val proxyIndex = url.indexOf("/imageproxy")
-        if (proxyIndex >= 0) {
-            val pathAndQuery = url.substring(proxyIndex)
-            return "${com.sendspindroid.musicassistant.MaProxyImageFetcher.SCHEME}://$pathAndQuery"
-        }
-
-        return url
+        return url.startsWith("http://") || url.startsWith("https://")
     }
 
     /**
@@ -2185,17 +2090,13 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Filter artwork URIs that the MediaSession bridge can't resolve out of
-     * process. The `ma-proxy://` scheme is only handled inside this app via
-     * Coil's MaProxyImageFetcher (which goes over the WebRTC DataChannel) --
-     * Android Auto, lock screen and AVRCP would try to fetch it externally
-     * and fail. Returning null here forces those consumers to fall back to
-     * the bitmap blob (artworkData) which we already compress and ship via
-     * MetadataForwardingPlayer. Issue from enhanced-branch audit.
+     * Artwork URI for the MediaSession bridge, or null when there is none.
+     * Out-of-process consumers (Android Auto, lock screen, AVRCP) fetch this
+     * themselves, so an absent URL has to leave them on the bitmap blob
+     * (artworkData) that MetadataForwardingPlayer already ships.
      */
     private fun externalArtworkUri(url: String?): Uri? {
         if (url.isNullOrEmpty()) return null
-        if (url.startsWith("${com.sendspindroid.musicassistant.MaProxyImageFetcher.SCHEME}://")) return null
         return Uri.parse(url)
     }
 
@@ -2540,88 +2441,6 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Connects to a SendSpin server via Music Assistant Remote Access.
-     *
-     * @param remoteId The 26-character Remote ID from Music Assistant settings
-     */
-    fun connectToRemoteServer(remoteId: String) {
-        Log.d(TAG, "Connecting to remote server via Remote ID: $remoteId")
-        lastDisconnectUserInitiated = false
-
-        // See connectToServer: announcing Connecting before the coordinator
-        // leaves Idle publishes DISCONNECTED instead.
-
-        try {
-            if (sendSpinClient?.isConnected == true) {
-                Log.d(TAG, "Already connected, disconnecting first...")
-                sendSpinClient?.disconnect()
-            }
-
-            // Read current device volume and set as initial volume for server and UI
-            val am = audioManager
-            if (am != null) {
-                val currentDeviceVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val volumePercent = ((currentDeviceVolume.toFloat() / maxVolume) * 100).toInt()
-                Log.d(TAG, "Setting initial volume from device: $currentDeviceVolume/$maxVolume = $volumePercent%")
-                sendSpinClient?.setInitialVolume(volumePercent)
-                _playbackState.value = _playbackState.value.copy(volume = volumePercent)
-            }
-
-            sendSpinClient?.connect(SendSpinEndpoint.Remote(remoteId))
-        } catch (e: Exception) {
-            Log.e(TAG, "Error connecting to remote server", e)
-            broadcastSessionExtras(
-                forceState = STATE_ERROR,
-                forceErrorMessage = "Connection failed: ${e.message}",
-            )
-        }
-    }
-
-    /**
-     * Connect to a SendSpin server via authenticated reverse proxy.
-     *
-     * This is for users who have Music Assistant exposed through Nginx Proxy Manager,
-     * Traefik, Caddy, or similar reverse proxies with token authentication.
-     *
-     * @param url The proxy URL (e.g., "https://ma.example.com/sendspin")
-     * @param authToken The long-lived authentication token from Music Assistant
-     */
-    fun connectToProxyServer(url: String, authToken: String) {
-        Log.d(TAG, "Connecting to proxy server: $url")
-        lastDisconnectUserInitiated = false
-
-        // See connectToServer: announcing Connecting before the coordinator
-        // leaves Idle publishes DISCONNECTED instead.
-
-        try {
-            if (sendSpinClient?.isConnected == true) {
-                Log.d(TAG, "Already connected, disconnecting first...")
-                sendSpinClient?.disconnect()
-            }
-
-            // Read current device volume and set as initial volume for server and UI
-            val am = audioManager
-            if (am != null) {
-                val currentDeviceVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val volumePercent = ((currentDeviceVolume.toFloat() / maxVolume) * 100).toInt()
-                Log.d(TAG, "Setting initial volume from device: $currentDeviceVolume/$maxVolume = $volumePercent%")
-                sendSpinClient?.setInitialVolume(volumePercent)
-                _playbackState.value = _playbackState.value.copy(volume = volumePercent)
-            }
-
-            sendSpinClient?.connect(SendSpinEndpoint.Proxy(url, authToken))
-        } catch (e: Exception) {
-            Log.e(TAG, "Error connecting to proxy server", e)
-            broadcastSessionExtras(
-                forceState = STATE_ERROR,
-                forceErrorMessage = "Connection failed: ${e.message}",
-            )
-        }
-    }
-
-    /**
      * Disconnects from the current server.
      */
     fun disconnectFromServer() {
@@ -2634,31 +2453,17 @@ class PlaybackService : MediaLibraryService() {
      * Call this before connecting when the server ID is known.
      *
      * @param serverId The UnifiedServer.id
-     * @param connectionMode The connection mode being used
      */
-    fun setCurrentServer(serverId: String?, connectionMode: ConnectionMode) {
+    fun setCurrentServer(serverId: String?) {
         currentServerId = serverId
-        currentConnectionMode = connectionMode
-        Log.d(TAG, "Set current server: $serverId, mode=$connectionMode")
+        Log.d(TAG, "Set current server: $serverId")
 
         _currentServerFlow.value = serverId?.let { UnifiedServerRepository.getServer(it) }
-
-        // Configure PROXY fallback for internal LOCAL->PROXY switchover in the
-        // reconnect loop. Only applies when connecting in LOCAL mode with a server
-        // that also has a PROXY config; cleared (null/null) otherwise so a later
-        // server-switch doesn't carry stale fallback data. Issue #126.
-        val proxy = if (connectionMode == ConnectionMode.LOCAL) {
-            serverId?.let { UnifiedServerRepository.getServer(it) }?.proxy
-        } else {
-            null
-        }
-        sendSpinClient?.setProxyFallback(proxy?.url, proxy?.authToken)
     }
 
     /**
      * Suspend-friendly connection wrapper used by the service-scoped
-     * AutoReconnectManager. Kicks off the appropriate connectToServer/
-     * connectToRemoteServer/connectToProxyServer call, then awaits the
+     * AutoReconnectManager. Kicks off connectToServer, then awaits the
      * SendSpin.connectionState transition to a terminal state.
      *
      * Returns true on Connected, false on Error or timeout.
@@ -2671,19 +2476,11 @@ class PlaybackService : MediaLibraryService() {
         val client = sendSpinClient ?: return false
 
         // Set the active server first so observers see context immediately.
-        setCurrentServer(server.id, when (selectedConnection) {
-            is ConnectionSelector.SelectedConnection.Local -> ConnectionMode.LOCAL
-            is ConnectionSelector.SelectedConnection.Remote -> ConnectionMode.REMOTE
-            is ConnectionSelector.SelectedConnection.Proxy -> ConnectionMode.PROXY
-        })
+        setCurrentServer(server.id)
 
         when (selectedConnection) {
             is ConnectionSelector.SelectedConnection.Local ->
                 connectToServer(selectedConnection.address, selectedConnection.path)
-            is ConnectionSelector.SelectedConnection.Remote ->
-                connectToRemoteServer(selectedConnection.remoteId)
-            is ConnectionSelector.SelectedConnection.Proxy ->
-                connectToProxyServer(selectedConnection.url, selectedConnection.authToken)
         }
 
         return withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
@@ -2714,9 +2511,6 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Notifies MusicAssistant that a server connection was established.
      * Looks up the server by ID and triggers MA availability check.
-     *
-     * For REMOTE mode, also passes the WebRTC "ma-api" DataChannel to
-     * MusicAssistant so it can create a DataChannel transport.
      */
     private fun notifyMusicAssistantConnected() {
         val serverId = currentServerId
@@ -2731,16 +2525,8 @@ class PlaybackService : MediaLibraryService() {
             return
         }
 
-        // In REMOTE mode, pass the MA API DataChannel to MusicAssistant
-        if (currentConnectionMode == ConnectionMode.REMOTE) {
-            val maChannel = sendSpinClient?.getMaApiDataChannel()
-            val bufferedMessages = sendSpinClient?.drainMaApiMessageBuffer() ?: emptyList()
-            Log.d(TAG, "REMOTE mode: MA API DataChannel ${if (maChannel != null) "available" else "not available"}, buffered=${bufferedMessages.size}")
-            MusicAssistant.setMaApiDataChannel(maChannel, bufferedMessages)
-        }
-
         Log.d(TAG, "Notifying MusicAssistant: server=${server.name}, isMusicAssistant=${server.isMusicAssistant}")
-        MusicAssistant.onServerConnected(server, currentConnectionMode)
+        MusicAssistant.onServerConnected(server)
     }
 
     /**
@@ -3278,23 +3064,6 @@ class PlaybackService : MediaLibraryService() {
             .build()
 
         Log.d(TAG, "MediaLibrarySession initialized with browse tree support")
-
-        // Watch MA connection state to refresh browse tree root when Library appears/disappears
-        serviceScope.launch {
-            var wasAvailable = MusicAssistant.connectionState.value is TransportState.Ready
-            MusicAssistant.connectionState.collect { state ->
-                val isNowAvailable = state is TransportState.Ready
-                if (isNowAvailable != wasAvailable) {
-                    Log.i(TAG, "MA availability changed: $wasAvailable -> $isNowAvailable")
-                    wasAvailable = isNowAvailable
-                    if (!isNowAvailable) {
-                        clearMaCaches()
-                    }
-                    // Notify that root children changed (Library folder appears/disappears)
-                    mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
-                }
-            }
-        }
     }
 
     private inner class LibraryCallback : MediaLibrarySession.Callback {
@@ -3325,9 +3094,9 @@ class PlaybackService : MediaLibraryService() {
                 )
                 .build()
 
-            // Build LibraryParams with search support and content style defaults
+            // Build LibraryParams with content style defaults. Search is not
+            // advertised: SendSpin defines no library to search.
             val extras = Bundle().apply {
-                putBoolean("android.media.browse.SEARCH_SUPPORTED", true)
                 putInt(CONTENT_STYLE_BROWSABLE, CONTENT_STYLE_LIST)
                 putInt(CONTENT_STYLE_PLAYABLE, CONTENT_STYLE_LIST)
             }
@@ -3353,11 +3122,16 @@ class PlaybackService : MediaLibraryService() {
                 )
             }
 
-            // Async path: server discovery (bounded mDNS wait) and MA data fetches
+            // Async path: server discovery (bounded mDNS wait)
             return suspendToFuture {
                 val items = when (parentId) {
                     MEDIA_ID_DISCOVERED -> getDiscoveredServers()
-                    else -> getMaChildren(parentId)
+                    else -> {
+                        // Never hand Android Auto an empty list here -- see the
+                        // invariant documented on AutoBrowseTree.unknownParentItem.
+                        Log.w(TAG, "Unknown parentId for onGetChildren: $parentId")
+                        listOf(AutoBrowseTree.unknownParentItem(parentId))
+                    }
                 }
                 LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
             }
@@ -3387,14 +3161,6 @@ class PlaybackService : MediaLibraryService() {
         ): ListenableFuture<List<MediaItem>> {
             Log.d(TAG, "onAddMediaItems: ${mediaItems.size} items")
 
-            // Voice search (VC-1): "OK Google, play X on SendSpinDroid"
-            // arrives with requestMetadata.searchQuery set
-            val searchQuery = mediaItems.firstOrNull()?.requestMetadata?.searchQuery
-            if (searchQuery != null) {
-                Log.d(TAG, "Voice search detected: query='$searchQuery'")
-                return handleVoiceSearch(searchQuery, mediaItems)
-            }
-
             val updatedItems = mediaItems.map { item ->
                 val mediaId = item.mediaId
 
@@ -3408,23 +3174,12 @@ class PlaybackService : MediaLibraryService() {
                             .find { it.id == serverId }
                         if (server != null) {
                             // Use ConnectionSelector to pick the best method
-                            networkEvaluator?.evaluateCurrentNetwork()
-                            val netState = networkEvaluator?.networkState?.value
-                                ?: NetworkState(TransportType.UNKNOWN)
-                            val selected = ConnectionSelector.selectConnection(server, netState)
+                            val selected = ConnectionSelector.selectConnection(server)
 
                             when (selected) {
                                 is ConnectionSelector.SelectedConnection.Local -> {
-                                    setCurrentServer(server.id, ConnectionMode.LOCAL)
+                                    setCurrentServer(server.id)
                                     connectToServer(selected.address, selected.path)
-                                }
-                                is ConnectionSelector.SelectedConnection.Remote -> {
-                                    setCurrentServer(server.id, ConnectionMode.REMOTE)
-                                    connectToRemoteServer(selected.remoteId)
-                                }
-                                is ConnectionSelector.SelectedConnection.Proxy -> {
-                                    setCurrentServer(server.id, ConnectionMode.PROXY)
-                                    connectToProxyServer(selected.url, selected.authToken)
                                 }
                                 null -> {
                                     Log.w(TAG, "No connection method for saved server: ${server.name}")
@@ -3450,7 +3205,7 @@ class PlaybackService : MediaLibraryService() {
                             it.local?.address == serverAddress
                         }
                         if (unifiedServer != null) {
-                            setCurrentServer(unifiedServer.id, ConnectionMode.LOCAL)
+                            setCurrentServer(unifiedServer.id)
                         } else {
                             Log.w(TAG, "No UnifiedServer found for address: $serverAddress")
                         }
@@ -3466,94 +3221,11 @@ class PlaybackService : MediaLibraryService() {
                             .setUri("sendspin://$serverAddress")
                             .build()
                     }
-                    // MA media items (tracks, playlists, albums, radio)
-                    mediaId.startsWith("ma_") -> {
-                        Log.d(TAG, "MA media item selected: $mediaId")
-                        handleMaMediaItem(mediaId)
-                    }
                     else -> item
                 }
             }
 
             return Futures.immediateFuture(updatedItems)
-        }
-
-        override fun onSearch(
-            session: MediaLibrarySession,
-            browser: MediaSession.ControllerInfo,
-            query: String,
-            params: LibraryParams?
-        ): ListenableFuture<LibraryResult<Void>> {
-            Log.d(TAG, "onSearch: query='$query'")
-
-            // The root always advertises SEARCH_SUPPORTED, so report zero
-            // results instead of an error when MA isn't available. Android
-            // Auto then shows its own "no results" UI rather than a failure.
-            if (MusicAssistant.connectionState.value !is TransportState.Ready) {
-                maSearchResultsCache = emptyList()
-                session.notifySearchResultChanged(browser, query, 0, params)
-                return Futures.immediateFuture(LibraryResult.ofVoid())
-            }
-
-            // Execute search async, cache results, notify when done
-            serviceScope.launch {
-                try {
-                    val result = MusicAssistant.search(
-                        query = query,
-                        limit = 25,
-                        libraryOnly = false
-                    )
-                    val searchResults = result.getOrNull()
-                    if (searchResults != null) {
-                        // Build flat list grouped by type (contiguous blocks with group titles)
-                        val items = mutableListOf<MediaItem>()
-                        searchResults.tracks.forEach { items.add(withGroupTitle(createMaTrackItem(it), "Songs")) }
-                        searchResults.albums.forEach { items.add(withGroupTitle(createMaAlbumItem(it), "Albums")) }
-                        searchResults.artists.forEach { items.add(withGroupTitle(createMaArtistItem(it), "Artists")) }
-                        searchResults.playlists.forEach { items.add(withGroupTitle(createMaPlaylistItem(it), "Playlists")) }
-                        searchResults.radios.forEach { items.add(withGroupTitle(createMaRadioItem(it), "Radio")) }
-                        maSearchResultsCache = items.filter { it != MediaItem.EMPTY }
-                        Log.d(TAG, "Search returned ${maSearchResultsCache?.size} results")
-                    } else {
-                        maSearchResultsCache = emptyList()
-                        Log.d(TAG, "Search returned no results")
-                    }
-                    // Notify browser that search results are ready
-                    session.notifySearchResultChanged(browser, query,
-                        maSearchResultsCache?.size ?: 0, params)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Search failed", e)
-                    maSearchResultsCache = emptyList()
-                    session.notifySearchResultChanged(browser, query, 0, params)
-                }
-            }
-
-            return Futures.immediateFuture(LibraryResult.ofVoid())
-        }
-
-        override fun onGetSearchResult(
-            session: MediaLibrarySession,
-            browser: MediaSession.ControllerInfo,
-            query: String,
-            page: Int,
-            pageSize: Int,
-            params: LibraryParams?
-        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
-            Log.d(TAG, "onGetSearchResult: query='$query', page=$page, pageSize=$pageSize")
-
-            val results = maSearchResultsCache ?: emptyList()
-            // Paginate
-            val startIndex = page * pageSize
-            val endIndex = minOf(startIndex + pageSize, results.size)
-            val pageResults = if (startIndex < results.size) {
-                results.subList(startIndex, endIndex)
-            } else {
-                emptyList()
-            }
-
-            return Futures.immediateFuture(
-                LibraryResult.ofItemList(ImmutableList.copyOf(pageResults), params)
-            )
         }
 
         override fun onConnect(
@@ -3570,8 +3242,6 @@ class PlaybackService : MediaLibraryService() {
             val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(SessionCommand(COMMAND_CONNECT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_CONNECT_AUTO, Bundle.EMPTY))
-                .add(SessionCommand(COMMAND_CONNECT_REMOTE, Bundle.EMPTY))
-                .add(SessionCommand(COMMAND_CONNECT_PROXY, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_DISCONNECT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_CANCEL_RECONNECT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_SET_VOLUME, Bundle.EMPTY))
@@ -3675,40 +3345,11 @@ class PlaybackService : MediaLibraryService() {
                     val serverId = args.getString(ARG_SERVER_ID)
                     if (address != null) {
                         // Set server info for MA integration before connecting
-                        setCurrentServer(serverId, ConnectionMode.LOCAL)
+                        setCurrentServer(serverId)
                         connectToServer(address, path)
                         Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                     } else {
                         Log.e(TAG, "CONNECT command missing server_address")
-                        Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
-                    }
-                }
-
-                COMMAND_CONNECT_REMOTE -> {
-                    val remoteId = args.getString(ARG_REMOTE_ID)
-                    val serverId = args.getString(ARG_SERVER_ID)
-                    if (remoteId != null) {
-                        // Set server info for MA integration before connecting
-                        setCurrentServer(serverId, ConnectionMode.REMOTE)
-                        connectToRemoteServer(remoteId)
-                        Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-                    } else {
-                        Log.e(TAG, "CONNECT_REMOTE command missing remote_id")
-                        Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
-                    }
-                }
-
-                COMMAND_CONNECT_PROXY -> {
-                    val url = args.getString(ARG_PROXY_URL)
-                    val token = args.getString(ARG_AUTH_TOKEN)
-                    val serverId = args.getString(ARG_SERVER_ID)
-                    if (url != null && token != null) {
-                        // Set server info for MA integration before connecting
-                        setCurrentServer(serverId, ConnectionMode.PROXY)
-                        connectToProxyServer(url, token)
-                        Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-                    } else {
-                        Log.e(TAG, "CONNECT_PROXY command missing proxy_url or auth_token")
                         Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
                     }
                 }
@@ -3906,6 +3547,12 @@ class PlaybackService : MediaLibraryService() {
             bundle.putLong("time_filter_convergence_ms", timeFilter.convergenceTimeMillis)
         }
 
+        // Refresh network state before reading it: no NetworkEvaluator.Listener is
+        // registered, so without this the diagnostics bundle would stay frozen at
+        // whatever the network looked like at service start instead of reflecting
+        // the current network (e.g. a Wi-Fi to cellular handover).
+        networkEvaluator?.evaluateCurrentNetwork()
+
         // Get network stats from NetworkEvaluator
         networkEvaluator?.networkState?.value?.let { netState ->
             bundle.putString("network_type", netState.transportType.name)
@@ -3949,8 +3596,7 @@ class PlaybackService : MediaLibraryService() {
     }
 
     private fun getRootChildren(): List<MediaItem> {
-        val maAvailable = MusicAssistant.connectionState.value is TransportState.Ready
-        return AutoBrowseTree.rootChildren(maAvailable, isConnected())
+        return AutoBrowseTree.rootChildren(isConnected())
     }
 
     private suspend fun getDiscoveredServers(): List<MediaItem> {
@@ -4009,495 +3655,6 @@ class PlaybackService : MediaLibraryService() {
         browseDiscoveryManager?.startDiscovery()
     }
 
-    /**
-     * Async routing for MA browse tree nodes.
-     * Called from onGetChildren for any parentId not handled by the sync path.
-     */
-    private suspend fun getMaChildren(parentId: String): List<MediaItem> {
-        val items = when (parentId) {
-            MEDIA_ID_MA_PLAYLISTS -> getMaPlaylists()
-            MEDIA_ID_MA_ALBUMS -> getMaAlbums()
-            MEDIA_ID_MA_ARTISTS -> getMaArtists()
-            MEDIA_ID_MA_RADIO -> getMaRadioStations()
-            else -> when {
-                parentId.startsWith(MEDIA_ID_MA_PLAYLIST_PREFIX) -> {
-                    getMaPlaylistTracks(parentId)
-                }
-                parentId.startsWith(MEDIA_ID_MA_ALBUM_PREFIX) -> {
-                    getMaAlbumTracks(parentId)
-                }
-                parentId.startsWith(MEDIA_ID_MA_ARTIST_PREFIX) -> {
-                    getMaArtistAlbums(parentId)
-                }
-                else -> {
-                    Log.w(TAG, "Unknown parentId for MA children: $parentId")
-                    emptyList()
-                }
-            }
-        }
-        // Never hand Android Auto an empty list -- it renders as a blank
-        // "unable to load content" screen (Play Auto quality rejection).
-        return AutoBrowseTree.withEmptyState(parentId, items)
-    }
-
-    // ========================================================================
-    // Music Assistant Item Builders
-    // ========================================================================
-
-    private fun createMaTrackItem(track: MaTrack): MediaItem {
-        val uri = track.uri ?: return MediaItem.EMPTY
-        return MediaItem.Builder()
-            .setMediaId("$MEDIA_ID_MA_TRACK_PREFIX${encodeMediaUri(uri)}")
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(track.name)
-                    .setSubtitle(track.artist)
-                    .setArtist(track.artist)
-                    .setAlbumTitle(track.album)
-                    .setIsPlayable(true)
-                    .setIsBrowsable(false)
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
-                    .apply {
-                        track.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    private fun createMaPlaylistItem(playlist: MaPlaylist): MediaItem {
-        val subtitle = if (playlist.trackCount > 0) "${playlist.trackCount} tracks" else null
-        // Encode provider in mediaId as: ma_playlist_ID~PROVIDER
-        val mediaId = "$MEDIA_ID_MA_PLAYLIST_PREFIX${MaMediaId.encode(playlist.playlistId, playlist.provider)}"
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(playlist.name)
-                    .setSubtitle(subtitle)
-                    .setIsPlayable(true)   // Tap to play entire playlist
-                    .setIsBrowsable(true)  // Drill into tracks
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_PLAYLIST)
-                    .apply {
-                        playlist.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    private fun createMaAlbumItem(album: MaAlbum): MediaItem {
-        val subtitle = buildString {
-            album.artist?.let { append(it) }
-            album.year?.let {
-                if (isNotEmpty()) append(" - ")
-                append(it)
-            }
-        }.ifEmpty { null }
-        // Encode provider in mediaId as: ma_album_ID~PROVIDER
-        val mediaId = "$MEDIA_ID_MA_ALBUM_PREFIX${MaMediaId.encode(album.albumId, album.provider)}"
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(album.name)
-                    .setSubtitle(subtitle)
-                    .setArtist(album.artist)
-                    .setIsPlayable(true)   // Tap to play entire album
-                    .setIsBrowsable(true)  // Drill into tracks
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_ALBUM)
-                    .setExtras(Bundle().apply {
-                        putInt(CONTENT_STYLE_SINGLE_ITEM, CONTENT_STYLE_GRID)
-                    })
-                    .apply {
-                        album.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    private fun createMaArtistItem(artist: MaArtist): MediaItem {
-        // Encode provider in mediaId as: ma_artist_ID~PROVIDER
-        val mediaId = "$MEDIA_ID_MA_ARTIST_PREFIX${MaMediaId.encode(artist.artistId, artist.provider)}"
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(artist.name)
-                    .setIsPlayable(false)  // Browse only (shows albums)
-                    .setIsBrowsable(true)
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_ARTIST)
-                    .setExtras(Bundle().apply {
-                        putInt(CONTENT_STYLE_SINGLE_ITEM, CONTENT_STYLE_GRID)
-                    })
-                    .apply {
-                        artist.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    private fun createMaRadioItem(radio: MaRadio): MediaItem {
-        val uri = radio.uri ?: return MediaItem.EMPTY
-        return MediaItem.Builder()
-            .setMediaId("$MEDIA_ID_MA_RADIO_ITEM_PREFIX${encodeMediaUri(uri)}")
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(radio.name)
-                    .setSubtitle(radio.provider)
-                    .setIsPlayable(true)
-                    .setIsBrowsable(false)
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
-                    .apply {
-                        radio.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    /**
-     * Wraps a MediaItem with a group title extra for Android Auto search result grouping.
-     * Items with the same group title are displayed together under a section header.
-     */
-    private fun withGroupTitle(item: MediaItem, title: String): MediaItem {
-        val existingExtras = item.mediaMetadata.extras
-        val extras = Bundle().apply {
-            if (existingExtras != null) putAll(existingExtras)
-            putString(CONTENT_STYLE_GROUP_TITLE, title)
-        }
-        return item.buildUpon()
-            .setMediaMetadata(
-                item.mediaMetadata.buildUpon()
-                    .setExtras(extras)
-                    .build()
-            )
-            .build()
-    }
-
-    // ========================================================================
-    // Music Assistant Category Listing Methods (suspend)
-    // ========================================================================
-
-    private suspend fun getMaPlaylists(): List<MediaItem> {
-        maPlaylistsCache?.takeUnless { it.expired(MA_LIST_CACHE_TTL_MS) }?.let { return it.data }
-
-        val result = MusicAssistant.getPlaylists(limit = 100)
-        val items = result.getOrNull()?.map { createMaPlaylistItem(it) } ?: emptyList()
-        maPlaylistsCache = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaAlbums(): List<MediaItem> {
-        maAlbumsCache?.takeUnless { it.expired(MA_LIST_CACHE_TTL_MS) }?.let { return it.data }
-
-        val result = MusicAssistant.getAlbums(limit = 100)
-        val items = result.getOrNull()?.map { createMaAlbumItem(it) } ?: emptyList()
-        maAlbumsCache = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaArtists(): List<MediaItem> {
-        maArtistsCache?.takeUnless { it.expired(MA_LIST_CACHE_TTL_MS) }?.let { return it.data }
-
-        val result = MusicAssistant.getArtists(limit = 100)
-        val items = result.getOrNull()?.map { createMaArtistItem(it) } ?: emptyList()
-        maArtistsCache = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaRadioStations(): List<MediaItem> {
-        maRadioCache?.takeUnless { it.expired(MA_LIST_CACHE_TTL_MS) }?.let { return it.data }
-
-        val result = MusicAssistant.getRadioStations(limit = 100)
-        val items = result.getOrNull()?.map { createMaRadioItem(it) } ?: emptyList()
-        maRadioCache = CacheEntry(items)
-        return items
-    }
-
-    // ========================================================================
-    // Music Assistant Drill-Down Methods (suspend)
-    // ========================================================================
-
-    private suspend fun getMaPlaylistTracks(parentId: String): List<MediaItem> {
-        // Parse parentId: "ma_playlist_ID~PROVIDER" or fallback to "ma_playlist_ID"
-        val (actualPlaylistId, provider) =
-            MaMediaId.decode(parentId.removePrefix(MEDIA_ID_MA_PLAYLIST_PREFIX))
-
-        val cacheKey = MaMediaId.encode(actualPlaylistId, provider)
-        maPlaylistTracksCache[cacheKey]
-            ?.takeUnless { it.expired(MA_DETAIL_CACHE_TTL_MS) }
-            ?.let { return it.data }
-
-        val result = MusicAssistant.getPlaylistTracks(actualPlaylistId, provider)
-        val items = result.getOrNull()?.map { createMaTrackItem(it) } ?: emptyList()
-        maPlaylistTracksCache[cacheKey] = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaAlbumTracks(parentId: String): List<MediaItem> {
-        // Parse parentId: "ma_album_ID~PROVIDER" or fallback to "ma_album_ID"
-        val (actualAlbumId, provider) =
-            MaMediaId.decode(parentId.removePrefix(MEDIA_ID_MA_ALBUM_PREFIX))
-
-        val cacheKey = MaMediaId.encode(actualAlbumId, provider)
-        maAlbumTracksCache[cacheKey]
-            ?.takeUnless { it.expired(MA_DETAIL_CACHE_TTL_MS) }
-            ?.let { return it.data }
-
-        val result = MusicAssistant.getAlbumTracks(actualAlbumId, provider)
-        val items = result.getOrNull()?.map { createMaTrackItem(it) } ?: emptyList()
-        maAlbumTracksCache[cacheKey] = CacheEntry(items)
-        return items
-    }
-
-    private suspend fun getMaArtistAlbums(parentId: String): List<MediaItem> {
-        // Parse parentId: "ma_artist_ID~PROVIDER" or fallback to "ma_artist_ID"
-        val (actualArtistId, provider) =
-            MaMediaId.decode(parentId.removePrefix(MEDIA_ID_MA_ARTIST_PREFIX))
-
-        val cacheKey = MaMediaId.encode(actualArtistId, provider)
-        maArtistAlbumsCache[cacheKey]
-            ?.takeUnless { it.expired(MA_DETAIL_CACHE_TTL_MS) }
-            ?.let { return it.data }
-
-        val result = MusicAssistant.getArtistDetails(actualArtistId, provider)
-        val items = result.getOrNull()?.albums?.map { createMaAlbumItem(it) } ?: emptyList()
-        maArtistAlbumsCache[cacheKey] = CacheEntry(items)
-        return items
-    }
-
-    /**
-     * Creates a playable MediaItem for a queue entry.
-     * Uses the queue item ID as the media ID (not the track URI),
-     * so tapping it calls playQueueItem() to jump to that position.
-     *
-     * The currently playing item gets a "[Now Playing]" prefix in its title
-     * for visual differentiation in Android Auto.
-     */
-    private fun createMaQueueMediaItem(item: MaQueueItem, isCurrent: Boolean): MediaItem {
-        val displayTitle = if (isCurrent) "[Now Playing] ${item.name}" else item.name
-        val mediaId = "$MEDIA_ID_MA_QUEUE_ITEM_PREFIX${item.queueItemId}"
-
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(displayTitle)
-                    .setSubtitle(item.artist)
-                    .setArtist(item.artist)
-                    .setAlbumTitle(item.album)
-                    .setIsPlayable(true)
-                    .setIsBrowsable(false)
-                    .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
-                    .apply {
-                        item.imageUri?.let { setArtworkUri(Uri.parse(it)) }
-                    }
-                    .build()
-            )
-            .build()
-    }
-
-    /**
-     * Fetches the MA queue in the background and populates the player's timeline.
-     * This makes the native queue button in Android Auto show all queue items.
-     */
-    @OptIn(UnstableApi::class)
-    private fun populatePlayerQueue() {
-        if (MusicAssistant.connectionState.value !is TransportState.Ready) return
-
-        val generation = ++queuePopulateGeneration
-
-        serviceScope.launch {
-            try {
-                val result = MusicAssistant.getQueueItems()
-                val queueState = result.getOrNull() ?: return@launch
-
-                val items = queueState.items.map { queueItem ->
-                    createMaQueueMediaItem(queueItem, isCurrent = false)
-                }
-
-                mainHandler.post {
-                    // Discard result if a newer populatePlayerQueue() was launched
-                    if (generation != queuePopulateGeneration) {
-                        Log.d(TAG, "Discarding stale queue populate (gen=$generation, current=$queuePopulateGeneration)")
-                        return@post
-                    }
-                    sendSpinPlayer?.updateQueueItems(items, queueState.currentIndex)
-                }
-                Log.d(TAG, "Populated player queue: ${items.size} items, current=${queueState.currentIndex}")
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to populate player queue", e)
-            }
-        }
-    }
-
-    // ========================================================================
-    // Voice Search (VC-1 requirement for Android Auto)
-    // ========================================================================
-
-    /**
-     * Handles voice search from Android Auto ("OK Google, play X on SendSpin Player").
-     * In Media3, voice search arrives via onAddMediaItems with requestMetadata.searchQuery set.
-     *
-     * - Empty/blank query ("play music"): plays recently played tracks
-     * - Non-empty query: searches MA library and plays the best result
-     *   (track > playlist > album, see AutoVoiceSearch.pickFromResults)
-     *
-     * Every dead end produces user-facing feedback instead of a silent no-op:
-     * disconnected requests set a player error with connect guidance; failures
-     * while connected send a transient session error so active playback is
-     * not disturbed.
-     */
-    private fun handleVoiceSearch(
-        query: String,
-        originalItems: List<MediaItem>
-    ): ListenableFuture<List<MediaItem>> {
-        if (MusicAssistant.connectionState.value !is TransportState.Ready) {
-            Log.w(TAG, "Voice search: MA not available")
-            val connected = isConnected()
-            val message = AutoVoiceSearch.unavailableMessage(connected)
-            if (!connected) {
-                // Nothing is playing and nothing can play. Surface actionable
-                // guidance on the car screen instead of a silent no-op (Play
-                // Auto quality: the app must respond to voice actions).
-                // Cleared automatically on the next successful connect.
-                sendSpinPlayer?.setError(message)
-            } else {
-                // Connected to a plain SendSpin server (no MA): playback may
-                // be active, so use a transient session error rather than
-                // putting the player into an error state.
-                notifyVoiceSearchError(message)
-            }
-            return Futures.immediateFuture(originalItems)
-        }
-
-        return suspendToFuture {
-            try {
-                if (query.isBlank()) {
-                    // "Play music on SendSpin Player" - play recently played
-                    Log.d(TAG, "Voice search: empty query, playing recent")
-                    val recent = MusicAssistant.getRecentlyPlayed(limit = 1)
-                    val recentUri = recent.getOrNull()?.firstOrNull()?.uri
-                    if (recentUri != null) {
-                        MusicAssistant.playMedia(recentUri, mediaType = "track")
-                    } else {
-                        Log.w(TAG, "Voice search: no recent tracks to play")
-                        notifyVoiceSearchError(AutoVoiceSearch.noRecentTracksMessage())
-                    }
-                } else {
-                    // "Play Beatles on SendSpin Player" - search and play best result
-                    Log.d(TAG, "Voice search: searching for '$query'")
-                    val result = MusicAssistant.search(
-                        query = query,
-                        limit = 5,
-                        libraryOnly = false
-                    )
-                    when (val pick = AutoVoiceSearch.pickFromResults(result.getOrNull())) {
-                        is AutoVoiceSearch.Pick.Track -> {
-                            Log.d(TAG, "Voice search: playing track '${pick.name}'")
-                            MusicAssistant.playMedia(pick.uri, mediaType = "track")
-                        }
-                        is AutoVoiceSearch.Pick.Playlist -> {
-                            Log.d(TAG, "Voice search: playing playlist '${pick.name}'")
-                            MusicAssistant.playMedia(pick.playlistId, mediaType = "playlist")
-                        }
-                        is AutoVoiceSearch.Pick.Album -> {
-                            Log.d(TAG, "Voice search: playing album '${pick.name}'")
-                            MusicAssistant.playMedia(pick.albumId, mediaType = "album")
-                        }
-                        AutoVoiceSearch.Pick.NoResults -> {
-                            Log.w(TAG, "Voice search: no results for '$query'")
-                            notifyVoiceSearchError(AutoVoiceSearch.noResultsMessage(query))
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Voice search failed", e)
-                notifyVoiceSearchError(AutoVoiceSearch.searchFailedMessage())
-            }
-            // Return original items with a dummy URI so media3 framework doesn't error
-            originalItems.map { item ->
-                item.buildUpon()
-                    .setUri("sendspin://voice-search")
-                    .build()
-            }
-        }
-    }
-
-    /**
-     * Surfaces a non-fatal voice search failure to the car screen / media
-     * notification. Unlike SendSpinPlayer.setError this does not put the
-     * player into an error state, so active playback is unaffected.
-     */
-    private fun notifyVoiceSearchError(message: String) {
-        mainHandler.post {
-            mediaSession?.sendError(SessionError(SessionError.ERROR_INVALID_STATE, message))
-        }
-    }
-
-    // Music Assistant MA Playback Dispatch
-    // ========================================================================
-
-    /**
-     * Handles playback for MA media IDs from the browse tree.
-     * Called from onAddMediaItems when a ma_* media ID is tapped.
-     */
-    private fun handleMaMediaItem(mediaId: String): MediaItem {
-        serviceScope.launch {
-            try {
-                when {
-                    mediaId.startsWith(MEDIA_ID_MA_QUEUE_ITEM_PREFIX) -> {
-                        val queueItemId = mediaId.removePrefix(MEDIA_ID_MA_QUEUE_ITEM_PREFIX)
-                        Log.d(TAG, "MA: Playing queue item id=$queueItemId")
-                        MusicAssistant.playQueueItem(queueItemId)
-                    }
-                    mediaId.startsWith(MEDIA_ID_MA_TRACK_PREFIX) -> {
-                        val encoded = mediaId.removePrefix(MEDIA_ID_MA_TRACK_PREFIX)
-                        val uri = decodeMediaUri(encoded)
-                        Log.d(TAG, "MA: Playing track uri=$uri")
-                        MusicAssistant.playMedia(uri, mediaType = "track")
-                    }
-                    mediaId.startsWith(MEDIA_ID_MA_RADIO_ITEM_PREFIX) -> {
-                        val encoded = mediaId.removePrefix(MEDIA_ID_MA_RADIO_ITEM_PREFIX)
-                        val uri = decodeMediaUri(encoded)
-                        Log.d(TAG, "MA: Playing radio uri=$uri")
-                        MusicAssistant.playMedia(uri, mediaType = "radio")
-                    }
-                    mediaId.startsWith(MEDIA_ID_MA_PLAYLIST_PREFIX) -> {
-                        // Parse mediaId: "ma_playlist_ID~PROVIDER" or fallback to "ma_playlist_ID"
-                        val (playlistId, provider) =
-                            MaMediaId.decode(mediaId.removePrefix(MEDIA_ID_MA_PLAYLIST_PREFIX))
-                        val uri = "$provider://playlist/$playlistId"
-                        Log.d(TAG, "MA: Playing playlist uri=$uri")
-                        MusicAssistant.playMedia(uri, mediaType = "playlist")
-                    }
-                    mediaId.startsWith(MEDIA_ID_MA_ALBUM_PREFIX) -> {
-                        // Parse mediaId: "ma_album_ID~PROVIDER" or fallback to "ma_album_ID"
-                        val (albumId, provider) =
-                            MaMediaId.decode(mediaId.removePrefix(MEDIA_ID_MA_ALBUM_PREFIX))
-                        val uri = "$provider://album/$albumId"
-                        Log.d(TAG, "MA: Playing album uri=$uri")
-                        MusicAssistant.playMedia(uri, mediaType = "album")
-                    }
-                    else -> {
-                        Log.w(TAG, "MA: Unknown media ID for playback: $mediaId")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "MA: Failed to play media $mediaId", e)
-            }
-        }
-
-        // Return a MediaItem with a dummy URI so media3 doesn't complain
-        return MediaItem.Builder()
-            .setMediaId(mediaId)
-            .setUri("sendspin://ma-playback")
-            .build()
-    }
-
     private fun findItemById(mediaId: String): MediaItem? {
         return when {
             mediaId == MEDIA_ID_ROOT -> {
@@ -4526,67 +3683,13 @@ class PlaybackService : MediaLibraryService() {
                 val server = UnifiedServerRepository.getServerByAddress(address)
                 server?.let { AutoBrowseTree.playableServerItem(it.name, it.local?.address ?: address) }
             }
-            // MA category folders (root-level tabs)
-            mediaId == MEDIA_ID_MA_PLAYLISTS -> {
-                AutoBrowseTree.browsableItem(MEDIA_ID_MA_PLAYLISTS, "Playlists")
-            }
-            mediaId == MEDIA_ID_MA_ALBUMS -> {
-                AutoBrowseTree.browsableItem(MEDIA_ID_MA_ALBUMS, "Albums")
-            }
-            mediaId == MEDIA_ID_MA_ARTISTS -> {
-                AutoBrowseTree.browsableItem(MEDIA_ID_MA_ARTISTS, "Artists")
-            }
-            mediaId == MEDIA_ID_MA_RADIO -> {
-                AutoBrowseTree.browsableItem(MEDIA_ID_MA_RADIO, "Radio")
-            }
-            // MA items - search through caches
-            mediaId.startsWith("ma_") -> {
-                findMaItemInCaches(mediaId)
-            }
             else -> null
         }
-    }
-
-    /**
-     * Searches all MA caches for an item by media ID.
-     * Used by onGetItem to resolve individual MA items.
-     */
-    private fun findMaItemInCaches(mediaId: String): MediaItem? {
-        // Search list caches
-        val allCaches = listOfNotNull(
-            maPlaylistsCache?.data,
-            maAlbumsCache?.data,
-            maArtistsCache?.data,
-            maRadioCache?.data,
-            maSearchResultsCache
-        )
-        for (cache in allCaches) {
-            cache.find { it.mediaId == mediaId }?.let { return it }
-        }
-        // Search drill-down caches
-        for ((_, entry) in maPlaylistTracksCache) {
-            entry.data.find { it.mediaId == mediaId }?.let { return it }
-        }
-        for ((_, entry) in maAlbumTracksCache) {
-            entry.data.find { it.mediaId == mediaId }?.let { return it }
-        }
-        for ((_, entry) in maArtistAlbumsCache) {
-            entry.data.find { it.mediaId == mediaId }?.let { return it }
-        }
-        return null
     }
 
     @OptIn(UnstableApi::class)
     private fun initializePlayer() {
         sendSpinPlayer = SendSpinPlayer()
-        sendSpinPlayer?.onQueueItemSelected = { mediaId ->
-            // Handle queue item selection from Android Auto's native queue UI
-            val queueItemId = mediaId.removePrefix(MEDIA_ID_MA_QUEUE_ITEM_PREFIX)
-            Log.d(TAG, "Native queue item selected: $queueItemId")
-            serviceScope.launch {
-                MusicAssistant.playQueueItem(queueItemId)
-            }
-        }
         Log.d(TAG, "SendSpinPlayer initialized")
     }
 
@@ -4671,20 +3774,12 @@ class PlaybackService : MediaLibraryService() {
         // Show foreground notification immediately (Android requires this within 10s)
         startForegroundServiceWithNotification(server.name)
 
-        // Connect using the server's preferred method
+        // Connect using the server's local address (the only connection method left).
         when {
             server.local != null -> {
                 // Re-resolve via mDNS first: a stored static IP can go stale
                 // (DHCP) and cause a refused connect on boot. See #158.
                 autoConnectLocalWithMdns(server)
-            }
-            server.remote != null -> {
-                Log.i(TAG, "Auto-connect: remote connection with ID ${server.remote!!.remoteId.take(8)}...")
-                connectToRemoteServer(server.remote!!.remoteId)
-            }
-            server.proxy != null -> {
-                Log.i(TAG, "Auto-connect: proxy connection to ${server.proxy!!.url}")
-                connectToProxyServer(server.proxy!!.url, server.proxy!!.authToken)
             }
             else -> {
                 Log.w(TAG, "Auto-connect: server ${server.name} has no configured connection methods")

@@ -81,14 +81,10 @@ import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.DefaultServerPinger
-import com.sendspindroid.network.NetworkEvaluator
-import com.sendspindroid.ui.remote.ProxyConnectDialog
-import com.sendspindroid.ui.remote.RemoteConnectDialog
 import com.sendspindroid.ui.server.AddServerWizardActivity
 import com.sendspindroid.ui.server.UnifiedServerConnector
 import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.musicassistant.MusicAssistant
-import com.sendspindroid.ui.queue.QueueSheetFragment
 import androidx.activity.viewModels
 import androidx.fragment.app.Fragment
 import kotlinx.coroutines.flow.collectLatest
@@ -119,7 +115,6 @@ import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.adaptive.determineFormFactor
 import com.sendspindroid.ui.adaptive.isTvDevice
 import com.sendspindroid.ui.theme.SendSpinTheme
-import com.sendspindroid.ui.main.NavTab
 
 /**
  * Main activity for the SendSpinDroid audio streaming client.
@@ -198,9 +193,8 @@ class MainActivity : AppCompatActivity() {
     // Server being reconnected to (for tracking during auto-reconnect)
     private var reconnectingToServer: UnifiedServer? = null
 
-    // Default server pinger for remote/proxy auto-connect when mDNS unavailable
+    // Default server pinger for auto-connect when mDNS hasn't found the server yet
     private var defaultServerPinger: DefaultServerPinger? = null
-    private var networkEvaluator: NetworkEvaluator? = null
 
     // Charging state receiver for adaptive ping intervals
     private var chargingReceiver: BroadcastReceiver? = null
@@ -423,40 +417,6 @@ class MainActivity : AppCompatActivity() {
             message,
             Snackbar.LENGTH_SHORT
         ).show()
-    }
-
-    /**
-     * Shows a Snackbar with an Undo action for reversible operations.
-     *
-     * The operation is deferred until the snackbar dismisses naturally.
-     * If the user taps Undo, the operation is cancelled and onUndo is called.
-     *
-     * @param message The message to display
-     * @param onUndo Called when the user taps Undo (restore the item)
-     * @param onDismissed Called when snackbar dismisses without Undo (execute the deletion)
-     */
-    fun showUndoSnackbar(
-        message: String,
-        onUndo: () -> Unit,
-        onDismissed: () -> Unit = {}
-    ) {
-        val snackbar = Snackbar.make(
-            snackbarView,
-            message,
-            Snackbar.LENGTH_LONG
-        )
-        snackbar.setAction("Undo") {
-            onUndo()
-        }
-        snackbar.addCallback(object : Snackbar.Callback() {
-            override fun onDismissed(transientBottomBar: Snackbar?, event: Int) {
-                if (event != DISMISS_EVENT_ACTION) {
-                    // Dismissed without pressing Undo -> execute the actual operation
-                    onDismissed()
-                }
-            }
-        })
-        snackbar.show()
     }
 
     /**
@@ -824,11 +784,6 @@ class MainActivity : AppCompatActivity() {
             onFavoriteClicked()
         }
 
-        // Queue button - Only visible when connected to MA server
-        binding.queueButton.setOnClickListener {
-            showQueueSheet()
-        }
-
         // Observe MA connection state to show/hide MA-dependent UI elements
         observeMaConnectionState()
 
@@ -873,8 +828,6 @@ class MainActivity : AppCompatActivity() {
      * The ComposeView hosts AppShell which provides:
      * - Server list (Compose)
      * - Now Playing screen (Compose)
-     * - Navigation tabs with browse content (Compose)
-     * - Mini player (Compose)
      * - Toolbar (Compose)
      *
      * The XML layout remains underneath for backward compatibility while
@@ -976,7 +929,6 @@ class MainActivity : AppCompatActivity() {
                             onVolumeChanged(volume)
                             viewModel.updateVolume(volume)
                         },
-                        onQueueClick = { showQueueSheet() },
                         onDisconnectClick = { onDisconnectClicked() },
                         onAddServerClick = { showAddServerWizard() },
                         onStatsClick = {
@@ -994,12 +946,7 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         },
-                        onExitAppClick = { onExitAppClicked() },
-                        onShowSuccess = { message -> showSuccessSnackbar(message) },
-                        onShowError = { message -> showErrorSnackbar(message) },
-                        onShowUndoSnackbar = { message, onUndo, onDismissed ->
-                            showUndoSnackbar(message, onUndo, onDismissed)
-                        }
+                        onExitAppClick = { onExitAppClicked() }
                     )
                 }
             }
@@ -1025,9 +972,6 @@ class MainActivity : AppCompatActivity() {
     // Track whether navigation content is currently shown (vs full player)
     // Legacy field - navigation is now Compose-based but some callbacks still reference this
     private var isNavigationContentVisible = false
-
-    // Current selected navigation tab (legacy - navigation is now Compose-based)
-    private var currentNavTab: Int = 0
 
     // setupBottomNavigation() removed - navigation is now Compose-based (AppShell)
     private fun setupBottomNavigation() {
@@ -1088,8 +1032,6 @@ class MainActivity : AppCompatActivity() {
     private fun showNavigationContent(fragment: Fragment) {
         if (!isNavigationContentVisible) {
             isNavigationContentVisible = true
-            // Sync state to ViewModel for Compose UI
-            viewModel.setNavigationContentVisible(true)
             updateBackPressCallbackEnabled()
             Log.d(TAG, "Showing navigation content")
 
@@ -1126,8 +1068,6 @@ class MainActivity : AppCompatActivity() {
     private fun hideNavigationContent() {
         if (isNavigationContentVisible) {
             isNavigationContentVisible = false
-            // Sync state to ViewModel for Compose UI
-            viewModel.setNavigationContentVisible(false)
             updateBackPressCallbackEnabled()
             Log.d(TAG, "Hiding navigation content, returning to full player")
 
@@ -1193,7 +1133,7 @@ class MainActivity : AppCompatActivity() {
      * Uses the modern OnBackPressedCallback approach (onBackPressed is deprecated).
      *
      * The callback is reactive: only enabled when there is in-app state to back
-     * out of (Compose detail stack or legacy XML nav). When nothing to handle,
+     * out of (the legacy XML nav content). When nothing to handle,
      * the callback stays disabled and BACK flows through to the framework's
      * default handlers -- this matters for popup menus (toolbar overflow), which
      * dismiss via Window-level key dispatch rather than the back-press
@@ -1205,12 +1145,6 @@ class MainActivity : AppCompatActivity() {
     private fun setupBackPressHandler() {
         backPressCallback = object : OnBackPressedCallback(false) {
             override fun handleOnBackPressed() {
-                // Check if a Compose detail screen is showing
-                if (viewModel.navigateDetailBack()) {
-                    updateBackPressCallbackEnabled()
-                    return
-                }
-
                 // Legacy path: XML-based navigation content
                 if (isNavigationContentVisible) {
                     if (supportFragmentManager.backStackEntryCount > 0) {
@@ -1226,24 +1160,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
         onBackPressedDispatcher.addCallback(this, backPressCallback)
-
-        // Keep the callback's enabled state in sync with whether there's
-        // anything in-app to back out of, so popups / dialogs / framework
-        // dismissal paths see BACK unobstructed when we have nothing to do.
-        lifecycleScope.launch {
-            viewModel.detailBackStack.collect { updateBackPressCallbackEnabled() }
-        }
     }
 
     /**
      * Enable the BACK callback iff there's in-app state to pop. Called from
-     * the callback itself after a pop, from nav content show/hide, and from
-     * the detailBackStack collector.
+     * the callback itself after a pop and from nav content show/hide.
      */
     private fun updateBackPressCallbackEnabled() {
         if (!::backPressCallback.isInitialized) return
-        backPressCallback.isEnabled = isNavigationContentVisible ||
-            viewModel.detailBackStack.value.isNotEmpty()
+        backPressCallback.isEnabled = isNavigationContentVisible
     }
 
     // setupSectionedServerAdapter() removed - server list is now Compose-based (ServerListScreen)
@@ -1292,8 +1217,6 @@ class MainActivity : AppCompatActivity() {
         applyFullScreenMode()
         // Re-apply mini-player position (picks up changes made in Settings)
         updateMiniPlayerPosition()
-        // Re-sync Compose mini-player position (picks up changes made in Settings)
-        viewModel.setMiniPlayerPosition(UserSettings.miniPlayerPosition)
         // Re-evaluate keep screen on (picks up setting changes + current playback state)
         updateKeepScreenOn(mediaController?.isPlaying == true)
         // Re-sync UI state with MediaController
@@ -1338,7 +1261,6 @@ class MainActivity : AppCompatActivity() {
         // Reset navigation state -- we're leaving browsing/player for the server list
         if (isNavigationContentVisible) {
             isNavigationContentVisible = false
-            viewModel.setNavigationContentVisible(false)
             updateBackPressCallbackEnabled()
         }
 
@@ -1378,8 +1300,8 @@ class MainActivity : AppCompatActivity() {
         // Check for default server and auto-connect after a brief delay
         checkDefaultServerAutoConnect()
 
-        // Start default server pinger for remote/proxy connections
-        // (mDNS only finds local servers; this pings remote/proxy when on cellular or away from home)
+        // Start default server pinger for when mDNS hasn't found the server yet
+        // (mDNS announcements can be missed; this pings the server directly to catch that case)
         if (!userManuallyDisconnected) {
             defaultServerPinger?.start()
         }
@@ -1618,20 +1540,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Initializes the DefaultServerPinger for remote/proxy auto-connect.
+     * Initializes the DefaultServerPinger for auto-connect when mDNS hasn't
+     * found the default server yet.
      *
-     * When the default server isn't discovered via mDNS (user on cellular,
-     * server only has remote/proxy config, etc.), this pinger periodically
-     * checks if the server is reachable and triggers auto-connect on success.
+     * When the default server isn't discovered via mDNS (e.g. its
+     * announcement was missed), this pinger periodically checks if the
+     * server is reachable and triggers auto-connect on success.
      */
     private fun initializeDefaultServerPinger() {
-        // Initialize NetworkEvaluator for connection priority decisions
-        networkEvaluator = NetworkEvaluator(this)
-        networkEvaluator?.evaluateCurrentNetwork()
-
         // Initialize the pinger
         defaultServerPinger = DefaultServerPinger(
-            networkEvaluator = networkEvaluator!!,
             onServerReachable = { server ->
                 runOnUiThread {
                     // Only connect if conditions still allow
@@ -1661,63 +1579,6 @@ class MainActivity : AppCompatActivity() {
         }, Context.RECEIVER_NOT_EXPORTED)
 
         Log.d(TAG, "DefaultServerPinger initialized")
-    }
-
-    /**
-     * Performs a connection attempt for auto-reconnection.
-     * Returns true if connection was initiated successfully (doesn't wait for completion).
-     */
-    private suspend fun performAutoReconnect(
-        server: UnifiedServer,
-        selectedConnection: ConnectionSelector.SelectedConnection
-    ): Boolean {
-        val controller = mediaController
-        if (controller == null) {
-            Log.e(TAG, "Cannot auto-reconnect: MediaController not available")
-            return false
-        }
-
-        return try {
-            when (selectedConnection) {
-                is ConnectionSelector.SelectedConnection.Local -> {
-                    val args = Bundle().apply {
-                        putString(PlaybackService.ARG_SERVER_ADDRESS, selectedConnection.address)
-                        putString(PlaybackService.ARG_SERVER_PATH, selectedConnection.path)
-                        putString(PlaybackService.ARG_SERVER_ID, server.id)
-                    }
-                    val command = SessionCommand(PlaybackService.COMMAND_CONNECT, Bundle.EMPTY)
-                    controller.sendCustomCommand(command, args)
-                    Log.d(TAG, "Auto-reconnect: sent local connect command to ${selectedConnection.address}")
-                }
-                is ConnectionSelector.SelectedConnection.Remote -> {
-                    val args = Bundle().apply {
-                        putString(PlaybackService.ARG_REMOTE_ID, selectedConnection.remoteId)
-                        putString(PlaybackService.ARG_SERVER_ID, server.id)
-                    }
-                    val command = SessionCommand(PlaybackService.COMMAND_CONNECT_REMOTE, Bundle.EMPTY)
-                    controller.sendCustomCommand(command, args)
-                    Log.d(TAG, "Auto-reconnect: sent remote connect command")
-                }
-                is ConnectionSelector.SelectedConnection.Proxy -> {
-                    val args = Bundle().apply {
-                        putString(PlaybackService.ARG_PROXY_URL, selectedConnection.url)
-                        putString(PlaybackService.ARG_AUTH_TOKEN, selectedConnection.authToken)
-                        putString(PlaybackService.ARG_SERVER_ID, server.id)
-                    }
-                    val command = SessionCommand(PlaybackService.COMMAND_CONNECT_PROXY, Bundle.EMPTY)
-                    controller.sendCustomCommand(command, args)
-                    Log.d(TAG, "Auto-reconnect: sent proxy connect command")
-                }
-            }
-            // Note: We return true to indicate the command was sent.
-            // The actual success/failure will be determined by connection state change.
-            // For now, we optimistically assume the attempt was valid.
-            // A more robust implementation would wait for connection confirmation.
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Auto-reconnect: failed to send connect command", e)
-            false
-        }
     }
 
     /**
@@ -2343,115 +2204,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Shows the Remote Connect dialog for connecting via Music Assistant Remote Access.
-     * Uses WebRTC for NAT traversal, allowing connection from outside the local network.
-     */
-    private fun showRemoteConnectDialog() {
-        RemoteConnectDialog.show(supportFragmentManager) { remoteId, nickname ->
-            // Save connection preferences for quick reconnection
-            UserSettings.setLastRemoteId(remoteId)
-            UserSettings.setLastConnectionMode(UserSettings.ConnectionMode.REMOTE)
-
-            // Initiate remote connection via WebRTC
-            connectToRemoteServer(remoteId)
-        }
-    }
-
-    /**
-     * Initiates a remote connection via WebRTC using the Music Assistant Remote ID.
-     * Sends a custom command to PlaybackService which handles the WebRTC connection.
-     *
-     * @param remoteId The 26-character Remote ID from Music Assistant settings
-     */
-    private fun connectToRemoteServer(remoteId: String) {
-        val controller = mediaController
-        if (controller == null) {
-            showErrorSnackbar(
-                message = getString(R.string.error_service_not_connected),
-                errorType = ErrorType.CONNECTION
-            )
-            return
-        }
-
-        // Update state to show connecting UI
-        connectionState = AppConnectionState.Connecting("Remote Server", remoteId)
-        showConnectionLoading("Remote Server")
-
-        // Send remote connect command to PlaybackService
-        try {
-            val args = Bundle().apply {
-                putString(PlaybackService.ARG_REMOTE_ID, remoteId)
-            }
-            val command = SessionCommand(PlaybackService.COMMAND_CONNECT_REMOTE, Bundle.EMPTY)
-            controller.sendCustomCommand(command, args)
-            Log.d(TAG, "Sent remote connect command for Remote ID: $remoteId")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send remote connect command", e)
-            connectionState = AppConnectionState.Error("Remote connection failed")
-            hideConnectionLoading()
-            showErrorSnackbar(
-                message = getString(R.string.remote_connection_failed, e.message ?: "Unknown error"),
-                errorType = ErrorType.CONNECTION
-            )
-        }
-    }
-
-    /**
-     * Shows the proxy connection dialog for connecting via reverse proxy.
-     */
-    private fun showProxyConnectDialog() {
-        ProxyConnectDialog.show(supportFragmentManager) { url, authToken, nickname ->
-            // Save connection preferences for quick reconnection
-            UserSettings.setLastProxyUrl(url)
-            UserSettings.setLastConnectionMode(UserSettings.ConnectionMode.PROXY)
-
-            // Initiate proxy connection
-            connectToProxyServer(url, authToken)
-        }
-    }
-
-    /**
-     * Initiates a connection via authenticated reverse proxy.
-     * Sends a custom command to PlaybackService which handles the WebSocket connection.
-     *
-     * @param url The proxy server URL (e.g., "https://ma.example.com/sendspin")
-     * @param authToken The long-lived authentication token from Music Assistant
-     */
-    private fun connectToProxyServer(url: String, authToken: String) {
-        val controller = mediaController
-        if (controller == null) {
-            showErrorSnackbar(
-                message = getString(R.string.error_service_not_connected),
-                errorType = ErrorType.CONNECTION
-            )
-            return
-        }
-
-        // Update state to show connecting UI
-        connectionState = AppConnectionState.Connecting("Proxy Server", url)
-        showConnectionLoading("Proxy Server")
-
-        // Send proxy connect command to PlaybackService
-        try {
-            val args = Bundle().apply {
-                putString(PlaybackService.ARG_PROXY_URL, url)
-                putString(PlaybackService.ARG_AUTH_TOKEN, authToken)
-            }
-            val command = SessionCommand(PlaybackService.COMMAND_CONNECT_PROXY, Bundle.EMPTY)
-            controller.sendCustomCommand(command, args)
-            Log.d(TAG, "Sent proxy connect command for URL: $url")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send proxy connect command", e)
-            connectionState = AppConnectionState.Error("Proxy connection failed")
-            hideConnectionLoading()
-            showErrorSnackbar(
-                message = getString(R.string.proxy_connection_failed, e.message ?: "Unknown error"),
-                errorType = ErrorType.CONNECTION
-            )
-        }
-    }
-
     // ============================================================================
     // Unified Server Support (MVP)
     // ============================================================================
@@ -2463,7 +2215,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun setupUnifiedServers() {
         // Initialize the connector for handling unified server connections
-        unifiedServerConnector = UnifiedServerConnector(this) { selected ->
+        unifiedServerConnector = UnifiedServerConnector { selected ->
             // Callback when connection method is selected
             Log.d(TAG, "Connection method selected: ${ConnectionSelector.getConnectionDescription(selected)}")
         }
@@ -2722,37 +2474,6 @@ class MainActivity : AppCompatActivity() {
                 }
             )
         }
-    }
-
-    /**
-     * Shows the queue management bottom sheet.
-     * Displays the current queue from Music Assistant with controls for
-     * reordering, removing, and jumping to tracks.
-     */
-    private fun showQueueSheet() {
-        Log.d(TAG, "Queue button clicked - showing queue sheet")
-
-        // On tablets (sw >= 600dp) or TV when Now Playing is shown (not browsing),
-        // the queue is already visible inline/sidebar -- skip the bottom sheet
-        val isTabletOrTv = resources.configuration.smallestScreenWidthDp >= 600 || isTvDevice
-        val isOnNowPlaying = !viewModel.isNavigationContentVisible.value
-        if (isTabletOrTv && isOnNowPlaying) {
-            Log.d(TAG, "Queue already visible inline on tablet/TV Now Playing -- skipping sheet")
-            return
-        }
-
-        // Avoid showing multiple instances
-        val existing = supportFragmentManager.findFragmentByTag(QueueSheetFragment.TAG)
-        if (existing != null) return
-
-        val fragment = QueueSheetFragment.newInstance()
-        fragment.onBrowseLibrary = {
-            // Navigate to Library tab when "Browse Library" is tapped from empty queue
-            // Navigation is now Compose-based via ViewModel
-            viewModel.setCurrentNavTab(NavTab.LIBRARY)
-            viewModel.setNavigationContentVisible(true)
-        }
-        fragment.show(supportFragmentManager, QueueSheetFragment.TAG)
     }
 
     /**
@@ -3660,12 +3381,10 @@ class MainActivity : AppCompatActivity() {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
             android.R.id.home -> {
-                // Toolbar back button -- pop Compose detail or legacy fragment
-                if (!viewModel.navigateDetailBack()) {
-                    if (supportFragmentManager.backStackEntryCount > 0) {
-                        supportFragmentManager.popBackStack()
-                        updateToolbarForNavigation()
-                    }
+                // Toolbar back button -- pop legacy fragment
+                if (supportFragmentManager.backStackEntryCount > 0) {
+                    supportFragmentManager.popBackStack()
+                    updateToolbarForNavigation()
                 }
                 true
             }

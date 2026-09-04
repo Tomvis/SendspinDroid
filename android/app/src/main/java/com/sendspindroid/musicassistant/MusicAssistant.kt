@@ -3,7 +3,6 @@ package com.sendspindroid.musicassistant
 import android.content.Context
 import android.util.Log
 import com.sendspindroid.UserSettings
-import com.sendspindroid.UserSettings.ConnectionMode
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.coordinator.FailureReason
 import com.sendspindroid.coordinator.TransportState
@@ -12,9 +11,7 @@ import com.sendspindroid.musicassistant.model.MaMediaType
 import com.sendspindroid.musicassistant.model.MaPlayer
 import com.sendspindroid.musicassistant.model.MaServerInfo
 import com.sendspindroid.musicassistant.transport.MaApiTransport
-import com.sendspindroid.musicassistant.transport.MaDataChannelTransport
 import com.sendspindroid.musicassistant.transport.MaWebSocketTransport
-import org.webrtc.DataChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,19 +32,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 
-/** Map app ConnectionMode to shared MaConnectionMode. */
-private fun ConnectionMode.toMaMode(): MaConnectionMode = when (this) {
-    ConnectionMode.LOCAL -> MaConnectionMode.LOCAL
-    ConnectionMode.REMOTE -> MaConnectionMode.REMOTE
-    ConnectionMode.PROXY -> MaConnectionMode.PROXY
-}
-
 /**
  * Derive the MA API WebSocket URL for this endpoint.
  *
  * LOCAL  -> ws://<host>:<port>/ws  (via WebSocketUrlBuilder for correct IPv6 handling)
  * PROXY  -> strips /sendspin suffix, converts http->ws, appends /ws
- * REMOTE -> sentinel URL "webrtc://ma-api" (signals DataChannel transport)
+ * REMOTE -> sentinel URL "webrtc://ma-api"
  */
 private fun MaEndpoint.toApiUrl(): String = when (this) {
     is MaEndpoint.Local -> {
@@ -142,7 +132,6 @@ suspend fun testMaAuth(
  * All command methods and JSON parsing are delegated to the shared
  * [MaCommandClient]. This manager handles only Android-specific concerns:
  * - Context initialization
- * - DataChannel transport management (WebRTC)
  * - Connection lifecycle
  * - Token/credential authentication flow
  */
@@ -204,7 +193,6 @@ object MusicAssistant {
 
     // Current server info (when connected)
     private var currentServer: UnifiedServer? = null
-    private var currentConnectionMode: ConnectionMode? = null
     private var currentApiUrl: String? = null
 
     // Persistent MA API transport (replaces fire-and-forget WebSocket pattern)
@@ -215,53 +203,8 @@ object MusicAssistant {
     @Volatile
     private var connectJob: Job? = null
 
-    /**
-     * Returns the active API transport, if connected.
-     * Used by MaImageProxy for HTTP proxy requests in REMOTE mode.
-     */
-    fun getApiTransport(): MaApiTransport? = apiTransport
-
-    // WebRTC DataChannel for MA API in REMOTE mode
-    @Volatile
-    private var maApiDataChannel: DataChannel? = null
-
-    // Pre-created DataChannel transport that eagerly captures ServerInfo
-    @Volatile
-    private var pendingDataChannelTransport: MaDataChannelTransport? = null
-
     // Shared command client — all command/parsing logic lives here
     private val commandClient = MaCommandClient(MaSettings)
-
-    /**
-     * Set the MA API DataChannel from WebRTCTransport.
-     *
-     * Called by PlaybackService when a remote connection establishes the "ma-api"
-     * DataChannel. Eagerly creates a [MaDataChannelTransport] and replays any
-     * messages buffered by WebRTCTransport (e.g., ServerInfo sent before this
-     * method is called).
-     *
-     * @param channel The open DataChannel, or null to clear
-     * @param bufferedMessages Messages buffered by WebRTCTransport before the
-     *                         transport observer was registered
-     */
-    fun setMaApiDataChannel(channel: DataChannel?, bufferedMessages: List<String> = emptyList()) {
-        maApiDataChannel = channel
-        if (channel != null) {
-            // Create transport eagerly so its observer captures future messages
-            val transport = MaDataChannelTransport(channel)
-            pendingDataChannelTransport = transport
-            Log.d(TAG, "MA API DataChannel set, transport created eagerly")
-
-            // Replay any messages buffered by WebRTCTransport before we took over
-            if (bufferedMessages.isNotEmpty()) {
-                Log.d(TAG, "Replaying ${bufferedMessages.size} buffered MA API message(s)")
-                transport.replayBufferedMessages(bufferedMessages)
-            }
-        } else {
-            pendingDataChannelTransport = null
-            Log.d(TAG, "MA API DataChannel cleared")
-        }
-    }
 
     // Coroutine scope for async operations.
     // `internal var` (not `private val`) solely so unit tests can substitute a
@@ -270,7 +213,7 @@ object MusicAssistant {
 
     /**
      * Test seam: when non-null, [createTransport] returns this instead of opening
-     * a real WebSocket/DataChannel, so unit tests never touch the network. Always
+     * a real WebSocket, so unit tests never touch the network. Always
      * null in production.
      */
     internal var transportFactoryOverride: ((String) -> MaApiTransport?)? = null
@@ -323,60 +266,42 @@ object MusicAssistant {
     }
 
     /**
-     * Map a UnifiedServer + ConnectionMode to an MaEndpoint.
-     * Returns null if the server has no configuration for the given mode.
+     * Map a UnifiedServer to an MaEndpoint.
+     * Returns null if the server has no local configuration.
      */
-    private fun serverToMaEndpoint(server: UnifiedServer, mode: ConnectionMode): MaEndpoint? =
-        when (mode) {
-            ConnectionMode.LOCAL -> server.local?.let {
-                MaEndpoint.Local(it.address, MaSettings.getDefaultPort())
-            }
-            ConnectionMode.PROXY -> server.proxy?.let {
-                MaEndpoint.Proxy(it.url)
-            }
-            ConnectionMode.REMOTE -> {
-                val remote = server.remote
-                if (remote != null) {
-                    MaEndpoint.Remote(remote.remoteId)
-                } else {
-                    // No remote config: fall back to local or proxy if available
-                    server.local?.let { MaEndpoint.Local(it.address, MaSettings.getDefaultPort()) }
-                        ?: server.proxy?.let { MaEndpoint.Proxy(it.url) }
-                }
-            }
+    private fun serverToMaEndpoint(server: UnifiedServer): MaEndpoint? =
+        server.local?.let {
+            MaEndpoint.Local(it.address, MaSettings.getDefaultPort())
         }
 
     /**
      * Called by PlaybackService when a server connection is established.
      *
-     * Checks if MA API should be available for this server and connection mode,
-     * then attempts authentication if a token is stored.
+     * Checks if MA API should be available for this server, then attempts
+     * authentication if a token is stored.
      *
      * @param server The connected UnifiedServer
-     * @param connectionMode The active connection mode (LOCAL, REMOTE, or PROXY)
      */
-    fun onServerConnected(server: UnifiedServer, connectionMode: ConnectionMode) {
-        Log.d(TAG, "Server connected: ${server.name}, mode=$connectionMode, isMusicAssistant=${server.isMusicAssistant}")
+    fun onServerConnected(server: UnifiedServer) {
+        Log.d(TAG, "Server connected: ${server.name}, isMusicAssistant=${server.isMusicAssistant}")
 
         currentServer = server
-        currentConnectionMode = connectionMode
 
         // Check 1: Is this server a Music Assistant server?
         val hasStoredToken = MaSettings.getTokenForServer(server.id) != null
-        val hasMaApiChannel = maApiDataChannel != null
-        if (!server.isMusicAssistant && !hasStoredToken && !hasMaApiChannel) {
-            Log.d(TAG, "Server is not marked as Music Assistant, no stored token, no ma-api channel")
+        if (!server.isMusicAssistant && !hasStoredToken) {
+            Log.d(TAG, "Server is not marked as Music Assistant, no stored token")
             _connectionState.value = TransportState.Idle
             return
         }
         if (!server.isMusicAssistant) {
-            Log.i(TAG, "Server not flagged as MA but auto-detected (token=$hasStoredToken, channel=$hasMaApiChannel)")
+            Log.i(TAG, "Server not flagged as MA but auto-detected (token=$hasStoredToken)")
         }
 
         // Check 2: Can we reach the MA API?
-        val endpoint = serverToMaEndpoint(server, connectionMode)
+        val endpoint = serverToMaEndpoint(server)
         if (endpoint == null) {
-            Log.d(TAG, "No MA API endpoint available for connection mode $connectionMode")
+            Log.d(TAG, "No MA API endpoint available")
             _connectionState.value = TransportState.Idle
             return
         }
@@ -410,12 +335,7 @@ object MusicAssistant {
         // Clear command client transport
         commandClient.setTransport(null, null, false)
 
-        // Clear DataChannel reference (owned by WebRTCTransport, not us)
-        maApiDataChannel = null
-        pendingDataChannelTransport = null
-
         currentServer = null
-        currentConnectionMode = null
         currentApiUrl = null
         currentServerInfo = null
         _connectionState.value = TransportState.Idle
@@ -531,7 +451,7 @@ object MusicAssistant {
         apiTransport = null
 
         val transport = createTransport(apiUrl)
-            ?: throw IOException("Cannot create MA API transport for mode $currentConnectionMode")
+            ?: throw IOException("Cannot create MA API transport for $apiUrl")
 
         authenticate(transport)
 
@@ -562,9 +482,9 @@ object MusicAssistant {
     /**
      * Attempt to authenticate with a stored token.
      *
-     * Establishes a persistent transport connection (WebSocket for LOCAL/PROXY,
-     * DataChannel for REMOTE) and authenticates with the given token.
-     * All subsequent API calls are multiplexed over this single connection.
+     * Establishes a persistent WebSocket transport connection and authenticates
+     * with the given token. All subsequent API calls are multiplexed over this
+     * single connection.
      */
     private fun connectWithToken(apiUrl: String, token: String, serverId: String) {
         _connectionState.value = TransportState.Connecting
@@ -584,38 +504,13 @@ object MusicAssistant {
     }
 
     /**
-     * Create the appropriate MaApiTransport for the current connection mode.
+     * Create the MaApiTransport for the connected server.
      *
-     * LOCAL/PROXY: MaWebSocketTransport (persistent WebSocket to ws://host:8095/ws)
-     * REMOTE: MaDataChannelTransport (WebRTC DataChannel "ma-api")
-     *
-     * For REMOTE mode, if the DataChannel is not available, falls back to
-     * a WebSocket if a local or proxy URL can be derived.
+     * MaWebSocketTransport: persistent WebSocket to ws://host:8095/ws.
      */
     private fun createTransport(apiUrl: String): MaApiTransport? {
         transportFactoryOverride?.let { return it(apiUrl) }
-        val mode = currentConnectionMode ?: return null
-
-        if (mode == ConnectionMode.REMOTE) {
-            val pending = pendingDataChannelTransport
-            if (pending != null) {
-                pendingDataChannelTransport = null  // Consumed; don't reuse
-                Log.d(TAG, "Using pre-created DataChannel transport (serverInfo=${pending.serverVersion != null})")
-                return pending
-            }
-            val channel = maApiDataChannel
-            if (channel != null) {
-                Log.w(TAG, "Creating fresh DataChannel transport (pre-created was null)")
-                return MaDataChannelTransport(channel)
-            }
-            // No DataChannel — try WebSocket fallback
-            val wsUrl = currentServer?.let { server ->
-                MaApiEndpoint.deriveFromLocal(server, MaSettings.getDefaultPort()) ?: MaApiEndpoint.deriveFromProxy(server)
-            }
-            return if (wsUrl != null) MaWebSocketTransport(wsUrl) else null
-        }
-
-        // LOCAL/PROXY: WebSocket transport
+        currentServer ?: return null
         return MaWebSocketTransport(apiUrl)
     }
 
