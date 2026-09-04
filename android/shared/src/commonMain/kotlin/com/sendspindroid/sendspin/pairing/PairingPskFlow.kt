@@ -221,6 +221,9 @@ object PairAbortReason {
     /** PAKE key confirmation or PIN binding failed. No call site until 4.4 (#220). */
     const val PIN_MISMATCH = "pin_mismatch"
 
+    /** A verified `server_kc` did not match: the Dynamic Pairing Code flow's in-band mismatch. */
+    const val PAIRING_CODE_MISMATCH = "pairing_code_mismatch"
+
     /** The operator aborted through a local UI. Either side may send it. */
     const val USER_CANCELLED = "user_cancelled"
 
@@ -230,6 +233,7 @@ object PairAbortReason {
         METHOD_NOT_SUPPORTED,
         PIN_LENGTH_UNACCEPTABLE,
         PIN_MISMATCH,
+        PAIRING_CODE_MISMATCH,
         USER_CANCELLED,
     )
 
