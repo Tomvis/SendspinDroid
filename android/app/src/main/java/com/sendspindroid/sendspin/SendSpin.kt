@@ -46,6 +46,8 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
+import com.sendspindroid.sendspin.protocol.message.PairMethodDescriptor
+import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.SocketException
@@ -492,9 +494,18 @@ class SendSpin(
             MessageBuilder.TRUST_NONE
         }
 
-    /** The live configuration, not a constant: a disabled method is not offered. */
-    override fun offeredPairMethods(): Set<String> =
-        if (pairingConfigStore.load().pairingPskEnabled) setOf("pairing_psk") else emptySet()
+    /**
+     * The live configuration, not a constant: a disabled method is not offered.
+     *
+     * `dynamic_pairing_code` has no enable/disable toggle yet -- there is no
+     * `PairingConfig` field for it and no settings UI to flip -- so it is
+     * offered unconditionally, the same way [isUnpairedAccessEnabled] defaults
+     * on absent a stored preference.
+     */
+    override fun offeredPairMethods(): Set<String> = buildSet {
+        if (pairingConfigStore.load().pairingPskEnabled) add("pairing_psk")
+        add(PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName)
+    }
 
     /**
      * The `server_id` a pairing record binds to.
@@ -622,13 +633,33 @@ class SendSpin(
         onProtocolFailure(reason)
     }
 
-    override fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> =
+    override fun getSupportedPairMethods(): List<PairMethodDescriptor> = buildList {
         if (pairingConfigStore.load().pairingPskEnabled) {
-            listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
-        } else {
-            // "An implemented method that is disabled is omitted."
-            emptyList()
+            add(PairMethodDescriptor.PAIRING_PSK)
         }
+        // "An implemented method that is disabled is omitted." No toggle
+        // exists yet for the dynamic method (see offeredPairMethods), so it is
+        // always advertised alongside Pairing PSK -- never in place of the
+        // (unimplemented) static_pairing_code, which pairing.md forbids
+        // combining with it.
+        add(PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
+    }
+
+    /** Backs the Dynamic Pairing Code flow's brute-force counter (item 3.2's escalation gate). */
+    private val dynamicPairingCounterStore = object : PairingCounterStore {
+        override fun load(): Int = UserSettings.getPairingCodeFailures()
+        override fun save(value: Int) {
+            UserSettings.setPairingCodeFailures(value)
+        }
+    }
+
+    override fun pairingCounterStore(): PairingCounterStore = dynamicPairingCounterStore
+
+    /** The Noise handshake hash for the current session; null before one completes. */
+    override fun currentHandshakeHash(): ByteArray? = sessionFacts?.priorHandshakeHash
+
+    /** The negotiated AEAD suite, needed to wrap the dynamic flow's confirm/finalize secrets. */
+    override fun negotiatedCipherSuite(): NoiseCipherSuite? = sessionFacts?.suite
 
     override fun sendTextMessage(text: String) {
         val t = transport ?: return  // Silently drop if transport is gone (e.g. post-disconnect race)
