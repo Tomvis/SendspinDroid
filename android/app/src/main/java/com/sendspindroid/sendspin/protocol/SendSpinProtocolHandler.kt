@@ -16,7 +16,6 @@ import com.sendspindroid.sendspin.protocol.management.ManagementSessionContext
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import com.sendspindroid.sendspin.protocol.message.MessageParser
-import com.sendspindroid.sendspin.protocol.message.PairMethodDescriptor
 import com.sendspindroid.sendspin.protocol.timesync.TimeSyncManager
 import kotlinx.coroutines.CoroutineScope
 import com.sendspindroid.sendspin.crypto.TrustStore
@@ -349,8 +348,8 @@ abstract class SendSpinProtocolHandler(
      * candidate set at the same time, or the server could still re-handshake to
      * a method the client no longer advertises.
      */
-    protected open fun getSupportedPairMethods(): List<PairMethodDescriptor> =
-        listOf(PairMethodDescriptor.PAIRING_PSK)
+    protected open fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> =
+        listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
 
     /**
      * Send player state update (volume/muted/availability).
@@ -982,7 +981,7 @@ abstract class SendSpinProtocolHandler(
                 // only the pairing ones: an activation WITHOUT `pairing` is how
                 // the server ends an attempt without finalizing, and the client
                 // must then discard the PSK it generated.
-                if (pairing && activate.pairingMethod == PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+                if (pairing && activate.pairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
                     activePairingMethod = activate.pairingMethod
                     // The client's own tally of "pairing activations since the
                     // last Noise handshake" - the value folded into the CPace
@@ -1069,7 +1068,7 @@ abstract class SendSpinProtocolHandler(
         val reason = payload?.get("reason")?.jsonPrimitive?.contentOrNull ?: "unspecified"
         Log.w(tag, "Pairing aborted (received): reason=$reason")
         runPairingActions(PairingEvent.PairAbortReceived(reason))
-        if (activePairingMethod == PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
             runDynamicPairingActions(DynamicPairingEvent.PairAbortReceived(reason))
         }
     }
@@ -1140,7 +1139,7 @@ abstract class SendSpinProtocolHandler(
     /** The operator cancelled pairing from the UI. Leaves the connection open. */
     fun cancelPairing() {
         runPairingActions(PairingEvent.UserCancelled)
-        if (activePairingMethod == PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
             runDynamicPairingActions(DynamicPairingEvent.UserCancelled)
         }
     }
@@ -1260,7 +1259,7 @@ abstract class SendSpinProtocolHandler(
 
     protected fun handleServerPairFinalize() {
         runPairingActions(PairingEvent.ServerPairFinalize)
-        if (activePairingMethod == PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
             runDynamicPairingActions(DynamicPairingEvent.ServerPairFinalize)
         }
     }
@@ -1268,7 +1267,7 @@ abstract class SendSpinProtocolHandler(
     /** Called by the connection when the socket goes away mid-attempt. */
     fun onConnectionClosedForPairing() {
         runPairingActions(PairingEvent.ConnectionClosed)
-        if (activePairingMethod == PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
             runDynamicPairingActions(DynamicPairingEvent.ConnectionClosed)
         }
     }
@@ -1385,7 +1384,7 @@ abstract class SendSpinProtocolHandler(
     protected open fun onDynamicPairingGestureRequested() {}
 
     private fun handleServerPairInit(payload: JsonObject?) {
-        if (activePairingMethod != PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod != MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
             onProtocolFailure("server/pair-init received outside a dynamic pairing attempt")
             return
         }
@@ -1398,7 +1397,7 @@ abstract class SendSpinProtocolHandler(
     }
 
     private fun handleServerPairAuth(payload: JsonObject?) {
-        if (activePairingMethod != PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod != MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
             onProtocolFailure("server/pair-auth received outside a dynamic pairing attempt")
             return
         }
@@ -1411,7 +1410,7 @@ abstract class SendSpinProtocolHandler(
     }
 
     private fun handleServerPairConfirm(payload: JsonObject?) {
-        if (activePairingMethod != PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod != MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
             onProtocolFailure("server/pair-confirm received outside a dynamic pairing attempt")
             return
         }

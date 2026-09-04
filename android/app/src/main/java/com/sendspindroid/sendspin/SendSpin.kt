@@ -46,7 +46,6 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
-import com.sendspindroid.sendspin.protocol.message.PairMethodDescriptor
 import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -504,7 +503,7 @@ class SendSpin(
      */
     override fun offeredPairMethods(): Set<String> = buildSet {
         if (pairingConfigStore.load().pairingPskEnabled) add("pairing_psk")
-        add(PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName)
+        add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName)
     }
 
     /**
@@ -633,16 +632,16 @@ class SendSpin(
         onProtocolFailure(reason)
     }
 
-    override fun getSupportedPairMethods(): List<PairMethodDescriptor> = buildList {
+    override fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> = buildList {
         if (pairingConfigStore.load().pairingPskEnabled) {
-            add(PairMethodDescriptor.PAIRING_PSK)
+            add(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
         }
         // "An implemented method that is disabled is omitted." No toggle
         // exists yet for the dynamic method (see offeredPairMethods), so it is
         // always advertised alongside Pairing PSK -- never in place of the
         // (unimplemented) static_pairing_code, which pairing.md forbids
         // combining with it.
-        add(PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
+        add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
     }
 
     /** Backs the Dynamic Pairing Code flow's brute-force counter (item 3.2's escalation gate). */

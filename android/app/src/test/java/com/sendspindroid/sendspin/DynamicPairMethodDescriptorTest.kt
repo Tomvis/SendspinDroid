@@ -1,7 +1,6 @@
 package com.sendspindroid.sendspin
 
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
-import com.sendspindroid.sendspin.protocol.message.PairMethodDescriptor
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -12,7 +11,7 @@ import org.junit.Test
  */
 class DynamicPairMethodDescriptorTest {
 
-    private fun hello(methods: List<PairMethodDescriptor>) = MessageBuilder.buildClientHello(
+    private fun hello(methods: List<MessageBuilder.PairMethodDescriptor>) = MessageBuilder.buildClientHello(
         clientId = null,
         deviceName = "Test",
         bufferCapacity = 1,
@@ -24,7 +23,7 @@ class DynamicPairMethodDescriptorTest {
     @Test
     fun `dynamic descriptor advertises display and digits`() {
         val json = hello(
-            listOf(PairMethodDescriptor.PAIRING_PSK, PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
+            listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK, MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
         )
         assertTrue(json.contains("dynamic_pairing_code"))
         assertTrue(json.contains("\"out_channels\":[\"display\"]"))
@@ -34,7 +33,7 @@ class DynamicPairMethodDescriptorTest {
     /** Never speaker: that would oblige us to accept a digit audio pack. */
     @Test
     fun `never advertises the speaker channel`() {
-        val json = hello(listOf(PairMethodDescriptor.DYNAMIC_PAIRING_CODE))
+        val json = hello(listOf(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE))
         assertFalse(json.contains("speaker"))
         assertFalse(json.contains("digit_audio"))
     }
@@ -42,14 +41,14 @@ class DynamicPairMethodDescriptorTest {
     /** Offering dynamic forecloses static; both together is non-conformant. */
     @Test
     fun `never advertises the static pairing code`() {
-        val json = hello(listOf(PairMethodDescriptor.DYNAMIC_PAIRING_CODE))
+        val json = hello(listOf(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE))
         assertFalse(json.contains("static_pairing_code"))
     }
 
     @Test
     fun `pairing psk remains advertised alongside it`() {
         val json = hello(
-            listOf(PairMethodDescriptor.PAIRING_PSK, PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
+            listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK, MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
         )
         assertTrue(json.contains("pairing_psk"))
     }

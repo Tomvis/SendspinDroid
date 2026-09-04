@@ -10,49 +10,49 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.math.roundToInt
 
-/**
- * A `supported_pair_methods` entry.
- *
- * "Every client implements at least the Pairing PSK method." The PIN methods
- * are optional for clients and are deferred to item 4.4 (#220).
- */
-data class PairMethodDescriptor(
-    val wireName: String,
-    val locations: List<String>,
-    val outChannels: List<String> = emptyList(),
-    val formats: List<String> = emptyList(),
-) {
-    companion object {
-        /**
-         * `locations: ["device"]` because this client generates its own
-         * Pairing PSK from a CSPRNG and shows the resulting token on screen,
-         * which is what "printed on the device" describes. Item 0.3 (#191)
-         * confirmed Music Assistant renders that hint accurately.
-         */
-        val PAIRING_PSK = PairMethodDescriptor("pairing_psk", listOf("device"))
-
-        /**
-         * `out_channels: ["display"]`, `formats: ["digits"]`. Never
-         * `speaker` -- accepting that channel would oblige this client to
-         * accept a server-supplied digit audio pack (ten clips, each with
-         * decode and size validation) for a device that already has a
-         * screen. "At most one" pairing-code method may be offered, so
-         * advertising this one permanently forecloses `static_pairing_code`.
-         */
-        val DYNAMIC_PAIRING_CODE = PairMethodDescriptor(
-            wireName = "dynamic_pairing_code",
-            locations = listOf("device"),
-            outChannels = listOf("display"),
-            formats = listOf("digits"),
-        )
-    }
-}
-
 object MessageBuilder {
 
     /** `trust_level` values (README.md#definitions). Ordered none < user. */
     const val TRUST_NONE = "none"
     const val TRUST_USER = "user"
+
+    /**
+     * A `supported_pair_methods` entry.
+     *
+     * "Every client implements at least the Pairing PSK method." The PIN methods
+     * are optional for clients and are deferred to item 4.4 (#220).
+     */
+    data class PairMethodDescriptor(
+        val wireName: String,
+        val locations: List<String>,
+        val outChannels: List<String> = emptyList(),
+        val formats: List<String> = emptyList(),
+    ) {
+        companion object {
+            /**
+             * `locations: ["device"]` because this client generates its own
+             * Pairing PSK from a CSPRNG and shows the resulting token on screen,
+             * which is what "printed on the device" describes. Item 0.3 (#191)
+             * confirmed Music Assistant renders that hint accurately.
+             */
+            val PAIRING_PSK = PairMethodDescriptor("pairing_psk", listOf("device"))
+
+            /**
+             * `out_channels: ["display"]`, `formats: ["digits"]`. Never
+             * `speaker` -- accepting that channel would oblige this client to
+             * accept a server-supplied digit audio pack (ten clips, each with
+             * decode and size validation) for a device that already has a
+             * screen. "At most one" pairing-code method may be offered, so
+             * advertising this one permanently forecloses `static_pairing_code`.
+             */
+            val DYNAMIC_PAIRING_CODE = PairMethodDescriptor(
+                wireName = "dynamic_pairing_code",
+                locations = listOf("device"),
+                outChannels = listOf("display"),
+                formats = listOf("digits"),
+            )
+        }
+    }
 
     data class FormatEntry(
         val codec: String,
