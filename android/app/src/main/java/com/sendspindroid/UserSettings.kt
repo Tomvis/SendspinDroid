@@ -63,6 +63,7 @@ object UserSettings {
     const val KEY_PAIRING_PSK_ENABLED = "sendspin_pairing_psk_enabled"
     const val KEY_UNPAIRED_ACCESS = "sendspin_unpaired_access"
     const val KEY_RECORD_MODE_PSK_ID = "sendspin_record_mode_psk_id"
+    const val KEY_PAIRING_CODE_FAILURES = "pairing_code_failures"
 
     const val KEY_LAST_REMOTE_ID = "last_remote_id"
     const val KEY_LAST_PROXY_URL = "last_proxy_url"
@@ -320,6 +321,12 @@ object UserSettings {
 
     fun setRecordModePskId(pskId: String): Boolean =
         sensitivePrefs?.edit()?.putString(KEY_RECORD_MODE_PSK_ID, pskId)?.commit() ?: false
+
+    fun getPairingCodeFailures(): Int =
+        sensitivePrefs?.getInt(KEY_PAIRING_CODE_FAILURES, 0) ?: 0
+
+    fun setPairingCodeFailures(value: Int): Boolean =
+        sensitivePrefs?.edit()?.putInt(KEY_PAIRING_CODE_FAILURES, value)?.commit() ?: false
 
     fun getPlayerId(): String {
         // Fast path: prefs available and ID already stored
