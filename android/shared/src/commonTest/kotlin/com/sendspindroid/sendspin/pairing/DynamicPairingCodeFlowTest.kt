@@ -79,6 +79,10 @@ class DynamicPairingCodeFlowTest {
         val actions = f.onEvent(DynamicPairingEvent.ServerPairAuth(ByteArray(32)))
         assertTrue(actions.any { it is DynamicPairingAction.ProtocolError })
         assertTrue(actions.none { it is DynamicPairingAction.SendPairAbort })
+        // Already tearing the connection down: our own share must not go out
+        // either, since it would be a response to a peer that did nothing to
+        // earn one.
+        assertTrue(actions.none { it is DynamicPairingAction.SendPairAuth })
     }
 
     @Test
@@ -126,6 +130,28 @@ class DynamicPairingCodeFlowTest {
         val h = ByteArray(32) { it.toByte() }
         val expected = "sendspin-pair-pake-v1".encodeToByteArray() + h + byteArrayOf(0, 0, 0, 1)
         assertContentEquals(expected, DynamicPairingCodeFlow.sidFor(h, pairingIndex = 1))
+    }
+
+    @Test
+    fun `a re-activation mid-attempt discards the old attempt and starts a fresh one`() {
+        val f = flow()
+        val first = f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 1))
+            .filterIsInstance<DynamicPairingAction.SendPairInit>().single()
+        // Drive past ServerPairInit so a code has been emitted and a
+        // CPaceResponder exists -- genuinely mid-attempt, not just pending.
+        f.onEvent(DynamicPairingEvent.ServerPairInit(ByteArray(32) { 5 }))
+
+        val actions = f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 2))
+        assertTrue(
+            actions.any { it is DynamicPairingAction.StopEmittingCode },
+            "the abandoned attempt must stop emitting its code: $actions",
+        )
+        val second = actions.filterIsInstance<DynamicPairingAction.SendPairInit>().single()
+        assertEquals(2, second.pairingIndex)
+        assertTrue(
+            !first.commitB.contentEquals(second.commitB),
+            "a reused commit_B would prove the old nonce_B survived the reset",
+        )
     }
 
     private companion object {

@@ -159,12 +159,25 @@ class DynamicPairingCodeFlow(
     }
 
     private fun onPairingActivation(event: DynamicPairingEvent.PairingActivation): List<DynamicPairingAction> {
+        // "A server MAY send such a cancelling server/activate at any point
+        // during a pairing attempt. On receipt the client abandons the
+        // attempt, discarding all pairing state." A re-activation mid-attempt
+        // must reset completely, not layer new state over live state.
+        val abandoning = state != State.IDLE && state != State.DONE
+        discard()
         pairingIndex = event.pairingIndex
+
+        val actions = mutableListOf<DynamicPairingAction>()
+        if (abandoning) actions.add(DynamicPairingAction.StopEmittingCode)
+
         if (counter.isEscalated) {
             state = State.AWAITING_GESTURE
-            return listOf(DynamicPairingAction.SendPairPending(pairingIndex), DynamicPairingAction.RequestGesture)
+            actions.add(DynamicPairingAction.SendPairPending(pairingIndex))
+            actions.add(DynamicPairingAction.RequestGesture)
+        } else {
+            actions.addAll(startAttempt())
         }
-        return startAttempt()
+        return actions
     }
 
     private fun onWindowOpened(): List<DynamicPairingAction> {
@@ -197,14 +210,16 @@ class DynamicPairingCodeFlow(
         val r = responder
         if (state != State.AWAITING_AUTH || r == null) return protocolError()
 
-        val actions = mutableListOf<DynamicPairingAction>(DynamicPairingAction.SendPairAuth(r.publicShare))
+        // Compute the share, but do not send it until the peer's share is
+        // known to be usable: at the point we decide to tear the connection
+        // down, sending into a socket we are about to close would hand an
+        // unauthenticated peer a response it did nothing to earn.
+        val ourShare = r.publicShare
         if (!r.derive(event.ya)) {
-            discard()
-            actions.add(DynamicPairingAction.ProtocolError)
-            return actions
+            return protocolError()
         }
         state = State.AWAITING_CONFIRM
-        return actions
+        return listOf(DynamicPairingAction.SendPairAuth(ourShare))
     }
 
     private fun onServerPairConfirm(event: DynamicPairingEvent.ServerPairConfirm): List<DynamicPairingAction> {
