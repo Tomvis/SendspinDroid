@@ -1240,7 +1240,15 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onDynamicPairingCodeCleared() {
             mainHandler.post {
+                // StopEmittingCode fires on every terminal path (success, abort,
+                // timeout, superseding activation) - including one where the
+                // attempt never got past AWAITING_GESTURE and no code was ever
+                // emitted. A terminal ends both the code display and any
+                // pending gesture request, so both clear here together;
+                // leaving the gesture flag set would strand the "Allow
+                // pairing" button on screen with no live attempt behind it.
                 pairingCode = null
+                pairingGestureRequested = false
                 broadcastSessionExtras()
             }
         }

@@ -58,6 +58,19 @@ class DynamicPairingCodeFlowTest {
     }
 
     @Test
+    fun `a terminal event while gesture-gated still stops emitting`() {
+        // Task 14 fix round 1: the service clears its "Allow pairing" gesture
+        // flag on StopEmittingCode, on the assumption that this action fires
+        // on every path out of AWAITING_GESTURE -- including one that never
+        // reached a code at all. Pin that assumption here, at the flow level,
+        // rather than leaving it implicit in the service wiring.
+        val f = flow(failures = 5)
+        f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 1))
+        val actions = f.onEvent(DynamicPairingEvent.ConnectionClosed)
+        assertTrue(actions.any { it is DynamicPairingAction.StopEmittingCode })
+    }
+
+    @Test
     fun `server pair-init emits the code and increments the counter`() {
         val store = FakeStore()
         val f = DynamicPairingCodeFlow(ByteArray(32), PairingFailureCounter(store), NoiseCipherSuite.CHACHA_POLY)
