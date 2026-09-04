@@ -187,6 +187,36 @@ object SendSpinProtocol {
         const val METADATA = "metadata@v1"
         const val ARTWORK = "artwork@v1"
     }
+
+    /**
+     * Role names as they appear in `stream/end` and `stream/clear`, which the
+     * spec writes UNVERSIONED.
+     *
+     * This asymmetry is deliberate on the spec's part, not an oversight:
+     * `supported_roles` and `active_roles` carry versioned identifiers
+     * (`player@v1`), while `messaging.md` defines `stream/end`'s field as
+     * "roles to end streams for ('player', 'artwork', 'visualizer')" and
+     * `stream/clear`'s as "which roles to clear: 'player', 'visualizer', or
+     * both". Comparing a versioned constant against either array therefore
+     * never matches, and the message is silently ignored.
+     */
+    object StreamRoles {
+        const val PLAYER = "player"
+        const val ARTWORK = "artwork"
+        const val VISUALIZER = "visualizer"
+    }
+
+    /**
+     * Does [name] denote the stream role [base]?
+     *
+     * Matches the spec's unversioned form and tolerates a versioned one, so a
+     * server that sends `player@v1` here is still understood. Being liberal in
+     * what we accept costs nothing: the two forms cannot denote different
+     * roles, and the failure this guards against is silence, not a wrong
+     * action.
+     */
+    fun isStreamRole(name: String, base: String): Boolean =
+        name.substringBefore('@') == base
 }
 
 /**

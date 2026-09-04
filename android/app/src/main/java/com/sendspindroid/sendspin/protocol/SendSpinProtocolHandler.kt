@@ -847,7 +847,7 @@ abstract class SendSpinProtocolHandler(
                 SendSpinProtocol.MessageType.GROUP_UPDATE -> handleGroupUpdate(payload)
                 SendSpinProtocol.MessageType.STREAM_START -> handleStreamStart(payload)
                 SendSpinProtocol.MessageType.STREAM_END -> handleStreamEnd(payload)
-                SendSpinProtocol.MessageType.STREAM_CLEAR -> handleStreamClear()
+                SendSpinProtocol.MessageType.STREAM_CLEAR -> handleStreamClear(payload)
                 SendSpinProtocol.MessageType.CLIENT_SYNC_OFFSET -> handleClientSyncOffset(payload)
                 // Before the else: every management request must be
                 // answered, including one we do not implement. Falling through
@@ -1709,9 +1709,24 @@ abstract class SendSpinProtocolHandler(
         onStreamStart(config)
     }
 
-    protected fun handleStreamClear() {
+    protected fun handleStreamClear(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamClear ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
-        Log.v(tag, "Stream clear - flushing audio buffers")
+
+        // The dispatcher used to call this with no payload at all, so every
+        // clear was treated as global: a visualizer-only clear reset the
+        // decoder and discarded the whole chunk queue mid-track. The field is
+        // unversioned, as in stream/end - "which roles to clear: 'player',
+        // 'visualizer', or both. If omitted, clears both roles".
+        val roles = payload?.get("roles")?.jsonArray?.map { it.jsonPrimitive.content }
+        if (roles != null && roles.none {
+                SendSpinProtocol.isStreamRole(it, SendSpinProtocol.StreamRoles.PLAYER)
+            }
+        ) {
+            Log.d(tag, "Stream clear for non-player roles: $roles - leaving audio alone")
+            return
+        }
+
+        Log.v(tag, "Stream clear - flushing audio buffers (roles=${roles ?: "all"})")
         onStreamClear()
     }
 
@@ -1720,7 +1735,15 @@ abstract class SendSpinProtocolHandler(
         val rolesArray = payload?.get("roles")?.jsonArray
         val roles = rolesArray?.map { it.jsonPrimitive.content }
 
-        if (roles != null && SendSpinProtocol.Roles.PLAYER !in roles) {
+        // messaging.md writes this field UNVERSIONED - "roles to end streams
+        // for ('player', 'artwork', 'visualizer')" - while active_roles is
+        // versioned. Comparing against "player@v1" here matched nothing, so
+        // every stream/end carrying a roles array was silently dropped and the
+        // stream never ended.
+        if (roles != null && roles.none {
+                SendSpinProtocol.isStreamRole(it, SendSpinProtocol.StreamRoles.PLAYER)
+            }
+        ) {
             Log.d(tag, "Stream end for non-player roles: $roles - ignoring")
             return
         }
