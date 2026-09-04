@@ -981,7 +981,7 @@ The one construction with no official test vectors: draft section 10.4.5-6 gives
   `val publicShare: ByteArray` (Yb), `fun derive(peerShare: ByteArray): Boolean`,
   `fun verify(serverKc: ByteArray): Boolean`, `fun tag(): ByteArray` (Tb), `val isk: ByteArray`
 
-- [ ] **Step 1: Generate the oracle vectors**
+- [ ] **Step 1: Verify the oracle vectors (already generated)**
 
 Create `ci/conformance/cpace_oracle.py`:
 
@@ -1023,9 +1023,16 @@ print(json.dumps({
 }, indent=2))
 ```
 
-Run it and paste the output into the test below. The responder's scalar is random, so `yb`, `isk` and both tags change per run -- capture ONE run and pin it, injecting the same scalar into the Kotlin constructor.
+`ci/conformance/cpace_oracle.py` already exists and its output is already
+embedded in the test below, so this step is a confirmation, not a generation:
+run `pip install cpace && python ci/conformance/cpace_oracle.py` and check the
+printed values match the constants in the test. If they differ, STOP and report
+-- it means the installed `cpace` version changed behaviour, which is exactly
+the interop signal this vector exists to catch.
 
-If the `cpace` package exposes the responder scalar under a different attribute than `responder.scalar`, read the installed module and adjust; the vector is only useful if the Kotlin side can reproduce the same `yb`.
+The script captures `responder._scalar` before `derive()` because the library
+zeroizes it afterwards. Injecting that scalar is what makes `yb` reproducible
+in Kotlin instead of random per run.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -1106,18 +1113,29 @@ class CPaceResponderTest {
     }
 
     private companion object {
-        const val ORACLE_SID = "PASTE_FROM_ORACLE"
-        const val ORACLE_YA = "PASTE_FROM_ORACLE"
-        const val ORACLE_YB = "PASTE_FROM_ORACLE"
-        const val ORACLE_YB_SCALAR = "PASTE_FROM_ORACLE"
-        const val ORACLE_ISK = "PASTE_FROM_ORACLE"
-        const val ORACLE_SERVER_KC = "PASTE_FROM_ORACLE"
-        const val ORACLE_CLIENT_KC = "PASTE_FROM_ORACLE"
+        // Captured from ci/conformance/cpace_oracle.py. PRS = "123456",
+        // handshake hash = bytes 0x00..0x1f, pairing_index = 1.
+        const val ORACLE_SID =
+            "73656e647370696e2d706169722d70616b652d763100010203040506070809" +
+            "0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000001"
+        const val ORACLE_YA =
+            "9fe5d4369ccd0299dfeae5e52efb1ab15a28b286dc8dd89b7dd11f4c9f32eb28"
+        const val ORACLE_YB =
+            "ffc9edf7457e8acf737d5bb2099e50592ec1313dee9658df6a628954cee55135"
+        const val ORACLE_YB_SCALAR =
+            "025984ca800ed7505e9f20a4b92314c3721e16112fe1447bd807e2fcf9813398"
+        const val ORACLE_ISK =
+            "d8235f0ee9ac764401d2f01474e96c565a5ef225c14c1c01dd35a9073f84bb8c" +
+            "a14a8cfdc169e7bddf79e06434270276ee2111f60ee91b9186ef05e1573de1d8"
+        const val ORACLE_SERVER_KC =
+            "ed2bf3ee3d10ae525e93fafb1189147fd3fc65e53d6399fccc8c95f80fcad235" +
+            "d5319d060d01ffe0f0a5b9cdbd85a4f71254af3216e79775dda0095681e8bbfb"
+        const val ORACLE_CLIENT_KC =
+            "546f758bdebc86771b46a55d042247a75fdd6eb8ea854357c11e135a8bc3429e" +
+            "f074c53382b946b8d275da732964a94bc7d93df70745c045d640fb5d2dcaf185"
     }
 }
 ```
-
-The `PASTE_FROM_ORACLE` constants are filled from Step 1's output before the test is run. Do not commit the test with them unfilled.
 
 - [ ] **Step 3: Run test to verify it fails**
 
