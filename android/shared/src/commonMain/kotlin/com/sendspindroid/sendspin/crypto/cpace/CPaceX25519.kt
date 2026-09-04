@@ -1,6 +1,7 @@
 package com.sendspindroid.sendspin.crypto.cpace
 
 import com.sendspindroid.sendspin.crypto.sha512
+import com.sendspindroid.sendspin.crypto.x25519ScalarMult
 
 /**
  * CPACE-X25519-SHA512 primitives from draft-irtf-cfrg-cpace-21.
@@ -38,5 +39,24 @@ object CPaceX25519 {
         // RFC 7748 decodeUCoordinate for 255 bits: clear the top bit.
         u[31] = (u[31].toInt() and 0x7f).toByte()
         return mapToCurveElligator2(u)
+    }
+
+    /**
+     * `G_X25519.scalar_mult_vfy`, draft section 10.8.
+     *
+     * X25519 already maps every low-order point -- on the curve and on the
+     * twist -- to the all-zero string, so verification reduces to a zero check
+     * on the result. Returning null rather than those zero bytes forces the
+     * caller to handle the abort: a peer steering both sides to a known shared
+     * secret is the attack this prevents, so the failure must not be
+     * representable as a valid K.
+     */
+    fun scalarMultVfy(scalar: ByteArray, point: ByteArray): ByteArray? {
+        require(scalar.size == 32) { "scalar must be 32 bytes, got ${scalar.size}" }
+        if (point.size != 32) return null
+        val result = x25519ScalarMult(scalar, point)
+        var acc = 0
+        for (b in result) acc = acc or b.toInt()
+        return if (acc == 0) null else result
     }
 }
