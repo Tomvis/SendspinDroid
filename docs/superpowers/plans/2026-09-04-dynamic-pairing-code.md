@@ -564,7 +564,12 @@ actual fun mapToCurveElligator2(u: ByteArray): ByteArray {
     // x = e2 ? x1 : x2
     val x = X25519Field.create()
     X25519Field.copy(x2, 0, x, 0)
-    X25519Field.cmov(if (isSquare) 1 else 0, x1, 0, x, 0)
+    // cmov needs a FULL-WORD mask (-1/0), not a boolean 1/0: it computes
+    // z ^= (diff & cond) per limb, and BouncyCastle asserts 0 == cond ||
+    // -1 == cond. Passing 1 flips only each limb's low bit, yielding neither
+    // candidate. The e1 cmov above is safe because isZero already returns a
+    // mask.
+    X25519Field.cmov(if (isSquare) -1 else 0, x1, 0, x, 0)
 
     X25519Field.normalize(x)
     val out = ByteArray(32)
