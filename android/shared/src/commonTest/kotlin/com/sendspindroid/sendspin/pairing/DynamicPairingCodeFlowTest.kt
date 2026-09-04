@@ -1,6 +1,9 @@
 package com.sendspindroid.sendspin.pairing
 
 import com.sendspindroid.sendspin.crypto.NoiseCipherSuite
+import com.sendspindroid.sendspin.crypto.aeadOpen
+import com.sendspindroid.sendspin.crypto.cpace.CPaceX25519
+import com.sendspindroid.sendspin.crypto.x25519ScalarMult
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -36,6 +39,7 @@ class DynamicPairingCodeFlowTest {
         val actions = flow().onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 1))
         assertTrue(actions.any { it is DynamicPairingAction.SendPairInit })
         assertTrue(actions.none { it is DynamicPairingAction.SendPairPending })
+        assertTrue(actions.none { it is DynamicPairingAction.RequestGesture })
     }
 
     @Test
@@ -44,6 +48,10 @@ class DynamicPairingCodeFlowTest {
         val actions = f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 1))
         assertTrue(actions.any { it is DynamicPairingAction.SendPairPending })
         assertTrue(actions.none { it is DynamicPairingAction.SendPairInit })
+        // Task 14's UI renders the "Allow pairing" button from this signal --
+        // pin it here so a regression is caught in this task, not silently in
+        // that one.
+        assertTrue(actions.any { it is DynamicPairingAction.RequestGesture })
 
         val opened = f.onEvent(DynamicPairingEvent.WindowOpened)
         assertTrue(opened.any { it is DynamicPairingAction.SendPairInit })
@@ -152,6 +160,97 @@ class DynamicPairingCodeFlowTest {
             !first.commitB.contentEquals(second.commitB),
             "a reused commit_B would prove the old nonce_B survived the reset",
         )
+    }
+
+    @Test
+    fun `wrong-state events are protocol errors`() {
+        // Idle expects only PairingActivation; every other event here is
+        // out-of-sequence. WindowOpened outside AwaitingGesture is the same
+        // shape of bug (an event the current state cannot make sense of).
+        val cases = listOf(
+            "ServerPairInit while Idle" to DynamicPairingEvent.ServerPairInit(ByteArray(32)),
+            "ServerPairAuth while Idle" to DynamicPairingEvent.ServerPairAuth(ByteArray(32)),
+            "ServerPairFinalize while Idle" to DynamicPairingEvent.ServerPairFinalize,
+            "WindowOpened while Idle" to DynamicPairingEvent.WindowOpened,
+        )
+        for ((name, event) in cases) {
+            val actions = flow().onEvent(event)
+            assertTrue(
+                actions.any { it is DynamicPairingAction.ProtocolError },
+                "$name: expected ProtocolError, got $actions",
+            )
+        }
+    }
+
+    /**
+     * Drives the flow end to end with a genuinely valid `server_kc`, computed
+     * by playing the CPace initiator (server) side directly against
+     * [CPaceX25519]'s primitives -- the same primitives [CPaceResponder]
+     * itself is built from.
+     *
+     * The pairing code is not known ahead of time (it depends on the flow's
+     * internally-generated `nonce_B`), so the fake server side is built AFTER
+     * capturing the code from `EmitPairingCode`, using the flow's own
+     * `sidFor` and the client's public share as emitted on `SendPairAuth`.
+     */
+    @Test
+    fun `the happy path persists the PSK it actually sent, and only on server pair-finalize`() {
+        val handshakeHash = ByteArray(32) { it.toByte() }
+        val f = DynamicPairingCodeFlow(
+            handshakeHash = handshakeHash,
+            counter = PairingFailureCounter(FakeStore()),
+            suite = NoiseCipherSuite.CHACHA_POLY,
+        )
+        val allActions = mutableListOf<DynamicPairingAction>()
+
+        allActions += f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 1))
+
+        val nonceA = ByteArray(32) { (it + 1).toByte() }
+        val initActions = f.onEvent(DynamicPairingEvent.ServerPairInit(nonceA))
+        allActions += initActions
+        val code = initActions.filterIsInstance<DynamicPairingAction.EmitPairingCode>().single().code
+
+        // Play the server (CPace initiator) side for real, using the code the
+        // flow actually derived.
+        val sid = DynamicPairingCodeFlow.sidFor(handshakeHash, pairingIndex = 1)
+        val emptyCi = ByteArray(0)
+        val adServer = "server".encodeToByteArray()
+        val adClient = "client".encodeToByteArray()
+        val yaScalar = ByteArray(32) { (it + 7).toByte() }
+        val generator = CPaceX25519.calculateGenerator(code.encodeToByteArray(), emptyCi, sid)
+        val ya = x25519ScalarMult(yaScalar, generator)
+
+        val authActions = f.onEvent(DynamicPairingEvent.ServerPairAuth(ya))
+        allActions += authActions
+        val yb = authActions.filterIsInstance<DynamicPairingAction.SendPairAuth>().single().yb
+
+        val k = CPaceX25519.scalarMultVfy(yaScalar, yb) ?: error("test setup produced a low-order Yb")
+        val isk = CPaceX25519.deriveIsk(sid, k, ya, adServer, yb, adClient)
+        val macKey = CPaceX25519.macKey(sid, isk)
+        val ta = CPaceX25519.mcfTag(macKey, ya, adServer)
+
+        val confirmActions = f.onEvent(DynamicPairingEvent.ServerPairConfirm(ta))
+        allActions += confirmActions
+        val wrappedPsk = confirmActions.filterIsInstance<DynamicPairingAction.SendPairFinalize>()
+            .single().wrappedPsk
+
+        val finalizeActions = f.onEvent(DynamicPairingEvent.ServerPairFinalize)
+        allActions += finalizeActions
+
+        assertTrue(
+            allActions.none { it is DynamicPairingAction.ProtocolError || it is DynamicPairingAction.SendPairAbort },
+            "the happy path must not hit either failure branch: $allActions",
+        )
+
+        val persisted = finalizeActions.filterIsInstance<DynamicPairingAction.PersistRecord>().single()
+        assertEquals(32, persisted.psk.size)
+        assertTrue(finalizeActions.any { it is DynamicPairingAction.StopEmittingCode })
+
+        // The PSK persisted must be the exact bytes sealed into the
+        // client/pair-finalize we already sent -- not a fresh value.
+        val wrapKey = PairingWrap.wrapKey(PairingWrap.PSK_LABEL, sid, isk)
+        val unwrappedPsk = aeadOpen(NoiseCipherSuite.CHACHA_POLY.aead, wrapKey, ByteArray(12), ByteArray(0), wrappedPsk)
+        assertContentEquals(unwrappedPsk, persisted.psk)
     }
 
     private companion object {
