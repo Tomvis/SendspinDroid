@@ -28,6 +28,7 @@ class AndroidPairingConfigStore : PairingConfigStore {
             pairingPsk = psk,
             pairingPskEnabled = UserSettings.getPairingPskEnabled(),
             unpairedAccessEnabled = UserSettings.getUnpairedAccessEnabled(),
+            dynamicPairingCodeEnabled = UserSettings.getDynamicPairingCodeEnabled(),
             recordModePskId = recordModePskId(),
         )
     }

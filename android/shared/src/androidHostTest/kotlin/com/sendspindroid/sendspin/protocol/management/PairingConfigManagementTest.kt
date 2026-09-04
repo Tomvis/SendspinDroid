@@ -368,7 +368,7 @@ class PairingConfigManagementTest {
         unpairedAccess: Boolean = true,
     ) : PairingConfigStore {
 
-        var config = PairingConfig(PAIRING_PSK, pairingPskEnabled, unpairedAccess, SHARED_RECORD_ID)
+        var config = PairingConfig(PAIRING_PSK, pairingPskEnabled, unpairedAccess, false, SHARED_RECORD_ID)
             private set
 
         var writes = 0

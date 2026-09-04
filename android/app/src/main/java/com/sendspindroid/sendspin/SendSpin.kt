@@ -505,14 +505,17 @@ class SendSpin(
     /**
      * The live configuration, not a constant: a disabled method is not offered.
      *
-     * `dynamic_pairing_code` has no enable/disable toggle yet -- there is no
-     * `PairingConfig` field for it and no settings UI to flip -- so it is
-     * offered unconditionally, the same way [isUnpairedAccessEnabled] defaults
-     * on absent a stored preference.
+     * `dynamic_pairing_code` is opt-in and defaults off: there is no capability
+     * signal in `server/hello` to test for it, and advertising it unconditionally
+     * broke the handshake against aiosendspin 9.1.1 (see
+     * [PairingConfig.dynamicPairingCodeEnabled]).
      */
     override fun offeredPairMethods(): Set<String> = buildSet {
-        if (pairingConfigStore.load().pairingPskEnabled) add("pairing_psk")
-        add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName)
+        val config = pairingConfigStore.load()
+        if (config.pairingPskEnabled) add("pairing_psk")
+        if (config.dynamicPairingCodeEnabled) {
+            add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName)
+        }
     }
 
     /**
@@ -569,6 +572,21 @@ class SendSpin(
         suppressAutoReconnect.set(true)
 
         callback?.onUnpaired(serverId)
+    }
+
+    /**
+     * A protocol-level failure that requires closing the socket.
+     *
+     * The base class only logs; nothing ever actually closed the transport,
+     * even though the spec allows no application-level message for these
+     * failures and "close the WebSocket, persist nothing" is a security
+     * property of pairing. Closing at the transport level - not
+     * `closeConnectionAfterFlush` or a goodbye - is deliberate: those send an
+     * application message first, and this path must send nothing at all.
+     */
+    override fun onProtocolFailure(reason: String) {
+        super.onProtocolFailure(reason)
+        transport?.close(1002, "protocol failure")
     }
 
     override fun closeConnectionAfterFlush() {
@@ -654,15 +672,17 @@ class SendSpin(
     }
 
     override fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> = buildList {
-        if (pairingConfigStore.load().pairingPskEnabled) {
+        val config = pairingConfigStore.load()
+        if (config.pairingPskEnabled) {
             add(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
         }
-        // "An implemented method that is disabled is omitted." No toggle
-        // exists yet for the dynamic method (see offeredPairMethods), so it is
-        // always advertised alongside Pairing PSK -- never in place of the
+        // "An implemented method that is disabled is omitted." Opt-in and off
+        // by default (see offeredPairMethods) -- never in place of the
         // (unimplemented) static_pairing_code, which pairing.md forbids
         // combining with it.
-        add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
+        if (config.dynamicPairingCodeEnabled) {
+            add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
+        }
     }
 
     /** Backs the Dynamic Pairing Code flow's brute-force counter (item 3.2's escalation gate). */

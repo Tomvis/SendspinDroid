@@ -181,7 +181,11 @@ class DynamicPairingCodeFlow(
     }
 
     private fun onWindowOpened(): List<DynamicPairingAction> {
-        if (state != State.AWAITING_GESTURE) return protocolError()
+        // WindowOpened is a local UI gesture (the operator's "Allow pairing"
+        // tap), never something a peer can trigger - so arriving outside
+        // AWAITING_GESTURE (e.g. a stray double-tap) is not protocol
+        // misbehaviour and must not close a healthy connection.
+        if (state != State.AWAITING_GESTURE) return emptyList()
         return startAttempt()
     }
 

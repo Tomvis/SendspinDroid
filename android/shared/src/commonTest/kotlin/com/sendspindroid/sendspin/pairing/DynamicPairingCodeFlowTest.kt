@@ -178,13 +178,11 @@ class DynamicPairingCodeFlowTest {
     @Test
     fun `wrong-state events are protocol errors`() {
         // Idle expects only PairingActivation; every other event here is
-        // out-of-sequence. WindowOpened outside AwaitingGesture is the same
-        // shape of bug (an event the current state cannot make sense of).
+        // out-of-sequence.
         val cases = listOf(
             "ServerPairInit while Idle" to DynamicPairingEvent.ServerPairInit(ByteArray(32)),
             "ServerPairAuth while Idle" to DynamicPairingEvent.ServerPairAuth(ByteArray(32)),
             "ServerPairFinalize while Idle" to DynamicPairingEvent.ServerPairFinalize,
-            "WindowOpened while Idle" to DynamicPairingEvent.WindowOpened,
         )
         for ((name, event) in cases) {
             val actions = flow().onEvent(event)
@@ -193,6 +191,19 @@ class DynamicPairingCodeFlowTest {
                 "$name: expected ProtocolError, got $actions",
             )
         }
+    }
+
+    /**
+     * FIX 4: `WindowOpened` is a local UI gesture (the operator's "Allow
+     * pairing" tap), never something a peer can trigger. Outside
+     * `AwaitingGesture` - e.g. a stray double-tap - it must be a no-op, not a
+     * protocol error: a protocol error now actually closes the connection, and
+     * a local UI tap must never be able to drop a healthy one.
+     */
+    @Test
+    fun `WindowOpened outside AwaitingGesture is a no-op`() {
+        val actions = flow().onEvent(DynamicPairingEvent.WindowOpened)
+        assertEquals(emptyList<DynamicPairingAction>(), actions)
     }
 
     /**

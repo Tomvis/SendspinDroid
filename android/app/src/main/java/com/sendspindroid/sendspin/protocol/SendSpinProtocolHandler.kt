@@ -700,6 +700,10 @@ abstract class SendSpinProtocolHandler(
         dynamicAttemptTimeoutJob?.cancel()
         dynamicAttemptTimeoutJob = null
         activePairingMethod = null
+        // A re-handshake landing mid-attempt must not strand the pairing UI:
+        // the flow above is dropped without going through StopEmittingCode, so
+        // this is the same clear that action would have triggered.
+        onDynamicPairingCodeCleared()
     }
 
     /** Drop the encrypted channel (disconnect, or falling back to legacy). */
@@ -991,6 +995,13 @@ abstract class SendSpinProtocolHandler(
                     runDynamicPairingActions(
                         DynamicPairingEvent.PairingActivation(dynamicPairingIndex)
                     )
+                    // The PSK flow was not selected by this activation. If a
+                    // server switches methods across activations, the PSK flow
+                    // must be told its attempt is over too - the same
+                    // "ends without finalizing" rule a non-pairing activation
+                    // applies - or a stale attempt could later persist a record
+                    // the server never stored.
+                    runPairingActions(PairingEvent.NonPairingActivation)
                 } else {
                     activePairingMethod = if (pairing) activate.pairingMethod else null
                     runPairingActions(
@@ -1006,10 +1017,13 @@ abstract class SendSpinProtocolHandler(
                             PairingEvent.NonPairingActivation
                         }
                     )
-                    // A non-pairing activation also ends any dynamic attempt in
-                    // flight - the same "ends without finalizing" rule the PSK
-                    // flow above just applied to itself.
-                    if (!pairing) runDynamicPairingActions(DynamicPairingEvent.NonPairingActivation)
+                    // A non-pairing OR a Pairing-PSK activation also ends any
+                    // dynamic attempt in flight - the same "ends without
+                    // finalizing" rule the PSK flow above just applied to
+                    // itself. Left live, a stale attempt keeps the code on
+                    // screen and can fire pair/abort(attempt_timeout) into the
+                    // middle of this new attempt.
+                    runDynamicPairingActions(DynamicPairingEvent.NonPairingActivation)
                 }
             }
         }

@@ -228,6 +228,8 @@
     <string name="pairing_token_copied">Pairing token copied</string>
     <string name="pairing_token_secret_warning">Treat this like a password: anyone who has it can pair with this device.</string>
     <string name="pairing_token_disabled">Pairing is turned off for this device.</string>
+    <string name="pref_dynamic_pairing_code_title">Dynamic pairing code</string>
+    <string name="pref_dynamic_pairing_code_summary">Most servers do not support this pairing method yet. Turning it on may prevent connecting to older servers.</string>
     <string name="debug_share_chooser_title">Share Debug Log</string>
     <string name="debug_log_exported">Debug log exported</string>
     <string name="debug_log_export_failed">Failed to export debug log</string>
