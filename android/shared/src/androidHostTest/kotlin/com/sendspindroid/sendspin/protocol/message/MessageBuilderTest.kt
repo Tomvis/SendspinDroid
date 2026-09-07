@@ -73,45 +73,45 @@ class MessageBuilderTest {
     }
 
     @Test
-    fun buildPlayerState_staticDelayMsRoundedToInt() {
-        // Spec: static_delay_ms is an integer.
+    fun buildPlayerState_outputDelayMsRoundedToInt() {
+        // Spec: output_delay_ms is an integer.
         val msg = Json.parseToJsonElement(
             MessageBuilder.buildPlayerState(50, false, true, 12.5)
         ).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(13, player["static_delay_ms"]?.jsonPrimitive?.int)
+        assertEquals(13, player["output_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
-    fun buildPlayerState_staticDelayMsDefaultsToZero() {
+    fun buildPlayerState_outputDelayMsDefaultsToZero() {
         val msg = Json.parseToJsonElement(
             MessageBuilder.buildPlayerState(50, false, available = true)
         ).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(0, player["static_delay_ms"]?.jsonPrimitive?.int)
+        assertEquals(0, player["output_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
-    fun buildPlayerState_staticDelayMsClampedToSpecRange() {
+    fun buildPlayerState_outputDelayMsClampedToSpecRange() {
         // Spec: 0-5000, negative values not supported. A negative user sync
         // offset is applied locally but reported as 0.
         val negative = Json.parseToJsonElement(
             MessageBuilder.buildPlayerState(50, false, true, -120.0)
         ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(0, negative["static_delay_ms"]?.jsonPrimitive?.int)
+        assertEquals(0, negative["output_delay_ms"]?.jsonPrimitive?.int)
 
         val huge = Json.parseToJsonElement(
             MessageBuilder.buildPlayerState(50, false, true, 9999.0)
         ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(5000, huge["static_delay_ms"]?.jsonPrimitive?.int)
+        assertEquals(5000, huge["output_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
-    fun buildPlayerState_declaresSetStaticDelaySupport() {
+    fun buildPlayerState_declaresSetOutputDelaySupport() {
         val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false, available = true)).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
         val commands = player["supported_commands"]!!.jsonArray.map { it.jsonPrimitive.content }
-        assertEquals(listOf("set_static_delay"), commands)
+        assertEquals(listOf("volume", "mute", "set_output_delay"), commands)
     }
 
     @Test

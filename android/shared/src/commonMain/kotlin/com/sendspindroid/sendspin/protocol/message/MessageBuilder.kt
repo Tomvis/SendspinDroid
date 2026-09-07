@@ -358,7 +358,7 @@ object MessageBuilder {
         volume: Int,
         muted: Boolean,
         available: Boolean,
-        staticDelayMs: Double = 0.0,
+        outputDelayMs: Double = 0.0,
         requiredLeadTimeMs: Int = SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS,
         minBufferMs: Int = SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS,
         playerRoleActive: Boolean = true
@@ -376,17 +376,27 @@ object MessageBuilder {
                 if (playerRoleActive) put("player", buildJsonObject {
                     put("volume", volume)
                     put("muted", muted)
-                    // Spec: integer, range 0-5000, negative values not
-                    // supported. Locally we still apply the full signed
-                    // value (user sync offset can be negative); only the
-                    // reported field is clamped.
-                    put("static_delay_ms", staticDelayMs.roundToInt().coerceIn(0, 5000))
+                    // roles/player/v1.md: delay BEYOND the audio port, integer
+                    // 0-5000, never optional. This is NOT the hardware latency
+                    // we measure and compensate ourselves - the spec says this
+                    // field "does not cover processing delays before the port
+                    // (DAC latency, audio buffers), which the client
+                    // compensates itself". Reporting that here would invite the
+                    // server to compensate a second time.
+                    put("output_delay_ms", outputDelayMs.roundToInt().coerceIn(0, 5000))
                     // Both timing fields are always required for players.
                     put("required_lead_time_ms", requiredLeadTimeMs)
                     put("min_buffer_ms", minBufferMs)
-                    // Declares that we handle server/command set_static_delay.
+                    // "subset of: 'volume', 'mute', 'set_output_delay'".
+                    // Advertises settability, not reportability: the spec says a
+                    // server "MUST NOT treat a reported volume or muted as
+                    // settable while the matching command is absent" from this
+                    // list. We handle all three, and previously listed none of
+                    // the first two.
                     put("supported_commands", buildJsonArray {
-                        add(kotlinx.serialization.json.JsonPrimitive("set_static_delay"))
+                        add(kotlinx.serialization.json.JsonPrimitive("volume"))
+                        add(kotlinx.serialization.json.JsonPrimitive("mute"))
+                        add(kotlinx.serialization.json.JsonPrimitive("set_output_delay"))
                     })
                 })
             })

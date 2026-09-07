@@ -239,13 +239,16 @@ object MessageParser {
                 val muted = player.booleanOrDefault("mute", false)
                 ServerCommandResult.Mute(muted)
             }
-            "set_static_delay" -> {
-                // Spec: integer, 0-5000 ms.
-                val delayMs = player.intOrDefault("static_delay_ms", -1)
+            "set_output_delay" -> {
+                // roles/player/v1.md: integer, 0-5000 ms. The command and its
+                // field were both named static_delay here, which matches no
+                // spec revision - so a conforming server's command fell through
+                // to Unknown and was silently dropped.
+                val delayMs = player.intOrDefault("output_delay_ms", -1)
                 if (delayMs in 0..5000) {
-                    ServerCommandResult.SetStaticDelay(delayMs)
+                    ServerCommandResult.SetOutputDelay(delayMs)
                 } else {
-                    Log.w(TAG, "set_static_delay out of range: $delayMs")
+                    Log.w(TAG, "set_output_delay out of range: $delayMs")
                     null
                 }
             }
