@@ -77,11 +77,11 @@ android {
         // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta16 = 20016). Every installable
         // build needs a strictly higher code than the one it replaces, so a
         // beta cannot share one; see the versionCode table in CLAUDE.md.
-        versionCode = 20016
+        versionCode = 20017
 
         // versionName: User-visible version string
         // Follows semantic versioning (major.minor.patch[-prerelease])
-        versionName = "2.0.0-Beta16"
+        versionName = "2.0.0-Beta17"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

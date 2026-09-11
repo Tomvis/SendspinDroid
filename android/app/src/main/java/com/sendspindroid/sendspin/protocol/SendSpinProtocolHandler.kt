@@ -3,6 +3,7 @@ package com.sendspindroid.sendspin.protocol
 import android.util.Log
 import com.sendspindroid.sendspin.AdaptiveBufferPolicy
 import com.sendspindroid.sendspin.SendspinTimeFilter
+import com.sendspindroid.sendspin.crypto.NoiseCipherSuite
 import com.sendspindroid.sendspin.crypto.NoiseCrypto
 import com.sendspindroid.sendspin.crypto.NoiseTransport
 import com.sendspindroid.sendspin.crypto.Psk
@@ -18,9 +19,14 @@ import com.sendspindroid.sendspin.protocol.message.MessageParser
 import com.sendspindroid.sendspin.protocol.timesync.TimeSyncManager
 import kotlinx.coroutines.CoroutineScope
 import com.sendspindroid.sendspin.crypto.TrustStore
+import com.sendspindroid.sendspin.pairing.DynamicPairingAction
+import com.sendspindroid.sendspin.pairing.DynamicPairingCodeFlow
+import com.sendspindroid.sendspin.pairing.DynamicPairingEvent
 import com.sendspindroid.sendspin.pairing.PairAbortReason
 import com.sendspindroid.sendspin.pairing.PairingAction
+import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import com.sendspindroid.sendspin.pairing.PairingEvent
+import com.sendspindroid.sendspin.pairing.PairingFailureCounter
 import com.sendspindroid.sendspin.pairing.PairingPskFlow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -655,7 +661,24 @@ abstract class SendSpinProtocolHandler(
     /** Install the transport produced by the handshake driver. */
     fun installEncryptedTransport(transport: NoiseTransport) {
         wireCodec = NoiseWireCodec(transport)
+        // This is the sole call site for a FRESH handshake - a re-handshake
+        // never calls it, going through resetForRehandshake() instead - so
+        // without this reset the counter would keep accumulating across
+        // reconnects on a reused SendSpin instance while each new server
+        // connection counts from 1, making our index look "ahead of the
+        // server's count".
+        resetPairingIndexForFreshHandshake()
         Log.i(tag, "Encrypted channel established")
+    }
+
+    /**
+     * Reset [dynamicPairingIndex] to 0: pairing_index counts "the number of
+     * pairing server/activate messages received since the last Noise
+     * handshake" (pairing.md line 335), and that count must restart on
+     * EVERY Noise handshake - fresh or re-handshake alike.
+     */
+    protected fun resetPairingIndexForFreshHandshake() {
+        dynamicPairingIndex = 0
     }
 
     /**
@@ -685,6 +708,18 @@ abstract class SendSpinProtocolHandler(
         activationSeen = false
         activeRoles = emptyList()
         activities = emptySet()
+        // The dynamic flow's sid is derived from this session's handshake
+        // hash, and pairing_index counts "activations since the last Noise
+        // handshake" - both go stale the moment a new handshake completes.
+        dynamicPairingFlow = null
+        resetPairingIndexForFreshHandshake()
+        dynamicAttemptTimeoutJob?.cancel()
+        dynamicAttemptTimeoutJob = null
+        activePairingMethod = null
+        // A re-handshake landing mid-attempt must not strand the pairing UI:
+        // the flow above is dropped without going through StopEmittingCode, so
+        // this is the same clear that action would have triggered.
+        onDynamicPairingCodeCleared()
     }
 
     /** Drop the encrypted channel (disconnect, or falling back to legacy). */
@@ -799,6 +834,9 @@ abstract class SendSpinProtocolHandler(
                 SendSpinProtocol.MessageType.SERVER_UNPAIR -> handleServerUnpair()
 
                 SendSpinProtocol.MessageType.PAIR_ABORT -> handlePairAbort(payload)
+                SendSpinProtocol.MessageType.SERVER_PAIR_INIT -> handleServerPairInit(payload)
+                SendSpinProtocol.MessageType.SERVER_PAIR_AUTH -> handleServerPairAuth(payload)
+                SendSpinProtocol.MessageType.SERVER_PAIR_CONFIRM -> handleServerPairConfirm(payload)
                 SendSpinProtocol.MessageType.SERVER_PAIR_FINALIZE -> handleServerPairFinalize()
                 SendSpinProtocol.MessageType.SERVER_HELLO -> handleServerHello(payload)
                 SendSpinProtocol.MessageType.SERVER_ACTIVATE -> handleServerActivate(payload)
@@ -931,12 +969,14 @@ abstract class SendSpinProtocolHandler(
             }
 
             is ActivationOutcome.Accept -> {
-                val first = !activationSeen
                 activities = activate.activities
                 activeRoles = outcome.activeRoles
                 activationSeen = true
                 Log.i(tag, "server/activate accepted: activities=${activate.activities} " +
                     "roles=${outcome.activeRoles}")
+                onAdmissionStateChanged(
+                    AdmissionState.from(activate.activities, outcome.activeRoles)
+                )
                 val pairing = Activity.PAIRING in activate.activities
 
                 // A pairing activation is answered with client/pair-finalize and
@@ -946,33 +986,87 @@ abstract class SendSpinProtocolHandler(
                 // rejected as malformed - which is precisely how this failed
                 // against both Music Assistant builds.
                 //
-                // Withholding them costs nothing: the admissibility table grants
-                // no roles on a Pairing-PSK connection, so there is no player
-                // state worth reporting and no stream to synchronise to. The
-                // activation that follows the promotion starts them.
-                if (first && !pairing) {
-                    // Now, and only now, may we speak.
+                // pairing.md says "Pairing and playback are mutually exclusive
+                // on a connection", but its "Sequence violations" rule only
+                // covers a *pairing* message arriving out of order - it does
+                // not explicitly forbid client/time during pairing. We stop it
+                // anyway on the strength of that mutual-exclusivity statement
+                // plus the observed fact above: every real server rejects it.
+                // This is an interop-driven reading, not a quoted spec rule.
+                //
+                // Withholding them costs nothing while pairing: the
+                // admissibility table grants no roles on a Pairing-PSK
+                // connection, so there is no player state worth reporting and
+                // no stream to synchronise to.
+                //
+                // The dynamic flow's real sequence is: the server activates
+                // with EMPTY activities first (time sync starts), and only
+                // LATER activates into pairing (time sync must then stop) -
+                // so this cannot be gated on "first activation" the way the
+                // original Pairing-PSK-only version was. A later activation
+                // that leaves pairing must restore both, whether or not it is
+                // the first activation ever seen on this connection.
+                if (pairing) {
+                    stopTimeSync()
+                } else {
                     sendPlayerStateUpdate()
                     startTimeSync()
+                }
+
+                if (pairing) {
+                    // The client's own tally of "pairing activations since the
+                    // last Noise handshake" (pairing.md) - the value folded
+                    // into the CPace sid as `pairing_index`. Incremented for
+                    // EVERY accepted pairing activation, whatever the method:
+                    // the server's own count advances the same way. Counting
+                    // only dynamic activations would leave our tally lower
+                    // than the server's after a pairing_psk activation, and
+                    // the spec silently discards an index lower than the
+                    // server's count - the dynamic attempt would then never
+                    // start. Incremented before use, so the first pairing
+                    // activation on a session is index 1.
+                    dynamicPairingIndex += 1
                 }
 
                 // Every accepted activation is fed to the pairing flow, not
                 // only the pairing ones: an activation WITHOUT `pairing` is how
                 // the server ends an attempt without finalizing, and the client
                 // must then discard the PSK it generated.
-                runPairingActions(
-                    if (pairing) {
-                        PairingEvent.PairingActivation(
-                            method = activate.pairingMethod,
-                            // From the handshake, never re-derived: this is the
-                            // only thing keeping a long-term secret off an
-                            // unauthenticated connection.
-                            matchedCategory = matchedPskCategory(),
-                        )
-                    } else {
-                        PairingEvent.NonPairingActivation
-                    }
-                )
+                if (pairing && activate.pairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+                    activePairingMethod = activate.pairingMethod
+                    runDynamicPairingActions(
+                        DynamicPairingEvent.PairingActivation(dynamicPairingIndex)
+                    )
+                    // The PSK flow was not selected by this activation. If a
+                    // server switches methods across activations, the PSK flow
+                    // must be told its attempt is over too - the same
+                    // "ends without finalizing" rule a non-pairing activation
+                    // applies - or a stale attempt could later persist a record
+                    // the server never stored.
+                    runPairingActions(PairingEvent.NonPairingActivation)
+                } else {
+                    activePairingMethod = if (pairing) activate.pairingMethod else null
+                    runPairingActions(
+                        if (pairing) {
+                            PairingEvent.PairingActivation(
+                                method = activate.pairingMethod,
+                                // From the handshake, never re-derived: this is the
+                                // only thing keeping a long-term secret off an
+                                // unauthenticated connection.
+                                matchedCategory = matchedPskCategory(),
+                            )
+                        } else {
+                            PairingEvent.NonPairingActivation
+                        }
+                    )
+                    // A non-pairing OR a Pairing-PSK activation also ends any
+                    // dynamic attempt in flight - the same "ends without
+                    // finalizing" rule the PSK flow above just applied to
+                    // itself. Left live, a stale attempt keeps the code on
+                    // screen and can fire pair/abort(attempt_timeout) into the
+                    // middle of this new attempt.
+                    runDynamicPairingActions(DynamicPairingEvent.NonPairingActivation)
+                }
             }
         }
     }
@@ -1007,6 +1101,15 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
+     * The accepted activation, projected to what the user needs to be told.
+     *
+     * Fires on every accepted `server/activate` rather than only on a change:
+     * activations are rare (handshake, a role change, a pairing transition),
+     * and the consumers hold it in state that already collapses repeats.
+     */
+    protected open fun onAdmissionStateChanged(state: AdmissionState) {}
+
+    /**
      * `pair/abort` from the server.
      *
      * Never closes the connection, for any reason including
@@ -1021,6 +1124,9 @@ abstract class SendSpinProtocolHandler(
         val reason = payload?.get("reason")?.jsonPrimitive?.contentOrNull ?: "unspecified"
         Log.w(tag, "Pairing aborted (received): reason=$reason")
         runPairingActions(PairingEvent.PairAbortReceived(reason))
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+            runDynamicPairingActions(DynamicPairingEvent.PairAbortReceived(reason))
+        }
     }
 
     // ========== Management (item 3.1) ==========
@@ -1089,6 +1195,19 @@ abstract class SendSpinProtocolHandler(
     /** The operator cancelled pairing from the UI. Leaves the connection open. */
     fun cancelPairing() {
         runPairingActions(PairingEvent.UserCancelled)
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+            runDynamicPairingActions(DynamicPairingEvent.UserCancelled)
+        }
+    }
+
+    /**
+     * The operator performed the "Allow pairing" gesture, ending a
+     * gesture-gated wait on an escalated attempt.
+     */
+    fun confirmDynamicPairingGesture() {
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+            runDynamicPairingActions(DynamicPairingEvent.WindowOpened)
+        }
     }
 
     // ========== Pairing PSK flow (item 2.5) ==========
@@ -1206,11 +1325,17 @@ abstract class SendSpinProtocolHandler(
 
     protected fun handleServerPairFinalize() {
         runPairingActions(PairingEvent.ServerPairFinalize)
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+            runDynamicPairingActions(DynamicPairingEvent.ServerPairFinalize)
+        }
     }
 
     /** Called by the connection when the socket goes away mid-attempt. */
     fun onConnectionClosedForPairing() {
         runPairingActions(PairingEvent.ConnectionClosed)
+        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+            runDynamicPairingActions(DynamicPairingEvent.ConnectionClosed)
+        }
     }
 
     private fun runPairingActions(event: PairingEvent) {
@@ -1272,6 +1397,186 @@ abstract class SendSpinProtocolHandler(
                 // The one failure a user could actually act on, so it names the
                 // cause rather than the symptom.
                 Log.e(tag, "Cannot store pairing record: the write did not persist")
+        }
+    }
+
+    // ========== Dynamic Pairing Code flow (item 3.2) ==========
+
+    /**
+     * The method name of the pairing attempt currently in flight on this
+     * connection ("pairing_psk" or "dynamic_pairing_code"), or null when none
+     * is. Set only by [handleServerActivate], which is the sole place a new
+     * attempt starts or an old one is superseded - matching how both flows
+     * themselves only truly reset on the next activation.
+     *
+     * This is what keeps `server/pair-init`, `server/pair-auth` and
+     * `server/pair-confirm` (exclusive to the dynamic method) from being fed
+     * to a Pairing-PSK attempt, and what keeps `server/pair-finalize` from
+     * being fed to a dynamic attempt that never asked for it.
+     */
+    private var activePairingMethod: String? = null
+
+    /** One attempt at a time, lazily built once a Noise session exists to bind it to. */
+    private var dynamicPairingFlow: DynamicPairingCodeFlow? = null
+
+    private var dynamicAttemptTimeoutJob: Job? = null
+
+    /**
+     * Accepted pairing activations (any method) since the last Noise
+     * handshake. Reset on every fresh handshake in [installEncryptedTransport]
+     * and on every re-handshake in [resetForRehandshake].
+     */
+    private var dynamicPairingIndex = 0
+
+    /** Backing store for the method's brute-force counter. Null on paths that never offer it. */
+    protected open fun pairingCounterStore(): PairingCounterStore? = null
+
+    /**
+     * The current session's Noise handshake hash `h`, needed to derive the
+     * CPace `sid`. Null before a handshake completes.
+     */
+    protected open fun currentHandshakeHash(): ByteArray? = null
+
+    /**
+     * The negotiated AEAD suite, needed to wrap `client/pair-confirm`'s
+     * `nonce_B` opening and `client/pair-finalize`'s PSK. Null before a
+     * handshake completes.
+     */
+    protected open fun negotiatedCipherSuite(): NoiseCipherSuite? = null
+
+    /** Surfaced for the pairing UI: show this code to the operator. */
+    protected open fun onDynamicPairingCodeEmitted(code: String) {}
+
+    /** Surfaced for the pairing UI: stop showing a code (attempt ended, one way or another). */
+    protected open fun onDynamicPairingCodeCleared() {}
+
+    /** Surfaced for the pairing UI: the attempt is gesture-gated; show the "Allow pairing" prompt. */
+    protected open fun onDynamicPairingGestureRequested() {}
+
+    private fun handleServerPairInit(payload: JsonObject?) {
+        if (activePairingMethod != MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+            onProtocolFailure("server/pair-init received outside a dynamic pairing attempt")
+            return
+        }
+        val nonceA = MessageParser.parseServerPairInit(payload)
+        if (nonceA == null) {
+            onProtocolFailure("malformed server/pair-init")
+            return
+        }
+        runDynamicPairingActions(DynamicPairingEvent.ServerPairInit(nonceA))
+    }
+
+    private fun handleServerPairAuth(payload: JsonObject?) {
+        if (activePairingMethod != MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+            onProtocolFailure("server/pair-auth received outside a dynamic pairing attempt")
+            return
+        }
+        val ya = MessageParser.parseServerPairAuth(payload)
+        if (ya == null) {
+            onProtocolFailure("malformed server/pair-auth")
+            return
+        }
+        runDynamicPairingActions(DynamicPairingEvent.ServerPairAuth(ya))
+    }
+
+    private fun handleServerPairConfirm(payload: JsonObject?) {
+        if (activePairingMethod != MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+            onProtocolFailure("server/pair-confirm received outside a dynamic pairing attempt")
+            return
+        }
+        val ta = MessageParser.parseServerPairConfirm(payload)
+        if (ta == null) {
+            onProtocolFailure("malformed server/pair-confirm")
+            return
+        }
+        runDynamicPairingActions(DynamicPairingEvent.ServerPairConfirm(ta))
+    }
+
+    private fun runDynamicPairingActions(event: DynamicPairingEvent) {
+        val flow = dynamicPairingFlow ?: run {
+            // Only worth building the flow for an event that starts or
+            // advances an attempt. A terminal event with no flow yet has
+            // nothing to end - most connections never touch this method at
+            // all, and treating every ordinary non-pairing activation as a
+            // reason to construct one (and fail loudly if the session context
+            // is not ready) would be wrong for all of them.
+            if (event !is DynamicPairingEvent.PairingActivation) return
+            val hash = currentHandshakeHash()
+            val store = pairingCounterStore()
+            val suite = negotiatedCipherSuite()
+            if (hash == null || store == null || suite == null) {
+                onProtocolFailure("dynamic pairing activation with no handshake context")
+                return
+            }
+            DynamicPairingCodeFlow(hash, PairingFailureCounter(store), suite)
+                .also { dynamicPairingFlow = it }
+        }
+
+        for (action in flow.onEvent(event)) {
+            when (action) {
+                is DynamicPairingAction.SendPairInit ->
+                    sendProtocolMessage(
+                        MessageBuilder.buildClientPairInit(action.pairingIndex, action.commitB)
+                    )
+
+                is DynamicPairingAction.SendPairPending ->
+                    sendProtocolMessage(MessageBuilder.buildClientPairPending(action.pairingIndex))
+
+                DynamicPairingAction.RequestGesture -> onDynamicPairingGestureRequested()
+
+                DynamicPairingAction.StartAttemptTimeout -> {
+                    dynamicAttemptTimeoutJob?.cancel()
+                    dynamicAttemptTimeoutJob = getCoroutineScope().launch {
+                        delay(SendSpinProtocol.PAIR_ATTEMPT_TIMEOUT_MS)
+                        Log.w(tag, "Dynamic pairing attempt timed out")
+                        runDynamicPairingActions(DynamicPairingEvent.AttemptTimeout)
+                    }
+                }
+
+                is DynamicPairingAction.EmitPairingCode -> onDynamicPairingCodeEmitted(action.code)
+
+                is DynamicPairingAction.SendPairAuth ->
+                    sendProtocolMessage(MessageBuilder.buildClientPairAuth(action.yb))
+
+                is DynamicPairingAction.SendPairAbort -> sendPairAbort(action.reason)
+
+                is DynamicPairingAction.SendPairConfirm ->
+                    sendProtocolMessage(
+                        MessageBuilder.buildClientPairConfirm(action.tb, action.wrappedNonceB)
+                    )
+
+                is DynamicPairingAction.SendPairFinalize -> {
+                    // Metadata only - the payload carries the wrapped PSK.
+                    Log.i(tag, "Dynamic pairing: sending client/pair-finalize (wrapped PSK)")
+                    sendProtocolMessage(
+                        MessageBuilder.buildClientPairFinalizeWrapped(action.wrappedPsk)
+                    )
+                }
+
+                is DynamicPairingAction.PersistRecord -> persistPairingRecord(action.psk)
+
+                DynamicPairingAction.StopEmittingCode -> {
+                    // No separate "clear the timer" action exists on this flow
+                    // (unlike PairingAction.ClearAttemptTimeout): StopEmittingCode
+                    // is emitted on every exit path - success, abort, timeout,
+                    // and a superseding activation - so it doubles as that
+                    // signal here. Without this, a completed pairing's timer
+                    // would still fire minutes later and abort a connection
+                    // that already succeeded.
+                    dynamicAttemptTimeoutJob?.cancel()
+                    dynamicAttemptTimeoutJob = null
+                    onDynamicPairingCodeCleared()
+                }
+
+                // "Close the WebSocket with no application-level message and
+                // persist nothing." onProtocolFailure is the handler's
+                // existing silent-close path: every other protocol-level
+                // failure in this file (a malformed server/activate, a
+                // handshake message out of phase) already routes through it,
+                // and it sends nothing itself - only the caller's log line.
+                DynamicPairingAction.ProtocolError ->
+                    onProtocolFailure("dynamic pairing protocol error")
+            }
         }
     }
 
@@ -1405,21 +1710,28 @@ abstract class SendSpinProtocolHandler(
 
     /**
      * True when a stream/clear or stream/end [roles] array applies to the given
-     * role family. The server emits the unversioned family name ("player") in
-     * these arrays, NOT the versioned role ("player@v1"), so match on the family
-     * and accept the versioned form too for forward compat. A null roles field
-     * means "all roles".
+     * stream role. A null roles field means "all roles".
+     *
+     * messaging.md writes these two fields UNVERSIONED -- stream/end's as
+     * "roles to end streams for ('player', 'artwork', 'visualizer')" and
+     * stream/clear's as "which roles to clear: 'player', 'visualizer', or
+     * both" -- while supported_roles/active_roles are versioned ("player@v1").
+     * [SendSpinProtocol.isStreamRole] matches the spec's unversioned form and
+     * tolerates a versioned one, so a server that sends "player@v1" here is
+     * still understood.
      */
-    private fun rolesCover(roles: List<String>?, family: String, versioned: String): Boolean =
-        roles == null || family in roles || versioned in roles
+    private fun rolesCover(roles: List<String>?, streamRole: String): Boolean =
+        roles == null || roles.any { SendSpinProtocol.isStreamRole(it, streamRole) }
 
     protected fun handleStreamClear(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleStreamClear ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
         val roles = MessageParser.parseRoles(payload)
 
         // Only flush the audio buffer for a player-role (or all-roles) clear.
-        // A visualizer-only clear must not wipe our PCM queue.
-        if (!rolesCover(roles, SendSpinProtocol.RoleFamily.PLAYER, SendSpinProtocol.Roles.PLAYER)) {
+        // The dispatcher used to call this with no payload at all, so every
+        // clear was treated as global: a visualizer-only clear reset the
+        // decoder and discarded the whole chunk queue mid-track.
+        if (!rolesCover(roles, SendSpinProtocol.StreamRoles.PLAYER)) {
             Log.d(tag, "Stream clear for non-player roles: $roles - not flushing audio")
             return
         }
@@ -1432,7 +1744,10 @@ abstract class SendSpinProtocolHandler(
         Log.i(tag, "[cmd-trace] T1 handleStreamEnd ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
         val roles = MessageParser.parseRoles(payload)
 
-        if (!rolesCover(roles, SendSpinProtocol.RoleFamily.PLAYER, SendSpinProtocol.Roles.PLAYER)) {
+        // Comparing against "player@v1" here matched nothing, so every
+        // stream/end carrying a roles array was silently dropped and the
+        // stream never ended.
+        if (!rolesCover(roles, SendSpinProtocol.StreamRoles.PLAYER)) {
             Log.d(tag, "Stream end for non-player roles: $roles - ignoring")
             return
         }

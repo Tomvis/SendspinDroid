@@ -28,14 +28,20 @@ from pathlib import Path
 
 try:
     from aiosendspin.noise.keys import Identity
-    from aiosendspin.noise.pairing import PairMethod, PairingAttempt
-    from aiosendspin.noise.pairing_token import decode_token
+    from aiosendspin.noise.pairing import (
+        PairingAttempt,
+        PairingCodeFormat,
+        PairMethod,
+    )
+    from aiosendspin.noise.pairing_token import decode_psk_token
     from aiosendspin.noise.trust_store import FileServerPairingStore
     from aiosendspin.server.server import SendspinServer
 except ImportError:  # pragma: no cover - environment guidance, not logic
     print(
         "aiosendspin is not installed. See docs/dev-server-runbook.md:\n"
-        "  pip install 'aiosendspin[server]==9.1.0'",
+        "  pip install \"aiosendspin[server] @ "
+        "git+https://github.com/sendspin/aiosendspin@"
+        "90feb19894793749eb017f9e1bb21929dc8fe94a\"",
         file=sys.stderr,
     )
     raise SystemExit(2) from None
@@ -86,6 +92,19 @@ def load_or_create_identity(path: Path) -> Identity:
         handle.write(identity.private_b64u)
     LOGGER.info("Generated a new server identity at %s", path)
     return identity
+
+
+async def _prompt_pairing_code() -> str:
+    """Read the six-digit dynamic pairing code the operator typed at the console.
+
+    Passed to aiosendspin as a `PairingCodeProvider`: it calls this with no
+    arguments and awaits the result, so this must not take a client_id or any
+    other argument the library does not pass.
+    """
+    loop = asyncio.get_running_loop()
+    print("Enter the pairing code shown on the device: ", end="", flush=True)
+    line = await loop.run_in_executor(None, sys.stdin.readline)
+    return line.strip()
 
 
 def describe_client(client) -> str:
@@ -265,7 +284,7 @@ class DevServer:
         elif cmd == "pair":
             if not rest:
                 raise ValueError("usage: pair <SP:0... token>")
-            token = decode_token(rest[0])
+            token = decode_psk_token(rest[0])
             client_id = token.client_id
             print(f"token decodes to client_id {client_id}")
             if server.get_client(client_id) is None:
@@ -276,6 +295,23 @@ class DevServer:
             await server.initiate_pairing(
                 client_id,
                 PairingAttempt(PairMethod.PAIRING_PSK, pairing_psk=token.pairing_psk),
+            )
+            print("pairing initiated")
+        elif cmd in ("pair-dynamic", "pd"):
+            client_id = self._resolve(rest)
+            if server.get_client(client_id) is None:
+                raise ValueError(
+                    f"no connected client with id {client_id}; the device must be "
+                    f"connected before it can be paired"
+                )
+            print("initiating dynamic pairing; read the six digits off the device screen")
+            await server.initiate_pairing(
+                client_id,
+                PairingAttempt(
+                    PairMethod.DYNAMIC_PAIRING_CODE,
+                    pairing_code_provider=_prompt_pairing_code,
+                    pairing_format=PairingCodeFormat.DIGITS,
+                ),
             )
             print("pairing initiated")
         else:
@@ -299,6 +335,7 @@ class DevServer:
             "  trust [id]         allow an unpaired client to play (Sentinel PSK)\n"
             "  untrust [id]       revoke unpaired playback\n"
             "  pair <token>       pair using a SP:0... pairing token from the device\n"
+            "  pair-dynamic [id]  pair using the six-digit dynamic pairing code\n"
             "  unpair [id]        drop the pairing record and tell the client\n"
             "  quit               stop the server\n"
             "id defaults to the only connected client when omitted.\n"

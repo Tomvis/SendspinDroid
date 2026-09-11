@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.model.UnifiedServer
+import com.sendspindroid.sendspin.protocol.AdmissionState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -69,6 +70,35 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     private val _metadata = MutableStateFlow(TrackMetadata.EMPTY)
     val metadata: StateFlow<TrackMetadata> = _metadata.asStateFlow()
+
+    /**
+     * Why a connected session cannot play, or READY when it can.
+     *
+     * Defaults to READY so the guidance never flashes on screen before the
+     * first `server/activate` of a session arrives.
+     */
+    private val _admissionState = MutableStateFlow(AdmissionState.READY)
+    val admissionState: StateFlow<AdmissionState> = _admissionState.asStateFlow()
+
+    fun updateAdmissionState(state: AdmissionState) {
+        _admissionState.value = state
+    }
+
+    /** The dynamic pairing code to show the operator, or null when none is active. */
+    private val _pairingCode = MutableStateFlow<String?>(null)
+    val pairingCode: StateFlow<String?> = _pairingCode.asStateFlow()
+
+    fun updatePairingCode(code: String?) {
+        _pairingCode.value = code
+    }
+
+    /** Whether a dynamic pairing attempt is waiting on the "Allow pairing" gesture. */
+    private val _pairingGestureRequested = MutableStateFlow(false)
+    val pairingGestureRequested: StateFlow<Boolean> = _pairingGestureRequested.asStateFlow()
+
+    fun updatePairingGestureRequested(requested: Boolean) {
+        _pairingGestureRequested.value = requested
+    }
 
     private val _groupName = MutableStateFlow("")
     val groupName: StateFlow<String> = _groupName.asStateFlow()
@@ -364,6 +394,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         _reconnectingState.value = null
         _reconnectingToServer.value = null
         _isConnectionLoading.value = false
+        _pairingCode.value = null
+        _pairingGestureRequested.value = false
         resetPlaybackState()
     }
 }

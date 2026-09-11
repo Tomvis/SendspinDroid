@@ -73,6 +73,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
+    private val _dynamicPairingCodeEnabled = MutableStateFlow(UserSettings.getDynamicPairingCodeEnabled())
+    val dynamicPairingCodeEnabled: StateFlow<Boolean> = _dynamicPairingCodeEnabled.asStateFlow()
+
+    fun setDynamicPairingCodeEnabled(enabled: Boolean) {
+        UserSettings.setDynamicPairingCodeEnabled(enabled)
+        _dynamicPairingCodeEnabled.value = enabled
+    }
+
     // Display settings
     private val _fullscreenMode = MutableStateFlow(UserSettings.fullScreenMode)
     val fullscreenMode: StateFlow<Boolean> = _fullscreenMode.asStateFlow()

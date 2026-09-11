@@ -61,6 +61,7 @@ import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.musicassistant.MusicAssistant
 import com.sendspindroid.musicassistant.QueueUpdate
 import com.sendspindroid.sendspin.SendSpin
+import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.sendspin.SendSpinEndpoint
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.UnifiedServerRepository
@@ -466,6 +467,7 @@ class PlaybackService : MediaLibraryService() {
         const val COMMAND_PREVIOUS = "com.sendspindroid.PREVIOUS"
         const val COMMAND_SWITCH_GROUP = "com.sendspindroid.SWITCH_GROUP"
         const val COMMAND_GET_STATS = "com.sendspindroid.GET_STATS"
+        const val COMMAND_ALLOW_PAIRING = "com.sendspindroid.ALLOW_PAIRING"
 
         // Intent actions for service start (used by BootReceiver)
         const val ACTION_AUTO_CONNECT = "com.sendspindroid.ACTION_AUTO_CONNECT"
@@ -498,6 +500,26 @@ class PlaybackService : MediaLibraryService() {
         const val EXTRA_ERROR_MESSAGE = "error_message"
         const val EXTRA_WAS_USER_INITIATED = "was_user_initiated"
         const val EXTRA_WAS_RECONNECT_EXHAUSTED = "was_reconnect_exhausted"
+
+        /**
+         * Why a connected session cannot play, as an [AdmissionState] name.
+         * Only present while EXTRA_CONNECTION_STATE is STATE_CONNECTED - it
+         * describes an accepted activation, which no other state has.
+         */
+        const val EXTRA_ADMISSION_STATE = "admission_state"
+
+        /**
+         * The current dynamic pairing code, present only while one is being
+         * shown to the operator. Rides the same STATE_CONNECTED branch as
+         * EXTRA_ADMISSION_STATE, for the same reason.
+         */
+        const val EXTRA_PAIRING_CODE = "pairing_code"
+
+        /**
+         * Whether a dynamic pairing attempt is gesture-gated and waiting on
+         * the "Allow pairing" gesture. Absent value reads as false.
+         */
+        const val EXTRA_PAIRING_GESTURE_REQUESTED = "pairing_gesture_requested"
 
         // Session extras keys for volume (server → controller)
         const val EXTRA_VOLUME = "volume"
@@ -1044,8 +1066,29 @@ class PlaybackService : MediaLibraryService() {
      * Initializes the native Kotlin SendSpin client.
      */
     @OptIn(UnstableApi::class)
+    /**
+     * Latest admission state for the live connection.
+     *
+     * Reset per connection: a stale value from a previous session would
+     * otherwise be published in the window between reconnecting and the first
+     * `server/activate` of the new session.
+     */
+    @Volatile
+    private var admissionState: AdmissionState = AdmissionState.READY
+
+    /** The dynamic pairing code currently shown to the operator, or null. */
+    @Volatile
+    private var pairingCode: String? = null
+
+    /** Whether a dynamic pairing attempt is waiting on the "Allow pairing" gesture. */
+    @Volatile
+    private var pairingGestureRequested: Boolean = false
+
     private fun initializeSendSpinClient() {
         try {
+            admissionState = AdmissionState.READY
+            pairingCode = null
+            pairingGestureRequested = false
             // Use user-configured player name, falls back to device model
             val playerName = com.sendspindroid.UserSettings.getPlayerName()
             sendSpinClient = SendSpin(
@@ -1252,6 +1295,44 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onServerDiscovered(name: String, address: String) {
             Log.d(TAG, "Server discovered (ignored in service): $name at $address")
+        }
+
+        override fun onAdmissionStateChanged(state: AdmissionState) {
+            mainHandler.post {
+                if (admissionState == state) return@post
+                Log.i(TAG, "Admission state: $admissionState -> $state")
+                admissionState = state
+                broadcastSessionExtras()
+            }
+        }
+
+        override fun onDynamicPairingCodeEmitted(code: String) {
+            mainHandler.post {
+                pairingCode = code
+                broadcastSessionExtras()
+            }
+        }
+
+        override fun onDynamicPairingCodeCleared() {
+            mainHandler.post {
+                // StopEmittingCode fires on every terminal path (success, abort,
+                // timeout, superseding activation) - including one where the
+                // attempt never got past AWAITING_GESTURE and no code was ever
+                // emitted. A terminal ends both the code display and any
+                // pending gesture request, so both clear here together;
+                // leaving the gesture flag set would strand the "Allow
+                // pairing" button on screen with no live attempt behind it.
+                pairingCode = null
+                pairingGestureRequested = false
+                broadcastSessionExtras()
+            }
+        }
+
+        override fun onDynamicPairingGestureRequested() {
+            mainHandler.post {
+                pairingGestureRequested = true
+                broadcastSessionExtras()
+            }
         }
 
         override fun onStateChanged(state: String) {
@@ -2279,6 +2360,9 @@ class PlaybackService : MediaLibraryService() {
                 STATE_CONNECTED -> {
                     putString(EXTRA_CONNECTION_STATE, STATE_CONNECTED)
                     serverName?.let { putString(EXTRA_SERVER_NAME, it) }
+                    putString(EXTRA_ADMISSION_STATE, admissionState.name)
+                    pairingCode?.let { putString(EXTRA_PAIRING_CODE, it) }
+                    putBoolean(EXTRA_PAIRING_GESTURE_REQUESTED, pairingGestureRequested)
                 }
                 STATE_RECONNECTING -> {
                     putString(EXTRA_CONNECTION_STATE, STATE_RECONNECTING)
@@ -3249,6 +3333,7 @@ class PlaybackService : MediaLibraryService() {
                 .add(SessionCommand(COMMAND_PREVIOUS, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_SWITCH_GROUP, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_GET_STATS, Bundle.EMPTY))
+                .add(SessionCommand(COMMAND_ALLOW_PAIRING, Bundle.EMPTY))
                 .build()
 
             // Player commands must include SET_MEDIA_ITEM so the legacy compat bridge
@@ -3417,6 +3502,17 @@ class PlaybackService : MediaLibraryService() {
                 COMMAND_GET_STATS -> {
                     val statsBundle = getStats()
                     Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS, statsBundle))
+                }
+
+                COMMAND_ALLOW_PAIRING -> {
+                    Log.d(TAG, "Allow pairing gesture confirmed")
+                    // Cleared here, at the operator's tap, rather than waiting on a
+                    // round trip through the flow: the gate is a local UI concern,
+                    // and the button must disappear the moment it is pressed.
+                    pairingGestureRequested = false
+                    sendSpinClient?.confirmDynamicPairingGesture()
+                    broadcastSessionExtras()
+                    Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
 
                 else -> {

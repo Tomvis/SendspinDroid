@@ -84,6 +84,7 @@ import com.sendspindroid.ui.adaptive.FormFactor
  * @param onSwitchGroupClick Switch playback group
  * @param onFavoriteClick Toggle favorite on current track
  * @param onVolumeChange Volume slider callback (0-1 range)
+ * @param onAllowPairingClick Confirm the dynamic pairing gesture gate
  * @param onDisconnectClick Disconnect from server
  * @param onAddServerClick FAB: launch add server wizard
  */
@@ -97,6 +98,7 @@ fun AppShell(
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
+    onAllowPairingClick: () -> Unit,
     onDisconnectClick: () -> Unit,
     onAddServerClick: () -> Unit,
     onStatsClick: () -> Unit,
@@ -127,6 +129,7 @@ fun AppShell(
                 onSwitchGroupClick = onSwitchGroupClick,
                 onFavoriteClick = onFavoriteClick,
                 onVolumeChange = onVolumeChange,
+                onAllowPairingClick = onAllowPairingClick,
                 onDisconnectClick = onDisconnectClick,
                 onStatsClick = onStatsClick,
                 onSettingsClick = onSettingsClick,
@@ -188,6 +191,7 @@ private fun ConnectedShell(
     onSwitchGroupClick: () -> Unit,
     onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
+    onAllowPairingClick: () -> Unit,
     onDisconnectClick: () -> Unit,
     onStatsClick: () -> Unit,
     onSettingsClick: () -> Unit,
@@ -308,6 +312,8 @@ private fun ConnectedShell(
             onSwitchGroupClick = onSwitchGroupClick,
             onFavoriteClick = onFavoriteClick,
             onVolumeChange = onVolumeChange,
+            onOpenPairingClick = onSettingsClick,
+            onAllowPairingClick = onAllowPairingClick,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)

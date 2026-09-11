@@ -215,11 +215,11 @@ object PairAbortReason {
     /** The activation's method is one the matched PSK disallows, or one we do not offer. */
     const val METHOD_NOT_SUPPORTED = "method_not_supported"
 
-    /** `pin_length` below `min_pin_length` or outside 4-12. No call site until 4.4 (#220). */
-    const val PIN_LENGTH_UNACCEPTABLE = "pin_length_unacceptable"
-
     /** PAKE key confirmation or PIN binding failed. No call site until 4.4 (#220). */
     const val PIN_MISMATCH = "pin_mismatch"
+
+    /** A verified `server_kc` did not match: the Dynamic Pairing Code flow's in-band mismatch. */
+    const val PAIRING_CODE_MISMATCH = "pairing_code_mismatch"
 
     /** The operator aborted through a local UI. Either side may send it. */
     const val USER_CANCELLED = "user_cancelled"
@@ -228,8 +228,8 @@ object PairAbortReason {
         ATTEMPT_TIMEOUT,
         CONCURRENT_ATTEMPT,
         METHOD_NOT_SUPPORTED,
-        PIN_LENGTH_UNACCEPTABLE,
         PIN_MISMATCH,
+        PAIRING_CODE_MISMATCH,
         USER_CANCELLED,
     )
 

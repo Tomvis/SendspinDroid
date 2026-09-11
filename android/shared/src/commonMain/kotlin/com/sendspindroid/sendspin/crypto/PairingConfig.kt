@@ -15,6 +15,13 @@ package com.sendspindroid.sendspin.crypto
  *   miss, and the descriptor leaves `client/hello`.
  * @param unpairedAccessEnabled whether this client admits a server with no
  *   pairing record. Advertised as `unpaired_access.enabled`.
+ * @param dynamicPairingCodeEnabled whether the `dynamic_pairing_code` method is
+ *   offered. Default false: `server/hello` carries no signal for whether the
+ *   server understands this method, and advertising it unconditionally broke
+ *   the handshake against aiosendspin 9.1.1 (its `PairMethod` enum predates
+ *   `dynamic_pairing_code`, so `client/hello` fails to deserialize). Until a
+ *   capability signal exists, this is an explicit opt-in the user makes
+ *   knowing older servers may reject the connection.
  * @param recordModePskId the shared-PSK record backing record mode.
  *
  *   `management.md#record-mode` requires this to name a real shared-PSK record,
@@ -33,6 +40,7 @@ class PairingConfig(
     pairingPsk: ByteArray,
     val pairingPskEnabled: Boolean,
     val unpairedAccessEnabled: Boolean,
+    val dynamicPairingCodeEnabled: Boolean,
     val recordModePskId: String,
 ) {
     init {
@@ -50,16 +58,19 @@ class PairingConfig(
     val pairingPskId: String by lazy { PskId.derive(secret) }
 
     fun withEnabled(enabled: Boolean): PairingConfig =
-        PairingConfig(secret, enabled, unpairedAccessEnabled, recordModePskId)
+        PairingConfig(secret, enabled, unpairedAccessEnabled, dynamicPairingCodeEnabled, recordModePskId)
 
     fun withUnpairedAccess(enabled: Boolean): PairingConfig =
-        PairingConfig(secret, pairingPskEnabled, enabled, recordModePskId)
+        PairingConfig(secret, pairingPskEnabled, enabled, dynamicPairingCodeEnabled, recordModePskId)
+
+    fun withDynamicPairingCodeEnabled(enabled: Boolean): PairingConfig =
+        PairingConfig(secret, pairingPskEnabled, unpairedAccessEnabled, enabled, recordModePskId)
 
     fun withPairingPsk(psk: ByteArray): PairingConfig =
-        PairingConfig(psk, pairingPskEnabled, unpairedAccessEnabled, recordModePskId)
+        PairingConfig(psk, pairingPskEnabled, unpairedAccessEnabled, dynamicPairingCodeEnabled, recordModePskId)
 
     fun withRecordModePskId(pskId: String): PairingConfig =
-        PairingConfig(secret, pairingPskEnabled, unpairedAccessEnabled, pskId)
+        PairingConfig(secret, pairingPskEnabled, unpairedAccessEnabled, dynamicPairingCodeEnabled, pskId)
 
     // Hand-written: a data class holding a ByteArray compares by reference.
     override fun equals(other: Any?): Boolean =
@@ -67,6 +78,7 @@ class PairingConfig(
             other is PairingConfig &&
                 pairingPskEnabled == other.pairingPskEnabled &&
                 unpairedAccessEnabled == other.unpairedAccessEnabled &&
+                dynamicPairingCodeEnabled == other.dynamicPairingCodeEnabled &&
                 recordModePskId == other.recordModePskId &&
                 secret.contentEquals(other.secret)
             )
@@ -75,6 +87,7 @@ class PairingConfig(
         var result = secret.contentHashCode()
         result = 31 * result + pairingPskEnabled.hashCode()
         result = 31 * result + unpairedAccessEnabled.hashCode()
+        result = 31 * result + dynamicPairingCodeEnabled.hashCode()
         result = 31 * result + recordModePskId.hashCode()
         return result
     }
@@ -82,5 +95,6 @@ class PairingConfig(
     /** Never the bytes. */
     override fun toString(): String =
         "PairingConfig(pairingPskId=$pairingPskId, enabled=$pairingPskEnabled, " +
-            "unpairedAccess=$unpairedAccessEnabled, recordMode=$recordModePskId)"
+            "unpairedAccess=$unpairedAccessEnabled, dynamicPairingCode=$dynamicPairingCodeEnabled, " +
+            "recordMode=$recordModePskId)"
 }

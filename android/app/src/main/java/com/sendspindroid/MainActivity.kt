@@ -77,6 +77,7 @@ import com.sendspindroid.coordinator.ConnectionCoordinator
 import com.sendspindroid.coordinator.ReconnectStatus
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.playback.PlaybackService
+import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.network.ConnectionSelector
@@ -925,6 +926,7 @@ class MainActivity : AppCompatActivity() {
                         onNextClick = { onNextClicked() },
                         onSwitchGroupClick = { onSwitchGroupClicked() },
                         onFavoriteClick = { onFavoriteClicked() },
+                        onAllowPairingClick = { onAllowPairingClicked() },
                         onVolumeChange = { volume ->
                             onVolumeChanged(volume)
                             viewModel.updateVolume(volume)
@@ -1685,6 +1687,20 @@ class MainActivity : AppCompatActivity() {
         if (connectionStateStr != null) {
             handleConnectionStateChange(connectionStateStr, extras)
         }
+
+        // The service sends this only while connected, so an absent value means
+        // "nothing to explain" - which is also the right answer for an unknown
+        // name from a newer service than this build understands.
+        val admission = extras.getString(PlaybackService.EXTRA_ADMISSION_STATE)
+            ?.let { name -> AdmissionState.entries.firstOrNull { it.name == name } }
+            ?: AdmissionState.READY
+        viewModel.updateAdmissionState(admission)
+
+        // Both null/false when absent, matching "nothing to explain" above.
+        viewModel.updatePairingCode(extras.getString(PlaybackService.EXTRA_PAIRING_CODE))
+        viewModel.updatePairingGestureRequested(
+            extras.getBoolean(PlaybackService.EXTRA_PAIRING_GESTURE_REQUESTED, false)
+        )
 
         // Handle metadata updates. PlaybackService encodes null aux fields as
         // 0 / "" because Bundle.putInt is non-nullable; convert back so
@@ -2447,6 +2463,18 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "Switch group clicked")
         val controller = mediaController ?: return
         val command = SessionCommand(PlaybackService.COMMAND_SWITCH_GROUP, Bundle.EMPTY)
+        controller.sendCustomCommand(command, Bundle.EMPTY)
+    }
+
+    /**
+     * Handles the "Allow pairing" gesture button click.
+     * Sends the allow-pairing command to PlaybackService, which forwards it
+     * to the dynamic pairing flow as a WindowOpened event.
+     */
+    private fun onAllowPairingClicked() {
+        Log.d(TAG, "Allow pairing clicked")
+        val controller = mediaController ?: return
+        val command = SessionCommand(PlaybackService.COMMAND_ALLOW_PAIRING, Bundle.EMPTY)
         controller.sendCustomCommand(command, Bundle.EMPTY)
     }
 
