@@ -47,18 +47,18 @@ import com.sendspindroid.ui.adaptive.TvPassiveFocusAnchor
 import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.theme.NpCream
 import com.sendspindroid.ui.theme.NpCreamDim
-import com.sendspindroid.ui.theme.NpFrauncesFamily
-import com.sendspindroid.ui.theme.NpInterFamily
+import com.sendspindroid.ui.theme.NpRubikFamily
+import com.sendspindroid.ui.theme.NpTabular
 import java.util.Calendar
 import java.util.Locale
 
-private val IdleBase = Color(0xFF07060D)
+private val IdleBase = Color(0xFF16222A) // home night (HW-48)
 private val IdleFg = NpCream
 private val IdleFgDim = NpCreamDim
 private val IdleFgFaint = NpCream.copy(alpha = 0.35f)
-private val IdleFgError = Color(0xFFE57373) // muted coral, doesn't fight cream/accent
-private val BlobTintA = Color(0xFF6A4D9A).copy(alpha = 0.4f)
-private val BlobTintB = Color(0xFFD98C58).copy(alpha = 0.67f)
+private val IdleFgError = Color(0xFFFF8AA0) // home dark alarm
+private val BlobTintA = Color(0xFF587E8D).copy(alpha = 0.4f)
+private val BlobTintB = Color(0xFFBAD2DE).copy(alpha = 0.30f)
 
 /**
  * View-model for the idle screen's status surfaces (standby badge + wordmark
@@ -332,7 +332,7 @@ private fun Wordmark(accent: Color, status: IdleStatus) {
     Column(horizontalAlignment = Alignment.End) {
         Text(
             text = annotated,
-            fontFamily = NpFrauncesFamily,
+            fontFamily = NpRubikFamily,
             fontSize = NowPlayingTvTokens.Type.Heading,
             letterSpacing = NowPlayingTvTokens.Type.TrackDisplay,
             lineHeight = NowPlayingTvTokens.Type.Heading,
@@ -343,7 +343,7 @@ private fun Wordmark(accent: Color, status: IdleStatus) {
             // uppercase the i in "Audio" to a dotted I. See badgeLabel.
             text = stringResource(status.wordmarkLabel).uppercase(Locale.ROOT),
             modifier = Modifier.padding(top = NowPlayingTvTokens.Space.SublabelGap),
-            fontFamily = NpInterFamily,
+            fontFamily = NpRubikFamily,
             fontSize = NowPlayingTvTokens.Type.Caption,
             fontWeight = FontWeight.W600,
             letterSpacing = NowPlayingTvTokens.Type.TrackSublabel,
@@ -367,7 +367,8 @@ private fun HeroClock(accent: Color) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = clock.hour,
-                fontFamily = NpFrauncesFamily,
+                fontFamily = NpRubikFamily,
+                style = NpTabular,
                 fontSize = NowPlayingTvTokens.Type.HeroClock,
                 lineHeight = NowPlayingTvTokens.Type.HeroClock,
                 fontWeight = FontWeight.W300,
@@ -377,7 +378,8 @@ private fun HeroClock(accent: Color) {
             PulsingColon(accent = accent)
             Text(
                 text = clock.minute,
-                fontFamily = NpFrauncesFamily,
+                fontFamily = NpRubikFamily,
+                style = NpTabular,
                 fontSize = NowPlayingTvTokens.Type.HeroClock,
                 lineHeight = NowPlayingTvTokens.Type.HeroClock,
                 fontWeight = FontWeight.W300,
@@ -395,7 +397,7 @@ private fun HeroClock(accent: Color) {
                 clock.year,
             ).uppercase(Locale.ROOT),
             modifier = Modifier.padding(top = NowPlayingTvTokens.Space.SectionGap),
-            fontFamily = NpInterFamily,
+            fontFamily = NpRubikFamily,
             fontSize = NowPlayingTvTokens.Type.Body,
             fontWeight = FontWeight.W500,
             letterSpacing = NowPlayingTvTokens.Type.TrackHeroDate,
@@ -519,11 +521,11 @@ private fun HorizonTagline() {
         )
         Text(
             text = stringResource(R.string.np_tv_idle_tagline),
-            fontFamily = NpFrauncesFamily,
+            fontFamily = NpRubikFamily,
             fontSize = NowPlayingTvTokens.Type.Label,
             fontStyle = FontStyle.Italic,
             fontWeight = FontWeight.W400,
-            // Sub-1sp optical nudge on one italic serif line -- not part of the
+            // Sub-1sp optical nudge on one italic line -- not part of the
             // tracked-uppercase ladder in Type, so it stays inline.
             letterSpacing = 0.3.sp,
             color = IdleFgDim,

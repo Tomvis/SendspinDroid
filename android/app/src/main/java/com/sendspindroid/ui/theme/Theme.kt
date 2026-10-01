@@ -102,7 +102,7 @@ private val DarkColorScheme = darkColorScheme(
 @Composable
 fun SendSpinTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    dynamicColor: Boolean = false, // HW-48: home brand colors, not Material You
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {
@@ -126,8 +126,9 @@ fun SendSpinTheme(
 
     CompositionLocalProvider(LocalIsDarkTheme provides darkTheme) {
         MaterialTheme(
-            colorScheme = colorScheme,
-            typography = Typography,
+            colorScheme = colorScheme.withHomeSurfaces(darkTheme),
+            typography = HomeTypography,
+            shapes = HomeShapes,
             content = content
         )
     }

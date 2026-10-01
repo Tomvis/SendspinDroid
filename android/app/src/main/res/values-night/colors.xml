@@ -3,54 +3,54 @@
     <!-- Material 3 Dark Theme Colors -->
 
     <!-- Primary colors -->
-    <color name="md_theme_dark_primary">#D0BCFF</color>
-    <color name="md_theme_dark_onPrimary">#381E72</color>
-    <color name="md_theme_dark_primaryContainer">#4F378B</color>
-    <color name="md_theme_dark_onPrimaryContainer">#EADDFF</color>
+    <color name="md_theme_dark_primary">#8DB0BD</color>
+    <color name="md_theme_dark_onPrimary">#16222A</color>
+    <color name="md_theme_dark_primaryContainer">#34505A</color>
+    <color name="md_theme_dark_onPrimaryContainer">#EAF0F0</color>
 
     <!-- Secondary colors -->
-    <color name="md_theme_dark_secondary">#CCC2DC</color>
-    <color name="md_theme_dark_onSecondary">#332D41</color>
-    <color name="md_theme_dark_secondaryContainer">#4A4458</color>
-    <color name="md_theme_dark_onSecondaryContainer">#E8DEF8</color>
+    <color name="md_theme_dark_secondary">#BAD2DE</color>
+    <color name="md_theme_dark_onSecondary">#16222A</color>
+    <color name="md_theme_dark_secondaryContainer">#3A525D</color>
+    <color name="md_theme_dark_onSecondaryContainer">#EAF0F0</color>
 
     <!-- Tertiary colors -->
-    <color name="md_theme_dark_tertiary">#EFB8C8</color>
-    <color name="md_theme_dark_onTertiary">#492532</color>
-    <color name="md_theme_dark_tertiaryContainer">#633B48</color>
-    <color name="md_theme_dark_onTertiaryContainer">#FFD8E4</color>
+    <color name="md_theme_dark_tertiary">#BAD2DE</color>
+    <color name="md_theme_dark_onTertiary">#16222A</color>
+    <color name="md_theme_dark_tertiaryContainer">#283B45</color>
+    <color name="md_theme_dark_onTertiaryContainer">#EAF0F0</color>
 
     <!-- Error colors -->
-    <color name="md_theme_dark_error">#F2B8B5</color>
-    <color name="md_theme_dark_errorContainer">#8C1D18</color>
-    <color name="md_theme_dark_onError">#601410</color>
-    <color name="md_theme_dark_onErrorContainer">#F9DEDC</color>
+    <color name="md_theme_dark_error">#FF8AA0</color>
+    <color name="md_theme_dark_errorContainer">#6E1A2C</color>
+    <color name="md_theme_dark_onError">#16222A</color>
+    <color name="md_theme_dark_onErrorContainer">#FFD9DF</color>
 
     <!-- Background colors -->
-    <color name="md_theme_dark_background">#1C1B1F</color>
-    <color name="md_theme_dark_onBackground">#E6E1E5</color>
+    <color name="md_theme_dark_background">#16222A</color>
+    <color name="md_theme_dark_onBackground">#EAF0F0</color>
 
     <!-- Surface colors -->
-    <color name="md_theme_dark_surface">#1C1B1F</color>
-    <color name="md_theme_dark_onSurface">#E6E1E5</color>
-    <color name="md_theme_dark_surfaceVariant">#49454F</color>
-    <color name="md_theme_dark_onSurfaceVariant">#CAC4D0</color>
+    <color name="md_theme_dark_surface">#16222A</color>
+    <color name="md_theme_dark_onSurface">#EAF0F0</color>
+    <color name="md_theme_dark_surfaceVariant">#283B45</color>
+    <color name="md_theme_dark_onSurfaceVariant">#BAD2DE</color>
 
     <!-- Outline colors -->
-    <color name="md_theme_dark_outline">#938F99</color>
-    <color name="md_theme_dark_outlineVariant">#49454F</color>
+    <color name="md_theme_dark_outline">#6E8F9B</color>
+    <color name="md_theme_dark_outlineVariant">#3A525D</color>
 
     <!-- Inverse colors -->
-    <color name="md_theme_dark_inverseSurface">#E6E1E5</color>
-    <color name="md_theme_dark_inverseOnSurface">#313033</color>
-    <color name="md_theme_dark_inversePrimary">#6750A4</color>
+    <color name="md_theme_dark_inverseSurface">#EAF0F0</color>
+    <color name="md_theme_dark_inverseOnSurface">#16222A</color>
+    <color name="md_theme_dark_inversePrimary">#466A77</color>
 
     <!-- Surface tint and shadow -->
-    <color name="md_theme_dark_surfaceTint">#D0BCFF</color>
+    <color name="md_theme_dark_surfaceTint">#8DB0BD</color>
     <color name="md_theme_dark_scrim">#000000</color>
 
     <!-- Stats for Nerds - Indicator colors (bright variants for dark backgrounds) -->
-    <color name="stats_value_good">#4ade80</color>           <!-- Bright green for dark backgrounds -->
-    <color name="stats_value_warning">#fbbf24</color>        <!-- Bright yellow for dark backgrounds -->
-    <color name="stats_value_bad">#f87171</color>            <!-- Bright red for dark backgrounds -->
+    <color name="stats_value_good">#36E0A0</color>           <!-- Bright green for dark backgrounds -->
+    <color name="stats_value_warning">#F5B14C</color>        <!-- Bright yellow for dark backgrounds -->
+    <color name="stats_value_bad">#FF8AA0</color>            <!-- Bright red for dark backgrounds -->
 </resources>

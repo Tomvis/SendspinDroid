@@ -38,12 +38,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.util.lerp
 import com.sendspindroid.R
-import com.sendspindroid.ui.theme.NpInterFamily
+import com.sendspindroid.ui.theme.NpRubikFamily
+import com.sendspindroid.ui.theme.NpTabular
 import java.util.Calendar
 import java.util.Locale
 
-private val StatusGreen = Color(0xFF7EE07E)
-private val StatusAmber = Color(0xFFF5A524)
+private val StatusGreen = Color(0xFF14D9C4) // home lit: on right now (HW-48)
+private val StatusAmber = Color(0xFFF5B14C) // home dark warning
 private val ChromeFg = Color(0xFFFFFFFF).copy(alpha = 0.70f)
 private val ChromeFgFaint = Color(0xFFFFFFFF).copy(alpha = 0.55f)
 
@@ -185,7 +186,7 @@ internal fun StatusBadge(
         dot()
         Text(
             text = label,
-            fontFamily = NpInterFamily,
+            fontFamily = NpRubikFamily,
             fontSize = NowPlayingTvTokens.Type.Caption,
             fontWeight = FontWeight.W500,
             letterSpacing = NowPlayingTvTokens.Type.TrackBadge,
@@ -290,7 +291,8 @@ fun NowPlayingClock(modifier: Modifier = Modifier) {
     ) {
         Text(
             text = "${clock.hour}:${clock.minute}",
-            fontFamily = NpInterFamily,
+            fontFamily = NpRubikFamily,
+            style = NpTabular,
             fontSize = NowPlayingTvTokens.Type.TopClock,
             fontWeight = FontWeight.W300,
             letterSpacing = NowPlayingTvTokens.Type.TrackDisplay,
@@ -302,7 +304,7 @@ fun NowPlayingClock(modifier: Modifier = Modifier) {
             text = String.format(Locale.ROOT, dateFormat, clock.weekday, clock.month, clock.day)
                 .uppercase(Locale.ROOT),
             modifier = Modifier.padding(top = NowPlayingTvTokens.Space.SublabelGap),
-            fontFamily = NpInterFamily,
+            fontFamily = NpRubikFamily,
             fontSize = NowPlayingTvTokens.Type.Label,
             fontWeight = FontWeight.W500,
             letterSpacing = NowPlayingTvTokens.Type.TrackMeta,

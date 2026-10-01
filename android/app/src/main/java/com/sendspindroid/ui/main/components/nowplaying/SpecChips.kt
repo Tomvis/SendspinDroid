@@ -17,7 +17,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
 import com.sendspindroid.ui.main.AudioStreamSpec
-import com.sendspindroid.ui.theme.NpMonoFamily
+import com.sendspindroid.ui.theme.NpRubikFamily
+import com.sendspindroid.ui.theme.NpTabular
 import java.util.Locale
 
 // Dark-theme frosted-glass per spec: rgba(255,255,255,0.08) bg, 0.14 border, 0.88 fg.
@@ -66,7 +67,8 @@ private fun Chip(text: String) {
         // (codec names, "kHz", "kbps") whatever the device is set to, so
         // uppercasing it under a foreign locale's casing rules is wrong.
         text = text.uppercase(Locale.ROOT),
-        fontFamily = NpMonoFamily,
+        fontFamily = NpRubikFamily,
+        style = NpTabular,
         fontSize = NowPlayingTvTokens.Type.Label,
         fontWeight = FontWeight.W600,
         letterSpacing = NowPlayingTvTokens.Type.TrackChip,

@@ -26,6 +26,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.sendspindroid.ui.theme.focusRing
 
 /**
  * TV focus modifier that adds:
@@ -107,7 +108,7 @@ private fun Modifier.tvFocusRing(
         label = "tv_focus_scale"
     )
     val borderColor = if (isFocused) {
-        MaterialTheme.colorScheme.primary
+        MaterialTheme.colorScheme.focusRing
     } else {
         Color.Transparent
     }

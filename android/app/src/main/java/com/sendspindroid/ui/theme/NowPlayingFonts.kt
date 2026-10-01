@@ -2,6 +2,7 @@
 
 package com.sendspindroid.ui.theme
 
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -11,22 +12,21 @@ import com.sendspindroid.R
 
 private fun wght(value: Int) = FontVariation.Settings(FontVariation.weight(value))
 
-val NpFrauncesFamily = FontFamily(
-    Font(R.font.fraunces, weight = FontWeight.W300, variationSettings = wght(300)),
-    Font(R.font.fraunces, weight = FontWeight.W400, variationSettings = wght(400)),
-    Font(R.font.fraunces, weight = FontWeight.W500, variationSettings = wght(500)),
-    Font(R.font.fraunces_italic, weight = FontWeight.W400, style = FontStyle.Italic, variationSettings = wght(400)),
-    Font(R.font.fraunces_italic, weight = FontWeight.W500, style = FontStyle.Italic, variationSettings = wght(500)),
+private fun rubik(weight: Int, italic: Boolean = false) = Font(
+    if (italic) R.font.rubik_italic else R.font.rubik,
+    weight = FontWeight(weight),
+    style = if (italic) FontStyle.Italic else FontStyle.Normal,
+    variationSettings = wght(weight),
 )
 
-val NpInterFamily = FontFamily(
-    Font(R.font.inter, weight = FontWeight.W300, variationSettings = wght(300)),
-    Font(R.font.inter, weight = FontWeight.W400, variationSettings = wght(400)),
-    Font(R.font.inter, weight = FontWeight.W500, variationSettings = wght(500)),
-    Font(R.font.inter, weight = FontWeight.W600, variationSettings = wght(600)),
+/** Home theme (HW-48): Rubik variable font, the only UI face. */
+val RubikFamily = FontFamily(
+    rubik(300), rubik(400), rubik(500), rubik(600), rubik(700),
+    rubik(300, italic = true), rubik(400, italic = true), rubik(500, italic = true),
 )
 
-val NpMonoFamily = FontFamily(
-    Font(R.font.jetbrains_mono, weight = FontWeight.W500, variationSettings = wght(500)),
-    Font(R.font.jetbrains_mono, weight = FontWeight.W600, variationSettings = wght(600)),
-)
+/** TV Now Playing surfaces use the same family as the rest of the app. */
+val NpRubikFamily = RubikFamily
+
+/** Tabular figures: numbers that update in place (clocks, timecodes, stats) don't jitter. */
+val NpTabular = TextStyle(fontFeatureSettings = "tnum")

@@ -108,14 +108,13 @@ internal object NowPlayingTvTokens {
      *
      * Nine sizes spanning 240px down to 16px. The two ends do different jobs.
      * The large end ([HeroClock], [Title], [TopClock]) carries *negative*
-     * tracking, because display type at this scale reads loose; the first two
-     * are the Fraunces display faces, while [TopClock] is Inter like the rest of
-     * the top chrome, tightened the same way. The small end ([Label],
-     * [Caption]) is uppercased Inter or mono with heavy *positive* tracking,
+     * tracking, because display type at this scale reads loose; all three
+     * are light Rubik (the one face on this surface, HW-48). The small end ([Label],
+     * [Caption]) is uppercased Rubik (tabular figures for numbers) with heavy *positive* tracking,
      * which is what buys legibility for a short label at 10 feet where simply
      * making it bigger would unbalance the composition. The idle tagline is the
      * one thing at the small end that opts out: it borrows [Label] as a size
-     * only and sets it lowercase in italic Fraunces with its own inline nudge.
+     * only and sets it lowercase in italic Rubik with its own inline nudge.
      *
      * `Track*` values are letter spacing for the size of the same name. Sizes
      * without an explicit leading token set `lineHeight` to their own size
@@ -147,7 +146,7 @@ internal object NowPlayingTvTokens {
         /**
          * The tracked-uppercase workhorse: date strip, track slug, rail meta,
          * spec chips. The idle tagline shares the size but not the treatment --
-         * it is lowercase italic Fraunces with an inline optical nudge, so none
+         * it is lowercase italic Rubik with an inline optical nudge, so none
          * of the `Track*` values below apply to it.
          */
         val Label: TextUnit = 18.sp

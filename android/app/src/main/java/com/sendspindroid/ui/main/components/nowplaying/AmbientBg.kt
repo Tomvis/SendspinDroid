@@ -38,7 +38,7 @@ import coil.transform.Transformation
 import com.sendspindroid.ui.main.ArtworkSource
 import kotlin.random.Random
 
-private val AmbientBase = Color(0xFF05040A)
+private val AmbientBase = Color(0xFF070D11)
 
 @Composable
 fun AmbientBg(
