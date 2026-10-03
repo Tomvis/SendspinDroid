@@ -1215,6 +1215,8 @@ class MainActivity : AppCompatActivity() {
      */
     override fun onResume() {
         super.onResume()
+        // Fork (HW-65): pick up a theme changed elsewhere (authentik, MA web) since we were last shown.
+        com.sendspindroid.ui.theme.HomeThemeController.refreshAsync()
         // Re-apply full screen mode (picks up changes made in Settings)
         applyFullScreenMode()
         // Re-apply mini-player position (picks up changes made in Settings)

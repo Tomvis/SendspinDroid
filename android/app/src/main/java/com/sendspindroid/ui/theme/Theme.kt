@@ -126,7 +126,7 @@ fun SendSpinTheme(
 
     CompositionLocalProvider(LocalIsDarkTheme provides darkTheme) {
         MaterialTheme(
-            colorScheme = colorScheme.withHomeSurfaces(darkTheme),
+            colorScheme = homeColorScheme(darkTheme), // fork: the person's home theme (HW-65)
             typography = Typography,
             shapes = HomeShapes,
             content = content

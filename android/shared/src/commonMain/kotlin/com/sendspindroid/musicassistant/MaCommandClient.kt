@@ -432,6 +432,20 @@ class MaCommandClient(private val settings: MaSettingsProvider) {
     // ========================================================================
 
     /**
+     * Fork (HW-65): the signed-in user's home theme from the server's `home_theme` provider:
+     * `{"claim": {theme, mode, override}?, "choice": {theme, mode, basis}?}`. Fails on servers without it.
+     */
+    suspend fun getHomeTheme(): Result<JsonObject> = runCatching {
+        sendCommand("home_theme/get").optJsonObject("result") ?: throw MaTransportException("no home_theme state")
+    }
+
+    /** Fork (HW-65): set the in-app choice; a null [theme] clears it ("Follow home theme"). */
+    suspend fun chooseHomeTheme(theme: String?, mode: String): Result<JsonObject> = runCatching {
+        val args = theme?.let { mapOf("theme" to it, "mode" to mode) } ?: emptyMap()
+        sendCommand("home_theme/choose", args).optJsonObject("result") ?: throw MaTransportException("no home_theme state")
+    }
+
+    /**
      * Get recently played items.
      */
     suspend fun getRecentlyPlayed(limit: Int = 15): Result<List<MaTrack>> {

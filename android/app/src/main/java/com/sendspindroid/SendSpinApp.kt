@@ -15,6 +15,8 @@ class SendSpinApp : Application(), ImageLoaderFactory {
         super.onCreate()
         // Initialize MaSettings early so it is available before any Activity or Service.
         MaSettings.initialize(this)
+        // Fork (HW-65): last home theme + light/dark before the first activity draws.
+        com.sendspindroid.ui.theme.HomeThemeController.initialize(this)
         // Initialize logging and install crash capture as early as possible, so
         // startup-path issues are captured and an unexpected exit can be reported
         // on the next launch. Runs the one-time log-level migration too.

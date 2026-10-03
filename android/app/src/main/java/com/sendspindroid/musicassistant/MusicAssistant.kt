@@ -26,6 +26,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.sendspindroid.musicassistant.transport.MaTransportException
 import java.io.IOException
+import com.sendspindroid.ui.theme.HomeThemeController
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -470,6 +472,7 @@ object MusicAssistant {
         Log.i(TAG, "MA API connected successfully (server ${transport.serverVersion})")
         currentServerInfo = serverInfo
         _connectionState.value = TransportState.Ready
+        scope.launch { HomeThemeController.refresh() } // Fork (HW-65): this user's home theme
 
         commandClient.autoSelectPlayer(serverId).fold(
             onSuccess = { playerId -> Log.i(TAG, "Auto-selected player for playback: $playerId") },
@@ -819,6 +822,14 @@ object MusicAssistant {
             commandClient.ungroupPlayer(playerId)
         }
     }
+
+    /** Fork (HW-65): the signed-in user's home theme state (see [MaCommandClient.getHomeTheme]). */
+    suspend fun getHomeTheme(): Result<JsonObject> =
+        withContext(Dispatchers.IO) { commandClient.getHomeTheme() }
+
+    /** Fork (HW-65): the in-app theme choice; a null theme is "Follow home theme". */
+    suspend fun chooseHomeTheme(theme: String?, mode: String): Result<JsonObject> =
+        withContext(Dispatchers.IO) { commandClient.chooseHomeTheme(theme, mode) }
 
     /**
      * Get recently played items.

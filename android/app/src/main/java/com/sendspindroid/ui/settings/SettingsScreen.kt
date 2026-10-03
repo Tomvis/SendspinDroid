@@ -172,6 +172,7 @@ fun SettingsScreen(
                 selectedOption = layoutMode,
                 onOptionSelected = { viewModel.setLayoutMode(it) }
             )
+            HomeThemePreferences() // Fork (HW-65)
 
             // Audio Category
             PreferenceCategory(title = stringResource(R.string.pref_category_audio))
