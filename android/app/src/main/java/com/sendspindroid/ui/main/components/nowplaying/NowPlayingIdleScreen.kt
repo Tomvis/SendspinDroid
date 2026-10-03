@@ -47,8 +47,8 @@ import com.sendspindroid.ui.adaptive.TvPassiveFocusAnchor
 import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.theme.NpCream
 import com.sendspindroid.ui.theme.NpCreamDim
-import com.sendspindroid.ui.theme.NpRubikFamily
-import com.sendspindroid.ui.theme.NpTabular
+import com.sendspindroid.ui.theme.NpFrauncesFamily
+import com.sendspindroid.ui.theme.NpInterFamily
 import java.util.Calendar
 import java.util.Locale
 
@@ -332,7 +332,7 @@ private fun Wordmark(accent: Color, status: IdleStatus) {
     Column(horizontalAlignment = Alignment.End) {
         Text(
             text = annotated,
-            fontFamily = NpRubikFamily,
+            fontFamily = NpFrauncesFamily,
             fontSize = NowPlayingTvTokens.Type.Heading,
             letterSpacing = NowPlayingTvTokens.Type.TrackDisplay,
             lineHeight = NowPlayingTvTokens.Type.Heading,
@@ -343,7 +343,7 @@ private fun Wordmark(accent: Color, status: IdleStatus) {
             // uppercase the i in "Audio" to a dotted I. See badgeLabel.
             text = stringResource(status.wordmarkLabel).uppercase(Locale.ROOT),
             modifier = Modifier.padding(top = NowPlayingTvTokens.Space.SublabelGap),
-            fontFamily = NpRubikFamily,
+            fontFamily = NpInterFamily,
             fontSize = NowPlayingTvTokens.Type.Caption,
             fontWeight = FontWeight.W600,
             letterSpacing = NowPlayingTvTokens.Type.TrackSublabel,
@@ -367,8 +367,7 @@ private fun HeroClock(accent: Color) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = clock.hour,
-                fontFamily = NpRubikFamily,
-                style = NpTabular,
+                fontFamily = NpFrauncesFamily,
                 fontSize = NowPlayingTvTokens.Type.HeroClock,
                 lineHeight = NowPlayingTvTokens.Type.HeroClock,
                 fontWeight = FontWeight.W300,
@@ -378,8 +377,7 @@ private fun HeroClock(accent: Color) {
             PulsingColon(accent = accent)
             Text(
                 text = clock.minute,
-                fontFamily = NpRubikFamily,
-                style = NpTabular,
+                fontFamily = NpFrauncesFamily,
                 fontSize = NowPlayingTvTokens.Type.HeroClock,
                 lineHeight = NowPlayingTvTokens.Type.HeroClock,
                 fontWeight = FontWeight.W300,
@@ -397,7 +395,7 @@ private fun HeroClock(accent: Color) {
                 clock.year,
             ).uppercase(Locale.ROOT),
             modifier = Modifier.padding(top = NowPlayingTvTokens.Space.SectionGap),
-            fontFamily = NpRubikFamily,
+            fontFamily = NpInterFamily,
             fontSize = NowPlayingTvTokens.Type.Body,
             fontWeight = FontWeight.W500,
             letterSpacing = NowPlayingTvTokens.Type.TrackHeroDate,
@@ -521,11 +519,11 @@ private fun HorizonTagline() {
         )
         Text(
             text = stringResource(R.string.np_tv_idle_tagline),
-            fontFamily = NpRubikFamily,
+            fontFamily = NpFrauncesFamily,
             fontSize = NowPlayingTvTokens.Type.Label,
             fontStyle = FontStyle.Italic,
             fontWeight = FontWeight.W400,
-            // Sub-1sp optical nudge on one italic line -- not part of the
+            // Sub-1sp optical nudge on one italic serif line -- not part of the
             // tracked-uppercase ladder in Type, so it stays inline.
             letterSpacing = 0.3.sp,
             color = IdleFgDim,

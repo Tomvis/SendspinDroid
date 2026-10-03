@@ -297,8 +297,9 @@ private fun StatRow(
         )
         Text(
             text = value,
-            style = MaterialTheme.typography.bodyMedium.copy(fontFeatureSettings = "tnum"),
+            style = MaterialTheme.typography.bodyMedium,
             color = valueColor ?: MaterialTheme.colorScheme.onSurface,
+            fontFamily = FontFamily.Monospace,
             fontWeight = if (valueColor != null) FontWeight.SemiBold else FontWeight.Normal
         )
     }

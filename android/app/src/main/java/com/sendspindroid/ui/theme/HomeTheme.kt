@@ -3,7 +3,6 @@ package com.sendspindroid.ui.theme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.Shapes
-import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
@@ -44,27 +43,6 @@ fun ColorScheme.withHomeSurfaces(dark: Boolean): ColorScheme = if (dark) {
 /** TV D-pad focus ring: lit cyan reads as "focused/active" at 10 feet in both modes. */
 val ColorScheme.focusRing: Color
     @Composable get() = if (LocalIsDarkTheme.current) HomeLitDark else HomeLitLight
-
-/** The M3 type scale set in Rubik. */
-val HomeTypography: Typography = com.sendspindroid.ui.theme.Typography.run {
-    copy(
-        displayLarge = displayLarge.copy(fontFamily = RubikFamily),
-        displayMedium = displayMedium.copy(fontFamily = RubikFamily),
-        displaySmall = displaySmall.copy(fontFamily = RubikFamily),
-        headlineLarge = headlineLarge.copy(fontFamily = RubikFamily),
-        headlineMedium = headlineMedium.copy(fontFamily = RubikFamily),
-        headlineSmall = headlineSmall.copy(fontFamily = RubikFamily),
-        titleLarge = titleLarge.copy(fontFamily = RubikFamily),
-        titleMedium = titleMedium.copy(fontFamily = RubikFamily),
-        titleSmall = titleSmall.copy(fontFamily = RubikFamily),
-        bodyLarge = bodyLarge.copy(fontFamily = RubikFamily),
-        bodyMedium = bodyMedium.copy(fontFamily = RubikFamily),
-        bodySmall = bodySmall.copy(fontFamily = RubikFamily),
-        labelLarge = labelLarge.copy(fontFamily = RubikFamily),
-        labelMedium = labelMedium.copy(fontFamily = RubikFamily),
-        labelSmall = labelSmall.copy(fontFamily = RubikFamily),
-    )
-}
 
 /** Controls are tight (6dp), containers soft (20dp). */
 val HomeShapes = Shapes(

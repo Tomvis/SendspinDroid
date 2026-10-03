@@ -44,8 +44,7 @@ import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
 import com.sendspindroid.ui.main.components.formatTime
 import com.sendspindroid.ui.theme.NpCream
-import com.sendspindroid.ui.theme.NpRubikFamily
-import com.sendspindroid.ui.theme.NpTabular
+import com.sendspindroid.ui.theme.NpMonoFamily
 import kotlinx.coroutines.isActive
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -270,8 +269,7 @@ fun ProgressRail(
                 StatusGlyph(paused = paused, color = elapsedColor)
                 Text(
                     text = elapsedLabel,
-                    fontFamily = NpRubikFamily,
-                    style = NpTabular,
+                    fontFamily = NpMonoFamily,
                     fontSize = NowPlayingTvTokens.Type.Body,
                     fontWeight = FontWeight.W600,
                     letterSpacing = NowPlayingTvTokens.Type.TrackTimecode,
@@ -280,8 +278,7 @@ fun ProgressRail(
             }
             Text(
                 text = remainingLabel,
-                fontFamily = NpRubikFamily,
-                style = NpTabular,
+                fontFamily = NpMonoFamily,
                 fontSize = NowPlayingTvTokens.Type.Body,
                 fontWeight = FontWeight.W500,
                 letterSpacing = NowPlayingTvTokens.Type.TrackTimecode,
@@ -314,8 +311,7 @@ fun ProgressRail(
         ) {
             Text(
                 text = totalLabel,
-                fontFamily = NpRubikFamily,
-                style = NpTabular,
+                fontFamily = NpMonoFamily,
                 fontSize = NowPlayingTvTokens.Type.Label,
                 fontWeight = FontWeight.W600,
                 letterSpacing = NowPlayingTvTokens.Type.TrackMeta,
@@ -324,8 +320,7 @@ fun ProgressRail(
             if (trackTotal > 0 && trackNumber > 0) {
                 Text(
                     text = counterLabel,
-                    fontFamily = NpRubikFamily,
-                    style = NpTabular,
+                    fontFamily = NpMonoFamily,
                     fontSize = NowPlayingTvTokens.Type.Label,
                     fontWeight = FontWeight.W600,
                     letterSpacing = NowPlayingTvTokens.Type.TrackMeta,

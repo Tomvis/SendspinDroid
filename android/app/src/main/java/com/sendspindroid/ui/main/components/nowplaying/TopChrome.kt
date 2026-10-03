@@ -38,8 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.util.lerp
 import com.sendspindroid.R
-import com.sendspindroid.ui.theme.NpRubikFamily
-import com.sendspindroid.ui.theme.NpTabular
+import com.sendspindroid.ui.theme.NpInterFamily
 import java.util.Calendar
 import java.util.Locale
 
@@ -186,7 +185,7 @@ internal fun StatusBadge(
         dot()
         Text(
             text = label,
-            fontFamily = NpRubikFamily,
+            fontFamily = NpInterFamily,
             fontSize = NowPlayingTvTokens.Type.Caption,
             fontWeight = FontWeight.W500,
             letterSpacing = NowPlayingTvTokens.Type.TrackBadge,
@@ -291,8 +290,7 @@ fun NowPlayingClock(modifier: Modifier = Modifier) {
     ) {
         Text(
             text = "${clock.hour}:${clock.minute}",
-            fontFamily = NpRubikFamily,
-            style = NpTabular,
+            fontFamily = NpInterFamily,
             fontSize = NowPlayingTvTokens.Type.TopClock,
             fontWeight = FontWeight.W300,
             letterSpacing = NowPlayingTvTokens.Type.TrackDisplay,
@@ -304,7 +302,7 @@ fun NowPlayingClock(modifier: Modifier = Modifier) {
             text = String.format(Locale.ROOT, dateFormat, clock.weekday, clock.month, clock.day)
                 .uppercase(Locale.ROOT),
             modifier = Modifier.padding(top = NowPlayingTvTokens.Space.SublabelGap),
-            fontFamily = NpRubikFamily,
+            fontFamily = NpInterFamily,
             fontSize = NowPlayingTvTokens.Type.Label,
             fontWeight = FontWeight.W500,
             letterSpacing = NowPlayingTvTokens.Type.TrackMeta,

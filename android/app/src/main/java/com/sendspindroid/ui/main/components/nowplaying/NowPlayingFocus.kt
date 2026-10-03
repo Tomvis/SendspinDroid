@@ -54,7 +54,8 @@ import com.sendspindroid.ui.main.AudioStreamSpec
 import com.sendspindroid.ui.main.TrackMetadata
 import com.sendspindroid.ui.theme.NpCream
 import com.sendspindroid.ui.theme.NpCreamDim
-import com.sendspindroid.ui.theme.NpRubikFamily
+import com.sendspindroid.ui.theme.NpFrauncesFamily
+import com.sendspindroid.ui.theme.NpInterFamily
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -431,7 +432,7 @@ private fun InfoColumn(
                 // (a Turkish-locale device would render "FROM THE ALBUM" with a
                 // dotted I).
                 text = slug.uppercase(Locale.ROOT),
-                fontFamily = NpRubikFamily,
+                fontFamily = NpInterFamily,
                 fontSize = NowPlayingTvTokens.Type.Label,
                 fontWeight = FontWeight.W600,
                 letterSpacing = NowPlayingTvTokens.Type.TrackSlug,
@@ -442,7 +443,7 @@ private fun InfoColumn(
 
         Text(
             text = metadata.title,
-            fontFamily = NpRubikFamily,
+            fontFamily = NpFrauncesFamily,
             fontSize = NowPlayingTvTokens.Type.Title,
             fontWeight = FontWeight.W500,
             lineHeight = NowPlayingTvTokens.Type.TitleLeading,
@@ -457,7 +458,7 @@ private fun InfoColumn(
             Spacer(modifier = Modifier.height(NowPlayingTvTokens.Space.SectionGap))
             Text(
                 text = metadata.artist,
-                fontFamily = NpRubikFamily,
+                fontFamily = NpInterFamily,
                 fontSize = NowPlayingTvTokens.Type.Heading,
                 fontWeight = FontWeight.W500,
                 letterSpacing = NowPlayingTvTokens.Type.TrackHeading,
@@ -478,7 +479,7 @@ private fun InfoColumn(
             Spacer(modifier = Modifier.height(NowPlayingTvTokens.Space.TightGap))
             Text(
                 text = albumLine,
-                fontFamily = NpRubikFamily,
+                fontFamily = NpInterFamily,
                 fontSize = NowPlayingTvTokens.Type.Subheading,
                 fontWeight = FontWeight.W400,
                 letterSpacing = NowPlayingTvTokens.Type.TrackSubheading,
