@@ -6,10 +6,13 @@ import android.util.Log
 import androidx.appcompat.app.AppCompatDelegate
 import com.sendspindroid.musicassistant.MusicAssistant
 import com.sendspindroid.coordinator.TransportState
+import com.sendspindroid.musicassistant.transport.MaApiTransport
 import home.theme.HomeThemes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -18,6 +21,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * The person's home theme (HW-65), fork-only. Same model as MA web and MA mobile (HW-64): MA's
@@ -35,6 +39,8 @@ object HomeThemeController {
     private const val KEY_LAST = "last"
     const val FOLLOW = "follow"
     val MODES = listOf("automatic", "light", "dark")
+    private const val INVALID_COMMAND = "12" // music_assistant_models.errors.InvalidCommand
+    private val RETRY_DELAYS = listOf(2.seconds, 5.seconds, 10.seconds)
 
     data class Claim(val theme: String, val mode: String, val override: String)
     data class Choice(val theme: String, val mode: String, val basis: String)
@@ -43,6 +49,12 @@ object HomeThemeController {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var prefs: SharedPreferences? = null
+
+    @Volatile private var retry: Job? = null
+
+    // Seams for tests.
+    internal var isReady: () -> Boolean = { MusicAssistant.connectionState.value == TransportState.Ready }
+    internal var getHomeTheme: suspend () -> Result<JsonObject> = { MusicAssistant.getHomeTheme() }
 
     private val _server = MutableStateFlow<ServerState?>(null)
 
@@ -61,11 +73,31 @@ object HomeThemeController {
         }
     }
 
+    /**
+     * Right after an MA restart the API is up ~1 s before the home_theme provider, so the sign-in's
+     * read gets "Invalid command" (HW-77): retry that case a few times; the next refresh cancels it.
+     */
     suspend fun refresh() {
-        if (MusicAssistant.connectionState.value != TransportState.Ready) return
-        MusicAssistant.getHomeTheme()
+        retry?.cancel()
+        if (fetch()) return
+        retry = scope.launch {
+            for (wait in RETRY_DELAYS) {
+                delay(wait)
+                if (fetch()) return@launch
+            }
+            Log.i(TAG, "home_theme/get still unknown to MA, keeping the last theme")
+        }
+    }
+
+    /** False only when MA doesn't know home_theme/get (yet). */
+    private suspend fun fetch(): Boolean {
+        if (!isReady()) return true
+        val result = getHomeTheme()
+        if ((result.exceptionOrNull() as? MaApiTransport.MaCommandException)?.errorCode == INVALID_COMMAND) return false
+        result
             .onSuccess { onServer(parse(it)) }
             .onFailure { Log.i(TAG, "home_theme/get failed, keeping the last theme: ${it.message}") }
+        return true
     }
 
     fun refreshAsync() {
