@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Generation and persistence of the per-device Pairing PSK.
@@ -98,16 +99,24 @@ class AndroidPairingConfigStoreTest {
         val barrier = CyclicBarrier(threads)
         val done = CountDownLatch(threads)
         val results = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val errors = java.util.Collections.synchronizedList(mutableListOf<Throwable>())
         val pool = Executors.newFixedThreadPool(threads)
         repeat(threads) {
             pool.submit {
-                barrier.await()
-                results += Base64Url.encode(AndroidPairingConfigStore().load().pairingPsk)
-                done.countDown()
+                // Fork (HW-77): a throwing task used to skip countDown and hang the build forever.
+                try {
+                    barrier.await(10, TimeUnit.SECONDS)
+                    results += Base64Url.encode(AndroidPairingConfigStore().load().pairingPsk)
+                } catch (t: Throwable) {
+                    errors += t
+                } finally {
+                    done.countDown()
+                }
             }
         }
-        done.await()
+        assertTrue("concurrent loads timed out", done.await(30, TimeUnit.SECONDS))
         pool.shutdown()
+        errors.firstOrNull()?.let { throw AssertionError("a concurrent load threw", it) }
         assertEquals("concurrent first loads minted more than one PSK", 1, results.toSet().size)
     }
 
