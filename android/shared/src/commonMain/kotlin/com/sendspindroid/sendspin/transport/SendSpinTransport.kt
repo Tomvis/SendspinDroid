@@ -129,7 +129,8 @@ interface SendSpinTransport {
         fun onClosing(code: Int, reason: String)
 
         /**
-         * Called when the transport is fully closed.
+         * Called once when the transport is fully closed, whether the remote
+         * end closed it or a local [close] did.
          *
          * @param code Close code
          * @param reason Close reason
