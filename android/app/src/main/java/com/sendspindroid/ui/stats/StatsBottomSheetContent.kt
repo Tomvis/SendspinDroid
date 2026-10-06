@@ -192,7 +192,6 @@ fun StatsContent(
         SectionHeader(stringResource(R.string.stats_section_dac_audio))
         StatRow(stringResource(R.string.stats_calibrated), if (state.startTimeCalibrated) stringResource(R.string.action_yes) else stringResource(R.string.action_no),
             if (state.startTimeCalibrated) ColorGood else ColorWarning)
-        StatRow(stringResource(R.string.stats_calibrations), state.dacCalibrationCount.toString())
         StatRow(stringResource(R.string.stats_frames_written), formatNumber(state.totalFramesWritten))
         StatRow(stringResource(R.string.stats_server_position), String.format("%.1fs", state.serverPositionSec))
         StatRow(stringResource(R.string.stats_underruns), state.bufferUnderrunCount.toString(),
