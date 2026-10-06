@@ -136,11 +136,6 @@ android {
 
     // Build features configuration
     buildFeatures {
-        // ViewBinding: Generate binding classes for layouts
-        // Provides type-safe view access without findViewById()
-        // Recommended over DataBinding for simple use cases
-        viewBinding = true
-
         // Jetpack Compose: Modern declarative UI toolkit
         // Used for Artist/Album detail screens (incremental migration)
         compose = true
@@ -194,9 +189,6 @@ dependencies {
     // Material Design Components - Google's Material Design 3 library
     implementation("com.google.android.material:material:1.13.0")
 
-    // ConstraintLayout - Flexible layout manager for complex UIs
-    implementation("androidx.constraintlayout:constraintlayout:2.2.1")
-
     // Lifecycle Runtime KTX - Lifecycle-aware components and coroutine support
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
 
@@ -245,8 +237,9 @@ dependencies {
     // Compose Runtime LiveData - observeAsState() for LiveData in Compose
     implementation("androidx.compose.runtime:runtime-livedata")
 
-    // Palette - Extract prominent colors from images for dynamic theming
-    implementation("androidx.palette:palette-ktx:1.0.0")
+    // LocalBroadcastManager - in-process broadcasts between PlaybackService and Settings
+    // (was only reaching the classpath transitively through palette)
+    implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.0.0")
 
     // Preference - Settings UI with PreferenceFragmentCompat
     implementation("androidx.preference:preference-ktx:1.2.1")
