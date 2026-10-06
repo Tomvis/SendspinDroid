@@ -671,7 +671,6 @@
     <string name="stats_frozen_reconnecting">Yes (reconnecting)</string>
     <string name="stats_sync_offset">Sync Offset</string>
     <string name="stats_calibrated">Calibrated</string>
-    <string name="stats_calibrations">Calibrations</string>
     <string name="stats_frames_written">Frames Written</string>
     <string name="stats_server_position">Server Position</string>
     <string name="stats_underruns">Underruns</string>

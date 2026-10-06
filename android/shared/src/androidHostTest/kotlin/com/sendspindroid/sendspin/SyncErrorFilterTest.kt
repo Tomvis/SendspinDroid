@@ -50,6 +50,22 @@ class SyncErrorFilterTest {
         assertTrue(filter.isReady)
     }
 
+    // --- Shift ---
+
+    @Test
+    fun shift_movesOffsetByKnownCorrection() {
+        for (i in 1..10) {
+            filter.update(1000L, i * 1_000_000L)
+        }
+        val before = filter.offsetMicros
+        val driftBefore = filter.driftValue
+
+        filter.shift(-250.0)
+
+        assertEquals(before - 250L, filter.offsetMicros)
+        assertEquals(driftBefore, filter.driftValue, 0.0)
+    }
+
     // --- Offset convergence ---
 
     @Test
