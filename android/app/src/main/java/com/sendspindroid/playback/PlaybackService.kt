@@ -1128,8 +1128,7 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Decode a single audio chunk. Runs on [decodeDispatcher]; [audioDecoder]
      * is read from the single-owner thread so no TOCTOU local-ref capture is
-     * needed. Chunks for the "pcm" codec pass through when no decoder is
-     * installed (matches the previous onAudioChunk behavior).
+     * needed.
      */
     private suspend fun handleDecodeChunk(t: DecodeTask.Chunk) {
         // Drop chunks belonging to a stream that has since ended or been
@@ -1139,13 +1138,11 @@ class PlaybackService : MediaLibraryService() {
         // stall is what delayed decoder reconfiguration in issue #114.
         if (t.generation != decodeGeneration) return
 
-        val decoder = audioDecoder
+        // No decoder means the stream's codec could not be set up: drop the
+        // chunk. PCM has a decoder of its own, so nothing passes through raw.
+        val decoder = audioDecoder ?: return
         val pcmData: ByteArray = try {
-            when {
-                decoder != null -> decoder.decode(t.audioData)
-                currentCodec == "pcm" -> t.audioData
-                else -> return // compressed codec with no decoder -- drop chunk
-            }
+            decoder.decode(t.audioData)
         } catch (e: Exception) {
             Log.e(TAG, "Decode error, dropping chunk", e)
             return
@@ -1163,9 +1160,9 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Release any prior decoder and create+configure a new one for the new
      * stream. Runs on [decodeDispatcher] so we're the single owner of
-     * [audioDecoder]. Falls back to a PCM pass-through decoder if the
-     * requested codec can't be created, matching the prior main-thread
-     * behavior.
+     * [audioDecoder]. If the decoder cannot be created or configured there is
+     * no decoder and the stream's chunks are dropped: silence, never the
+     * compressed bytes played as PCM.
      */
     private suspend fun handleDecodeStartStream(t: DecodeTask.StartStream) {
         Log.d(
@@ -1185,20 +1182,9 @@ class PlaybackService : MediaLibraryService() {
             Log.i(TAG, "Audio decoder created: ${t.codec}")
             decoderReady = true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create decoder for ${t.codec}, falling back to PCM", e)
-            try {
-                val fallback = AudioDecoderFactory.create("pcm")
-                fallback.configure(t.sampleRate, t.channels, t.bitDepth)
-                audioDecoder = fallback
-                Log.i(TAG, "PCM fallback decoder configured")
-                decoderReady = true
-            } catch (fallbackEx: Exception) {
-                Log.e(TAG, "PCM fallback decoder also failed", fallbackEx)
-                audioDecoder = null
-                // decoderReady stays false -- subsequent chunks will be
-                // rejected at the WS-IO fast-path gate.
-                decoderReady = false
-            }
+            Log.e(TAG, "No decoder for ${t.codec}; dropping this stream's audio", e)
+            // Subsequent chunks are rejected at the WS-IO fast-path gate.
+            decoderReady = false
         }
 
         if (t.keepBuffered) switchOutputFormat(t)

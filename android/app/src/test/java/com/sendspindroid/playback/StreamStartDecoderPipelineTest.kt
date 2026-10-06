@@ -75,15 +75,8 @@ class StreamStartDecoderPipelineTest {
             audioDecoder?.configure(sampleRate, channels, bitDepth, codecHeader)
             decoderReady = true
         } catch (e: Exception) {
-            try {
-                val fallback = AudioDecoderFactory.create("pcm")
-                fallback.configure(sampleRate, channels, bitDepth)
-                audioDecoder = fallback
-                decoderReady = true
-            } catch (fallbackEx: Exception) {
-                audioDecoder = null
-                // decoderReady stays false
-            }
+            audioDecoder = null
+            // decoderReady stays false
         }
 
         // Step 5: Create SyncAudioPlayer (simulated - can't instantiate AudioTrack in JVM)
@@ -109,19 +102,17 @@ class StreamStartDecoderPipelineTest {
     }
 
     @Test
-    fun `onStreamStart with opus falls back to pcm when opus unavailable in JVM`() {
-        // In JVM tests, OpusDecoder requires native library, so create() may throw
-        // This tests the fallback path
+    fun `onStreamStart with opus unavailable has no decoder and no pcm fallback`() {
         mockkObject(AudioDecoderFactory)
         every { AudioDecoderFactory.create("opus") } throws RuntimeException("Native lib not loaded")
+        // A real PCM decoder is on offer; it must not be taken.
         every { AudioDecoderFactory.create("pcm") } answers { callOriginal() }
 
         simulateOnStreamStart("opus", sampleRate = 48000, channels = 2, bitDepth = 16)
 
-        assertTrue("decoderReady should be true (via fallback)", decoderReady)
-        assertNotNull("decoder should be fallback PCM", audioDecoder)
-        assertTrue("fallback decoder should be configured", audioDecoder!!.isConfigured)
-        assertTrue("SyncAudioPlayer should be created", syncPlayerCreated)
+        assertFalse("decoderReady should be false", decoderReady)
+        assertNull("decoder should be null", audioDecoder)
+        assertFalse("SyncAudioPlayer should NOT be created", syncPlayerCreated)
     }
 
     @Test
@@ -166,7 +157,7 @@ class StreamStartDecoderPipelineTest {
     }
 
     @Test
-    fun `onStreamStart with both decoders failing does not create player`() {
+    fun `onStreamStart with a failing decoder does not create player`() {
         val failingDecoder = object : AudioDecoder {
             override val isConfigured = false
             override fun configure(sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
