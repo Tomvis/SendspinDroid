@@ -321,6 +321,29 @@ class SendSpinProtocolHandlerTest {
     }
 
     @Test
+    fun `available stays true when sync is lost after first convergence`() {
+        val filter = handler.exposedTimeFilter()
+        assertFalse("Not available before the filter converges", handler.exposedIsAvailable())
+
+        for (i in 1..30) {
+            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
+        }
+        handler.evaluateAndPublishSyncStateForTest()
+        assertTrue(handler.exposedIsAvailable())
+
+        // "available: false" ends our streams, so losing sync mid-stream must
+        // mute locally instead of reporting it.
+        filter.reset()
+        handler.evaluateAndPublishSyncStateForTest()
+        assertEquals("error", handler.exposedSyncState())
+        assertTrue("Sync loss must not report unavailable", handler.exposedIsAvailable())
+
+        // A new connection starts from scratch.
+        handler.resetSyncStateTrackingForTest()
+        assertFalse(handler.exposedIsAvailable())
+    }
+
+    @Test
     fun `resetSyncStateTracking clears mute and returns state to error`() {
         val filter = handler.exposedTimeFilter()
         for (i in 1..30) {
@@ -473,6 +496,7 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     fun exposedVolume(): Int = currentVolume
     fun exposedSyncState(): String = currentSyncState
+    fun exposedIsAvailable(): Boolean = isAvailable()
     fun exposedTimeFilter(): SendspinTimeFilter = timeFilter
     fun lastMuteDecision(): Boolean = muteEvents.lastOrNull() ?: false
     fun evaluateAndPublishSyncStateForTest() = evaluateAndPublishSyncState()
