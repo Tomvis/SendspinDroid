@@ -330,7 +330,11 @@ abstract class SendSpinProtocolHandler(
      */
     protected fun isAvailable(): Boolean {
         if (externalSourceActive) return false
-        return getTimeFilter().isConverged
+        // Convergence gates only the FIRST `available: true`. Once reached it
+        // is latched for the connection: the server ends our streams the
+        // moment we report false, so a filter that wobbles when a stream
+        // starts must not take us out of the playback it just joined.
+        return hasEverConverged || getTimeFilter().isConverged
     }
 
     /**
