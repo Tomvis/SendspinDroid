@@ -499,7 +499,7 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     fun exposedTimeFilter(): SendspinTimeFilter = timeFilter
     fun lastMuteDecision(): Boolean = muteEvents.lastOrNull() ?: false
     fun evaluateAndPublishSyncStateForTest() = evaluateAndPublishSyncState()
-    fun sendGoodbyeForTest(reason: GoodbyeReason) = sendGoodbye(reason)
+    fun sendGoodbyeForTest(reason: GoodbyeReason) = encodeGoodbye(reason).forEach { sendBinaryFrame(it) }
     fun resetServerStateForTest() = resetServerState()
     fun resetSyncStateTrackingForTest() = resetSyncStateTracking()
 

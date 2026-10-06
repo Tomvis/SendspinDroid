@@ -141,8 +141,10 @@ abstract class E2ETestBase {
         fakeTransport.setListener(listener)
 
         // No fake server speaks Noise, so the handshake driver never reaches
-        // transport mode here. Install what it would have installed.
+        // transport mode here. Install what it would have installed - again
+        // after the client starts its handshake, which clears the channel.
         client.installEncryptedChannel(PlaintextCrypto)
+        fakeTransport.afterConnected = { client.installEncryptedChannel(PlaintextCrypto) }
     }
 
     /**

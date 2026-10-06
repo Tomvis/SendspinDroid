@@ -18,6 +18,15 @@ object SendSpinProtocol {
     const val PAIR_ATTEMPT_TIMEOUT_MS = 120_000L
 
     /**
+     * How long the cleartext init exchange and the Noise handshake may take.
+     *
+     * "Implementations SHOULD apply a timeout (e.g., 30 seconds) for each side
+     * to receive the next expected message during the prologue and
+     * Noise-handshake phases."
+     */
+    const val HANDSHAKE_TIMEOUT_MS = 30_000L
+
+    /**
      * Audio chunk header (roles/player/v1.md): 1 byte type + 8 bytes big-endian
      * int64 timestamp + 4 bytes big-endian uint32 `send_ahead`.
      */

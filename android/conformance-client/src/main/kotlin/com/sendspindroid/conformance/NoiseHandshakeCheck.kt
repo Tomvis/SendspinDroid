@@ -25,6 +25,7 @@ import com.sendspindroid.sendspin.pairing.PairingPskFlow
 import com.sendspindroid.sendspin.pairing.PairingToken
 import com.sendspindroid.sendspin.protocol.ActivationOutcome
 import com.sendspindroid.sendspin.protocol.Activity
+import com.sendspindroid.sendspin.protocol.GoodbyeReason
 import com.sendspindroid.sendspin.protocol.NoiseWireCodec
 import com.sendspindroid.sendspin.protocol.RehandshakeDriver
 import com.sendspindroid.sendspin.protocol.SendSpinHandshakeDriver
@@ -572,6 +573,15 @@ object NoiseHandshakeCheck {
         }
 
         val finished = done.await(40, TimeUnit.SECONDS)
+        // The process is going away, so a session that got as far as the
+        // hellos says so before it closes. OkHttp writes queued frames ahead
+        // of the close frame.
+        if (failure == null && serverHellos > 0 && !rehandshakeInProgress) {
+            sendEncrypted(
+                MessageBuilder.buildGoodbye(GoodbyeReason.SHUTDOWN),
+                "client/goodbye shutdown",
+            )
+        }
         socket.close()
         client.dispatcher.executorService.shutdown()
 

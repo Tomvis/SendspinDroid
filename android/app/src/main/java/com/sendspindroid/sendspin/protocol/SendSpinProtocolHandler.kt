@@ -31,6 +31,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -298,19 +299,27 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Send goodbye message before disconnecting.
+     * Encrypt a `client/goodbye` and retire the channel it was encrypted for.
      *
-     * Note the [handshakeComplete] gate, which means "server/hello seen". A
-     * goodbye is legitimate before that, as soon as the Noise handshake
-     * finishes, so this swallows one silently. `server/unpair` sidesteps it by
-     * sending its own goodbye - it has to sequence the send against the close
-     * anyway - but item 2.9's `concurrent_attempt` will need this relaxed.
+     * Returns the frames instead of sending them, and does so before
+     * returning rather than on the coroutine scope: the caller is about to
+     * close this connection - and may be about to open the next one or cancel
+     * the scope - so the frames have to be in its hands first. A goodbye
+     * queued behind an async encrypt loses that race every time.
+     *
+     * Empty when there is nothing to say goodbye to: before `server/hello`
+     * (the [handshakeComplete] gate) or mid re-handshake, when no application
+     * message may be started.
      */
-    protected fun sendGoodbye(reason: GoodbyeReason) = sendGoodbye(reason.wire)
-
-    protected fun sendGoodbye(reason: String) {
-        if (!handshakeComplete) return
-        sendProtocolMessage(MessageBuilder.buildGoodbye(reason))
+    protected fun encodeGoodbye(reason: GoodbyeReason): List<ByteArray> {
+        val codec = wireCodec
+        if (codec == null || !handshakeComplete || rehandshakeInProgress) return emptyList()
+        // Nothing may follow a goodbye under these keys.
+        wireCodec = null
+        Log.d(tag, "Sending client/goodbye reason=${reason.wire}")
+        // The codec only suspends for its send mutex, which is never held
+        // across anything but the encryption itself.
+        return runBlocking { codec.encodeJson(MessageBuilder.buildGoodbye(reason)) }
     }
 
     /**
@@ -687,6 +696,16 @@ abstract class SendSpinProtocolHandler(
         // server's count".
         resetPairingIndexForFreshHandshake()
         Log.i(tag, "Encrypted channel established")
+    }
+
+    /**
+     * Forget the previous connection's channel. Called before every fresh
+     * handshake, so that nothing sent while the new one is in progress can be
+     * encrypted under the old session's keys.
+     */
+    protected fun clearEncryptedChannel() {
+        wireCodec = null
+        rehandshakeInProgress = false
     }
 
     /**

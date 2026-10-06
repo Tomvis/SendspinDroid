@@ -2096,10 +2096,8 @@ class PlaybackService : MediaLibraryService() {
         // Connecting branch of the connectionState collector announces it.
 
         try {
-            if (sendSpinClient?.isConnected == true) {
-                Log.d(TAG, "Already connected, disconnecting first...")
-                sendSpinClient?.disconnect()
-            }
+            // No disconnect() first: connect() leaves the current server
+            // itself, with the goodbye reason a server switch requires.
 
             // Read current device volume and set as initial volume for server and UI
             val am = audioManager
