@@ -94,6 +94,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import com.sendspindroid.ui.main.MainActivityViewModel
 import com.sendspindroid.ui.main.PlaybackState
 import com.sendspindroid.ui.main.ArtworkSource
@@ -2634,7 +2635,7 @@ class MainActivity : AppCompatActivity() {
 
         // Set device volume directly (Spotify-style)
         val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val newVolume = (volume * maxVolume).toInt().coerceIn(0, maxVolume)
+        val newVolume = (volume * maxVolume).roundToInt().coerceIn(0, maxVolume)
         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
 
         // Also notify PlaybackService to sync to server (for multi-client coordination)

@@ -97,6 +97,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.roundToInt
 
 /**
  * Background playback service for SendSpinDroid.
@@ -1723,9 +1724,7 @@ class PlaybackService : MediaLibraryService() {
                 Log.i(TAG, "[cmd-trace] T3 onVolumeChanged.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name} vol=$volume")
                 // Convert from 0-100 to 0.0-1.0 and apply to device volume
                 val volumeFloat = volume / 100f
-                setVolume(volumeFloat)  // Sets device STREAM_MUSIC volume
-                // Update playback state with new volume
-                _playbackState.value = _playbackState.value.copy(volume = volume)
+                setVolume(volumeFloat)  // Sets device STREAM_MUSIC volume and the cached volume
                 // Broadcast all state including volume to UI controllers
                 broadcastSessionExtras()
             }
@@ -2229,12 +2228,16 @@ class PlaybackService : MediaLibraryService() {
     fun setVolume(volume: Float) {
         val am = audioManager ?: return
         val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val newVolume = (volume * maxVolume).toInt().coerceIn(0, maxVolume)
+        val newVolume = (volume * maxVolume).roundToInt().coerceIn(0, maxVolume)
 
         Log.d(TAG, "Setting device volume: $newVolume/$maxVolume (normalized: $volume)")
 
         // Update tracking to prevent echo in observer
         lastKnownVolume = newVolume
+
+        // Every session-extras broadcast resends this value to the activity, so
+        // it has to follow each volume set here or the slider snaps back to it.
+        _playbackState.value = _playbackState.value.copy(volume = (volume * 100).roundToInt())
 
         // Set device volume (no flags = silent, no UI popup)
         am.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
