@@ -155,6 +155,13 @@ It passes only if audio arrived, every chunk was a whole number of PCM frames,
 the chunk timestamps follow one another, and the frame counter never breaks.
 The server log must contain no `non-compliant client` line.
 
+`--send-test-artwork` makes the server send two album artwork images to the
+first client with an artwork stream - one that fits a single part and one that
+needs several - and then clear the channel. Add `--expect-artwork` to the
+client: it reassembles them with the app's `ArtworkReceiver` and passes only if
+an image arrived in more than one part and the last one was cleared. Both sides
+print each image's SHA-256, which must match.
+
 To exercise the in-band re-handshake as well, add
 `--pair-token-file <identity-file>.token` to the server and
 `--expect-rehandshake` to the client. The tool writes its pairing token to that

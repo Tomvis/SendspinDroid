@@ -46,7 +46,7 @@ transport message. After decryption, byte 0 is the message ID:
          (flags bit 1 = first, bit 0 = last)
   2-3:   Reserved
   4:     Audio chunk
-  8-11:  Artwork channels 0-3 (announce/part/cancel; not implemented yet)
+  8-11:  Artwork channels 0-3 (announce/part/cancel; only channel 0 is declared)
   16-23: Visualizer (not claimed)
 
 Audio chunk (13-byte header):

@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import hashlib
 import logging
 import os
 import struct
@@ -38,6 +39,7 @@ try:
     from aiosendspin.noise.pairing_token import decode_psk_token
     from aiosendspin.noise.trust_store import FileServerPairingStore
     from aiosendspin.server.server import SendspinServer
+    from PIL import Image
 except ImportError:  # pragma: no cover - environment guidance, not logic
     print(
         "aiosendspin is not installed. See docs/dev-server-runbook.md:\n"
@@ -283,6 +285,57 @@ class DevServer:
         await target.group.stop()
         LOGGER.info("test audio: done, %d frames (%d bytes) committed", frame, frame * 4)
 
+    async def send_test_artwork(self) -> None:
+        """Send album artwork to the first client with an artwork stream, then clear it.
+
+        Two images: a flat colour, which encodes to a few kilobytes and travels
+        as one part, and noise, which encodes to well over the 65517 bytes one
+        part can carry. The log line for each is the SHA-256 of the bytes the
+        artwork role was handed to transfer; NoiseHandshakeCheck
+        --expect-artwork prints the same for what it reassembled.
+        """
+        assert self._server is not None
+        while True:
+            target = next(
+                (
+                    (client, role)
+                    for client in self._server.connected_clients
+                    for role in client.roles_by_family("artwork")
+                    if role.get_channel_configs()
+                ),
+                None,
+            )
+            if target is not None:
+                break
+            await asyncio.sleep(0.5)
+        client, role = target
+
+        send_artwork = role.send_artwork
+
+        def logged_send_artwork(channel: int, image_data: bytes, timestamp_us: int) -> None:
+            LOGGER.info(
+                "test artwork: channel %d %s",
+                channel,
+                f"image {len(image_data)} bytes sha256={hashlib.sha256(image_data).hexdigest()}"
+                if image_data
+                else "clear",
+            )
+            send_artwork(channel, image_data, timestamp_us)
+
+        role.send_artwork = logged_send_artwork
+        artwork = client.group.group_role("artwork")
+        # The stream's own late-join clear goes out first.
+        await asyncio.sleep(1.0)
+        for image in (
+            Image.new("RGB", (64, 64), (200, 30, 30)),
+            Image.frombytes("RGB", (500, 500), os.urandom(500 * 500 * 3)),
+            None,
+        ):
+            await artwork.set_album_artwork(image)
+            # The parts of a transfer are paced; let it finish before the next.
+            await asyncio.sleep(2.0)
+        LOGGER.info("test artwork: done")
+
     async def rehandshake_with_token(self, token_file: Path) -> None:
         """Start a Pairing PSK pairing with the client whose token is in `token_file`.
 
@@ -460,6 +513,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="stream this many seconds of counter-pattern PCM to the first player",
     )
     parser.add_argument(
+        "--send-test-artwork",
+        action="store_true",
+        help="send two album artwork images, then a clear, to the first artwork client",
+    )
+    parser.add_argument(
         "--pair-token-file",
         default=None,
         metavar="PATH",
@@ -495,13 +553,15 @@ async def run(args: argparse.Namespace) -> int:
     watcher.add_done_callback(report_watcher_death)
 
     async def scripted() -> None:
+        if args.send_test_artwork:
+            await server.send_test_artwork()
         if args.play_test_audio:
             await server.play_test_audio(args.play_test_audio)
         if args.pair_token_file:
             await server.rehandshake_with_token(Path(args.pair_token_file))
 
     test_audio = None
-    if args.play_test_audio or args.pair_token_file:
+    if args.send_test_artwork or args.play_test_audio or args.pair_token_file:
         test_audio = asyncio.create_task(scripted())
         test_audio.add_done_callback(
             lambda task: task.cancelled() or task.exception() is None

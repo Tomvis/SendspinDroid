@@ -1070,6 +1070,7 @@ class SendSpin(
         reconnectJob = null
 
         stopTimeSync()
+        resetArtworkStream()
         reconnecting.set(false)
         waitingForNetwork.set(false)
         // Spec reason enum is another_server | shutdown | restart |
@@ -1098,6 +1099,7 @@ class SendSpin(
         reconnectJob = null
 
         stopTimeSync()
+        resetArtworkStream()
         reconnecting.set(false)
         waitingForNetwork.set(false)
         sendGoodbye(GoodbyeReason.USER_REQUEST)

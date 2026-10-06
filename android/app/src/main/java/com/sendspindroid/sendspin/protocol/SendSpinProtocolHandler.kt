@@ -10,6 +10,7 @@ import com.sendspindroid.sendspin.crypto.NoiseTransport
 import com.sendspindroid.sendspin.crypto.Psk
 import com.sendspindroid.sendspin.crypto.PskCategory
 import com.sendspindroid.sendspin.crypto.asNoiseCrypto
+import com.sendspindroid.sendspin.protocol.message.ArtworkReceiver
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import com.sendspindroid.sendspin.protocol.message.MessageParser
@@ -27,8 +28,11 @@ import com.sendspindroid.sendspin.pairing.PairingFailureCounter
 import com.sendspindroid.sendspin.pairing.PairingPskFlow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
@@ -74,6 +78,15 @@ abstract class SendSpinProtocolHandler(
     // Stream active tracking (mirrors CLI _stream_active)
     private var _streamActive = false
     private var _currentStreamConfig: StreamConfig? = null
+
+    // Artwork stream (roles/artwork/v1.md). One channel is declared, so only
+    // channel 0 is shown. [artworkLock] orders a pending image coming due on
+    // the timer scope against the receive thread replacing or discarding it.
+    private val artworkLock = Any()
+    private val artworkReceiver = ArtworkReceiver()
+    private var artworkStreamActive = false
+    private var artworkChannelConfig: JsonElement? = null
+    private var pendingArtwork: Job? = null
 
     // Last received values for change detection (avoids unnecessary UI recomposition)
     private var lastMetadata: TrackMetadata? = null
@@ -178,11 +191,8 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun onAudioChunk(timestampMicros: Long, audioData: ByteArray)
 
     /**
-     * Called when artwork is received.
-     *
-     * Not fed at present: artwork arrives as announce/part/cancel transfers
-     * (roles/artwork/v1.md), which are not implemented yet, so artwork binary
-     * messages are ignored and the UI relies on `metadata.artwork_url`.
+     * Called when a channel's current image changes. An empty [payload] means
+     * the channel no longer displays artwork.
      */
     protected abstract fun onArtwork(channel: Int, payload: ByteArray)
 
@@ -259,6 +269,7 @@ abstract class SendSpinProtocolHandler(
             bufferCapacity = bufferCapacity,
             manufacturer = getManufacturer(),
             supportedFormats = formats,
+            lowMemoryMode = isLowMemoryMode(),
             softwareVersion = getSoftwareVersion(),
             unpairedAccessEnabled = isUnpairedAccessEnabled(),
             supportedPairMethods = getSupportedPairMethods(),
@@ -874,6 +885,7 @@ abstract class SendSpinProtocolHandler(
         // Clear cached values so the first post-handshake messages always propagate
         _streamActive = false
         _currentStreamConfig = null
+        resetArtworkStream()
         lastMetadata = null
         lastPlaybackState = null
         lastGroupInfo = null
@@ -1591,6 +1603,10 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected fun handleStreamStart(payload: JsonObject?) {
+        // A stream/start carries an object per role it starts or reconfigures,
+        // so one for artwork alone has no `player` object.
+        (payload?.get("artwork") as? JsonObject)?.let { handleArtworkStreamStart(it) }
+
         val config = MessageParser.parseStreamStart(payload)
         if (config == null) return
 
@@ -1641,6 +1657,19 @@ abstract class SendSpinProtocolHandler(
         // versioned. Comparing against "player@v1" here matched nothing, so
         // every stream/end carrying a roles array was silently dropped and the
         // stream never ended.
+        if (artworkStreamActive && (roles == null || roles.any {
+                SendSpinProtocol.isStreamRole(it, SendSpinProtocol.StreamRoles.ARTWORK)
+            })
+        ) {
+            // "On stream/end for the artwork role, clients MUST clear the
+            // current image and discard any pending image."
+            Log.i(tag, "Artwork stream ended - clearing artwork")
+            synchronized(artworkLock) {
+                resetArtworkStream()
+                onArtwork(0, ByteArray(0))
+            }
+        }
+
         if (roles != null && roles.none {
                 SendSpinProtocol.isStreamRole(it, SendSpinProtocol.StreamRoles.PLAYER)
             }
@@ -1691,8 +1720,12 @@ abstract class SendSpinProtocolHandler(
         when (val decoded = codec.decode(bytes)) {
             is NoiseWireCodec.Decoded.Json -> handleTextMessage(decoded.text)
             is NoiseWireCodec.Decoded.Typed ->
-                BinaryMessageParser.parse(decoded.type, decoded.body)
-                    ?.let { dispatchBinaryMessage(it) }
+                if (decoded.type - SendSpinProtocol.BinaryType.ARTWORK_BASE in 0..3) {
+                    handleArtworkMessage(decoded.type, decoded.body)
+                } else {
+                    BinaryMessageParser.parse(decoded.type, decoded.body)
+                        ?.let { dispatchBinaryMessage(it) }
+                }
             is NoiseWireCodec.Decoded.Buffered -> {
                 // A fragment landed and the message is still incomplete. The
                 // codec holds the partial buffer; nothing to dispatch until the
@@ -1716,6 +1749,89 @@ abstract class SendSpinProtocolHandler(
                     return
                 }
                 onAudioChunk(message.timestampMicros, message.payload)
+            }
+        }
+    }
+
+    // ========== Artwork (roles/artwork/v1.md) ==========
+
+    private fun handleArtworkStreamStart(artwork: JsonObject) {
+        val config = (artwork["channels"] as? JsonArray)?.getOrNull(0)
+        synchronized(artworkLock) {
+            artworkStreamActive = true
+            // "A stream/start that changes a channel's configuration likewise
+            // discards that channel's pending image."
+            if (config != artworkChannelConfig) discardPendingArtwork()
+            artworkChannelConfig = config
+        }
+    }
+
+    /**
+     * Forget the artwork stream, on a new connection or on leaving one, so an
+     * image still pending cannot come due afterwards. Does not touch the image
+     * on display.
+     */
+    protected fun resetArtworkStream() = synchronized(artworkLock) {
+        artworkStreamActive = false
+        artworkChannelConfig = null
+        artworkReceiver.reset()
+        discardPendingArtwork()
+    }
+
+    private fun discardPendingArtwork() {
+        pendingArtwork?.cancel()
+        pendingArtwork = null
+    }
+
+    private fun handleArtworkMessage(type: Int, body: ByteArray) {
+        val result = synchronized(artworkLock) {
+            if (artworkStreamActive) {
+                artworkReceiver.accept(type, body)
+            } else {
+                // "Servers MUST NOT send artwork messages outside an active
+                // artwork stream." A malformed message is a protocol error
+                // regardless; the sequence rules only apply within a stream,
+                // so a well-formed stray is dropped.
+                artworkReceiver.malformed(body)?.let { ArtworkReceiver.Result.ProtocolError(it) }
+                    ?: ArtworkReceiver.Result.None
+            }
+        }
+        when (result) {
+            is ArtworkReceiver.Result.None -> {}
+            is ArtworkReceiver.Result.ProtocolError -> onProtocolFailure(result.reason)
+            is ArtworkReceiver.Result.Discard ->
+                if (result.channel == 0) synchronized(artworkLock) { discardPendingArtwork() }
+            is ArtworkReceiver.Result.Image ->
+                if (result.channel == 0) scheduleArtwork(result.timestampMicros, result.data)
+        }
+    }
+
+    /**
+     * Make [image] the pending image, and the current one once its timestamp
+     * is reached: "translated to the local clock via the time filter (current
+     * best estimate, no waiting for convergence) ... artwork is never dropped
+     * for lateness". Before the filter has any estimate there is nothing to
+     * translate with, so the image is shown at once, which the spec allows
+     * ("or show it early").
+     */
+    private fun scheduleArtwork(timestampMicros: Long, image: ByteArray) = synchronized(artworkLock) {
+        discardPendingArtwork()
+        val filter = getTimeFilter()
+        val delayMicros = filter.serverToClient(timestampMicros) - System.nanoTime() / 1000
+        if (!filter.isReady || delayMicros <= 0) {
+            onArtwork(0, image)
+            return@synchronized
+        }
+        Log.d(tag, "Artwork (${image.size} bytes) pending for ${delayMicros / 1000}ms")
+        pendingArtwork = getCoroutineScope().launch {
+            delay(delayMicros / 1000)
+            // A cancel takes the same lock, so an image discarded while this
+            // was waiting for it is no longer active here.
+            synchronized(artworkLock) {
+                if (isActive) {
+                    pendingArtwork = null
+                    onArtwork(0, image)
+                }
             }
         }
     }

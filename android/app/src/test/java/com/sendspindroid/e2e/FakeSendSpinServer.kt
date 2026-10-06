@@ -197,6 +197,17 @@ class FakeSendSpinServer(
     }
 
     /**
+     * Send a stream/start for the artwork role alone, with the one channel the
+     * client declares in client/state.
+     */
+    fun sendArtworkStreamStart() {
+        transport.simulateTextMessage(
+            """{"type":"stream/start","payload":{"artwork":{"channels":[""" +
+                """{"source":"album","format":"jpeg","width":500,"height":500}]}}}"""
+        )
+    }
+
+    /**
      * Send a stream/stop message.
      */
     fun sendStreamEnd() {
