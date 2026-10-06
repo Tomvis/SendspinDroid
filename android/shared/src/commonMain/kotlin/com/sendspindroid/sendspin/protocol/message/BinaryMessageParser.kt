@@ -47,9 +47,8 @@ object BinaryMessageParser {
      *
      * @return null for a malformed audio chunk and for every other ID, which
      *   the spec says to ignore ("binary messages whose ID they do not
-     *   implement"). That includes artwork (8-11): its announce/part/cancel
-     *   transfers are not implemented yet, and reading them with the audio
-     *   layout would turn a flags byte into a timestamp.
+     *   implement"). Artwork (8-11) does not come here: its announce/part/cancel
+     *   transfers are stateful and belong to [ArtworkReceiver].
      */
     fun parse(type: Int, body: ByteArray): BinaryMessage? {
         if (type != SendSpinProtocol.BinaryType.AUDIO) {
