@@ -274,7 +274,10 @@ class DevServer:
             stream.prepare_audio(test_audio_chunk(frame), TEST_AUDIO_FORMAT)
             frame += TEST_AUDIO_CHUNK_FRAMES
             await stream.commit_audio()
-            await stream.sleep_to_limit_buffer(1_000_000)
+            # Must exceed the client's min_buffer_ms + required_lead_time_ms
+            # (the app reports 1500 + 500): a lower limit stalls after every
+            # commit and leaves holes in the timeline.
+            await stream.sleep_to_limit_buffer(5_000_000)
         # Let the tail leave the send queue before the stream ends.
         await asyncio.sleep(2.0)
         await target.group.stop()
