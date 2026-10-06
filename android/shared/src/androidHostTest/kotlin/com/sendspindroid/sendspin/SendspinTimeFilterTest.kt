@@ -11,6 +11,7 @@ import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import kotlin.math.abs
 
 class SendspinTimeFilterTest {
 
@@ -166,6 +167,104 @@ class SendspinTimeFilterTest {
         val originalTime = 100_000_000L
         val roundTrip = filter.clientToServer(filter.serverToClient(originalTime))
         assertEquals(originalTime, roundTrip)
+    }
+
+    // --- Drift in the conversions ---
+
+    /** Server clock running [ppm] fast: offset(t) = 10ms + ppm * t. */
+    private fun driftingOffset(clientTimeMicros: Long, ppm: Double = 100.0): Double =
+        10_000.0 + ppm * 1e-6 * clientTimeMicros
+
+    /** Feed noise-free measurements of [driftingOffset], one per [stepMicros]. */
+    private fun feedDrifting(from: Int, to: Int, stepMicros: Long = 1_000_000L) {
+        for (i in from..to) {
+            val t = i * stepMicros
+            filter.addMeasurement(driftingOffset(t).toLong(), 500L, t)
+        }
+    }
+
+    @Test
+    fun clientToServer_followsDriftBetweenUpdates() {
+        feedDrifting(1, 300)
+        // 3 s after the last update the true offset has moved on by 300us.
+        val clientTime = 303_000_000L
+        val expected = clientTime + driftingOffset(clientTime)
+        assertEquals(expected, filter.clientToServer(clientTime).toDouble(), 20.0)
+        // Holding the offset flat would be about 300us short.
+        assertTrue(expected - (clientTime + filter.offsetMicros) > 250.0)
+    }
+
+    @Test
+    fun serverToClient_followsDriftBetweenUpdates() {
+        feedDrifting(1, 300)
+        val clientTime = 303_000_000L
+        val serverTime = (clientTime + driftingOffset(clientTime)).toLong()
+        assertEquals(clientTime.toDouble(), filter.serverToClient(serverTime).toDouble(), 20.0)
+    }
+
+    @Test
+    fun conversions_areInversesWithDriftAndPlayoutTerms() {
+        feedDrifting(1, 60)
+        filter.setUserSyncOffsetMs(35.0)
+        filter.setOutputDelayMs(120.0)
+        // Before, at and long after the last update, at realistic magnitudes.
+        for (serverTime in listOf(30_000_000L, 60_010_000L, 63_000_000L, 3_600_000_000L, 10_000_000_000_000L)) {
+            val roundTrip = filter.clientToServer(filter.serverToClient(serverTime))
+            assertEquals(serverTime.toDouble(), roundTrip.toDouble(), 1.0)
+        }
+    }
+
+    @Test
+    fun conversions_ignoreDriftUntilItIsSignificant() {
+        // Two measurements give a drift estimate from one finite difference;
+        // that is not evidence of drift yet, so the offset is held.
+        filter.addMeasurement(10_000L, 5000L, 1_000_000L)
+        filter.addMeasurement(10_400L, 5000L, 2_000_000L)
+        assertTrue(filter.driftPpm > 100.0)
+        val clientTime = 12_000_000L
+        assertEquals(clientTime + filter.offsetMicros, filter.clientToServer(clientTime))
+    }
+
+    @Test
+    fun wrongFirstDriftEstimate_isCorrectedByTheNextMeasurements() {
+        // 1.2ms of noise between the first two measurements, 3 s apart, reads
+        // as 400 ppm. The clock does not drift at all.
+        filter.addMeasurement(10_000L, 2000L, 3_000_000L)
+        filter.addMeasurement(11_200L, 2000L, 6_000_000L)
+        assertEquals(400.0, filter.driftPpm, 1.0)
+
+        for (i in 3..8) {
+            filter.addMeasurement(10_000L, 2000L, i * 3_000_000L)
+        }
+        assertEquals(0.0, filter.driftPpm, 40.0)
+        // 3 s past the last update the conversion is within 150us of the truth.
+        val clientTime = 27_000_000L
+        assertEquals((clientTime + 10_000L).toDouble(), filter.clientToServer(clientTime).toDouble(), 150.0)
+    }
+
+    @Test
+    fun conversions_seeOffsetDriftAndUpdateTimeFromTheSameUpdate() {
+        // Updates 10 s apart on a 100 ppm clock: the offset moves 1000us per
+        // update. A consistent snapshot extrapolates to the true offset a few
+        // updates away; one update's offset with another's update time would
+        // be out by a multiple of 1000us.
+        val step = 10_000_000L
+        feedDrifting(1, 300, step)
+
+        val done = AtomicBoolean(false)
+        var worstErrorUs = 0.0
+        val reader = thread(name = "conversion-reader") {
+            while (!done.get()) {
+                val clientTime = filter.lastUpdateTimeUs + step / 2
+                val error = abs(filter.clientToServer(clientTime) - clientTime - driftingOffset(clientTime))
+                if (error > worstErrorUs) worstErrorUs = error
+            }
+        }
+        feedDrifting(301, 20_000, step)
+        done.set(true)
+        reader.join(5000)
+
+        assertTrue("worst error ${worstErrorUs}us", worstErrorUs < 100.0)
     }
 
     // --- Static delay ---

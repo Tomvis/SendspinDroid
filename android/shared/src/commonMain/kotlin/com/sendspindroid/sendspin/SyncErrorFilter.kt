@@ -12,8 +12,8 @@ import kotlin.math.sqrt
  *
  * Algorithm shape matches `SendspinTimeFilter` post-Phase-2 with one
  * deliberate divergence: the drift-significance gate is omitted.
- * Upstream gates drift in its time-conversion API (which we don't
- * expose); for the prediction step, drift is always applied here, so
+ * The time filter gates drift in its conversions; this filter has no
+ * conversions, and in the prediction step drift is always applied, so
  * the drift estimate isn't biased by suppressing its own contribution
  * to predicted offset.
  *
