@@ -31,6 +31,9 @@ interface AudioSink {
      */
     fun write(buffer: ByteArray, offset: Int, size: Int): Int
 
+    /** Set the output gain, 0.0 to 1.0. Mirrors AudioTrack.setVolume(). */
+    fun setVolume(gain: Float)
+
     /**
      * Query the DAC timestamp. Returns null if the hardware hasn't produced
      * a valid timestamp yet (mirrors AudioTrack.getTimestamp() returning

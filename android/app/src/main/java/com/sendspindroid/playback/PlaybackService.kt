@@ -1570,6 +1570,8 @@ class PlaybackService : MediaLibraryService() {
                     ).apply {
                         // Set callback to update SendSpinPlayer when playback state changes
                         setStateCallback(SyncAudioPlayerStateCallback())
+                        // From settings, not _playbackState: that is reset on disconnect.
+                        setMuted(com.sendspindroid.UserSettings.getPlayerMuted())
                         initialize()
                         start()
                     }
@@ -1651,16 +1653,13 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onMutedChanged(muted: Boolean) {
             mainHandler.post {
-                // Apply mute by setting volume to 0, or restore previous volume
-                val currentState = _playbackState.value
-                if (muted) {
-                    setVolume(0f)
-                } else {
-                    // Restore volume from state
-                    setVolume(currentState.volume / 100f)
-                }
+                // Mute silences the output and leaves the volume alone: the
+                // two are independent, and a later volume change must not
+                // make a muted player audible.
+                syncAudioPlayer?.setMuted(muted)
+                com.sendspindroid.UserSettings.setPlayerMuted(muted)
                 // Update playback state with new mute status
-                _playbackState.value = currentState.copy(muted = muted)
+                _playbackState.value = _playbackState.value.copy(muted = muted)
                 // Broadcast all state including mute to UI controllers
                 broadcastSessionExtras()
             }
@@ -2028,9 +2027,12 @@ class PlaybackService : MediaLibraryService() {
                 val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                 val volumePercent = ((currentDeviceVolume.toFloat() / maxVolume) * 100).toInt()
                 Log.d(TAG, "Setting initial volume from device: $currentDeviceVolume/$maxVolume = $volumePercent%")
-                sendSpinClient?.setInitialVolume(volumePercent)
+                // Mute is restored from settings: it is the app's own state,
+                // where volume is the device's.
+                val muted = com.sendspindroid.UserSettings.getPlayerMuted()
+                sendSpinClient?.setInitialVolume(volumePercent, muted)
                 // Also update playback state so UI shows correct volume from the start
-                _playbackState.value = _playbackState.value.copy(volume = volumePercent)
+                _playbackState.value = _playbackState.value.copy(volume = volumePercent, muted = muted)
             }
 
             sendSpinClient?.connect(SendSpinEndpoint.Local(address, path))

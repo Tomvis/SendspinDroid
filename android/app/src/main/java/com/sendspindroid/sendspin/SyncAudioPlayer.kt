@@ -490,6 +490,7 @@ class SyncAudioPlayer(
     @Volatile private var syncErrorUs = 0L        // Current sync error (for display)
 
     @Volatile private var syncMuted: Boolean = false
+    @Volatile private var muted: Boolean = false
 
     // 2D Kalman filter for sync error smoothing (tracks offset + drift)
     // Based on Python reference implementation for optimal noise filtering
@@ -628,6 +629,7 @@ class SyncAudioPlayer(
 
         try {
             audioSink = sinkFactory(sampleRate, channels, bitDepth, bufferSize)
+            if (muted) audioSink?.setVolume(0f)
 
             // Pre-allocate frame buffers for sync correction (avoids GC in audio callback)
             lastOutputFrame = ByteArray(bytesPerFrame)
@@ -841,6 +843,17 @@ class SyncAudioPlayer(
         // AudioTrack plays at full volume; device media stream handles attenuation.
         // This follows Spotify/Plexamp best practices for hardware volume button support.
         AppLog.Audio.d("setVolume called (ignored - using device volume): $volume")
+    }
+
+    /**
+     * Apply the player's `muted` state. Mute is AudioTrack gain, not device
+     * volume, so the two stay independent: "a volume change ... MUST NOT
+     * clear the mute state". Audio keeps draining in sync while muted.
+     */
+    fun setMuted(muted: Boolean) {
+        this.muted = muted
+        audioSink?.setVolume(if (muted) 0f else 1f)
+        AppLog.Audio.i("Mute=$muted")
     }
 
     /**
