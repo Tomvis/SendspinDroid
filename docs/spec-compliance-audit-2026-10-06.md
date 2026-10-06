@@ -45,7 +45,6 @@ legacy shim, and no longer connects to pre-rc1 servers.
 - Dynamic pairing code is verified against the strict server with the shared flows only, not on a device (it is an opt-in setting).
 - Single-round dynamic pairing: a mistyped code aborts and needs a new attempt from the server, where the spec's SHOULD is `client/pair-retry`.
 - Binary artwork reaches only the media session, and only when the server sends no `artwork_url`.
-- `OutputLatencyEstimator` always times out, which holds the first start of a new player for about 2 s.
 - Optional and unclaimed: `client/leave`, server-initiated connections, `color`, `visualizer`, `source`, static pairing code, `qr_code`.
 - Unrelated to rc1, seen during testing: the add-server button sits behind the T901 taskbar; the Device Volume slider and track progress sometimes lag a refresh.
 
