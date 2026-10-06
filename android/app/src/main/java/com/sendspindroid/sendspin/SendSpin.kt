@@ -1135,6 +1135,12 @@ class SendSpin(
     /** Enable or disable shuffle. */
     fun setShuffle(enabled: Boolean) = sendCommand(if (enabled) "shuffle" else "unshuffle")
 
+    /** Seek to an absolute position, clamped to 0..seek_max_ms. */
+    fun seek(positionMs: Long) = sendCommand("seek", positionMs = positionMs)
+
+    /** Seek by a signed offset from the current position. */
+    fun seekRelative(offsetMs: Long) = sendCommand("seek_relative", offsetMs = offsetMs)
+
     /**
      * Clean up resources.
      */

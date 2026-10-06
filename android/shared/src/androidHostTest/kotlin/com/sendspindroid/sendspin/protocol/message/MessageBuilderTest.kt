@@ -172,6 +172,24 @@ class MessageBuilderTest {
         assertNull(controller["mute"])
     }
 
+    @Test
+    fun buildCommand_seekCarriesPositionMs() {
+        val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("seek", positionMs = 42_000)).jsonObject
+        val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
+        assertEquals("seek", controller["command"]?.jsonPrimitive?.content)
+        assertEquals(42_000L, controller["position_ms"]?.jsonPrimitive?.long)
+        assertNull(controller["offset_ms"])
+    }
+
+    @Test
+    fun buildCommand_seekRelativeCarriesSignedOffsetMs() {
+        val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("seek_relative", offsetMs = -10_000)).jsonObject
+        val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
+        assertEquals("seek_relative", controller["command"]?.jsonPrimitive?.content)
+        assertEquals(-10_000L, controller["offset_ms"]?.jsonPrimitive?.long)
+        assertNull(controller["position_ms"])
+    }
+
     // --- buildPlayerState: format preference and artwork ---
 
     @Test

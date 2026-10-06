@@ -351,8 +351,16 @@ object MessageBuilder {
      *
      * @param volume only set if [command] is "volume" (0-100)
      * @param mute only set if [command] is "mute"
+     * @param positionMs only set if [command] is "seek" (0 to seek_max_ms)
+     * @param offsetMs only set if [command] is "seek_relative" (signed)
      */
-    fun buildCommand(command: String, volume: Int? = null, mute: Boolean? = null): String {
+    fun buildCommand(
+        command: String,
+        volume: Int? = null,
+        mute: Boolean? = null,
+        positionMs: Long? = null,
+        offsetMs: Long? = null,
+    ): String {
         val message = buildJsonObject {
             put("type", SendSpinProtocol.MessageType.CLIENT_COMMAND)
             put("payload", buildJsonObject {
@@ -360,6 +368,8 @@ object MessageBuilder {
                     put("command", command)
                     if (volume != null) put("volume", volume.coerceIn(0, 100))
                     if (mute != null) put("mute", mute)
+                    if (positionMs != null) put("position_ms", positionMs)
+                    if (offsetMs != null) put("offset_ms", offsetMs)
                 })
             })
         }

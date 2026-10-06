@@ -541,22 +541,52 @@ abstract class SendSpinProtocolHandler(
 
     /**
      * Send a controller command (play, pause, stop, next, previous, volume,
-     * mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch).
+     * mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch,
+     * seek, seek_relative).
      *
-     * Per spec, commands should be one of the server's advertised
-     * supported_commands; once the server has told us its set, anything
-     * outside it is dropped (the server would ignore it anyway).
+     * "Only valid from clients whose `controller` role is active", and the
+     * command "MUST be one of the values listed in `supported_commands` from
+     * the latest controller state the client received". So nothing is sent
+     * while the role is inactive, before a controller state has arrived, or
+     * for a command outside the advertised set.
      *
      * @param volume only used when [command] is "volume"
      * @param mute only used when [command] is "mute"
+     * @param positionMs required when [command] is "seek"; clamped to the
+     *   spec's "range 0 to seek_max_ms"
+     * @param offsetMs required when [command] is "seek_relative"
      */
-    fun sendCommand(command: String, volume: Int? = null, mute: Boolean? = null) {
-        val supported = currentControllerState?.supportedCommands
-        if (supported != null && command !in supported) {
+    fun sendCommand(
+        command: String,
+        volume: Int? = null,
+        mute: Boolean? = null,
+        positionMs: Long? = null,
+        offsetMs: Long? = null,
+    ) {
+        if (SendSpinProtocol.Roles.CONTROLLER !in activeRoles) {
+            Log.w(tag, "Dropping controller command '$command': controller role is not active")
+            return
+        }
+        val state = currentControllerState
+        val supported = state?.supportedCommands
+        if (supported == null || command !in supported) {
             Log.w(tag, "Dropping controller command '$command': not in server supported_commands $supported")
             return
         }
-        sendProtocolMessage(MessageBuilder.buildCommand(command, volume, mute))
+        var position = positionMs
+        if (command == "seek") {
+            // The server MUST send seek_max_ms whenever it offers 'seek'.
+            val seekMaxMs = state?.seekMaxMs
+            if (position == null || seekMaxMs == null) {
+                Log.w(tag, "Dropping seek: position_ms=$position seek_max_ms=$seekMaxMs")
+                return
+            }
+            position = position.coerceIn(0, seekMaxMs)
+        } else if (command == "seek_relative" && offsetMs == null) {
+            Log.w(tag, "Dropping seek_relative: offset_ms is required")
+            return
+        }
+        sendProtocolMessage(MessageBuilder.buildCommand(command, volume, mute, position, offsetMs))
     }
 
     /**

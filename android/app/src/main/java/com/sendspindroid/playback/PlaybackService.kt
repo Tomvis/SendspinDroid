@@ -738,6 +738,13 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
+        // The media session offers only what the server's controller state allows.
+        serviceScope.launch {
+            sendSpinClient?.controllerState?.collect { state ->
+                sendSpinPlayer?.updateControllerState(state)
+            }
+        }
+
         // Drives the work formerly in SendSpin.Callback.onConnected /
         // onDisconnected / onError / onReconnecting / onReconnected. Phase 4 Task 5
         // removed those callbacks; consumers observe the StateFlow instead.

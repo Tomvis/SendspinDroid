@@ -58,6 +58,11 @@ class NotificationMetadataControlsTest : E2ETestBase() {
 
         // Wire up to our test client
         connectAndHandshake()
+        // Commands only go out once the server has said which it supports.
+        fakeTransport.simulateTextMessage(
+            """{"type":"server/state","payload":{"controller":{""" +
+                """"supported_commands":["play","pause","next","previous"]}}}"""
+        )
         player.setSendSpinClient(client)
     }
 
