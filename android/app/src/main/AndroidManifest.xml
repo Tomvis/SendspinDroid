@@ -80,11 +80,16 @@
         - supportsRtl: Support right-to-left languages (Arabic, Hebrew, etc.)
         - theme: Default theme for all activities (Material Components with DayNight)
 
-        TODO for v2: Add android:fullBackupContent="@xml/backup_rules"
+        - fullBackupContent / dataExtractionRules: keep the secrets store out of
+          backup and device transfer (Android 11 and lower / Android 12 and
+          higher). Its keys live in this device's Keystore, so a copy restored
+          elsewhere cannot be read.
     -->
     <application
         android:name=".SendSpinApp"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:banner="@drawable/banner_tv"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
