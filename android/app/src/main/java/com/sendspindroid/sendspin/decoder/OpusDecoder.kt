@@ -12,19 +12,23 @@ import java.nio.ByteOrder
  * It's stateful - the decoder maintains internal state between frames for
  * better compression, so frames must be decoded in order.
  *
- * The codec_header from stream/start should contain the OpusHead structure.
- * If not provided, default parameters are used.
+ * Sendspin Opus has no container and no codec_header: "exactly one Opus
+ * packet per chunk ... the decoder is configured from the negotiated
+ * sample_rate and channels". An OpusHead is synthesized because MediaCodec
+ * requires one as CSD-0.
  */
 class OpusDecoder : MediaCodecDecoder(MediaFormat.MIMETYPE_AUDIO_OPUS) {
 
     companion object {
         private const val TAG = "OpusDecoder"
 
-        // Default pre-skip for 48kHz (3840 samples = 80ms)
-        private const val DEFAULT_PRE_SKIP: Long = 3840
-
-        // Default seek pre-roll in nanoseconds (80ms)
-        private const val DEFAULT_SEEK_PRE_ROLL_NS: Long = 80_000_000
+        // Pre-skip and seek pre-roll are Ogg/WebM container concepts: samples
+        // the decoder discards at the start of a file or after a seek. A
+        // Sendspin chunk's samples all belong at that chunk's timestamp, so
+        // nothing may be discarded.
+        private const val PRE_SKIP_SAMPLES = 0
+        private const val CODEC_DELAY_NS: Long = 0
+        private const val SEEK_PRE_ROLL_NS: Long = 0
 
         // Size of a minimal OpusHead structure (RFC 7845) without channel mapping table
         private const val OPUS_HEAD_SIZE = 19
@@ -57,23 +61,22 @@ class OpusDecoder : MediaCodecDecoder(MediaFormat.MIMETYPE_AUDIO_OPUS) {
             Log.d(TAG, "Using default Opus header")
         }
 
-        // CSD-1: Pre-skip (number of samples to skip at start)
-        // This compensates for encoder delay.
+        // CSD-1: Codec delay (pre-skip) in nanoseconds. Overrides the pre-skip
+        // in the OpusHead.
         // Note: Android MediaCodec requires native byte order for CSD-1/CSD-2
         // (unsigned 64-bit native-order integer per the MediaCodec docs),
         // NOT the little-endian order used by the Opus RFC 7845 OpusHead structure.
         val preSkipBuffer = ByteBuffer.allocate(8)
             .order(ByteOrder.nativeOrder())
-            .putLong(DEFAULT_PRE_SKIP)
+            .putLong(CODEC_DELAY_NS)
         preSkipBuffer.flip()
         format.setByteBuffer("csd-1", preSkipBuffer)
 
-        // CSD-2: Seek pre-roll in nanoseconds
-        // Time to decode before a seek point to ensure clean audio.
+        // CSD-2: Seek pre-roll in nanoseconds, discarded after a flush.
         // Same native byte order requirement as CSD-1 (see note above).
         val seekPreRollBuffer = ByteBuffer.allocate(8)
             .order(ByteOrder.nativeOrder())
-            .putLong(DEFAULT_SEEK_PRE_ROLL_NS)
+            .putLong(SEEK_PRE_ROLL_NS)
         seekPreRollBuffer.flip()
         format.setByteBuffer("csd-2", seekPreRollBuffer)
 
@@ -97,7 +100,7 @@ class OpusDecoder : MediaCodecDecoder(MediaFormat.MIMETYPE_AUDIO_OPUS) {
         buffer.put(channels.toByte())
 
         // Pre-skip (little-endian, 16-bit)
-        buffer.putShort(DEFAULT_PRE_SKIP.toInt().toShort())
+        buffer.putShort(PRE_SKIP_SAMPLES.toShort())
 
         // Input sample rate (little-endian, 32-bit)
         // Note: Opus always uses 48kHz internally, but this field indicates original rate
