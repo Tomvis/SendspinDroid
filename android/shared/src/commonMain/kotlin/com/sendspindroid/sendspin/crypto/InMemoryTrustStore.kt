@@ -1,15 +1,15 @@
 package com.sendspindroid.sendspin.crypto
 
 /**
- * The record and namespace semantics, with no persistence.
+ * The record semantics, with no persistence.
  *
  * All the logic lives here so it can be tested without Android; the encrypted
  * preferences implementation wraps this and adds loading and flushing.
  *
  * @param initial records restored from storage
- * @param pairingPskId the client's own Pairing PSK id once 2.2 provides one. It
- *   participates in the namespace even though it is not a record, because a
- *   `psk_id` must be unique across all three categories.
+ * @param pairingPskId the client's own Pairing PSK id. Not a record, but a
+ *   record may not reuse it: a long-term PSK is a fresh secret, so a collision
+ *   means the pairing went wrong.
  * @param storageIsEncrypted reported through [TrustStore]; always true for a
  *   store that never touches disk.
  */
@@ -64,14 +64,7 @@ open class InMemoryTrustStore(
     override fun candidates(): List<Psk> =
         records.map { it.toPsk() } + SentinelPsk.psk
 
-    /**
-     * The write-path half of the single-namespace rule.
-     *
-     * [PskCandidateSet.of] enforces the same rule when the set is built; this
-     * stops a colliding record being persisted in the first place, so the
-     * failure surfaces as a rejected pairing rather than as a client that can
-     * no longer build a candidate set at all.
-     */
+    /** A record may not reuse a `psk_id` this client already holds. */
     private fun isClaimed(pskId: String): Boolean =
         pskId == SentinelPsk.EXPECTED_PSK_ID ||
             pskId == pairingPskId ||

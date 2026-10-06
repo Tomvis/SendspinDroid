@@ -3,13 +3,10 @@ package com.sendspindroid.sendspin.crypto
 /**
  * The client's pairing configuration.
  *
- * Shaped after the `data` payload of `management/get-pairing-config` so 3.2
- * (#228) can read and patch this object rather than inventing a second model.
- *
- * @param pairingPsk the per-device Pairing PSK. "Generated from a CSPRNG per
- *   device - never a shared default", and long-lived: "a successful pairing
- *   does not consume or rotate it". Nothing may rewrite it except a deliberate
- *   operator rotation or `management/set-pairing-config`.
+ * @param pairingPsk the per-device pairing PSK. "MUST be drawn from a CSPRNG
+ *   per device and MUST NOT be a fixed default shared across devices", and
+ *   long-lived: "a successful pairing does not consume it". Nothing may rewrite
+ *   it except a deliberate operator rotation.
  * @param pairingPskEnabled whether the method is offered. A disabled method's
  *   PSK leaves the candidate set, so a handshake naming it fails as a lookup
  *   miss, and the descriptor leaves `client/hello`.
@@ -22,26 +19,12 @@ package com.sendspindroid.sendspin.crypto
  *   `dynamic_pairing_code`, so `client/hello` fails to deserialize). Until a
  *   capability signal exists, this is an explicit opt-in the user makes
  *   knowing older servers may reject the connection.
- * @param recordModePskId the shared-PSK record backing record mode.
- *
- *   `management.md#record-mode` requires this to name a real shared-PSK record,
- *   and `get-pairing-config` lists `record_mode` as a non-optional member of the
- *   response - so the client ships exactly one pre-provisioned shared-PSK
- *   record purely as this target. It is device-specific and CSPRNG-generated
- *   ("MUST NOT be a fixed default shared across devices"), never leaves the
- *   device, and is never used in practice: audit decision D4 puts us on the
- *   stored-pubkey model, and Android storage is effectively unbounded, so the
- *   storage-exhaustion path that would admit a server under record mode is
- *   unreachable. Thirty-two bytes buys a well-formed `get-pairing-config` and
- *   makes the `remove-record` referential constraint a real branch rather than
- *   dead code.
  */
 class PairingConfig(
     pairingPsk: ByteArray,
     val pairingPskEnabled: Boolean,
     val unpairedAccessEnabled: Boolean,
     val dynamicPairingCodeEnabled: Boolean,
-    val recordModePskId: String,
 ) {
     init {
         require(pairingPsk.size == Psk.PSK_SIZE) {
@@ -58,19 +41,16 @@ class PairingConfig(
     val pairingPskId: String by lazy { PskId.derive(secret) }
 
     fun withEnabled(enabled: Boolean): PairingConfig =
-        PairingConfig(secret, enabled, unpairedAccessEnabled, dynamicPairingCodeEnabled, recordModePskId)
+        PairingConfig(secret, enabled, unpairedAccessEnabled, dynamicPairingCodeEnabled)
 
     fun withUnpairedAccess(enabled: Boolean): PairingConfig =
-        PairingConfig(secret, pairingPskEnabled, enabled, dynamicPairingCodeEnabled, recordModePskId)
+        PairingConfig(secret, pairingPskEnabled, enabled, dynamicPairingCodeEnabled)
 
     fun withDynamicPairingCodeEnabled(enabled: Boolean): PairingConfig =
-        PairingConfig(secret, pairingPskEnabled, unpairedAccessEnabled, enabled, recordModePskId)
+        PairingConfig(secret, pairingPskEnabled, unpairedAccessEnabled, enabled)
 
     fun withPairingPsk(psk: ByteArray): PairingConfig =
-        PairingConfig(psk, pairingPskEnabled, unpairedAccessEnabled, dynamicPairingCodeEnabled, recordModePskId)
-
-    fun withRecordModePskId(pskId: String): PairingConfig =
-        PairingConfig(secret, pairingPskEnabled, unpairedAccessEnabled, dynamicPairingCodeEnabled, pskId)
+        PairingConfig(psk, pairingPskEnabled, unpairedAccessEnabled, dynamicPairingCodeEnabled)
 
     // Hand-written: a data class holding a ByteArray compares by reference.
     override fun equals(other: Any?): Boolean =
@@ -79,7 +59,6 @@ class PairingConfig(
                 pairingPskEnabled == other.pairingPskEnabled &&
                 unpairedAccessEnabled == other.unpairedAccessEnabled &&
                 dynamicPairingCodeEnabled == other.dynamicPairingCodeEnabled &&
-                recordModePskId == other.recordModePskId &&
                 secret.contentEquals(other.secret)
             )
 
@@ -88,13 +67,11 @@ class PairingConfig(
         result = 31 * result + pairingPskEnabled.hashCode()
         result = 31 * result + unpairedAccessEnabled.hashCode()
         result = 31 * result + dynamicPairingCodeEnabled.hashCode()
-        result = 31 * result + recordModePskId.hashCode()
         return result
     }
 
     /** Never the bytes. */
     override fun toString(): String =
         "PairingConfig(pairingPskId=$pairingPskId, enabled=$pairingPskEnabled, " +
-            "unpairedAccess=$unpairedAccessEnabled, dynamicPairingCode=$dynamicPairingCodeEnabled, " +
-            "recordMode=$recordModePskId)"
+            "unpairedAccess=$unpairedAccessEnabled, dynamicPairingCode=$dynamicPairingCodeEnabled)"
 }

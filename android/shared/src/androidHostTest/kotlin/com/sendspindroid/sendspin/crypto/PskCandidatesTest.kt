@@ -25,7 +25,6 @@ class PskCandidatesTest {
             pairingPskEnabled = enabled,
             unpairedAccessEnabled = true,
             dynamicPairingCodeEnabled = false,
-            recordModePskId = "record-mode-id",
         )
 
     @Test
@@ -86,9 +85,6 @@ class PskCandidatesTest {
 
     @Test
     fun noInputCombinationProducesADuplicatePskId() {
-        // A duplicate would make one wire psk_id map to two trust levels, and
-        // PskCandidateSet.of would refuse the whole set - leaving the client
-        // unable to handshake with anything at all.
         for (enabled in listOf(true, false)) {
             for (records in listOf(
                 emptyList(),
@@ -101,18 +97,16 @@ class PskCandidatesTest {
                     built.size,
                     built.map { it.pskId }.toSet().size,
                 )
-                assertTrue(PskCandidateSet.of(built).isSuccess)
             }
         }
     }
 
     @Test
     fun pairingPskIsCandidateWithNoPairingActivityRunning() {
-        // The standing obligation. "The client MUST keep its Pairing PSK among
-        // its handshake PSK candidates whenever the method is enabled, not only
-        // while a pairing activity is running: the server's re-handshake to the
-        // Pairing PSK succeeds only if the client already recognizes its
-        // psk_id."
+        // The standing obligation. "The client MUST keep its pairing PSK among
+        // its handshake PSK candidates at all times, not only while a pairing
+        // activity is running: the server's re-handshake to the pairing PSK
+        // succeeds only if the client already recognizes its psk_id."
         //
         // Nothing in build()'s signature can express "a pairing screen is open",
         // which is the point: there is no way to make this conditional without

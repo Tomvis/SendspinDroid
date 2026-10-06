@@ -28,36 +28,12 @@ python -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
 
-pip install "aiosendspin[server] @ git+https://github.com/sendspin/aiosendspin@90feb19894793749eb017f9e1bb21929dc8fe94a"
+pip install "aiosendspin[server]==10.0.0"
 ```
 
-**This is not a released version, and the pin above is a deliberate stand-in.**
-As of this writing, aiosendspin 10.0.0 -- the version with the dynamic-pairing-code
-API this dev server needs -- exists only as a **draft GitHub release**
-(`draft=true`, `published_at=null`) with **no git tag**; it has not been
-published to PyPI. The dynamic-pairing-code surface
-(`PairMethod.DYNAMIC_PAIRING_CODE`, `run_dynamic_pairing_code_server`,
-`PairingCodeFormat`) exists only on the `aiosendspin` repository's `main`
-branch. The commit above is `main` as of 2026-08-31.
-
-Pin the exact commit SHA, never `@main`: acceptance evidence gathered against
-a branch that moves underneath it is not reproducible, and there would be no
-way to tell a real regression in SendSpinDroid from an unrelated upstream
-change landing on `main` between test runs.
-
-**Revisit this pin once aiosendspin 10.0.0 actually ships** (a real PyPI
-release with a git tag). At that point switch back to a normal version pin
-(`pip install "aiosendspin[server]>=10,<11"`, matching whatever Music
-Assistant has moved to by then) and drop this note. Until then, do not
-assume anyone reading this later can run `pip install aiosendspin==10.0.0`
-and get something that works -- it will not resolve to anything on PyPI.
-
-Prior to this, the script pinned `aiosendspin==9.1.0`, matching what Music
-Assistant currently requires (`music_assistant/providers/sendspin/manifest.json`).
-`aiosendspin.noise.*` is not a stability-guaranteed API, so expect renames
-across major versions -- the 10.x pairing module alone renamed `DYNAMIC_PIN`
-to `DYNAMIC_PAIRING_CODE`, `STATIC_PIN` to `STATIC_PAIRING_CODE`, and
-`decode_token` to `decode_psk_token` relative to 9.1.x.
+10.0.0 is the first release that speaks the Sendspin 1.0.0-rc1 wire, and the
+version Music Assistant pins. `aiosendspin.noise.*` is not a stability-guaranteed
+API, so expect renames across major versions and keep the pin exact.
 
 ## Running
 
@@ -156,6 +132,36 @@ CPace exchange keyed by that code -- never by transmitting the code itself.
 A wrong code produces a `pair/abort` with reason `pairing_code_mismatch`
 instead of a success -- see the device-acceptance checklist below for what to
 confirm about the client's recovery from that.
+
+## Verifying the wire end to end
+
+`--play-test-audio SECONDS` makes the server stream that many seconds of PCM to
+the first client that is granted a player role. The samples are a frame
+counter, so a receiver can prove it read every chunk at the right offset.
+`NoiseHandshakeCheck` drives the app's real handshake driver, wire codec,
+builders, activation rules and binary parser against it:
+
+```bash
+python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
+    --trust-all-unpaired --no-console --debug --play-test-audio 5
+
+cd android && ./gradlew :conformance-client:fatJar
+java -cp conformance-client/build/libs/conformance-client-all.jar \
+    com.sendspindroid.conformance.NoiseHandshakeCheck \
+    ws://127.0.0.1:18931/sendspin --hold-seconds=16 --expect-audio
+```
+
+It passes only if audio arrived, every chunk was a whole number of PCM frames,
+the chunk timestamps follow one another, and the frame counter never breaks.
+The server log must contain no `non-compliant client` line.
+
+To exercise the in-band re-handshake as well, add
+`--pair-token-file <identity-file>.token` to the server and
+`--expect-rehandshake` to the client. The tool writes its pairing token to that
+file; the server then starts a Pairing PSK pairing, which re-handshakes the
+Sentinel-keyed connection to the pairing PSK. The tool checks that no hello was
+repeated and that `server/activate` followed, then declines the pairing with
+`pair/abort`.
 
 ## Verifying the target is configured correctly
 

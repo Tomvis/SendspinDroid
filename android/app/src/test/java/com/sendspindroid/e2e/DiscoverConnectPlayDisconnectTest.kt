@@ -100,19 +100,6 @@ class DiscoverConnectPlayDisconnectTest : E2ETestBase() {
     }
 
     @Test
-    fun `disconnect sends goodbye before closing transport`() {
-        connectAndHandshake()
-
-        client.disconnect()
-
-        // Verify goodbye was sent
-        assertTrue(
-            "Client should send goodbye on disconnect",
-            fakeServer.clientSentGoodbye()
-        )
-    }
-
-    @Test
     fun `multiple audio chunks are delivered to callback`() {
         connectAndHandshake()
         fakeServer.sendStreamStart()
@@ -130,17 +117,51 @@ class DiscoverConnectPlayDisconnectTest : E2ETestBase() {
     }
 
     @Test
-    fun `artwork delivered and cleared correctly`() {
+    fun `client hello answers server hello and state follows the activation`() {
+        injectTransportAndConnect()
+        fakeTransport.simulateConnected()
+        assertFalse("nothing but client/init before server/hello", fakeServer.clientSentHello())
+
+        fakeServer.sendServerHello()
+        assertTrue("client/hello answers server/hello", fakeServer.clientSentHello())
+        assertFalse(
+            "no client/state before the initial server/activate",
+            fakeTransport.sentTextMessages.any { it.contains("client/state") }
+        )
+
+        fakeServer.sendServerActivate(
+            activities = emptyList(),
+            activeRoles = listOf("player@v1", "artwork@v1"),
+        )
+        assertTrue("client/state follows the activation", fakeServer.clientSentState())
+        val state = fakeTransport.sentTextMessages.first { it.contains("client/state") }
+        assertTrue("the active player role reports its object", state.contains("\"player\":{"))
+        assertTrue(
+            "the active artwork role reports its channels",
+            state.contains("\"artwork\":{\"channels\":[{\"source\":\"album\"")
+        )
+    }
+
+    @Test
+    fun `artwork transfers are ignored rather than misread`() {
         connectAndHandshake()
 
-        // Send artwork data
-        val imageData = ByteArray(100) { it.toByte() }
-        fakeServer.sendArtwork(channel = 0, imageData = imageData)
-        verify { mockCallback.onArtwork(any()) }
+        // Announce + part, a clear (an announce of an empty image), a cancel.
+        // The announce/part/cancel transfer is not implemented yet; what
+        // matters here is that none of it is read with the pre-rc1 layout,
+        // delivered as an image, or treated as a protocol error.
+        fakeServer.sendArtwork(channel = 0, imageData = ByteArray(100) { it.toByte() })
+        fakeServer.sendArtwork(channel = 0, imageData = ByteArray(0))
+        fakeServer.cancelArtwork(channel = 0)
 
-        // Clear artwork (empty payload)
-        fakeServer.clearArtwork(channel = 0)
-        verify { mockCallback.onArtworkCleared() }
+        verify(exactly = 0) { mockCallback.onArtwork(any()) }
+        verify(exactly = 0) { mockCallback.onArtworkCleared() }
+        assertFalse("artwork must not close the connection", fakeTransport.closed)
+
+        // The connection carries on: audio after it is still delivered.
+        fakeServer.sendStreamStart()
+        fakeServer.sendAudioChunk(timestampMicros = 1000000L, audioData = fakeServer.generateSilence(20))
+        verify { mockCallback.onAudioChunk(1000000L, any()) }
     }
 
     @Test

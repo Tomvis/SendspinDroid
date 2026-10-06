@@ -15,7 +15,6 @@ import com.sendspindroid.sendspin.protocol.ControllerPatch
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.ServerCommandResult
-import com.sendspindroid.sendspin.protocol.ServerHelloResult
 import com.sendspindroid.sendspin.protocol.ServerStateResult
 import com.sendspindroid.sendspin.protocol.StreamConfig
 import com.sendspindroid.sendspin.protocol.SyncOffsetResult
@@ -37,26 +36,18 @@ import kotlinx.serialization.json.longOrNull
 object MessageParser {
     private const val TAG = "MessageParser"
 
-    fun parseServerHello(payload: JsonObject?, defaultName: String): ServerHelloResult? {
+    /**
+     * Parse `server/hello`, returning the server's friendly name.
+     *
+     * `name` is the only field this client reads; `server_id` comes from
+     * `server/init` and the active roles from `server/activate`.
+     */
+    fun parseServerHello(payload: JsonObject?, defaultName: String): String? {
         if (payload == null) {
             Log.e(TAG, "server/hello missing payload")
             return null
         }
-
-        val serverName = payload.stringOrDefault("name", defaultName)
-        val serverId = payload.stringOrDefault("server_id", "")
-        val connectionReason = payload.stringOrDefault("connection_reason", "discovery")
-
-        val activeRoles = payload["active_roles"]?.jsonArray?.map {
-            it.jsonPrimitive.content
-        } ?: emptyList()
-
-        return ServerHelloResult(
-            serverName = serverName,
-            serverId = serverId,
-            activeRoles = activeRoles,
-            connectionReason = connectionReason
-        )
+        return payload.stringOrDefault("name", defaultName)
     }
 
     fun parseServerTime(payload: JsonObject?, clientReceivedMicros: Long): TimeMeasurement? {

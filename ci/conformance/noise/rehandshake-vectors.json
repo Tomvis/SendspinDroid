@@ -11,31 +11,41 @@
     "psk": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
     "server_ephemeral_private": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
     "client_ephemeral_private": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
-    "message_1": "493e82fc74464a59268817623d2053c5eb8e2cc4a988b4fee179ec6b010d531dcdf8933800968c0ab0d21481d00d1f970a9c9c5d33853e73b282525c0f20a7ee8fdcb2019d201fdf1fbb344d8694c3323af1433ca494daf07d94472ef646bd76d3407a7b55b842915f",
-    "message_1_payload": "{\"psk_id\": \"UaXYTgo_O5NA363FD_WJGwAORfbAld1hDE9vHMOWFSg\"}",
-    "message_2": "dc2cca31e8e43bbd91dff7e475cca3347eb478107d5bd765aba4ae4a30c35d44a0aed8677b63bc1b1340cfb56c31eebaebfc",
-    "handshake_hash": "c67193e08139054878140bfcb63e2006de919f0d77951210f76789073f781385"
+    "message_1": "493e82fc74464a59268817623d2053c5eb8e2cc4a988b4fee179ec6b010d531dcdf8933800968c0ab0d21481d00d1f970a9c9c5d33853e73b282525c0f20a7ee8fdcb2019d201fdf1fbb344d8694c3323af1433ca494daf02ce72860995f6d364563f8878e7a6cd72d6d6761a58d90f4ee86ad72ee0e1c73ef2470ac38d84e",
+    "message_1_payload": "{\"psk_id\": \"UaXYTgo_O5NA363FD_WJGwAORfbAld1hDE9vHMOWFSg\", \"psk_category\": \"sn\"}",
+    "message_2": "dc2cca31e8e43bbd91dff7e475cca3347eb478107d5bd765aba4ae4a30c35d44a0aea4adae69be9d0d18d1fcdd9473abc117",
+    "handshake_hash": "1f1486e42c483083db088f6c6c7246b509245554f2a2cf941c5dea2de9fe25cb"
   },
   "rehandshake": {
-    "prologue": "c67193e08139054878140bfcb63e2006de919f0d77951210f76789073f781385",
+    "prologue": "1f1486e42c483083db088f6c6c7246b509245554f2a2cf941c5dea2de9fe25cb",
     "psk": "b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0",
     "server_ephemeral_private": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
     "client_ephemeral_private": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
-    "message_1": "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7cdd9e7b6b8fa1b6c5c8cc1ef96a3059b5cff80039bba7a44cee3f0aba6535fe545d1152fbbf44c65ed703e61a0705a2d583167bbb654a0593a7006bbcd9da39913dc53c0cf5c6f0e52a",
-    "message_1_payload": "{\"psk_id\": \"6A-_lYjSwe_Zdvax32HHlWsJ_EDijylfWfnhN1VOsaY\"}",
-    "message_2": "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51ad16bef1e916c9d494334fe0e6769045dda6f",
-    "handshake_hash": "f7965fde8e621d2710bb578620d4a159829d4ad06de77c612fdd04b93a977228"
+    "message_1": "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7cdd9e7b6b8fa1b6c5c8cc1ef96a3059b5cff80039bba7a44cee3f0aba6535fe545d1152fbbf44c65ed703e61a0705a2d583167bbb654a0593f6514c69f1a8585abd67c1d63e048ea10710f4ec526a5961849b6a7372e470f13e94cb5711ab36",
+    "message_1_payload": "{\"psk_id\": \"6A-_lYjSwe_Zdvax32HHlWsJ_EDijylfWfnhN1VOsaY\", \"psk_category\": \"lt\"}",
+    "message_2": "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51ad16b6e879fea8b30416e49861249a228dde3",
+    "handshake_hash": "5ed35be63f1d35325b1259041c5db9aa2dedf592f494b11d3f30502244bdaebe"
+  },
+  "rehandshake_pairing": {
+    "prologue": "1f1486e42c483083db088f6c6c7246b509245554f2a2cf941c5dea2de9fe25cb",
+    "psk": "b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0",
+    "server_ephemeral_private": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "client_ephemeral_private": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "message_1": "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7cdd9e7b6b8fa1b6c5c8cc1ef96a3059b5cff80039bba7a44cee3f0aba6535fe545d1152fbbf44c65ed703e61a0705a2d583167bbb654a0593f6514c69f1a8585abd67c1d63e048ea10710f4f0546a59b94c739c0ea977027bc1ad95db21751a",
+    "message_1_payload": "{\"psk_id\": \"6A-_lYjSwe_Zdvax32HHlWsJ_EDijylfWfnhN1VOsaY\", \"psk_category\": \"pr\"}",
+    "message_2": "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51ad16bad764e25c6c7386836ef70f4e099d268",
+    "handshake_hash": "8a84d5d6ad97d31cabd3329bf0d8d701184f5cf98f0071a4b6ade915d1c3df67"
   },
   "chained": {
-    "prologue": "f7965fde8e621d2710bb578620d4a159829d4ad06de77c612fdd04b93a977228",
+    "prologue": "5ed35be63f1d35325b1259041c5db9aa2dedf592f494b11d3f30502244bdaebe",
     "psk": "b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0",
     "server_ephemeral_private": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
     "client_ephemeral_private": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
-    "message_1": "493e82fc74464a59268817623d2053c5eb8e2cc4a988b4fee179ec6b010d531dcdf8933800968c0ab0d21481b32d6a9132a299510bd52f68e5c20062784db8eca4fc8004900339f719a6694395b7942c3c8d5a2491a6e4f07d2353958d36092934bee7ade6fe8778dc",
-    "message_1_payload": "{\"psk_id\": \"6A-_lYjSwe_Zdvax32HHlWsJ_EDijylfWfnhN1VOsaY\"}",
-    "message_2": "dc2cca31e8e43bbd91dff7e475cca3347eb478107d5bd765aba4ae4a30c35d442db1d8b8206516b3ae61055a20e865e45510",
-    "handshake_hash": "5d28d229f2da99513fe10f605f69c2a36faea68305f940466a8489c05be7884c"
+    "message_1": "493e82fc74464a59268817623d2053c5eb8e2cc4a988b4fee179ec6b010d531dcdf8933800968c0ab0d21481b32d6a9132a299510bd52f68e5c20062784db8eca4fc8004900339f719a6694395b7942c3c8d5a2491a6e4f02ce72860995f6d364563f8878e7a6cd72d6d677ebf8d900f45cb797a161677f659cf1901f10165",
+    "message_1_payload": "{\"psk_id\": \"6A-_lYjSwe_Zdvax32HHlWsJ_EDijylfWfnhN1VOsaY\", \"psk_category\": \"lt\"}",
+    "message_2": "dc2cca31e8e43bbd91dff7e475cca3347eb478107d5bd765aba4ae4a30c35d442db1e25cb13a9787e4fa07ef1efcd93cecf9",
+    "handshake_hash": "59192e74e9b919d03314e04eb87e3548be3c5c693f6b30447a2e18ca98e4e4bd"
   },
-  "wrong_prologue_message_2": "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51ad16be829ab7c90db555bacabeb2ebb86060d",
-  "wrong_prologue_handshake_hash": "8b2a98a75f313ab2a39cb10ad6375fe612f72c68e01f31167c960289a460302f"
+  "wrong_prologue_message_2": "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51ad16b0d12a9a926821e0a2d8bbedbf9225497",
+  "wrong_prologue_handshake_hash": "3e7d92aecc979b1a5077a78b102de16b74c98929b701a4a7a8ad9c6949ba819c"
 }

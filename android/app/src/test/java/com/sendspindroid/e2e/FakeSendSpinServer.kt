@@ -15,7 +15,7 @@ import java.nio.ByteOrder
  * Fake SendSpin server that drives a FakeTransport.
  *
  * Simulates server-side behavior for E2E testing:
- * - Responds to client/hello with server/hello
+ * - Sends server/hello and the initial server/activate
  * - Sends server/state and group/update messages
  * - Generates binary audio chunks with proper header format
  * - Handles time sync messages
@@ -44,6 +44,10 @@ class FakeSendSpinServer(
         const val MSG_TYPE_ARTWORK_0 = 8
         const val MSG_TYPE_VISUALIZER = 16
 
+        // Artwork flags byte: bit 1 on an announce, bit 0 on a cancel.
+        const val ARTWORK_FLAG_ANNOUNCE: Byte = 0x02
+        const val ARTWORK_FLAG_CANCEL: Byte = 0x01
+
         // Default audio format
         const val DEFAULT_SAMPLE_RATE = 48000
         const val DEFAULT_CHANNELS = 2
@@ -59,39 +63,52 @@ class FakeSendSpinServer(
     val receivedMessages: List<String> get() = transport.sentTextMessages.toList()
 
     /**
-     * Simulate server connection and complete the full handshake:
-     * 1. Transport becomes connected
-     * 2. Wait for client/hello (auto-sent by SendSpin.TransportEventListener.onConnected)
-     * 3. Send server/hello
+     * Simulate server connection and the message sequence that follows the
+     * Noise handshake (which E2ETestBase stands in for):
+     * 1. Transport becomes connected (the client sends client/init)
+     * 2. server/hello (the client answers with client/hello)
+     * 3. server/activate granting playback and the given roles
      */
     fun completeHandshake(
-        protocolVersion: Int = 1,
-        activeRoles: List<String> = listOf("player")
+        activeRoles: List<String> = listOf("player@v1", "controller@v1", "metadata@v1")
     ) {
-        // Step 1: simulate transport connected (triggers client/hello)
         transport.simulateConnected()
-
-        // Step 2: send server/hello back
-        sendServerHello(protocolVersion, activeRoles)
+        sendServerHello()
+        sendServerActivate(activities = listOf("playback"), activeRoles = activeRoles)
         handshakeCompleted = true
     }
 
     /**
      * Send a server/hello message.
      */
-    fun sendServerHello(
-        protocolVersion: Int = 1,
-        activeRoles: List<String> = listOf("player")
-    ) {
+    fun sendServerHello() {
         val msg = buildJsonObject {
             put("type", "server/hello")
             put("payload", buildJsonObject {
                 put("name", serverName)
-                put("server_id", serverId)
-                put("protocol_version", protocolVersion)
-                put("active_roles", buildJsonArray {
-                    activeRoles.forEach { add(JsonPrimitive(it)) }
+            })
+        }
+        transport.simulateTextMessage(msg.toString())
+    }
+
+    /**
+     * Send a server/activate message. [activeRoles] null omits the field.
+     */
+    fun sendServerActivate(
+        activities: List<String>,
+        activeRoles: List<String>? = null,
+    ) {
+        val msg = buildJsonObject {
+            put("type", "server/activate")
+            put("payload", buildJsonObject {
+                put("activities", buildJsonArray {
+                    activities.forEach { add(JsonPrimitive(it)) }
                 })
+                if (activeRoles != null) {
+                    put("active_roles", buildJsonArray {
+                        activeRoles.forEach { add(JsonPrimitive(it)) }
+                    })
+                }
             })
         }
         transport.simulateTextMessage(msg.toString())
@@ -192,44 +209,48 @@ class FakeSendSpinServer(
     /**
      * Send a binary audio chunk with proper protocol header.
      *
-     * Header format: 1 byte type + 8 byte big-endian int64 timestamp
-     * Followed by PCM audio data.
+     * Header format: 1 byte type + 8 byte big-endian int64 timestamp + 4 byte
+     * big-endian uint32 send_ahead. Followed by PCM audio data.
      */
-    fun sendAudioChunk(timestampMicros: Long, audioData: ByteArray) {
-        val header = ByteBuffer.allocate(9)
-        header.order(ByteOrder.BIG_ENDIAN)
-        header.put(MSG_TYPE_AUDIO.toByte())
-        header.putLong(timestampMicros)
+    fun sendAudioChunk(timestampMicros: Long, audioData: ByteArray, sendAheadMicros: Int = 500_000) {
+        val message = ByteBuffer.allocate(13 + audioData.size)
+        message.order(ByteOrder.BIG_ENDIAN)
+        message.put(MSG_TYPE_AUDIO.toByte())
+        message.putLong(timestampMicros)
+        message.putInt(sendAheadMicros)
+        message.put(audioData)
 
-        val message = ByteArray(9 + audioData.size)
-        System.arraycopy(header.array(), 0, message, 0, 9)
-        System.arraycopy(audioData, 0, message, 9, audioData.size)
-
-        transport.simulateBinaryMessage(message)
+        transport.simulateBinaryMessage(message.array())
     }
 
     /**
-     * Send artwork data on a specific channel.
+     * Transfer an image on an artwork channel the way roles/artwork/v1.md
+     * defines it: an announce `[type][flags][timestamp][total_size]` followed
+     * by one part `[type][flags][data]`. An empty image is an announce alone,
+     * which is how a channel is cleared.
      */
     fun sendArtwork(channel: Int, imageData: ByteArray) {
-        val type = 8 + channel
-        val header = ByteBuffer.allocate(9)
-        header.order(ByteOrder.BIG_ENDIAN)
-        header.put(type.toByte())
-        header.putLong(0L) // timestamp unused for artwork
+        val type = (MSG_TYPE_ARTWORK_0 + channel).toByte()
+        val announce = ByteBuffer.allocate(14)
+        announce.order(ByteOrder.BIG_ENDIAN)
+        announce.put(type)
+        announce.put(ARTWORK_FLAG_ANNOUNCE)
+        announce.putLong(0L)
+        announce.putInt(imageData.size)
+        transport.simulateBinaryMessage(announce.array())
 
-        val message = ByteArray(9 + imageData.size)
-        System.arraycopy(header.array(), 0, message, 0, 9)
-        System.arraycopy(imageData, 0, message, 9, imageData.size)
-
-        transport.simulateBinaryMessage(message)
+        if (imageData.isNotEmpty()) {
+            transport.simulateBinaryMessage(byteArrayOf(type, 0) + imageData)
+        }
     }
 
     /**
-     * Clear artwork on a specific channel (empty payload).
+     * Cancel the pending image on an artwork channel: `[type][flags]`.
      */
-    fun clearArtwork(channel: Int) {
-        sendArtwork(channel, ByteArray(0))
+    fun cancelArtwork(channel: Int) {
+        transport.simulateBinaryMessage(
+            byteArrayOf((MSG_TYPE_ARTWORK_0 + channel).toByte(), ARTWORK_FLAG_CANCEL)
+        )
     }
 
     /**

@@ -280,12 +280,15 @@ class AbortTestHandler(
         events.add("close")
     }
 
-    override fun sendTextMessage(text: String) {
+    init {
+        installEncryptedChannel(PlaintextCrypto)
+    }
+
+    override fun sendBinaryFrame(bytes: ByteArray) {
+        val text = bytes.jsonFrameText() ?: return
         sent.add(text)
         events.add("send:" + Json.parseToJsonElement(text).jsonObject["type"]?.jsonPrimitive?.content)
     }
-
-    override fun sendBinaryFrame(bytes: ByteArray) = Unit
 
     override fun getCoroutineScope(): CoroutineScope = scope
 

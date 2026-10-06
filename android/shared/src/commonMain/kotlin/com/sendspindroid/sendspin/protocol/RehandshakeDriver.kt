@@ -8,21 +8,15 @@ import com.sendspindroid.sendspin.crypto.NoiseHandshakeException
 import com.sendspindroid.sendspin.crypto.NoiseTransport
 import com.sendspindroid.sendspin.crypto.Psk
 import com.sendspindroid.sendspin.crypto.PskCandidateSet
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
+import com.sendspindroid.sendspin.protocol.message.InitMessages
 
 /**
  * Drives one in-band re-handshake.
  *
  * `connection.md#re-handshake`: "The server may rerun the Noise handshake in
  * transport mode to swap session keys without closing the WebSocket - typically
- * to promote the trust level after a successful pairing, to switch from
- * Sentinel to a Pairing PSK, or to rotate session keys on long-running
+ * to promote the session to paired after a successful pairing, to switch from
+ * Sentinel to a pairing PSK, or to rotate session keys on long-running
  * connections."
  *
  * Lives in `shared` rather than the app for a specific reason: the private half
@@ -87,18 +81,26 @@ class RehandshakeDriver(
             return Outcome.Fail("re-handshake message 1 rejected: ${e.reason}")
         }
 
-        val pskId = parsePskId(innerPayload)
-            ?: return Outcome.Fail("re-handshake message 1 payload is not {\"psk_id\": ...}")
+        val referenced = InitMessages.parseNoiseMessage1Payload(innerPayload)
+            ?: return Outcome.Fail(
+                "re-handshake message 1 payload is not " +
+                    "{\"psk_id\": ..., \"psk_category\": lt|pr|sn}"
+            )
+        val pskId = referenced.pskId
 
         // Selected against the candidate set as it is NOW. A record persisted
         // moments ago by a pairing has to be visible to this very selection -
-        // promoting to it is the reason the server started this exchange.
-        val matched = when (val selection = candidates.select(pskId, serverId)) {
+        // promoting to it is the reason the server started this exchange. A
+        // miss here fails the handshake: the Sentinel Fallback applies only to
+        // the initial one.
+        val matched = when (
+            val selection = candidates.select(pskId, referenced.pskCategory, serverId)
+        ) {
             is PskCandidateSet.Selection.Matched -> selection.candidate
 
             PskCandidateSet.Selection.NoMatch -> return Outcome.Fail(
-                "re-handshake psk_id $pskId matches none of the " +
-                    "${candidates.all.size} candidates"
+                "re-handshake psk_id $pskId matches no ${referenced.pskCategory} PSK " +
+                    "among the ${candidates.all.size} candidates"
             )
 
             is PskCandidateSet.Selection.ServerIdMismatch -> return Outcome.Fail(
@@ -113,18 +115,8 @@ class RehandshakeDriver(
             return Outcome.Fail("re-handshake message 2 failed: ${e.reason}")
         }
 
-        val reply = buildJsonObject {
-            put("type", JsonPrimitive(SendSpinProtocol.MessageType.NOISE_HANDSHAKE))
-            put("payload", buildJsonObject {
-                put("data", JsonPrimitive(Base64Url.encode(message2.message)))
-            })
-        }.toString()
+        val reply = InitMessages.buildNoiseHandshake(Base64Url.encode(message2.message))
 
         return Outcome.Reply(reply, message2.transport, matched)
     }
-
-    private fun parsePskId(payload: ByteArray): String? = runCatching {
-        Json.parseToJsonElement(payload.decodeToString())
-            .jsonObject["psk_id"]?.jsonPrimitive?.contentOrNull
-    }.getOrNull()
 }

@@ -9,11 +9,7 @@ import com.sendspindroid.sendspin.crypto.NoiseCrypto
 import com.sendspindroid.sendspin.crypto.NoiseTransport
 import com.sendspindroid.sendspin.crypto.Psk
 import com.sendspindroid.sendspin.crypto.PskCategory
-import com.sendspindroid.sendspin.crypto.PairingConfigStore
-import com.sendspindroid.sendspin.protocol.management.ManagementResultCode
-import com.sendspindroid.sendspin.protocol.management.ManagementRequestParser
-import com.sendspindroid.sendspin.protocol.management.ManagementService
-import com.sendspindroid.sendspin.protocol.management.ManagementSessionContext
+import com.sendspindroid.sendspin.crypto.asNoiseCrypto
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import com.sendspindroid.sendspin.protocol.message.MessageParser
@@ -101,16 +97,6 @@ abstract class SendSpinProtocolHandler(
 
     // ========== Abstract Transport Methods ==========
 
-    /**
-     * Send a raw WebSocket TEXT frame.
-     *
-     * After the Noise handshake this is a protocol violation - "all messages
-     * are sent as WebSocket binary frames carrying Noise transport ciphertexts".
-     * Only the handshake driver and the legacy path may call it; everything else
-     * goes through [sendProtocolMessage].
-     */
-    protected abstract fun sendTextMessage(text: String)
-
     /** Send a raw WebSocket BINARY frame. */
     protected abstract fun sendBinaryFrame(bytes: ByteArray)
 
@@ -193,6 +179,10 @@ abstract class SendSpinProtocolHandler(
 
     /**
      * Called when artwork is received.
+     *
+     * Not fed at present: artwork arrives as announce/part/cancel transfers
+     * (roles/artwork/v1.md), which are not implemented yet, so artwork binary
+     * messages are ignored and the UI relies on `metadata.artwork_url`.
      */
     protected abstract fun onArtwork(channel: Int, payload: ByteArray)
 
@@ -237,13 +227,27 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun getSoftwareVersion(): String
 
     /**
-     * Send client/hello message to start handshake.
+     * The `supported_formats` this connection's client/hello advertised. A
+     * `format` preference in client/state "MUST be one of the entries" here.
+     */
+    @Volatile
+    private var advertisedFormats: List<MessageBuilder.FormatEntry> = emptyList()
+
+    /** The overridden format preference reported in client/state, if any. */
+    @Volatile
+    private var preferredFormat: MessageBuilder.FormatEntry? = null
+
+    /**
+     * Send client/hello, the reply to server/hello.
      *
      * Buffer capacity is computed from the format list and target duration
      * so the wire-byte cap scales with the highest PCM bitrate we advertise.
      */
-    protected fun sendClientHello() {
+    private fun sendClientHello() {
         val formats = getSupportedFormats()
+        advertisedFormats = formats
+        // The hello's priority order already puts the preferred codec first.
+        preferredFormat = null
         val bufferDuration = if (isLowMemoryMode()) {
             SendSpinProtocol.Buffer.DURATION_LOW_MEM_SEC
         } else {
@@ -251,16 +255,11 @@ abstract class SendSpinProtocolHandler(
         }
         val bufferCapacity = MessageBuilder.calculateBufferCapacity(formats, bufferDuration)
         val text = MessageBuilder.buildClientHello(
-            // Always null: client_id and version live in client/init, and every
-            // session is encrypted, so repeating them here would be sending
-            // fields the spec does not define for this message.
-            clientId = null,
             deviceName = getDeviceName(),
             bufferCapacity = bufferCapacity,
             manufacturer = getManufacturer(),
             supportedFormats = formats,
             softwareVersion = getSoftwareVersion(),
-            trustLevel = getTrustLevel(),
             unpairedAccessEnabled = isUnpairedAccessEnabled(),
             supportedPairMethods = getSupportedPairMethods(),
         )
@@ -319,25 +318,20 @@ abstract class SendSpinProtocolHandler(
      */
     protected fun isAvailable(): Boolean {
         if (externalSourceActive) return false
-        return getTimeFilter().isConverged
+        // Convergence gates only the FIRST `available: true`. Once reached it
+        // is latched for the connection: the server ends our streams the
+        // moment we report false, so a filter that wobbles when a stream
+        // starts must not take us out of the playback it just joined.
+        return hasEverConverged || getTimeFilter().isConverged
     }
-
-    /**
-     * `'user'` when a pairing record exists for this server, `'none'` otherwise.
-     *
-     * Phase 1 has no record store, so this is always `'none'`. Item 2.1 (#202)
-     * gives it a real answer; 2.3 (#204) makes it follow the matched PSK.
-     */
-    protected open fun getTrustLevel(): String = MessageBuilder.TRUST_NONE
 
     /**
      * Whether this client admits a server holding no pairing record.
      *
      * This is what decides whether an unpaired connection can carry audio at
-     * all: the spec allows `['playback']` on a Sentinel-keyed session "only when
-     * the client has unpaired access enabled". Default on, so a fresh install
-     * plays before anyone has paired anything; item 3.2 (#228) lets a paired
-     * server toggle it.
+     * all: the spec allows `'playback'` on an unpaired session "only when the
+     * client has unpaired access enabled". Default on, so a fresh install plays
+     * before anyone has paired anything.
      */
     protected open fun isUnpairedAccessEnabled(): Boolean = true
 
@@ -369,10 +363,10 @@ abstract class SendSpinProtocolHandler(
             MessageBuilder.buildPlayerState(
                 currentVolume, currentMuted, isAvailable(), delayMs,
                 minBufferMs = minBufferMs,
-                // On the legacy dialect there is no server/activate, so the
-                // player object always ships; on the spec path it may only
-                // appear once the role is actually active.
-                playerRoleActive = !isEncrypted || activeRoles.contains(ROLE_PLAYER_V1),
+                // A role's object may only appear once the role is active.
+                playerRoleActive = activeRoles.contains(ROLE_PLAYER_V1),
+                format = preferredFormat,
+                artworkRoleActive = activeRoles.contains(SendSpinProtocol.Roles.ARTWORK),
             )
         )
     }
@@ -556,20 +550,27 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Request a different stream format from the server (spec
-     * stream/request-format). Omitted fields keep their current value.
-     * The server responds with stream/start, which flows through the
-     * normal format-change reconfiguration path.
+     * Prefer [codec] for this player's stream.
+     *
+     * Reported as `format` in the client/state player object: "When `format`
+     * changes while a `player` stream is active, the server re-derives the
+     * stream format and sends a `stream/start` if it changed", which flows
+     * through the normal format-change reconfiguration path.
+     *
+     * The preference "MUST be one of the entries in `supported_formats`", and
+     * client/hello is sent once per connection, so a codec this connection did
+     * not advertise can only take effect on the next one.
      */
-    fun requestStreamFormat(
-        codec: String? = null,
-        sampleRate: Int? = null,
-        channels: Int? = null,
-        bitDepth: Int? = null
-    ) {
-        if (!handshakeComplete) return
-        Log.i(tag, "Requesting stream format: codec=$codec, rate=$sampleRate, ch=$channels, bits=$bitDepth")
-        sendProtocolMessage(MessageBuilder.buildStreamRequestFormat(codec, sampleRate, channels, bitDepth))
+    fun setPreferredCodec(codec: String) {
+        val format = advertisedFormats.firstOrNull { it.codec == codec }
+        if (format == null) {
+            Log.i(tag, "Preferred codec $codec was not advertised on this connection; " +
+                "it applies from the next connect")
+            return
+        }
+        Log.i(tag, "Preferring stream format: $format")
+        preferredFormat = format
+        if (handshakeComplete) sendPlayerStateUpdate()
     }
 
     // ========== Player State Methods ==========
@@ -648,24 +649,21 @@ abstract class SendSpinProtocolHandler(
     // ========== Encrypted channel ==========
 
     /**
-     * Set once the Noise handshake completes. Null means the legacy
-     * (unencrypted) dialect, which Music Assistant still accepts today behind
-     * its `allow_legacy_clients` toggle but has documented as temporary.
-     *
-     * This one field is what switches the whole protocol layer between the two
-     * wire formats: every existing caller of [sendProtocolMessage] becomes
-     * encrypted with no further edits, and [handleBinaryMessage] routes through
-     * the codec instead of parsing a bare frame.
+     * Set once the Noise handshake completes. Every application message, in
+     * both directions, goes through it; before then nothing may be sent or
+     * dispatched at all.
      */
     @Volatile
     private var wireCodec: NoiseWireCodec? = null
 
-    /** True once the connection is carrying Noise ciphertexts. */
-    val isEncrypted: Boolean get() = wireCodec != null
-
     /** Install the transport produced by the handshake driver. */
-    fun installEncryptedTransport(transport: NoiseTransport) {
-        wireCodec = NoiseWireCodec(transport)
+    fun installEncryptedTransport(transport: NoiseTransport) =
+        installEncryptedChannel(transport.asNoiseCrypto())
+
+    /** [installEncryptedTransport], taking the codec's narrow view so tests can fake it. */
+    internal fun installEncryptedChannel(crypto: NoiseCrypto) {
+        wireCodec = NoiseWireCodec(crypto)
+        rehandshakeInProgress = false
         // This is the sole call site for a FRESH handshake - a re-handshake
         // never calls it, going through resetForRehandshake() instead - so
         // without this reset the counter would keep accumulating across
@@ -675,6 +673,19 @@ abstract class SendSpinProtocolHandler(
         resetPairingIndexForFreshHandshake()
         Log.i(tag, "Encrypted channel established")
     }
+
+    /**
+     * True from the moment Noise message 1 of a re-handshake is received until
+     * the `server/activate` that follows it.
+     *
+     * "The server MUST NOT start new application messages after sending Noise
+     * message 1, nor the client after receiving it, except for the handshake
+     * and `server/activate`." [sendProtocolMessage] drops everything while
+     * this is set; the activation re-sends client/state, so nothing that
+     * matters is lost.
+     */
+    @Volatile
+    private var rehandshakeInProgress = false
 
     /**
      * Reset [dynamicPairingIndex] to 0: pairing_index counts "the number of
@@ -699,20 +710,16 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Reset the application-level handshake state after a re-handshake.
+     * Reset what a re-handshake invalidates, once the new keys are in place.
      *
-     * The channel is promoted, not replaced: the transport, the group and the
-     * time filter all survive, so this deliberately does NOT touch them. What
-     * does reset is the message sequence - the server sends `server/hello`
-     * again, and the next `server/activate` is a *first* activation, so a
-     * server that omits `active_roles` clears them rather than inheriting the
-     * roles from before the promotion.
+     * "Connection state, such as open streams with their buffered data or the
+     * time filter, persists across a re-handshake; only the session keys and
+     * what the handshake itself derives change." Neither hello is re-sent and
+     * the next `server/activate` "is a subsequent one on the same connection",
+     * so the active roles, the activities and [handshakeComplete] all stay as
+     * they are: an activation that omits `active_roles` inherits them.
      */
     protected fun resetForRehandshake() {
-        handshakeComplete = false
-        activationSeen = false
-        activeRoles = emptyList()
-        activities = emptySet()
         // The dynamic flow's sid is derived from this session's handshake
         // hash, and pairing_index counts "activations since the last Noise
         // handshake" - both go stale the moment a new handshake completes.
@@ -727,24 +734,10 @@ abstract class SendSpinProtocolHandler(
         onDynamicPairingCodeCleared()
     }
 
-    /** Drop the encrypted channel (disconnect, or falling back to legacy). */
-    fun clearEncryptedTransport() {
-        wireCodec = null
-    }
-
     /**
-     * Send an application protocol message.
-     *
-     * Encrypted when a Noise transport is installed, a plain text frame
-     * otherwise. Callers do not need to know which.
+     * Send an application protocol message over the encrypted channel.
      */
     protected fun sendProtocolMessage(text: String) {
-        val codec = wireCodec
-        if (codec == null) {
-            // Legacy dialect: a plain text frame.
-            sendTextMessage(text)
-            return
-        }
         // encodeJson takes the send mutex, so this has to be in a coroutine.
         getCoroutineScope().launch { sendProtocolMessageAwaiting(text) }
     }
@@ -761,8 +754,19 @@ abstract class SendSpinProtocolHandler(
     protected suspend fun sendProtocolMessageAwaiting(text: String) {
         val codec = wireCodec
         if (codec == null) {
-            sendTextMessage(text)
+            Log.w(tag, "Dropping outbound message: no encrypted channel")
             return
+        }
+        if (rehandshakeInProgress) {
+            Log.d(tag, "Dropping outbound message during re-handshake")
+            return
+        }
+        // client/pair-finalize carries the new long-term PSK; it never goes
+        // to the log.
+        if (SendSpinProtocol.MessageType.CLIENT_PAIR_FINALIZE in text) {
+            Log.d(tag, "Sent: client/pair-finalize (payload withheld)")
+        } else {
+            Log.d(tag, "Sent: ${text.take(500)}")
         }
         try {
             codec.encodeJson(text).forEach { sendBinaryFrame(it) }
@@ -777,9 +781,10 @@ abstract class SendSpinProtocolHandler(
      *
      * The completing frame of a re-handshake. Ordering is the codec's problem
      * (it holds the send mutex across encrypt-then-install); ordering with
-     * respect to the *application* is this method's: [onSwapped] runs only
-     * after the frame is on the wire, so the re-asserted `client/hello` cannot
-     * be built from state the swap has not finished changing.
+     * respect to the *application* is this method's: [onSwapped] runs once the
+     * new keys are installed and BEFORE the frame goes out. The server answers
+     * that frame with `server/activate` straight away, and the activation must
+     * be judged against the PSK this handshake matched, not the previous one.
      */
     protected fun sendAndSwapKeys(text: String, next: NoiseCrypto, onSwapped: () -> Unit) {
         val codec = wireCodec
@@ -789,12 +794,13 @@ abstract class SendSpinProtocolHandler(
         }
         getCoroutineScope().launch {
             try {
-                codec.encodeAndSwap(
+                val frames = codec.encodeAndSwap(
                     SendSpinProtocol.BinaryType.JSON,
                     text.encodeToByteArray(),
                     next,
-                ).forEach { sendBinaryFrame(it) }
+                )
                 onSwapped()
+                frames.forEach { sendBinaryFrame(it) }
             } catch (e: Exception) {
                 Log.e(tag, "Re-handshake key swap failed", e)
                 onProtocolFailure("re-handshake key swap failed: ${e.message}")
@@ -831,11 +837,14 @@ abstract class SendSpinProtocolHandler(
                 // An in-band re-handshake. It arrives as an ordinary encrypted
                 // JSON message inside the current channel, which is why it is
                 // dispatched here and not by the cleartext handshake driver.
-                SendSpinProtocol.MessageType.NOISE_HANDSHAKE -> onRehandshakeMessage(payload)
+                SendSpinProtocol.MessageType.NOISE_HANDSHAKE -> {
+                    rehandshakeInProgress = true
+                    onRehandshakeMessage(payload)
+                }
 
                 // Deliberately not gated on `activities`, and deliberately
-                // discarding the payload: "Valid at any time regardless of the
-                // current `activities`", and the message has no fields.
+                // discarding the payload: "Valid regardless of the current
+                // `activities`", and the message has no fields.
                 SendSpinProtocol.MessageType.SERVER_UNPAIR -> handleServerUnpair()
 
                 SendSpinProtocol.MessageType.PAIR_ABORT -> handlePairAbort(payload)
@@ -853,16 +862,9 @@ abstract class SendSpinProtocolHandler(
                 SendSpinProtocol.MessageType.STREAM_END -> handleStreamEnd(payload)
                 SendSpinProtocol.MessageType.STREAM_CLEAR -> handleStreamClear(payload)
                 SendSpinProtocol.MessageType.CLIENT_SYNC_OFFSET -> handleClientSyncOffset(payload)
-                // Before the else: every management request must be
-                // answered, including one we do not implement. Falling through
-                // to the unhandled log leaves the server waiting for a reply
-                // that never comes - which is exactly how MA's device-settings
-                // dialog hangs (#228).
-                else -> if (type.startsWith("management/")) {
-                    handleManagementRequest(type, payload)
-                } else {
-                    Log.d(tag, "Unhandled message type: $type")
-                }
+                // "Clients and servers MUST ignore JSON messages with an
+                // unrecognized `type`."
+                else -> Log.d(tag, "Unhandled message type: $type")
             }
         } catch (e: Exception) {
             Log.e(tag, "Failed to parse message: ${text.take(100)}", e)
@@ -870,17 +872,12 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected open fun handleServerHello(payload: JsonObject?) {
-        val result = MessageParser.parseServerHello(payload, "Unknown")
-        if (result == null) {
+        val serverName = MessageParser.parseServerHello(payload, "Unknown")
+        if (serverName == null) {
             Log.e(tag, "Failed to parse server/hello")
             return
         }
-
-        // server/hello carries only `name` in the current spec. active_roles
-        // moved to server/activate and connection_reason was an aiosendspin
-        // legacy-mode invention; both are still parsed for the legacy dialect
-        // but must not be acted on here.
-        Log.i(tag, "server/hello: name=${result.serverName}")
+        Log.i(tag, "server/hello: name=$serverName")
 
         handshakeComplete = true
 
@@ -894,19 +891,14 @@ abstract class SendSpinProtocolHandler(
         activationSeen = false
         activeRoles = emptyList()
 
-        onHandshakeComplete(result.serverName, result.serverId)
+        // The server's identity is its static key from server/init;
+        // server/hello carries only the friendly name.
+        onHandshakeComplete(serverName, currentServerId().orEmpty())
 
-        if (isEncrypted) {
-            // "Only after receiving the initial server/activate should the
-            // client send any other messages (including client/time and the
-            // initial client/state)." Starting either here would put frames on
-            // the wire before the server has told us what this connection is
-            // for.
-            Log.d(tag, "Waiting for server/activate before sending state or time")
-        } else {
-            sendPlayerStateUpdate()
-            startTimeSync()
-        }
+        // "Sent by the client once it has received server/hello." Nothing else
+        // may follow until the initial server/activate: "The client MUST NOT
+        // send other Sendspin messages until it receives that activation."
+        sendClientHello()
     }
 
     /** The versioned player role, as it appears in active_roles. */
@@ -937,6 +929,8 @@ abstract class SendSpinProtocolHandler(
     protected open fun offeredPairMethods(): Set<String> = setOf("pairing_psk")
 
     protected fun handleServerActivate(payload: JsonObject?) {
+        // The activation that follows a re-handshake ends its quiet period.
+        rehandshakeInProgress = false
         val activate = ServerActivateRules.parse(payload)
         if (activate == null) {
             Log.e(tag, "server/activate missing required activities")
@@ -962,8 +956,13 @@ abstract class SendSpinProtocolHandler(
             is ActivationOutcome.Close -> {
                 Log.w(tag, "Rejecting server/activate: ${outcome.goodbyeReason} " +
                     "(activities=${activate.activities}, roles=${activate.activeRoles})")
-                sendGoodbye(outcome.goodbyeReason)
-                onProtocolFailure("server/activate not admissible: ${outcome.goodbyeReason}")
+                // Sequenced in one coroutine, as in handleServerUnpair: the
+                // reason is the whole point of the rejection, and a close
+                // issued straight after the send would outrun the frame.
+                getCoroutineScope().launch {
+                    sendProtocolMessageAwaiting(MessageBuilder.buildGoodbye(outcome.goodbyeReason))
+                    closeConnectionAfterFlush()
+                }
             }
 
             is ActivationOutcome.AbortPairing -> {
@@ -984,39 +983,16 @@ abstract class SendSpinProtocolHandler(
                 )
                 val pairing = Activity.PAIRING in activate.activities
 
-                // A pairing activation is answered with client/pair-finalize and
-                // NOTHING else. The server is sitting in _receive_pairing
-                // waiting for that exact message, so a client/state or the
-                // client/time burst arriving first is read as the finalize and
-                // rejected as malformed - which is precisely how this failed
-                // against both Music Assistant builds.
-                //
-                // pairing.md says "Pairing and playback are mutually exclusive
-                // on a connection", but its "Sequence violations" rule only
-                // covers a *pairing* message arriving out of order - it does
-                // not explicitly forbid client/time during pairing. We stop it
-                // anyway on the strength of that mutual-exclusivity statement
-                // plus the observed fact above: every real server rejects it.
-                // This is an interop-driven reading, not a quoted spec rule.
-                //
-                // Withholding them costs nothing while pairing: the
-                // admissibility table grants no roles on a Pairing-PSK
-                // connection, so there is no player state worth reporting and
-                // no stream to synchronise to.
-                //
-                // The dynamic flow's real sequence is: the server activates
-                // with EMPTY activities first (time sync starts), and only
-                // LATER activates into pairing (time sync must then stop) -
-                // so this cannot be gated on "first activation" the way the
-                // original Pairing-PSK-only version was. A later activation
-                // that leaves pairing must restore both, whether or not it is
-                // the first activation ever seen on this connection.
-                if (pairing) {
-                    stopTimeSync()
-                } else {
-                    sendPlayerStateUpdate()
-                    startTimeSync()
-                }
+                // "Pairing can run alongside playback. A server/activate that
+                // adds 'pairing' to activities does not by itself affect
+                // active_roles, streams, or group membership." So every
+                // accepted activation reports state and keeps the clock
+                // synchronized, pairing or not. The state is also what a role
+                // added by this activation is waiting for: "When a role that
+                // defines a state object becomes active in active_roles, the
+                // client MUST send an update that includes that role's object."
+                sendPlayerStateUpdate()
+                startTimeSync()
 
                 if (pairing) {
                     // The client's own tally of "pairing activations since the
@@ -1134,69 +1110,6 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
-    // ========== Management (item 3.1) ==========
-
-    /** Where the pairing configuration lives. Null on the legacy path. */
-    protected open fun pairingConfigStore(): PairingConfigStore? = null
-
-    /**
-     * Answer one `management/` request.
-     *
-     * Handled to completion on the receive path, synchronously, and that is a
-     * requirement rather than a convenience: "At most one management request
-     * may be in flight per connection; in-order WebSocket delivery makes the
-     * reply unambiguous", and the reply carries no request identifier. The Nth
-     * result on the wire IS the answer to the Nth request. Moving the work to
-     * another dispatcher would let two replies race and be attributed to the
-     * wrong requests, with nothing in either frame to reveal the swap.
-     *
-     * If persistence ever has to leave this thread, it needs a single-consumer
-     * serialized queue, not a `launch`.
-     */
-    private fun handleManagementRequest(type: String, payload: JsonObject?) {
-        val request = ManagementRequestParser.parse(type, payload) ?: return
-
-        val matched = matchedPsk()
-        val outcome = ManagementService(trustStore(), pairingConfigStore()).handle(
-            request,
-            ManagementSessionContext(
-                hasManagementActivity = Activity.MANAGEMENT in activities,
-                // No PIN method is implemented (audit D2), so none can be on.
-                pinMethodEnabled = false,
-                // Only a record identifies "our own record"; the Sentinel and
-                // the Pairing PSK are not records and cannot be removed.
-                matchedPskId = matched?.takeIf { it.category == PskCategory.LONG_TERM }?.pskId,
-            ),
-        )
-
-        Log.i(tag, "management: $type -> ${outcome.code.wire}")
-
-        // Sequenced in one coroutine, and that is the contract: the result must
-        // reach the wire before the goodbye, because the result is the only
-        // thing that tells the server the operation happened. A close on its
-        // own reads as a failure. sendProtocolMessage returns while the encrypt
-        // is still queued, so the awaiting form is what makes the order real.
-        getCoroutineScope().launch {
-            sendProtocolMessageAwaiting(
-                MessageBuilder.buildManagementResult(outcome.code, outcome.data)
-            )
-            outcome.closeAfterReply?.let { reason ->
-                sendProtocolMessageAwaiting(MessageBuilder.buildGoodbye(reason))
-                onManagementSessionRevoked()
-                closeConnectionAfterFlush()
-            }
-        }
-    }
-
-    /**
-     * The client removed the record that authenticated this session.
-     *
-     * "Server should not auto-reconnect with the same activity set" - and we
-     * should not either: the credential is gone, so every attempt would fail
-     * the handshake PSK lookup and loop.
-     */
-    protected open fun onManagementSessionRevoked() {}
-
     /** The operator cancelled pairing from the UI. Leaves the connection open. */
     fun cancelPairing() {
         runPairingActions(PairingEvent.UserCancelled)
@@ -1224,7 +1137,7 @@ abstract class SendSpinProtocolHandler(
 
     /**
      * The `server_id` this connection authenticated against, for the record a
-     * successful pairing persists. Null on the legacy path.
+     * successful pairing persists. Null before the handshake.
      */
     protected open fun currentServerId(): String? = null
 
@@ -1239,12 +1152,12 @@ abstract class SendSpinProtocolHandler(
     /**
      * The PSK that admitted this connection, or null before the handshake.
      *
-     * This is the single source of truth for the session's trust level, and
-     * `server/unpair` must read it rather than ask "do we hold a record for
+     * This is the single source of truth for whether the session is paired,
+     * and `server/unpair` must read it rather than ask "do we hold a record for
      * this server?". The two differ in a case that matters: during a pairing
      * handshake we may well hold a record for that same server from a previous
      * pairing, while the current session was admitted by the Pairing PSK and is
-     * `trust_level: none`. Deciding on the record would delete it.
+     * unpaired. Deciding on the record would delete it.
      *
      * A re-handshake replaces it at the key swap, so an unpair arriving just
      * after a promotion sees the post-swap value.
@@ -1276,11 +1189,11 @@ abstract class SendSpinProtocolHandler(
     protected fun handleServerUnpair() {
         val matched = matchedPsk()
 
-        // "If the connection's `trust_level` is `'none'` (e.g., an in-flight
-        // pairing handshake), ignore the message and continue unchanged." Not
-        // an error, and specifically not a close: the connection carries on.
+        // "If the session is unpaired, ignore the message and continue
+        // unchanged." Not an error, and specifically not a close: the
+        // connection carries on.
         if (matched == null || matched.category != PskCategory.LONG_TERM) {
-            Log.i(tag, "server/unpair at trust_level none (psk=${matched?.category}) - ignoring")
+            Log.i(tag, "server/unpair on an unpaired session (psk=${matched?.category}) - ignoring")
             return
         }
 
@@ -1289,31 +1202,23 @@ abstract class SendSpinProtocolHandler(
             return
         }
 
-        if (matched.serverId == null) {
-            // "If the matched record is a shared-PSK record ... the client MUST
-            // NOT remove it." The same PSK may authenticate other servers, and
-            // none of them asked to be unpaired. Wholesale removal is
-            // management/remove-record's job.
-            Log.i(tag, "server/unpair matched shared-PSK record ${matched.pskId} - retaining it")
-        } else {
-            val store = trustStore()
-            if (store == null) {
-                Log.e(tag, "server/unpair with no trust store - cannot drop the record")
-                return
-            }
-            // Durable before we say a word. A crash between the two must not
-            // leave a record the server has already forgotten, and telling the
-            // server we unpaired while the record survives is worse still: the
-            // device keeps authenticating with a credential that is gone, and
-            // it looks like a working pairing until the next handshake fails.
-            try {
-                store.removeRecord(matched.pskId)
-            } catch (e: Exception) {
-                Log.e(tag, "server/unpair could not remove record ${matched.pskId}", e)
-                return
-            }
-            Log.i(tag, "server/unpair removed record ${matched.pskId} for ${matched.serverId}")
+        val store = trustStore()
+        if (store == null) {
+            Log.e(tag, "server/unpair with no trust store - cannot drop the record")
+            return
         }
+        // Durable before we say a word. A crash between the two must not
+        // leave a record the server has already forgotten, and telling the
+        // server we unpaired while the record survives is worse still: the
+        // device keeps authenticating with a credential that is gone, and
+        // it looks like a working pairing until the next handshake fails.
+        try {
+            store.removeRecord(matched.pskId)
+        } catch (e: Exception) {
+            Log.e(tag, "server/unpair could not remove record ${matched.pskId}", e)
+            return
+        }
+        Log.i(tag, "server/unpair removed record ${matched.pskId} for ${matched.serverId}")
 
         unpairHandled = true
         onUnpaired(matched.pskId, matched.serverId)
@@ -1788,8 +1693,9 @@ abstract class SendSpinProtocolHandler(
     protected fun handleBinaryMessage(bytes: ByteArray) {
         val codec = wireCodec
         if (codec == null) {
-            // Legacy path: the frame is a bare SendSpin binary message.
-            BinaryMessageParser.parse(bytes)?.let { dispatchBinaryMessage(it) }
+            // A binary frame before the Noise handshake completed. There is
+            // no channel to decrypt it with, and no cleartext binary dialect.
+            Log.w(tag, "Dropping binary frame: no encrypted channel")
             return
         }
         when (val decoded = codec.decode(bytes)) {
@@ -1800,7 +1706,7 @@ abstract class SendSpinProtocolHandler(
             is NoiseWireCodec.Decoded.Buffered -> {
                 // A fragment landed and the message is still incomplete. The
                 // codec holds the partial buffer; nothing to dispatch until the
-                // fragment-end frame arrives.
+                // last fragment arrives.
             }
             is NoiseWireCodec.Decoded.ProtocolError ->
                 onProtocolFailure(decoded.reason)
@@ -1820,16 +1726,6 @@ abstract class SendSpinProtocolHandler(
                     return
                 }
                 onAudioChunk(message.timestampMicros, message.payload)
-            }
-            is BinaryMessageParser.BinaryMessage.Artwork -> {
-                Log.v(tag, "Received artwork channel ${message.channel}: ${message.payload.size} bytes")
-                onArtwork(message.channel, message.payload)
-            }
-            is BinaryMessageParser.BinaryMessage.Visualizer -> {
-                // Visualization data - currently not used, no logging needed
-            }
-            is BinaryMessageParser.BinaryMessage.Unknown -> {
-                Log.v(tag, "Unknown binary message type: ${message.type}")
             }
         }
     }

@@ -12,7 +12,6 @@ import org.junit.Test
 class DynamicPairMethodDescriptorTest {
 
     private fun hello(methods: List<MessageBuilder.PairMethodDescriptor>) = MessageBuilder.buildClientHello(
-        clientId = null,
         deviceName = "Test",
         bufferCapacity = 1,
         manufacturer = "Test",
@@ -28,6 +27,14 @@ class DynamicPairMethodDescriptorTest {
         assertTrue(json.contains("dynamic_pairing_code"))
         assertTrue(json.contains("\"out_channels\":[\"display\"]"))
         assertTrue(json.contains("\"formats\":[\"digits\"]"))
+    }
+
+    /** pairing.md: `locations` belongs to the secret-based methods only. */
+    @Test
+    fun `dynamic descriptor carries no locations`() {
+        val json = hello(listOf(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE))
+        assertFalse(json.contains("locations"))
+        assertTrue(json.contains("\"dynamic_pairing_code\":{\"out_channels\""))
     }
 
     /** Never speaker: that would oblige us to accept a digit audio pack. */

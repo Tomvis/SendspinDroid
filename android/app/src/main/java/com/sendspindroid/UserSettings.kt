@@ -63,7 +63,6 @@ object UserSettings {
     const val KEY_PAIRING_PSK_ENABLED = "sendspin_pairing_psk_enabled"
     const val KEY_UNPAIRED_ACCESS = "sendspin_unpaired_access"
     const val KEY_DYNAMIC_PAIRING_CODE_ENABLED = "sendspin_dynamic_pairing_code_enabled"
-    const val KEY_RECORD_MODE_PSK_ID = "sendspin_record_mode_psk_id"
     const val KEY_PAIRING_CODE_FAILURES = "pairing_code_failures"
     const val KEY_OUTPUT_DELAY_MS = "output_delay_ms"
 
@@ -305,9 +304,8 @@ object UserSettings {
     /**
      * @return false if the change was not persisted.
      *
-     * `commit()` rather than `apply()`, and the result is propagated, because
-     * management answers `ok` only once "any state change has been persisted".
-     * The rest of this file uses `apply()`; a management write cannot.
+     * `commit()` rather than `apply()`, and the result is propagated, so a
+     * caller never reports a pairing setting as changed when it was not.
      */
     fun setPairingPskEnabled(enabled: Boolean): Boolean =
         sensitivePrefs?.edit()?.putBoolean(KEY_PAIRING_PSK_ENABLED, enabled)?.commit() ?: false
@@ -328,12 +326,6 @@ object UserSettings {
 
     fun setDynamicPairingCodeEnabled(enabled: Boolean): Boolean =
         sensitivePrefs?.edit()?.putBoolean(KEY_DYNAMIC_PAIRING_CODE_ENABLED, enabled)?.commit() ?: false
-
-    fun getRecordModePskId(): String? =
-        sensitivePrefs?.getString(KEY_RECORD_MODE_PSK_ID, null)
-
-    fun setRecordModePskId(pskId: String): Boolean =
-        sensitivePrefs?.edit()?.putString(KEY_RECORD_MODE_PSK_ID, pskId)?.commit() ?: false
 
     /**
      * The spec's `output_delay_ms`: delay beyond the audio port, 0-5000 ms.

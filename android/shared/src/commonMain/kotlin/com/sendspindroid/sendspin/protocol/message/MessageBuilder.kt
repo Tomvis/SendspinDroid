@@ -2,9 +2,7 @@ package com.sendspindroid.sendspin.protocol.message
 
 import com.sendspindroid.sendspin.crypto.Base64Url
 import com.sendspindroid.sendspin.protocol.GoodbyeReason
-import com.sendspindroid.sendspin.protocol.management.ManagementResultCode
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -12,19 +10,16 @@ import kotlin.math.roundToInt
 
 object MessageBuilder {
 
-    /** `trust_level` values (README.md#definitions). Ordered none < user. */
-    const val TRUST_NONE = "none"
-    const val TRUST_USER = "user"
-
     /**
-     * A `supported_pair_methods` entry.
+     * A `supported_pair_methods` entry: the method identifier is the key, and
+     * the rest is its pair-method descriptor (pairing.md).
      *
-     * "Every client implements at least the Pairing PSK method." The PIN methods
-     * are optional for clients and are deferred to item 4.4 (#220).
+     * "Every client offers at least the Pairing PSK method, and at most one
+     * pairing-code method may be listed."
      */
     data class PairMethodDescriptor(
         val wireName: String,
-        val locations: List<String>,
+        val locations: List<String> = emptyList(),
         val outChannels: List<String> = emptyList(),
         val formats: List<String> = emptyList(),
     ) {
@@ -32,22 +27,19 @@ object MessageBuilder {
             /**
              * `locations: ["device"]` because this client generates its own
              * Pairing PSK from a CSPRNG and shows the resulting token on screen,
-             * which is what "printed on the device" describes. Item 0.3 (#191)
-             * confirmed Music Assistant renders that hint accurately.
+             * which is what "printed on the device" describes.
              */
-            val PAIRING_PSK = PairMethodDescriptor("pairing_psk", listOf("device"))
+            val PAIRING_PSK = PairMethodDescriptor("pairing_psk", locations = listOf("device"))
 
             /**
-             * `out_channels: ["display"]`, `formats: ["digits"]`. Never
-             * `speaker` -- accepting that channel would oblige this client to
-             * accept a server-supplied digit audio pack (ten clips, each with
-             * decode and size validation) for a device that already has a
-             * screen. "At most one" pairing-code method may be offered, so
-             * advertising this one permanently forecloses `static_pairing_code`.
+             * `out_channels: ["display"]`, `formats: ["digits"]`. The code is
+             * shown on screen, never spoken, and no QR rendering exists yet. A
+             * `dynamic_pairing_code` descriptor has no `locations`. "At most
+             * one" pairing-code method may be offered, so advertising this one
+             * forecloses `static_pairing_code`.
              */
             val DYNAMIC_PAIRING_CODE = PairMethodDescriptor(
                 wireName = "dynamic_pairing_code",
-                locations = listOf("device"),
                 outChannels = listOf("display"),
                 formats = listOf("digits"),
             )
@@ -64,40 +56,32 @@ object MessageBuilder {
     /**
      * Build `client/hello`.
      *
-     * @param clientId legacy dialect only. `client_id` and `version` moved to
-     *   `client/init` when encryption landed, and `messaging.md#communication`
-     *   forbids sending fields the spec does not define for a message - so on
-     *   an encrypted session this must be null and both fields are omitted.
-     * @param trustLevel `'user'` when a pairing record exists for this server,
-     *   `'none'` otherwise. Required.
+     * `client_id` and `version` live in `client/init`, and the role
+     * configuration a client may change during the connection (player
+     * commands, artwork channels) lives in `client/state`, so neither appears
+     * here: `messaging.md#communication` forbids sending fields the spec does
+     * not define for a message.
+     *
      * @param unpairedAccessEnabled whether this client admits a server with no
      *   pairing record. This is what decides whether an unpaired connection can
-     *   ever carry playback: the spec permits `['playback']` on a Sentinel-keyed
+     *   ever carry playback: the spec permits `'playback'` on an unpaired
      *   session "only when the client has unpaired access enabled", so omitting
      *   it leaves the server no choice but empty activities.
      */
     fun buildClientHello(
-        clientId: String?,
         deviceName: String,
         bufferCapacity: Int,
         manufacturer: String,
         supportedFormats: List<FormatEntry>,
         lowMemoryMode: Boolean = false,
         softwareVersion: String = "unknown",
-        trustLevel: String = TRUST_NONE,
         unpairedAccessEnabled: Boolean = true,
         supportedPairMethods: List<PairMethodDescriptor> = listOf(PairMethodDescriptor.PAIRING_PSK),
     ): String {
         val message = buildJsonObject {
             put("type", SendSpinProtocol.MessageType.CLIENT_HELLO)
             put("payload", buildJsonObject {
-                // Legacy-only. On an encrypted session these live in client/init.
-                if (clientId != null) {
-                    put("client_id", clientId)
-                    put("version", SendSpinProtocol.VERSION)
-                }
                 put("name", deviceName)
-                put("trust_level", trustLevel)
                 put("supported_roles", buildJsonArray {
                     add(kotlinx.serialization.json.JsonPrimitive(SendSpinProtocol.Roles.PLAYER))
                     add(kotlinx.serialization.json.JsonPrimitive(SendSpinProtocol.Roles.CONTROLLER))
@@ -113,58 +97,24 @@ object MessageBuilder {
                 })
                 put("player@v1_support", buildJsonObject {
                     put("supported_formats", buildJsonArray {
-                        for (fmt in supportedFormats) {
-                            add(buildJsonObject {
-                                put("codec", fmt.codec)
-                                put("sample_rate", fmt.sampleRate)
-                                put("channels", fmt.channels)
-                                put("bit_depth", fmt.bitDepth)
-                            })
-                        }
+                        for (fmt in supportedFormats) add(formatObject(fmt))
                     })
                     put("buffer_capacity", bufferCapacity)
-                    put("supported_commands", buildJsonArray {
-                        add(kotlinx.serialization.json.JsonPrimitive("volume"))
-                        add(kotlinx.serialization.json.JsonPrimitive("mute"))
-                    })
                 })
-                if (!lowMemoryMode) {
-                    put("artwork@v1_support", buildJsonObject {
-                        put("channels", buildJsonArray {
-                            add(buildJsonObject {
-                                put("source", "album")
-                                put("format", "jpeg")
-                                put("media_width", SendSpinProtocol.Artwork.REQUEST_SIZE)
-                                put("media_height", SendSpinProtocol.Artwork.REQUEST_SIZE)
-                            })
-                        })
-                    })
-                }
                 // Both required by messaging.md#client--server-clienthello.
-                put("supported_pair_methods", buildJsonArray {
+                // An object keyed by method identifier; each descriptor carries
+                // only the keys its method defines.
+                put("supported_pair_methods", buildJsonObject {
                     for (method in supportedPairMethods) {
-                        add(buildJsonObject {
-                            put("method", method.wireName)
-                            put("locations", buildJsonArray {
-                                for (location in method.locations) {
-                                    add(kotlinx.serialization.json.JsonPrimitive(location))
-                                }
-                            })
-                            // Omitted rather than sent empty, so PAIRING_PSK's
-                            // wire shape is unchanged.
+                        put(method.wireName, buildJsonObject {
+                            if (method.locations.isNotEmpty()) {
+                                put("locations", stringArray(method.locations))
+                            }
                             if (method.outChannels.isNotEmpty()) {
-                                put("out_channels", buildJsonArray {
-                                    for (channel in method.outChannels) {
-                                        add(kotlinx.serialization.json.JsonPrimitive(channel))
-                                    }
-                                })
+                                put("out_channels", stringArray(method.outChannels))
                             }
                             if (method.formats.isNotEmpty()) {
-                                put("formats", buildJsonArray {
-                                    for (format in method.formats) {
-                                        add(kotlinx.serialization.json.JsonPrimitive(format))
-                                    }
-                                })
+                                put("formats", stringArray(method.formats))
                             }
                         })
                     }
@@ -175,6 +125,17 @@ object MessageBuilder {
             })
         }
         return message.toString()
+    }
+
+    private fun stringArray(values: List<String>) = buildJsonArray {
+        for (value in values) add(kotlinx.serialization.json.JsonPrimitive(value))
+    }
+
+    private fun formatObject(format: FormatEntry) = buildJsonObject {
+        put("codec", format.codec)
+        put("sample_rate", format.sampleRate)
+        put("channels", format.channels)
+        put("bit_depth", format.bitDepth)
     }
 
     fun buildClientTime(clientTransmittedMicros: Long): String {
@@ -292,40 +253,6 @@ object MessageBuilder {
     }.toString()
 
     /** The typed form. Prefer this: a bare string can invent a reason. */
-    /**
-     * A `management/result`.
-     *
-     * Deliberately omits the `storage` accounting object. "a client whose
-     * storage is effectively unbounded or of unknown size omits the key, and
-     * the server relies on `storage_exhausted` alone" - records are roughly a
-     * hundred bytes in EncryptedSharedPreferences on a filesystem measured in
-     * gigabytes, so any capacity figure we invented would corrupt the server's
-     * free/cost arithmetic. `storage_exhausted` stays authoritative for a
-     * genuine write failure.
-     *
-     * Also carries no request identifier: replies are matched to requests by
-     * ordering alone.
-     *
-     * @param data merged into the payload, and only when the operation
-     *   succeeded. A failure that carried state would invite the server to read
-     *   it out of a reply saying the operation did not happen.
-     */
-    fun buildManagementResult(
-        code: ManagementResultCode,
-        data: JsonObject? = null,
-    ): String {
-        val message = buildJsonObject {
-            put("type", SendSpinProtocol.MessageType.MANAGEMENT_RESULT)
-            put("payload", buildJsonObject {
-                put("result", code.wire)
-                if (code == ManagementResultCode.OK && data != null) {
-                    for ((key, value) in data) put(key, value)
-                }
-            })
-        }
-        return message.toString()
-    }
-
     fun buildGoodbye(reason: GoodbyeReason): String =
         buildGoodbye(reason.wire)
 
@@ -353,6 +280,12 @@ object MessageBuilder {
      *   external system (messaging.md#external-source-handling). It is NOT the
      *   way to report a sync problem, which is why the convergence gate lives
      *   at the call site rather than here.
+     * @param format the format the player currently prefers, which "MUST be one
+     *   of the entries in `supported_formats`". Null means no overridden
+     *   preference, and the server falls back to the hello's priority order.
+     * @param artworkRoleActive whether to include the `artwork` object. A role
+     *   that defines a state object must report it once active, and the server
+     *   sends no artwork until it has.
      */
     fun buildPlayerState(
         volume: Int,
@@ -361,18 +294,18 @@ object MessageBuilder {
         outputDelayMs: Double = 0.0,
         requiredLeadTimeMs: Int = SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS,
         minBufferMs: Int = SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS,
-        playerRoleActive: Boolean = true
+        playerRoleActive: Boolean = true,
+        format: FormatEntry? = null,
+        artworkRoleActive: Boolean = false,
     ): String {
         val message = buildJsonObject {
             put("type", SendSpinProtocol.MessageType.CLIENT_STATE)
             put("payload", buildJsonObject {
                 put("available", available)
-                // "player?: object - only if client has player role". Sending it
-                // for an inactive role is a compliance failure: aiosendspin
-                // rejects the connection outright with "client/state carried a
-                // player object for an inactive role". A client whose roles are
-                // all state-less still sends this message - `available` alone is
-                // what unlocks the server's streams.
+                // "player?: object - only if the `player` role is active". A
+                // client whose roles are all state-less still sends this
+                // message - `available` alone is what unlocks the server's
+                // streams.
                 if (playerRoleActive) put("player", buildJsonObject {
                     put("volume", volume)
                     put("muted", muted)
@@ -391,12 +324,24 @@ object MessageBuilder {
                     // Advertises settability, not reportability: the spec says a
                     // server "MUST NOT treat a reported volume or muted as
                     // settable while the matching command is absent" from this
-                    // list. We handle all three, and previously listed none of
-                    // the first two.
+                    // list. We handle all three.
                     put("supported_commands", buildJsonArray {
                         add(kotlinx.serialization.json.JsonPrimitive("volume"))
                         add(kotlinx.serialization.json.JsonPrimitive("mute"))
                         add(kotlinx.serialization.json.JsonPrimitive("set_output_delay"))
+                    })
+                    if (format != null) put("format", formatObject(format))
+                })
+                // roles/artwork/v1.md: one channel, album art, at the size the
+                // UI renders. The array is positional from channel 0.
+                if (artworkRoleActive) put("artwork", buildJsonObject {
+                    put("channels", buildJsonArray {
+                        add(buildJsonObject {
+                            put("source", "album")
+                            put("format", "jpeg")
+                            put("width", SendSpinProtocol.Artwork.REQUEST_SIZE)
+                            put("height", SendSpinProtocol.Artwork.REQUEST_SIZE)
+                        })
                     })
                 })
             })
@@ -418,32 +363,6 @@ object MessageBuilder {
                     put("command", command)
                     if (volume != null) put("volume", volume.coerceIn(0, 100))
                     if (mute != null) put("mute", mute)
-                })
-            })
-        }
-        return message.toString()
-    }
-
-    /**
-     * Build a stream/request-format message for the player role.
-     *
-     * All fields optional; omitted fields keep their current value on the
-     * server. The server responds with stream/start carrying the new format.
-     */
-    fun buildStreamRequestFormat(
-        codec: String? = null,
-        sampleRate: Int? = null,
-        channels: Int? = null,
-        bitDepth: Int? = null
-    ): String {
-        val message = buildJsonObject {
-            put("type", SendSpinProtocol.MessageType.STREAM_REQUEST_FORMAT)
-            put("payload", buildJsonObject {
-                put("player", buildJsonObject {
-                    if (codec != null) put("codec", codec)
-                    if (sampleRate != null) put("sample_rate", sampleRate)
-                    if (channels != null) put("channels", channels)
-                    if (bitDepth != null) put("bit_depth", bitDepth)
                 })
             })
         }

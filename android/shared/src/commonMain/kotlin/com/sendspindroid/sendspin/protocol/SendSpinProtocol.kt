@@ -18,9 +18,10 @@ object SendSpinProtocol {
     const val PAIR_ATTEMPT_TIMEOUT_MS = 120_000L
 
     /**
-     * Binary message header: 1 byte type + 8 bytes big-endian int64 timestamp.
+     * Audio chunk header (roles/player/v1.md): 1 byte type + 8 bytes big-endian
+     * int64 timestamp + 4 bytes big-endian uint32 `send_ahead`.
      */
-    const val BINARY_HEADER_SIZE_BYTES = 9
+    const val AUDIO_HEADER_SIZE_BYTES = 13
 
     /**
      * Binary message type identifiers.
@@ -32,16 +33,14 @@ object SendSpinProtocol {
          */
         const val JSON = 0
 
-        /** Reserved by the spec for future use. */
-        const val RESERVED = 1
-
-        /** Fragmentation, see messaging.md#fragmentation. Handled in item 1.5. */
-        const val FRAGMENT_MORE = 2
-        const val FRAGMENT_END = 3
+        /**
+         * Fragmentation, see messaging.md#fragmentation. IDs 2-3 are reserved
+         * for future use and are ignored like any other unimplemented ID.
+         */
+        const val FRAGMENT = 1
 
         const val AUDIO = 4
         const val ARTWORK_BASE = 8  // 8-11 for channels 0-3
-        const val VISUALIZER = 16
     }
 
     /**
@@ -73,7 +72,7 @@ object SendSpinProtocol {
     }
 
     /**
-     * Artwork request constants for client/hello handshake.
+     * Artwork request constants for the `client/state` artwork object.
      */
     object Artwork {
         const val REQUEST_SIZE = 500  // Requested artwork width/height in pixels
@@ -154,28 +153,13 @@ object SendSpinProtocol {
         const val SERVER_COMMAND = "server/command"
         const val CLIENT_GOODBYE = "client/goodbye"
 
-        /**
-         * Valid at any time regardless of `activities`; notably it does NOT
-         * require `'management'`, so it must never be gated on the activity set.
-         */
+        /** Valid regardless of the current `activities`; never gate it on them. */
         const val SERVER_UNPAIR = "server/unpair"
         const val GROUP_UPDATE = "group/update"
         const val STREAM_START = "stream/start"
         const val STREAM_END = "stream/end"
         const val STREAM_CLEAR = "stream/clear"
-        const val STREAM_REQUEST_FORMAT = "stream/request-format"
         const val CLIENT_SYNC_OFFSET = "client/sync_offset"
-
-        // Management. Every one of these is answered by exactly one
-        // MANAGEMENT_RESULT; ordering alone matches reply to request, so none
-        // of them carries an identifier.
-        const val MANAGEMENT_LIST_RECORDS = "management/list-records"
-        const val MANAGEMENT_ADD_RECORD = "management/add-record"
-        const val MANAGEMENT_REMOVE_RECORD = "management/remove-record"
-        const val MANAGEMENT_GET_PAIRING_CONFIG = "management/get-pairing-config"
-        const val MANAGEMENT_SET_PAIRING_CONFIG = "management/set-pairing-config"
-        const val MANAGEMENT_OPEN_PAIRING_WINDOW = "management/open-pairing-window"
-        const val MANAGEMENT_RESULT = "management/result"
     }
 
     /**
@@ -381,16 +365,6 @@ data class GroupInfo(
     val groupId: String,
     val groupName: String,
     val playbackState: String
-)
-
-/**
- * Result from parsing server/hello message.
- */
-data class ServerHelloResult(
-    val serverName: String,
-    val serverId: String,
-    val activeRoles: List<String>,
-    val connectionReason: String
 )
 
 /**

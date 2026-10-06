@@ -209,10 +209,10 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
-    // BroadcastReceiver for preferred codec changes from settings: ask the
-    // server to switch the live stream via stream/request-format instead of
-    // waiting for the next connect. The server replies with stream/start,
-    // which flows through the normal format-change reconfiguration path.
+    // BroadcastReceiver for preferred codec changes from settings: report the
+    // new preference as `format` in client/state instead of waiting for the
+    // next connect. The server replies with stream/start, which flows through
+    // the normal format-change reconfiguration path.
     private val preferredCodecReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val codec = intent.getStringExtra(SettingsViewModel.EXTRA_PREFERRED_CODEC) ?: return
@@ -220,8 +220,8 @@ class PlaybackService : MediaLibraryService() {
                 Log.w(TAG, "Preferred codec changed to unsupported '$codec' - not requesting")
                 return
             }
-            Log.i(TAG, "Preferred codec changed: $codec - requesting live format change")
-            sendSpinClient?.requestStreamFormat(codec = codec)
+            Log.i(TAG, "Preferred codec changed: $codec - reporting the new format preference")
+            sendSpinClient?.setPreferredCodec(codec)
         }
     }
 
