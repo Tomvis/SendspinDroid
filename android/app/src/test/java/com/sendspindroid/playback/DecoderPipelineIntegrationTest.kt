@@ -512,14 +512,7 @@ class DecoderPipelineIntegrationTest {
                 audioDecoder?.configure(sampleRate, channels, bitDepth, codecHeader)
                 decoderReady = true
             } catch (e: Exception) {
-                try {
-                    val fallback = AudioDecoderFactory.create("pcm")
-                    fallback.configure(sampleRate, channels, bitDepth)
-                    audioDecoder = fallback
-                    decoderReady = true
-                } catch (fallbackEx: Exception) {
-                    audioDecoder = null
-                }
+                audioDecoder = null
             }
         }
 

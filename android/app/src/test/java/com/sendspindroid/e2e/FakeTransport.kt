@@ -70,7 +70,11 @@ class FakeTransport : SendSpinTransport {
         closed = true
         closeCode = code
         closeReason = reason
+        // As the real transport: a local close of a live connection reports
+        // onClosed, once.
+        val wasLive = _state == TransportState.Connected || _state == TransportState.Connecting
         _state = TransportState.Closed
+        if (wasLive) listener?.onClosed(code, reason)
     }
 
     /** Whether the close was asked to let queued frames out first. */

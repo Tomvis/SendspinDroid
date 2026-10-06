@@ -42,6 +42,12 @@ data class PlaybackState(
             return minOf(durationMs, positionMs + elapsedMs)
         }
 
+    /**
+     * For the text fields null keeps the current value and "" clears it.
+     * Duration and position are taken as given: 0 means unknown, so a caller
+     * that wants to keep the current duration passes it. The position is
+     * stamped as received now.
+     */
     fun withMetadata(
         title: String?,
         artist: String?,
@@ -71,12 +77,11 @@ data class PlaybackState(
             artworkUrl.isEmpty() -> null
             else -> artworkUrl
         },
-        durationMs = if (durationMs > 0) durationMs else this.durationMs,
+        durationMs = durationMs,
         positionMs = positionMs,
-        // Only stamp positionUpdatedAt when position is non-zero. When positionMs is 0
-        // (e.g., initial metadata for a new track before audio starts), keep existing
-        // timestamp so interpolatedPositionMs doesn't phantom-count up from zero.
-        positionUpdatedAt = if (positionMs > 0) Platform.elapsedRealtimeMs() else this.positionUpdatedAt,
+        // Stamped for every position, zero included. Keeping the old stamp for
+        // a new track's 0 made the display count on from the previous track.
+        positionUpdatedAt = Platform.elapsedRealtimeMs(),
         playbackSpeed = playbackSpeed
     )
 

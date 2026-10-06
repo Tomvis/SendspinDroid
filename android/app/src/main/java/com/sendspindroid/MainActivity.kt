@@ -1977,7 +1977,7 @@ class MainActivity : AppCompatActivity() {
 
         // Set device volume directly (Spotify-style)
         val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val newVolume = (volume * maxVolume).toInt().coerceIn(0, maxVolume)
+        val newVolume = (volume * maxVolume).roundToInt().coerceIn(0, maxVolume)
         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
 
         // Also notify PlaybackService to sync to server (for multi-client coordination)

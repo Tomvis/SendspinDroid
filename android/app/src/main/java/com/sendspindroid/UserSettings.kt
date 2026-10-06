@@ -24,8 +24,9 @@ import com.sendspindroid.sendspin.crypto.TrustStore
  *   connection secrets (proxy servers, remote servers). Encrypted at rest using
  *   Android Keystore (L-15).
  *
- * If EncryptedSharedPreferences fails to initialize (broken Keystore on some OEMs),
- * [sensitivePrefs] falls back to a plain SharedPreferences with a warning log.
+ * If the encrypted store cannot be opened it is deleted and recreated empty. Only
+ * if that fails too (broken Keystore on some OEMs) does [sensitivePrefs] fall back
+ * to a plain SharedPreferences in a separate file, with a warning log.
  * The app must not crash due to Keystore issues.
  *
  * Thread-safety: Uses @Volatile + double-checked locking for initialization,
@@ -35,8 +36,19 @@ object UserSettings {
 
     private const val TAG = "UserSettings"
 
-    /** File name for the encrypted SharedPreferences store. */
+    /**
+     * File name for the encrypted SharedPreferences store. Only ever holds
+     * encrypted data. Excluded from backup and device transfer by name in
+     * res/xml/backup_rules.xml and res/xml/data_extraction_rules.xml.
+     */
     private const val ENCRYPTED_PREFS_FILE = "sendspin_secure_prefs"
+
+    /**
+     * File name for the unencrypted store used only when the Keystore cannot
+     * produce an encrypted one. A different file, so encrypted and plain data
+     * never share one. Excluded from backup in the same two rule files.
+     */
+    private const val PLAIN_FALLBACK_PREFS_FILE = "sendspin_plain_prefs"
 
     // Preference keys
     const val KEY_PLAYER_ID = "player_id"
@@ -125,34 +137,64 @@ object UserSettings {
     }
 
     /**
-     * Creates an EncryptedSharedPreferences instance backed by Android Keystore.
-     * If the Keystore is broken (known issue on some OEM devices), falls back to
-     * a plain SharedPreferences and logs a warning. The app must not crash.
+     * Opens the store for the secrets: the Sendspin identity, the Pairing PSK
+     * and the pairing records.
+     *
+     * An encrypted store that cannot be opened is deleted and recreated empty,
+     * so those secrets are lost and every server has to be paired again. It is
+     * never reopened as plaintext: that would write new secrets in the clear
+     * into a file that is supposed to hold only ciphertext. The getters that
+     * refuse to replace an unreadable identity or Pairing PSK are unaffected -
+     * they guard a value that will not decode, and a recreated store has no
+     * value at all, so they mint a fresh one.
+     *
+     * Only when a fresh encrypted store cannot be created either (a device
+     * whose Keystore is broken) is a plain store used, under its own file
+     * name, with [isEncrypted] false. The app must not crash.
      */
     private fun createEncryptedPrefs(context: Context): SharedPreferences {
-        return try {
-            val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
-            val encrypted = EncryptedSharedPreferences.create(
-                ENCRYPTED_PREFS_FILE,
-                masterKeyAlias,
-                context,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-            isEncrypted = true
-            Log.i(TAG, "Encrypted SharedPreferences initialized for sensitive data")
-            encrypted
+        // Throwable (not just Exception) because some MediaTek and other OEM
+        // devices throw Error subclasses from the Android Keystore JNI layer
+        // during MasterKeys.getOrCreate() -- especially on first-run key generation.
+        // Known to fail on Samsung, Xiaomi, Huawei, and some MediaTek devices.
+        try {
+            return openEncryptedPrefs(context)
         } catch (e: Throwable) {
-            // Catch Throwable (not just Exception) because some MediaTek and other
-            // OEM devices throw Error subclasses from the Android Keystore JNI layer
-            // during MasterKeys.getOrCreate() -- especially on first-run key generation.
-            // Known to fail on Samsung, Xiaomi, Huawei, and some MediaTek devices.
-            // Fall back to plain SharedPreferences so the app remains functional.
-            Log.w(TAG, "EncryptedSharedPreferences failed, falling back to plain prefs. " +
-                    "Auth tokens will NOT be encrypted on this device.", e)
-            isEncrypted = false
-            context.getSharedPreferences(ENCRYPTED_PREFS_FILE, Context.MODE_PRIVATE)
+            Log.w(TAG, "Encrypted store failed to open; trying once more before giving it up", e)
         }
+        // One retry: a transient Keystore error must not cost every pairing.
+        try {
+            return openEncryptedPrefs(context)
+        } catch (e: Throwable) {
+            Log.w(TAG, "ENCRYPTED STORE UNREADABLE - deleting it and starting again. " +
+                    "Any Sendspin identity, Pairing PSK and pairing records it held are " +
+                    "LOST; every server must be paired again.", e)
+            // The keyset is kept inside the same file, so this removes both.
+            context.deleteSharedPreferences(ENCRYPTED_PREFS_FILE)
+        }
+        return try {
+            openEncryptedPrefs(context)
+        } catch (e: Throwable) {
+            Log.w(TAG, "A fresh encrypted store could not be created either: the device " +
+                    "Keystore is unusable. Secrets will be stored UNENCRYPTED in " +
+                    "$PLAIN_FALLBACK_PREFS_FILE.", e)
+            isEncrypted = false
+            context.getSharedPreferences(PLAIN_FALLBACK_PREFS_FILE, Context.MODE_PRIVATE)
+        }
+    }
+
+    private fun openEncryptedPrefs(context: Context): SharedPreferences {
+        val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+        val encrypted = EncryptedSharedPreferences.create(
+            ENCRYPTED_PREFS_FILE,
+            masterKeyAlias,
+            context,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+        isEncrypted = true
+        Log.i(TAG, "Encrypted SharedPreferences initialized for sensitive data")
+        return encrypted
     }
 
     /**

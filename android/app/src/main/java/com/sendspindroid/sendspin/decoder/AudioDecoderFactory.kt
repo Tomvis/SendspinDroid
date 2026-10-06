@@ -22,30 +22,17 @@ object AudioDecoderFactory {
      *
      * @param codec The codec identifier ("pcm", "flac", "opus")
      * @return An appropriate AudioDecoder implementation
+     * @throws IllegalArgumentException if the codec is unknown or this device
+     *   cannot decode it. There is no PCM fallback: compressed bytes played as
+     *   PCM are full-scale noise, so the caller must drop the stream's audio.
      */
     fun create(codec: String): AudioDecoder {
-        return when (codec.lowercase()) {
-            "pcm" -> PcmDecoder()
-            "flac" -> {
-                if (isCodecSupported("flac")) {
-                    FlacDecoder()
-                } else {
-                    Log.w(TAG, "FLAC not supported on this device, falling back to PCM")
-                    PcmDecoder()
-                }
-            }
-            "opus" -> {
-                if (isCodecSupported("opus")) {
-                    OpusDecoder()
-                } else {
-                    Log.w(TAG, "OPUS not supported on this device, falling back to PCM")
-                    PcmDecoder()
-                }
-            }
-            else -> {
-                Log.w(TAG, "Unknown codec: $codec, falling back to PCM")
-                PcmDecoder()
-            }
+        val name = codec.lowercase()
+        return when {
+            name == "pcm" -> PcmDecoder()
+            name == "flac" && isCodecSupported(name) -> FlacDecoder()
+            name == "opus" && isCodecSupported(name) -> OpusDecoder()
+            else -> throw IllegalArgumentException("No decoder for codec '$codec' on this device")
         }
     }
 

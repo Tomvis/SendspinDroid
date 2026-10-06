@@ -27,8 +27,10 @@ open class InMemoryTrustStore(
      * The persistence layer subclasses rather than wraps: a wrapper would have
      * to redeclare all seven members just to add a write, and the one that got
      * forgotten would lose records silently.
+     *
+     * @return false if the change could not be persisted.
      */
-    protected open fun onChanged() {}
+    protected open fun onChanged(): Boolean = true
 
     override fun listRecords(): List<PskRecord> = records.toList()
 
@@ -44,9 +46,16 @@ open class InMemoryTrustStore(
         val record = PskRecord(pskId, psk, serverId, used = false)
         // "The client MUST persist the new record, replacing any record it
         // already holds for the server."
+        val before = records.toList()
         if (serverId != null) records.removeAll { it.serverId == serverId }
         records += record
-        onChanged()
+        if (!onChanged()) {
+            // Not stored, so not paired: put back what was held, or this
+            // process would authenticate with a record the next one has lost.
+            records.clear()
+            records += before
+            return TrustStore.AddRecordResult.StorageFailed
+        }
         return TrustStore.AddRecordResult.Ok(record)
     }
 

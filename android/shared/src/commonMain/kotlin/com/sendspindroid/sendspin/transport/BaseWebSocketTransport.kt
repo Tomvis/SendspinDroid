@@ -226,16 +226,16 @@ abstract class BaseWebSocketTransport(
                     val code = reason?.code?.toInt() ?: 1000
                     val msg = reason?.message ?: ""
                     Log.d(tag, "WebSocket closed: $code $msg")
-                    _state.store(TransportState.Closed)
-                    listener?.onClosed(code, msg)
+                    reportClosed(code, msg)
                 }
             } catch (e: CancellationException) {
                 // Intentional close via destroy()/close()
                 Log.d(tag, "WebSocket cancelled")
             } catch (e: Exception) {
                 Log.e(tag, "WebSocket failure: ${e.message}")
-                _state.store(TransportState.Failed)
-                listener?.onFailure(e, isRecoverableError(e))
+                if (endConnection(TransportState.Failed)) {
+                    listener?.onFailure(e, isRecoverableError(e))
+                }
             } finally {
                 sendChannel.close()
                 outgoingChannel = null
@@ -266,6 +266,19 @@ abstract class BaseWebSocketTransport(
         outgoingChannel?.close()
         connectionJob?.cancel()
         connectionJob = null
+        reportClosed(code, reason)
+    }
+
+    /**
+     * Leave the live state for [terminal]. True for the first caller only, so
+     * a local close racing a remote close or a failure is reported once.
+     */
+    private fun endConnection(terminal: TransportState): Boolean =
+        _state.compareAndSet(TransportState.Connected, terminal) ||
+            _state.compareAndSet(TransportState.Connecting, terminal)
+
+    private fun reportClosed(code: Int, reason: String) {
+        if (endConnection(TransportState.Closed)) listener?.onClosed(code, reason)
     }
 
     /**

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Auto Backup rules for Android 11 and lower (android:fullBackupContent).
+    Android 12 and higher reads data_extraction_rules.xml; keep the two in step.
+
+    The secrets store (Sendspin identity, Pairing PSK, pairing records) is
+    encrypted with a key in this device's Keystore, so a restored copy cannot
+    be opened. The plain store is its fallback on a device with no usable
+    Keystore and must not leave the device either. File names are
+    ENCRYPTED_PREFS_FILE and PLAIN_FALLBACK_PREFS_FILE in UserSettings.kt.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="sendspin_secure_prefs.xml" />
+    <exclude domain="sharedpref" path="sendspin_plain_prefs.xml" />
+</full-backup-content>

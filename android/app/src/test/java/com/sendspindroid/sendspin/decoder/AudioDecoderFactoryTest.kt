@@ -1,20 +1,20 @@
 package com.sendspindroid.sendspin.decoder
 
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Unit tests for AudioDecoderFactory.
+ *
+ * A codec the factory cannot decode must fail, not come back as a PCM
+ * pass-through: compressed bytes written to the output as PCM are noise.
  */
 class AudioDecoderFactoryTest {
 
     @Test
-    fun `unknown codec falls back to PcmDecoder`() {
-        val decoder = AudioDecoderFactory.create("aac")
-        assertTrue(
-            "Unknown codec 'aac' should fall back to PcmDecoder, got ${decoder::class.simpleName}",
-            decoder is PcmDecoder
-        )
+    fun `unknown codec has no decoder`() {
+        assertThrows(IllegalArgumentException::class.java) { AudioDecoderFactory.create("aac") }
     }
 
     @Test
@@ -27,20 +27,13 @@ class AudioDecoderFactoryTest {
     }
 
     @Test
-    fun `unknown codec is case insensitive`() {
-        val decoder = AudioDecoderFactory.create("AAC")
-        assertTrue(
-            "Unknown codec 'AAC' should fall back to PcmDecoder, got ${decoder::class.simpleName}",
-            decoder is PcmDecoder
-        )
+    fun `codec names are case insensitive`() {
+        assertTrue(AudioDecoderFactory.create("PCM") is PcmDecoder)
+        assertThrows(IllegalArgumentException::class.java) { AudioDecoderFactory.create("AAC") }
     }
 
     @Test
-    fun `empty codec falls back to PcmDecoder`() {
-        val decoder = AudioDecoderFactory.create("")
-        assertTrue(
-            "Empty codec should fall back to PcmDecoder, got ${decoder::class.simpleName}",
-            decoder is PcmDecoder
-        )
+    fun `empty codec has no decoder`() {
+        assertThrows(IllegalArgumentException::class.java) { AudioDecoderFactory.create("") }
     }
 }

@@ -23,6 +23,7 @@ class EncryptedPrefsTrustStoreTest {
     private lateinit var mockPrefs: SharedPreferences
     private lateinit var mockSensitivePrefs: SharedPreferences
     private val sensitiveStore = ConcurrentHashMap<String, String?>()
+    private var commitSucceeds = true
 
     private fun psk(fill: Byte) = ByteArray(Psk.PSK_SIZE) { fill }
 
@@ -37,7 +38,7 @@ class EncryptedPrefsTrustStoreTest {
             }
             // The store must use commit(), not apply(): an async write losing a
             // race with process death loses the record.
-            every { commit() } returns true
+            every { commit() } answers { commitSucceeds }
         }
         mockSensitivePrefs = mockk<SharedPreferences> {
             every { getString(any(), any()) } answers {
@@ -75,6 +76,20 @@ class EncryptedPrefsTrustStoreTest {
         val shared = second.findByPskId(PskId.derive(psk(2)))
         assertNotNull(shared)
         assertNull("a shared-PSK record has no server binding", shared!!.serverId)
+    }
+
+    @Test
+    fun aRecordThatDidNotPersistIsNotAPairing() {
+        UserSettings.initializeForTesting(mockPrefs, mockSensitivePrefs, encrypted = true)
+        val store = EncryptedPrefsTrustStore()
+        store.addRecord(psk(1), serverId = "server-a")
+
+        commitSucceeds = false
+        val result = store.addRecord(psk(2), serverId = "server-a")
+
+        assertTrue("was $result", result is TrustStore.AddRecordResult.StorageFailed)
+        // The record it would have replaced is still the one held.
+        assertEquals(listOf(PskId.derive(psk(1))), store.listRecords().map { it.pskId })
     }
 
     @Test
