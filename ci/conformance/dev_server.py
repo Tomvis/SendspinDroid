@@ -30,6 +30,7 @@ from pathlib import Path
 
 try:
     from aiosendspin.audio.format import AudioFormat
+    from aiosendspin.models.types import MediaCommand
     from aiosendspin.noise.keys import Identity
     from aiosendspin.noise.pairing import (
         PairingAttempt,
@@ -38,6 +39,7 @@ try:
     )
     from aiosendspin.noise.pairing_token import decode_psk_token
     from aiosendspin.noise.trust_store import FileServerPairingStore
+    from aiosendspin.server.roles.controller.events import ControllerEvent
     from aiosendspin.server.server import SendspinServer
     from PIL import Image
 except ImportError:  # pragma: no cover - environment guidance, not logic
@@ -284,6 +286,36 @@ class DevServer:
         await asyncio.sleep(2.0)
         await target.group.stop()
         LOGGER.info("test audio: done, %d frames (%d bytes) committed", frame, frame * 4)
+
+    async def offer_seek(self, seek_max_ms: int) -> None:
+        """Offer 'seek' and 'seek_relative' to the first controller, and log what arrives.
+
+        A controller event in the log is a command the server accepted: one
+        outside supported_commands, or a seek outside 0..seek_max_ms, is
+        dropped before any event is emitted.
+        """
+        assert self._server is not None
+        while True:
+            target = next(
+                (
+                    client
+                    for client in self._server.connected_clients
+                    if any(role.startswith("controller@") for role in client.active_role_ids)
+                ),
+                None,
+            )
+            if target is not None:
+                break
+            await asyncio.sleep(0.5)
+        target.group.add_event_listener(
+            lambda _group, event: isinstance(event, ControllerEvent)
+            and LOGGER.info("controller event: %r", event)
+        )
+        controller = target.group.group_role("controller")
+        controller.set_seek_max_ms(seek_max_ms)
+        controller.set_supported_commands([MediaCommand.SEEK, MediaCommand.SEEK_RELATIVE])
+        LOGGER.info("offering seek (seek_max_ms=%d) and seek_relative to %s",
+                    seek_max_ms, target.client_id)
 
     async def send_test_artwork(self) -> None:
         """Send album artwork to the first client with an artwork stream, then clear it.
@@ -573,6 +605,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="send two album artwork images, then a clear, to the first artwork client",
     )
     parser.add_argument(
+        "--offer-seek",
+        type=int,
+        default=None,
+        metavar="SEEK_MAX_MS",
+        help="offer 'seek' (up to this position) and 'seek_relative' to the first "
+        "controller, and log every controller command accepted",
+    )
+    parser.add_argument(
         "--pair-token-file",
         default=None,
         metavar="PATH",
@@ -622,6 +662,8 @@ async def run(args: argparse.Namespace) -> int:
     watcher.add_done_callback(report_watcher_death)
 
     async def scripted() -> None:
+        if args.offer_seek is not None:
+            await server.offer_seek(args.offer_seek)
         if args.send_test_artwork:
             await server.send_test_artwork()
         if args.play_test_audio:
@@ -634,8 +676,8 @@ async def run(args: argparse.Namespace) -> int:
             )
 
     test_audio = None
-    if (args.send_test_artwork or args.play_test_audio or args.pair_token_file
-            or args.pair_dynamic_code_file):
+    if (args.offer_seek is not None or args.send_test_artwork or args.play_test_audio
+            or args.pair_token_file or args.pair_dynamic_code_file):
         test_audio = asyncio.create_task(scripted())
         test_audio.add_done_callback(
             lambda task: task.cancelled() or task.exception() is None
