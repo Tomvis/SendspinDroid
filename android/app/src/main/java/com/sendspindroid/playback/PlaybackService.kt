@@ -71,6 +71,7 @@ import com.sendspindroid.sendspin.SyncAudioPlayerCallback
 import com.sendspindroid.sendspin.PlaybackState as SyncPlaybackState
 import com.sendspindroid.sendspin.decoder.AudioDecoder
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
+import com.sendspindroid.sendspin.protocol.StreamConfig
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.NetworkEvaluator
@@ -85,6 +86,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -245,6 +247,12 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var decodeGeneration = 0
 
+    // Configuration of the active player stream, null when none is active.
+    // Tells a stream/start that begins a stream from one that reconfigures
+    // the stream already playing, which must keep its buffered audio.
+    @Volatile
+    private var activeStreamConfig: StreamConfig? = null
+
     // Playback state exposed as StateFlow (like Python CLI's AppState)
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
@@ -398,6 +406,10 @@ class PlaybackService : MediaLibraryService() {
         // How long boot auto-connect waits for mDNS to re-resolve a saved local
         // server's current address before falling back to the stored one (#158).
         private const val MDNS_AUTOCONNECT_TIMEOUT_MS = 5_000L
+
+        // Poll interval while an output format switch waits for the audio
+        // buffered in the previous format to play out.
+        private const val FORMAT_SWITCH_POLL_MS = 20L
 
         // Custom session commands
         const val COMMAND_CANCEL_RECONNECT = "com.sendspindroid.CANCEL_RECONNECT"
@@ -561,12 +573,16 @@ class PlaybackService : MediaLibraryService() {
             val channels: Int,
             val bitDepth: Int,
             val codecHeader: ByteArray?,
+            // True when this reconfigures an active stream: audio queued
+            // before it is in the previous format and must still play.
+            val keepBuffered: Boolean,
         ) : DecodeTask() {
             override fun equals(other: Any?): Boolean {
                 if (this === other) return true
                 if (other !is StartStream) return false
                 return codec == other.codec && sampleRate == other.sampleRate &&
                     channels == other.channels && bitDepth == other.bitDepth &&
+                    keepBuffered == other.keepBuffered &&
                     (codecHeader?.contentEquals(other.codecHeader) ?: (other.codecHeader == null))
             }
             override fun hashCode(): Int {
@@ -574,6 +590,7 @@ class PlaybackService : MediaLibraryService() {
                 result = 31 * result + sampleRate
                 result = 31 * result + channels
                 result = 31 * result + bitDepth
+                result = 31 * result + keepBuffered.hashCode()
                 result = 31 * result + (codecHeader?.contentHashCode() ?: 0)
                 return result
             }
@@ -744,6 +761,8 @@ class PlaybackService : MediaLibraryService() {
         var prevSendSpinState: TransportState = TransportState.Idle
         serviceScope.launch {
             sendSpinClient?.connectionState?.collect { state ->
+                // No stream survives the connection it was started on.
+                if (state !is TransportState.Ready) activeStreamConfig = null
                 when {
                     state is TransportState.Ready && prevSendSpinState !is TransportState.Ready -> {
                         // PORTED FROM onConnected + onReconnected:
@@ -1168,6 +1187,70 @@ class PlaybackService : MediaLibraryService() {
                 decoderReady = false
             }
         }
+
+        if (t.keepBuffered) switchOutputFormat(t)
+    }
+
+    /**
+     * Format change on an active stream. Everything already queued in
+     * [syncAudioPlayer] was decoded in the previous format and must still be
+     * played, so when the PCM format differs the player is only replaced once
+     * its queue has drained. Suspending here holds back the chunks behind this
+     * task, which are in the new format. A stream/clear or stream/end bumps
+     * [decodeGeneration] and ends the wait early.
+     */
+    private suspend fun switchOutputFormat(t: DecodeTask.StartStream) {
+        val old = syncAudioPlayer
+        if (old != null && old.matchesFormat(t.sampleRate, t.channels, t.bitDepth)) return
+
+        Log.i(TAG, "Output format change on active stream - playing out ${old?.getBufferedDurationMs() ?: 0}ms of buffered audio first")
+        val generation = decodeGeneration
+        while (old != null && old === syncAudioPlayer && generation == decodeGeneration &&
+            old.getBufferedDurationMs() > 0
+        ) {
+            delay(FORMAT_SWITCH_POLL_MS)
+        }
+
+        withContext(Dispatchers.Main) {
+            // Replaced or torn down while we waited (disconnect, new stream).
+            if (syncAudioPlayer !== old) return@withContext
+            old?.release()
+            createSyncAudioPlayer(t.sampleRate, t.channels, t.bitDepth)
+        }
+    }
+
+    /** Creates and starts a [SyncAudioPlayer] for the given PCM format. Main thread. */
+    private fun createSyncAudioPlayer(sampleRate: Int, channels: Int, bitDepth: Int) {
+        val timeFilter = sendSpinClient?.getTimeFilter()
+        if (timeFilter == null) {
+            Log.e(TAG, "Cannot start audio: time filter not available")
+            return
+        }
+        // In low memory mode, cap the chunk queue to ~10 seconds of audio
+        val maxSamples = if (com.sendspindroid.UserSettings.lowMemoryMode) {
+            sampleRate.toLong() * SendSpinProtocol.Buffer.DURATION_LOW_MEM_SEC
+        } else {
+            0L  // Unlimited
+        }
+        syncAudioPlayer = SyncAudioPlayer(
+            timeFilter = timeFilter,
+            sampleRate = sampleRate,
+            channels = channels,
+            bitDepth = bitDepth,
+            maxQueueSamples = maxSamples,
+            requestClientStateSnapshot = {
+                sendSpinClient?.sendClientStateSnapshot()
+            },
+        ).apply {
+            // Set callback to update SendSpinPlayer when playback state changes
+            setStateCallback(SyncAudioPlayerStateCallback())
+            // From settings, not _playbackState: that is reset on disconnect.
+            setMuted(com.sendspindroid.UserSettings.getPlayerMuted())
+            initialize()
+            start()
+        }
+        sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
+        Log.i(TAG, "SyncAudioPlayer created: ${sampleRate}Hz, ${channels}ch, ${bitDepth}bit")
     }
 
     private suspend fun handleDecodeFlush() {
@@ -1501,12 +1584,25 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
-            // Invalidate every chunk from the stream being replaced. Bumping
-            // here -- on WS-IO, before anything new is queued -- means chunks
-            // already in flight toward decodeChannel carry the old tag and are
-            // dropped by the worker. That is what stops a track change from
-            // replaying ~30s of the previous track's look-ahead buffer (#114).
-            decodeGeneration++
+            val config = StreamConfig(codec, sampleRate, channels, bitDepth, codecHeader)
+            val action = StreamStartAction.of(activeStreamConfig, config)
+            activeStreamConfig = config
+            if (action == StreamStartAction.UNCHANGED) {
+                Log.d(TAG, "stream/start repeats the active format - nothing to do")
+                return
+            }
+            // A stream/start on an active stream reconfigures it: "Clients
+            // MUST keep buffered chunks and decode each chunk in the format
+            // that was in effect when it was received." FIFO ordering on
+            // decodeChannel gives the second half; not discarding anything
+            // gives the first.
+            val keepBuffered = action == StreamStartAction.FORMAT_CHANGE
+
+            // A new stream invalidates every chunk left from the last one.
+            // Bumping here -- on WS-IO, before anything new is queued -- means
+            // chunks already in flight toward decodeChannel carry the old tag
+            // and are dropped by the worker (#114).
+            if (!keepBuffered) decodeGeneration++
 
             // Post decoder lifecycle to the single-owner decode worker via the
             // channel. FIFO ordering between StartStream and any subsequent
@@ -1518,7 +1614,7 @@ class PlaybackService : MediaLibraryService() {
             decoderReady = true
             serviceScope.launch {
                 decodeChannel.send(
-                    DecodeTask.StartStream(codec, sampleRate, channels, bitDepth, codecHeader)
+                    DecodeTask.StartStream(codec, sampleRate, channels, bitDepth, codecHeader, keepBuffered)
                 )
             }
 
@@ -1530,9 +1626,7 @@ class PlaybackService : MediaLibraryService() {
                 completePendingExitDraining()
                 currentCodec = codec
 
-                // Get the time filter from SendSpin
-                val timeFilter = sendSpinClient?.getTimeFilter()
-                if (timeFilter == null) {
+                if (sendSpinClient?.getTimeFilter() == null) {
                     Log.e(TAG, "Cannot start audio: time filter not available")
                     return@post
                 }
@@ -1544,6 +1638,10 @@ class PlaybackService : MediaLibraryService() {
                 // Update notification to show we're now streaming
                 startForegroundServiceWithNotification()
 
+                // The decode worker switches the output of an active stream,
+                // once the audio buffered in the old format has played.
+                if (keepBuffered) return@post
+
                 // Reuse existing player if format matches (DAC timestamps stay warm)
                 val existingPlayer = syncAudioPlayer
                 if (existingPlayer != null && existingPlayer.matchesFormat(sampleRate, channels, bitDepth)) {
@@ -1552,31 +1650,7 @@ class PlaybackService : MediaLibraryService() {
                 } else {
                     // Format changed or no existing player - create new one
                     existingPlayer?.release()
-                    // In low memory mode, cap the chunk queue to ~10 seconds of audio
-                    val maxSamples = if (com.sendspindroid.UserSettings.lowMemoryMode) {
-                        sampleRate.toLong() * SendSpinProtocol.Buffer.DURATION_LOW_MEM_SEC
-                    } else {
-                        0L  // Unlimited
-                    }
-                    syncAudioPlayer = SyncAudioPlayer(
-                        timeFilter = timeFilter,
-                        sampleRate = sampleRate,
-                        channels = channels,
-                        bitDepth = bitDepth,
-                        maxQueueSamples = maxSamples,
-                        requestClientStateSnapshot = {
-                            sendSpinClient?.sendClientStateSnapshot()
-                        },
-                    ).apply {
-                        // Set callback to update SendSpinPlayer when playback state changes
-                        setStateCallback(SyncAudioPlayerStateCallback())
-                        // From settings, not _playbackState: that is reset on disconnect.
-                        setMuted(com.sendspindroid.UserSettings.getPlayerMuted())
-                        initialize()
-                        start()
-                    }
-                    sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
-                    Log.i(TAG, "SyncAudioPlayer created: ${sampleRate}Hz, ${channels}ch, ${bitDepth}bit")
+                    createSyncAudioPlayer(sampleRate, channels, bitDepth)
                 }
             }
         }
@@ -1588,6 +1662,12 @@ class PlaybackService : MediaLibraryService() {
             // stream/clear message decodes with the pre-flush decoder
             // state; every chunk enqueued after decodes with the flushed
             // decoder. Preserves the FIFO guarantee from the design.
+            //
+            // "clients MUST clear all buffered audio chunks and continue with
+            // chunks received after this message": the bump discards chunks
+            // still waiting to be decoded, which can be seconds of audio while
+            // the worker is holding a format switch back.
+            decodeGeneration++
             serviceScope.launch { decodeChannel.send(DecodeTask.Flush) }
 
             mainHandler.post {
@@ -1602,6 +1682,7 @@ class PlaybackService : MediaLibraryService() {
 
             // Invalidate the ending stream's pre-buffered chunks (issue #114).
             decodeGeneration++
+            activeStreamConfig = null
 
             mainHandler.post {
                 Log.i(TAG, "[cmd-trace] T3 onStreamEnd.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
