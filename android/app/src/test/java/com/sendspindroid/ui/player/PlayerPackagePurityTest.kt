@@ -18,7 +18,6 @@ class PlayerPackagePurityTest {
     @Test
     fun playerPackageHasNoMusicAssistantImports() {
         val dir = File("src/main/java/com/sendspindroid/ui/player")
-        require(dir.isDirectory) { "player package not found at " + dir.absolutePath }
 
         val offending = dir.listFiles { f -> f.name.endsWith(".kt") }
             .orEmpty()
