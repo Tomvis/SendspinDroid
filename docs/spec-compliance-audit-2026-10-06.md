@@ -10,6 +10,45 @@ Phase 1-3 work has landed; this one covers what RC1 changed underneath it.
 
 ---
 
+## 0. Status after the same-day fixes
+
+Everything below section 0 describes the code as audited at `0d14aba`. By the end
+of 2026-10-06 `main` had moved on as follows.
+
+**Verdict now:** a strict aiosendspin 10.0.0 server
+(`allow_unencrypted=False`, `allow_noncompliant_clients=False`) accepts the app
+with no non-compliance flags, and the app plays from Music Assistant 2.11.0b4 on
+a T901 tablet (Android 15). The app no longer depends on Music Assistant's
+legacy shim, and no longer connects to pre-rc1 servers.
+
+| Area | Items | PR | How it was verified |
+|---|---|---|---|
+| Cleartext after transport | section 4 | #266 | unit test |
+| Wire core | W1-W4, W6, C2, C5, C6, management removal | #267 | strict server, tablet |
+| Availability latch | found on device: `available: false` flapped at stream start and Music Assistant ended the stream | #267 | captured on tablet, unit test, tablet |
+| Artwork | W5 | #268 | strict server (hashes match), tablet (58 KB image from Music Assistant) |
+| Pairing | W7, W8, R1-R6, C11 | #269 | strict server, both methods; Pairing PSK on the tablet |
+| Player behaviour | P1, P5, P8, P10 | #271 | tablet (skips, pause/resume, mute held across volume changes) |
+| Sync accuracy | P2, P3, P4, start re-anchor | #276 | tablet: +/-0.1 ms smoothed over 6 min 40 s, 0 re-anchors in 26 starts, listened to |
+| Controller | M2, M3 (media session) | #270 | strict server, tablet (media key sends `seek_relative`) |
+| State and session | C1, C3, C4, C7-C10, M1 | #275 | strict server; goodbye on the tablet |
+| Skip silence | found on device: a chunk decoded across `stream/clear` was queued stale | #277 | tablet: 8 skips, 2.8-3.0 s each |
+| CI | conformance adapter on the encrypted wire, three scenarios; unit tests running again | #273, #274 | CI green |
+
+**Still open**
+
+- P6: low-memory mode caps the decoded queue at 10 s while advertising a larger byte capacity.
+- P7: `min_buffer_ms` is still derived from time-sync RTT; `send_ahead` is parsed and unused.
+- P9: no volume curve `(volume/100)^1.5` and no volume ramp (both SHOULD).
+- R7: the pairing failure counter keeps the 5-attempt gate and is not reset by the operator gesture.
+- M3, M4: no in-app controls for seek, repeat and shuffle; `album_artist`, `year` and `track` are not shown.
+- Dynamic pairing code is verified against the strict server with the shared flows only, not on a device (it is an opt-in setting).
+- Single-round dynamic pairing: a mistyped code aborts and needs a new attempt from the server, where the spec's SHOULD is `client/pair-retry`.
+- Binary artwork reaches only the media session, and only when the server sends no `artwork_url`.
+- `OutputLatencyEstimator` always times out, which holds the first start of a new player for about 2 s.
+- Optional and unclaimed: `client/leave`, server-initiated connections, `color`, `visualizer`, `source`, static pairing code, `qr_code`.
+- Unrelated to rc1, seen during testing: the add-server button sits behind the T901 taskbar; the Device Volume slider and track progress sometimes lag a refresh.
+
 ## 1. Verdict
 
 **A strict RC1 server rejects us at `client/hello`.** The Noise handshake still
