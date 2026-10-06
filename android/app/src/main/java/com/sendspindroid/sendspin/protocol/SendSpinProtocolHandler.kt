@@ -761,7 +761,13 @@ abstract class SendSpinProtocolHandler(
             Log.d(tag, "Dropping outbound message during re-handshake")
             return
         }
-        Log.d(tag, "Sent: ${text.take(500)}")
+        // client/pair-finalize carries the new long-term PSK; it never goes
+        // to the log.
+        if (SendSpinProtocol.MessageType.CLIENT_PAIR_FINALIZE in text) {
+            Log.d(tag, "Sent: client/pair-finalize (payload withheld)")
+        } else {
+            Log.d(tag, "Sent: ${text.take(500)}")
+        }
         try {
             codec.encodeJson(text).forEach { sendBinaryFrame(it) }
         } catch (e: Exception) {
