@@ -23,10 +23,12 @@ import base64
 import contextlib
 import logging
 import os
+import struct
 import sys
 from pathlib import Path
 
 try:
+    from aiosendspin.audio.format import AudioFormat
     from aiosendspin.noise.keys import Identity
     from aiosendspin.noise.pairing import (
         PairingAttempt,
@@ -39,9 +41,7 @@ try:
 except ImportError:  # pragma: no cover - environment guidance, not logic
     print(
         "aiosendspin is not installed. See docs/dev-server-runbook.md:\n"
-        "  pip install \"aiosendspin[server] @ "
-        "git+https://github.com/sendspin/aiosendspin@"
-        "90feb19894793749eb017f9e1bb21929dc8fe94a\"",
+        "  pip install \"aiosendspin[server]==10.0.0\"",
         file=sys.stderr,
     )
     raise SystemExit(2) from None
@@ -50,6 +50,24 @@ LOGGER = logging.getLogger("dev_server")
 
 DEFAULT_STATE_DIR = Path(".dev/sendspin")
 DEFAULT_PORT = 8927
+
+# --play-test-audio: 16-bit stereo at 48 kHz, in 100 ms chunks.
+TEST_AUDIO_FORMAT = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+TEST_AUDIO_CHUNK_FRAMES = 4800
+
+
+def test_audio_chunk(first_frame: int) -> bytes:
+    """PCM whose samples are a frame counter, so a receiver can prove byte-exactness.
+
+    Frame n carries n as a little-endian uint32: the low 16 bits are the left
+    sample and the next 16 the right. A client that mis-sizes the audio chunk
+    header sees the counter break at every chunk boundary.
+    NoiseHandshakeCheck --expect-audio checks exactly that.
+    """
+    return b"".join(
+        struct.pack("<I", (first_frame + i) & 0xFFFFFFFF)
+        for i in range(TEST_AUDIO_CHUNK_FRAMES)
+    )
 
 
 def b64u_decode(value: str) -> bytes:
@@ -231,6 +249,69 @@ class DevServer:
             seen = current
             await asyncio.sleep(1.0)
 
+    async def play_test_audio(self, seconds: float) -> None:
+        """Stream `seconds` of counter PCM to the first client that gets a player role."""
+        assert self._server is not None
+        while True:
+            target = next(
+                (
+                    client
+                    for client in self._server.connected_clients
+                    if any(role.startswith("player@") for role in client.active_role_ids)
+                ),
+                None,
+            )
+            if target is not None:
+                break
+            await asyncio.sleep(0.5)
+        # The server holds a player's audio until its client/state arrives.
+        await asyncio.sleep(1.0)
+
+        LOGGER.info("test audio: streaming %.1fs to %s", seconds, target.client_id)
+        stream = target.group.start_stream()
+        frame = 0
+        for _ in range(round(seconds * 48000 / TEST_AUDIO_CHUNK_FRAMES)):
+            stream.prepare_audio(test_audio_chunk(frame), TEST_AUDIO_FORMAT)
+            frame += TEST_AUDIO_CHUNK_FRAMES
+            await stream.commit_audio()
+            await stream.sleep_to_limit_buffer(1_000_000)
+        # Let the tail leave the send queue before the stream ends.
+        await asyncio.sleep(2.0)
+        await target.group.stop()
+        LOGGER.info("test audio: done, %d frames (%d bytes) committed", frame, frame * 4)
+
+    async def rehandshake_with_token(self, token_file: Path) -> None:
+        """Start a Pairing PSK pairing with the client whose token is in `token_file`.
+
+        On a Sentinel-keyed connection that makes the server re-handshake to the
+        pairing PSK first, which is the point: it exercises the in-band
+        re-handshake without needing an operator at the console.
+        """
+        assert self._server is not None
+        while True:
+            if token_file.exists():
+                token = decode_psk_token(token_file.read_text(encoding="utf-8").strip())
+                client = self._server.get_client(token.client_id)
+                if client is not None and client.is_connected and client.active_role_ids:
+                    break
+            await asyncio.sleep(0.5)
+        LOGGER.info("pairing %s with its token (re-handshake to the pairing PSK)", token.client_id)
+        try:
+            await self._server.initiate_pairing(
+                token.client_id,
+                PairingAttempt(
+                    PairMethod.PAIRING_PSK,
+                    pairing_psk=token.pairing_psk,
+                    client_id=token.client_id,
+                ),
+            )
+        except Exception as err:
+            # NoiseHandshakeCheck declines the pairing with pair/abort; a real
+            # client completes it. Either way the re-handshake has happened.
+            LOGGER.info("pairing attempt ended: %s: %s", type(err).__name__, err)
+        else:
+            LOGGER.info("pairing attempt completed")
+
     # -- console -----------------------------------------------------------
 
     async def console(self) -> None:
@@ -294,7 +375,11 @@ class DevServer:
                 )
             await server.initiate_pairing(
                 client_id,
-                PairingAttempt(PairMethod.PAIRING_PSK, pairing_psk=token.pairing_psk),
+                PairingAttempt(
+                    PairMethod.PAIRING_PSK,
+                    pairing_psk=token.pairing_psk,
+                    client_id=client_id,
+                ),
             )
             print("pairing initiated")
         elif cmd in ("pair-dynamic", "pd"):
@@ -365,6 +450,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="auto-trust every unpaired client so it becomes playback-capable",
     )
     parser.add_argument(
+        "--play-test-audio",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="stream this many seconds of counter-pattern PCM to the first player",
+    )
+    parser.add_argument(
+        "--pair-token-file",
+        default=None,
+        metavar="PATH",
+        help="pair, by Pairing PSK, with the client whose SP:0 token is in this file "
+        "(after --play-test-audio, if both are given)",
+    )
+    parser.add_argument(
         "--no-console",
         action="store_true",
         help="do not read commands from stdin; serve until killed",
@@ -392,11 +491,29 @@ async def run(args: argparse.Namespace) -> int:
 
     watcher.add_done_callback(report_watcher_death)
 
+    async def scripted() -> None:
+        if args.play_test_audio:
+            await server.play_test_audio(args.play_test_audio)
+        if args.pair_token_file:
+            await server.rehandshake_with_token(Path(args.pair_token_file))
+
+    test_audio = None
+    if args.play_test_audio or args.pair_token_file:
+        test_audio = asyncio.create_task(scripted())
+        test_audio.add_done_callback(
+            lambda task: task.cancelled() or task.exception() is None
+            or LOGGER.error("scripted run failed", exc_info=task.exception())
+        )
+
     try:
         await server.console()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        if test_audio is not None:
+            test_audio.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await test_audio
         watcher.cancel()
         # Suppress CancelledError from the cancel above, but tolerate a watcher
         # that already died of something else - otherwise that exception would
