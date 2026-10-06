@@ -3067,7 +3067,15 @@ class PlaybackService : MediaLibraryService() {
         sendSpinClient?.let { client ->
             bundle.putString("server_name", client.getServerName())
             bundle.putString("server_address", client.getServerAddress())
-            bundle.putString("connection_state", client.connectionState.value.toString())
+            // TransportState variants are plain objects; toString() would show
+            // "TransportState$Ready@b7f7b20" on the stats screen.
+            val stateLabel = when (client.connectionState.value) {
+                is TransportState.Ready -> "Connected"
+                is TransportState.Connecting -> "Connecting"
+                is TransportState.Idle -> "Disconnected"
+                is TransportState.Failed -> "Failed"
+            }
+            bundle.putString("connection_state", stateLabel)
             bundle.putString("audio_codec", currentCodec.uppercase())
         } ?: run {
             bundle.putString("connection_state", "Disconnected")
