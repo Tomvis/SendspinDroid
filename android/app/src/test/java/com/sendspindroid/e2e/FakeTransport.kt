@@ -73,6 +73,15 @@ class FakeTransport : SendSpinTransport {
         _state = TransportState.Closed
     }
 
+    /** Whether the close was asked to let queued frames out first. */
+    var flushedBeforeClose = false
+        private set
+
+    override fun closeAfterFlush(code: Int, reason: String) {
+        flushedBeforeClose = true
+        close(code, reason)
+    }
+
     override fun destroy() {
         destroyed = true
         _state = TransportState.Closed
@@ -85,11 +94,19 @@ class FakeTransport : SendSpinTransport {
     // ========== Simulation Methods ==========
 
     /**
+     * Runs once the client has started its handshake on this transport. No
+     * fake server speaks Noise, so this is where a test installs the channel
+     * the handshake would have produced.
+     */
+    var afterConnected: () -> Unit = {}
+
+    /**
      * Simulate the transport becoming connected (onConnected callback).
      */
     fun simulateConnected() {
         _state = TransportState.Connected
         listener?.onConnected()
+        afterConnected()
     }
 
     /**

@@ -23,9 +23,9 @@ class PskCandidateSet(candidates: List<Psk>) {
      * Find the PSK a server named by `psk_id`, among the candidates of
      * [category] only.
      *
-     * A miss is not an error at this layer - it is the caller that maps it to
-     * `NoiseHandshakeException.Cause.PskLookupMiss` and closes the socket with
-     * no application-level message.
+     * A miss is not an error at this layer - it is the caller that decides
+     * what it means: the Sentinel Fallback in the initial handshake, a silent
+     * close in a re-handshake.
      */
     fun resolve(pskId: String, category: PskCategory): Psk? =
         candidates.firstOrNull { it.category == category && it.pskId == pskId }
@@ -40,12 +40,11 @@ class PskCandidateSet(candidates: List<Psk>) {
         /**
          * The `psk_id` matched a record bound to a different server.
          *
-         * Kept apart from [NoMatch] because both close the socket with no
-         * application-level message, so a log line is the only place they can
-         * ever be distinguished - and they mean very different things. A miss
-         * is "I have never been told about this secret"; a mismatch is "I hold
-         * this secret, but for someone else", which is what a spoofed or
-         * misconfigured server looks like.
+         * Kept apart from [NoMatch] because they mean very different things
+         * and are handled differently. A miss is "I have never been told about
+         * this secret"; a mismatch is "I hold this secret, but for someone
+         * else", which is what a spoofed or misconfigured server looks like,
+         * and it always fails the handshake.
          */
         data class ServerIdMismatch(val expected: String, val actual: String) : Selection
     }
