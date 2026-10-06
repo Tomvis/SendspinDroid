@@ -227,7 +227,9 @@ object MessageParser {
                 }
             }
             "mute" -> {
-                val muted = player.booleanOrDefault("mute", false)
+                // `mute` is "required if command is mute". Defaulting a
+                // missing field to false would unmute a muted player.
+                val muted = player["mute"]?.booleanOrNull() ?: return null
                 ServerCommandResult.Mute(muted)
             }
             "set_output_delay" -> {
@@ -235,13 +237,9 @@ object MessageParser {
                 // field were both named static_delay here, which matches no
                 // spec revision - so a conforming server's command fell through
                 // to Unknown and was silently dropped.
-                val delayMs = player.intOrDefault("output_delay_ms", -1)
-                if (delayMs in 0..5000) {
-                    ServerCommandResult.SetOutputDelay(delayMs)
-                } else {
-                    Log.w(TAG, "set_output_delay out of range: $delayMs")
-                    null
-                }
+                // "Clients MUST clamp output_delay_ms to the range 0-5000."
+                val delayMs = player["output_delay_ms"]?.longOrNull() ?: return null
+                ServerCommandResult.SetOutputDelay(delayMs.coerceIn(0, 5000).toInt())
             }
             else -> {
                 if (command.isNotEmpty()) {

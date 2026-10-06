@@ -45,6 +45,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
+import com.sendspindroid.sendspin.pairing.PairMethod
 import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -458,7 +459,7 @@ class SendSpin(
 
     /**
      * Every PSK this handshake may match: the stored records, the Sentinel, and
-     * the Pairing PSK whenever the method is enabled.
+     * the Pairing PSK.
      *
      * Built from stored state alone, with no reference to whether a pairing
      * screen is open, because the server re-handshakes to the Pairing PSK
@@ -484,7 +485,7 @@ class SendSpin(
         matchedPsk?.category ?: PskCategory.SENTINEL
 
     /**
-     * The live configuration, not a constant: a disabled method is not offered.
+     * The live configuration, not a constant. `pairing_psk` is always offered.
      *
      * `dynamic_pairing_code` is opt-in and defaults off: there is no capability
      * signal in `server/hello` to test for it, and advertising it unconditionally
@@ -492,10 +493,9 @@ class SendSpin(
      * [PairingConfig.dynamicPairingCodeEnabled]).
      */
     override fun offeredPairMethods(): Set<String> = buildSet {
-        val config = pairingConfigStore.load()
-        if (config.pairingPskEnabled) add("pairing_psk")
-        if (config.dynamicPairingCodeEnabled) {
-            add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName)
+        add(PairMethod.PAIRING_PSK)
+        if (pairingConfigStore.load().dynamicPairingCodeEnabled) {
+            add(PairMethod.DYNAMIC_PAIRING_CODE)
         }
     }
 
@@ -640,15 +640,12 @@ class SendSpin(
     }
 
     override fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> = buildList {
-        val config = pairingConfigStore.load()
-        if (config.pairingPskEnabled) {
-            add(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
-        }
+        add(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
         // "An implemented method that is disabled is omitted." Opt-in and off
         // by default (see offeredPairMethods) -- never in place of the
         // (unimplemented) static_pairing_code, which pairing.md forbids
         // combining with it.
-        if (config.dynamicPairingCodeEnabled) {
+        if (pairingConfigStore.load().dynamicPairingCodeEnabled) {
             add(MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
         }
     }
@@ -1070,6 +1067,7 @@ class SendSpin(
         reconnectJob = null
 
         stopTimeSync()
+        resetArtworkStream()
         reconnecting.set(false)
         waitingForNetwork.set(false)
         // Spec reason enum is another_server | shutdown | restart |
@@ -1098,6 +1096,7 @@ class SendSpin(
         reconnectJob = null
 
         stopTimeSync()
+        resetArtworkStream()
         reconnecting.set(false)
         waitingForNetwork.set(false)
         sendGoodbye(GoodbyeReason.USER_REQUEST)

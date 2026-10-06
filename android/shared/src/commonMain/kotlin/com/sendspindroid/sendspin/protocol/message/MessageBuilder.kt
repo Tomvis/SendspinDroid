@@ -163,16 +163,17 @@ object MessageBuilder {
     }.toString()
 
     /**
-     * Build `client/pair-init` for the Dynamic Pairing Code flow.
+     * Build `client/pair-init`, which starts the attempt.
      *
-     * `commit_B = SHA-256("sendspin-pair-commit-v1" || nonce_B)` ([PairingCode.commit]).
-     * Starts the attempt: `pairing_index` folds into the CPace `sid`.
+     * @param commitB `SHA-256("sendspin-pair-commit-v1" || nonce_B)`
+     *   ([PairingCode.commit]). "Required in the Dynamic Pairing Code Flow;
+     *   absent otherwise", so the Pairing PSK flow passes null.
      */
-    fun buildClientPairInit(pairingIndex: Int, commitB: ByteArray): String = buildJsonObject {
+    fun buildClientPairInit(pairingIndex: Int, commitB: ByteArray? = null): String = buildJsonObject {
         put("type", SendSpinProtocol.MessageType.CLIENT_PAIR_INIT)
         put("payload", buildJsonObject {
             put("pairing_index", pairingIndex)
-            put("commit_B", Base64Url.encode(commitB))
+            if (commitB != null) put("commit_B", Base64Url.encode(commitB))
         })
     }.toString()
 
@@ -207,12 +208,8 @@ object MessageBuilder {
      * Build `client/pair-finalize` for the Pairing PSK flow.
      *
      * `pairing.md#client--server-clientpair-finalize`: "In the Pairing PSK
-     * Flow, it starts the pairing attempt and is sent immediately after the
-     * `server/activate`, carrying the PSK directly."
-     *
-     * Exactly one of `long_term_psk` and `wrapped_psk` is ever present, and the
-     * wrapped form belongs to the PIN methods this client does not offer - so
-     * only the direct field is emitted here.
+     * Flow, it is sent immediately after `client/pair-init` without waiting
+     * for a server response, carrying the PSK directly."
      */
     fun buildClientPairFinalize(longTermPsk: ByteArray): String {
         require(longTermPsk.size == 32) {

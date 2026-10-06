@@ -27,13 +27,6 @@ interface PairingConfigStore {
      */
     fun load(): PairingConfig
 
-    /**
-     * Offer or withdraw the `pairing_psk` method. Never discards the secret.
-     *
-     * @return false if the change could not be persisted.
-     */
-    fun setEnabled(enabled: Boolean): Boolean
-
     fun setUnpairedAccess(enabled: Boolean): Boolean
 
     /**

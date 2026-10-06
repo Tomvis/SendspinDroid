@@ -2,12 +2,26 @@ package com.sendspindroid.conformance
 
 import com.sendspindroid.sendspin.crypto.Base64Url
 import com.sendspindroid.sendspin.crypto.ClientIdentity
+import com.sendspindroid.sendspin.crypto.InMemoryTrustStore
+import com.sendspindroid.sendspin.crypto.PairingConfig
 import com.sendspindroid.sendspin.crypto.Psk
 import com.sendspindroid.sendspin.crypto.PskCandidateSet
+import com.sendspindroid.sendspin.crypto.PskCandidates
 import com.sendspindroid.sendspin.crypto.PskCategory
-import com.sendspindroid.sendspin.crypto.SentinelPsk
+import com.sendspindroid.sendspin.crypto.PskRecordCodec
+import com.sendspindroid.sendspin.crypto.TrustStore
 import com.sendspindroid.sendspin.crypto.asNoiseCrypto
 import com.sendspindroid.sendspin.crypto.secureRandomBytes
+import com.sendspindroid.sendspin.pairing.DynamicPairingAction
+import com.sendspindroid.sendspin.pairing.DynamicPairingCodeFlow
+import com.sendspindroid.sendspin.pairing.DynamicPairingEvent
+import com.sendspindroid.sendspin.pairing.PairAbortReason
+import com.sendspindroid.sendspin.pairing.PairMethod
+import com.sendspindroid.sendspin.pairing.PairingAction
+import com.sendspindroid.sendspin.pairing.PairingCounterStore
+import com.sendspindroid.sendspin.pairing.PairingEvent
+import com.sendspindroid.sendspin.pairing.PairingFailureCounter
+import com.sendspindroid.sendspin.pairing.PairingPskFlow
 import com.sendspindroid.sendspin.pairing.PairingToken
 import com.sendspindroid.sendspin.protocol.ActivationOutcome
 import com.sendspindroid.sendspin.protocol.Activity
@@ -17,6 +31,7 @@ import com.sendspindroid.sendspin.protocol.SendSpinHandshakeDriver
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.ServerActivateRules
 import com.sendspindroid.sendspin.protocol.StreamConfig
+import com.sendspindroid.sendspin.protocol.message.ArtworkReceiver
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.InitMessages
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
@@ -24,6 +39,7 @@ import com.sendspindroid.sendspin.protocol.message.MessageParser
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
@@ -41,8 +57,8 @@ import java.util.concurrent.TimeUnit
  * End-to-end check of the encrypted path against a real server.
  *
  * Drives the SAME code the Android app uses - `SendSpinHandshakeDriver`,
- * `NoiseWireCodec`, `ServerActivateRules`, `BinaryMessageParser` and the real
- * `MessageBuilder` - over a real WebSocket against an aiosendspin server
+ * `NoiseWireCodec`, `ServerActivateRules`, `BinaryMessageParser`,
+ * `ArtworkReceiver` and the real `MessageBuilder` - over a real WebSocket against an aiosendspin server
  * running with `allow_unencrypted=False`.
  *
  * The identity is **persisted** rather than generated per run. That matters:
@@ -52,14 +68,29 @@ import java.util.concurrent.TimeUnit
  * what earlier versions of this check did.
  *
  * Usage: `NoiseHandshakeCheck <ws://host:port/sendspin> [identity-file]
- *   [--hold | --hold-seconds=N] [--expect-audio] [--expect-rehandshake]`
+ *   [--hold | --hold-seconds=N] [--expect-audio] [--expect-artwork]
+ *   [--expect-rehandshake] [--pair] [--expect-mismatches=N] [--expect-paired]`
  *
  * The tool also holds a pairing PSK, persisted beside the identity, and writes
  * its pairing token to `<identity-file>.token`. Handing that token to the
  * server (`dev_server.py --pair-token-file`) makes it re-handshake this
- * connection to the pairing PSK, which exercises the in-band re-handshake. The
- * pairing itself is not run: the tool answers the pairing activation with
- * `pair/abort` reason `user_cancelled`.
+ * connection to the pairing PSK, which exercises the in-band re-handshake.
+ * Without `--pair` the pairing itself is not run: the tool answers the pairing
+ * activation with `pair/abort` reason `user_cancelled`.
+ *
+ * With `--pair` it offers both pairing methods and runs whichever the server
+ * picks through the app's own `PairingPskFlow` / `DynamicPairingCodeFlow`. The
+ * record lands in `<identity-file>.records` and is a handshake candidate on
+ * the next run; a dynamic pairing code is written to `<identity-file>.code`
+ * while it is being shown (`dev_server.py --pair-dynamic-code-file`). The run
+ * passes once the record is persisted, the server has re-handshaken to it and
+ * a `server/activate` has followed. `--expect-paired` instead fails unless the
+ * initial handshake itself matched a stored record.
+ *
+ * What `--pair` does NOT drive is `SendSpinProtocolHandler`, which lives in
+ * the Android module: counting `pairing_index`, routing a message to the flow
+ * its activation selected and the attempt timer are re-implemented here in a
+ * few lines, and are covered by the handler's unit tests instead.
  */
 object NoiseHandshakeCheck {
 
@@ -80,9 +111,19 @@ object NoiseHandshakeCheck {
             ?.substringAfter('=')?.toLongOrNull()
         // Fail unless audio arrived and survived every check in [AudioCheck].
         val expectAudio = args.contains("--expect-audio")
+        // Fail unless artwork arrived as [ArtworkCheck] requires.
+        val expectArtwork = args.contains("--expect-artwork")
         // Fail unless the server re-handshook and then activated, with no
         // second hello in between.
         val expectRehandshake = args.contains("--expect-rehandshake")
+        // Run a pairing to completion instead of declining it.
+        val pair = args.contains("--pair")
+        // With --pair: the number of attempts that must end in our own
+        // pair/abort pairing_code_mismatch before one succeeds.
+        val expectMismatches = args.firstOrNull { it.startsWith("--expect-mismatches=") }
+            ?.substringAfter('=')?.toIntOrNull()
+        // Fail unless the initial handshake matched a stored pairing record.
+        val expectPaired = args.contains("--expect-paired")
         val identityFile = File(positional.getOrNull(1) ?: ".dev/noisecheck-identity.key")
         val identity = loadOrCreateIdentity(identityFile)
         val pairingPsk = loadOrCreatePairingPsk(File(identityFile.path + ".pairing-psk"))
@@ -90,12 +131,33 @@ object NoiseHandshakeCheck {
         tokenFile.writeText(
             PairingToken.encode(InitMessages.decodeKey32(identity.clientId)!!, pairingPsk.bytes)
         )
-        // The Sentinel and the pairing PSK, as a client with no records holds.
-        val candidates = PskCandidateSet(listOf(SentinelPsk.psk, pairingPsk))
+        val recordsFile = File(identityFile.path + ".records")
+        val codeFile = File(identityFile.path + ".code")
+        val store = object : InMemoryTrustStore(
+            initial = PskRecordCodec.decode(if (recordsFile.exists()) recordsFile.readText() else ""),
+        ) {
+            override fun onChanged() = recordsFile.writeText(PskRecordCodec.encode(listRecords()))
+        }
+        val pairingConfig = PairingConfig(
+            pairingPsk.bytes, unpairedAccessEnabled = true, dynamicPairingCodeEnabled = pair,
+        )
+        // The app's candidate set: the records, the Sentinel and the pairing
+        // PSK. Rebuilt per handshake, so a record persisted by this run is a
+        // candidate for the re-handshake that follows it.
+        fun candidates() = PskCandidateSet(PskCandidates.build(store.listRecords(), pairingConfig))
+        val pairMethods = if (pair) {
+            listOf(
+                MessageBuilder.PairMethodDescriptor.PAIRING_PSK,
+                MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE,
+            )
+        } else {
+            listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
+        }
 
         println("client_id : ${identity.clientId}")
         println("identity  : ${identityFile.path} (stable across runs)")
         println("pair token: ${tokenFile.path}")
+        println("records   : ${recordsFile.path} (${store.listRecords().size} stored)")
         println("connecting: $url")
         println()
 
@@ -103,6 +165,7 @@ object NoiseHandshakeCheck {
         var failure: String? = null
         var codec: NoiseWireCodec? = null
         var matchedCategory = PskCategory.SENTINEL
+        var initialCategory: PskCategory? = null
         var serverHellos = 0
         var activationSeen = false
         var ready: SendSpinHandshakeDriver.Event.TransportReady? = null
@@ -116,6 +179,22 @@ object NoiseHandshakeCheck {
         var grantedActivities: Set<Activity> = emptySet()
         var grantedRoles: List<String> = emptyList()
         val audio = AudioCheck()
+        val artwork = ArtworkCheck()
+
+        // Pairing (--pair). pairing_index counts every pairing server/activate
+        // since the last Noise handshake.
+        var pairingIndex = 0
+        var activeMethod: String? = null
+        val pskFlow = PairingPskFlow()
+        var dynamicFlow: DynamicPairingCodeFlow? = null
+        var recordsPersisted = 0
+        var mismatches = 0
+        val abortsSent = mutableListOf<String>()
+        val counterStore = object : PairingCounterStore {
+            private var value = 0
+            override fun load() = value
+            override fun save(value: Int) { this.value = value }
+        }
 
         val json = Json { ignoreUnknownKeys = true }
         val client = OkHttpClient.Builder().readTimeout(30, TimeUnit.SECONDS).build()
@@ -134,9 +213,85 @@ object NoiseHandshakeCheck {
             println("-> enc   $label")
         }
 
+        fun sendPairAbort(reason: String) {
+            abortsSent += reason
+            if (reason == PairAbortReason.PAIRING_CODE_MISMATCH) mismatches++
+            sendEncrypted(MessageBuilder.buildPairAbort(reason), "pair/abort $reason")
+        }
+
+        fun persistRecord(psk: ByteArray) {
+            val serverId = ready?.serverInit?.serverId ?: return fail("paired before a handshake")
+            when (val result = store.addRecord(psk, serverId)) {
+                is TrustStore.AddRecordResult.Ok -> {
+                    recordsPersisted++
+                    println("PAIRED  record persisted: psk_id=${result.record.pskId} server=$serverId " +
+                        "(${store.listRecords().size} stored)")
+                }
+                else -> fail("could not persist the pairing record: $result")
+            }
+        }
+
+        fun runPskActions(event: PairingEvent) {
+            for (action in pskFlow.onEvent(event)) {
+                when (action) {
+                    is PairingAction.SendPairInit -> sendEncrypted(
+                        MessageBuilder.buildClientPairInit(action.pairingIndex),
+                        "client/pair-init pairing_index=${action.pairingIndex}",
+                    )
+                    is PairingAction.SendPairFinalize -> sendEncrypted(
+                        MessageBuilder.buildClientPairFinalize(action.longTermPsk),
+                        "client/pair-finalize (long_term_psk)",
+                    )
+                    is PairingAction.SendPairAbort -> sendPairAbort(action.reason)
+                    is PairingAction.PersistRecord -> persistRecord(action.psk)
+                    // The run is bounded by its own timeout.
+                    PairingAction.StartAttemptTimeout, PairingAction.ClearAttemptTimeout -> Unit
+                }
+            }
+        }
+
+        fun runDynamicActions(event: DynamicPairingEvent) {
+            val flow = dynamicFlow ?: return
+            for (action in flow.onEvent(event)) {
+                when (action) {
+                    is DynamicPairingAction.SendPairInit -> sendEncrypted(
+                        MessageBuilder.buildClientPairInit(action.pairingIndex, action.commitB),
+                        "client/pair-init pairing_index=${action.pairingIndex} (commit_B)",
+                    )
+                    is DynamicPairingAction.SendPairPending -> sendEncrypted(
+                        MessageBuilder.buildClientPairPending(action.pairingIndex),
+                        "client/pair-pending pairing_index=${action.pairingIndex}",
+                    )
+                    is DynamicPairingAction.EmitPairingCode -> {
+                        println("PAIRING CODE  ${action.code}  (written to ${codeFile.path})")
+                        codeFile.writeText(action.code)
+                    }
+                    is DynamicPairingAction.SendPairAuth -> sendEncrypted(
+                        MessageBuilder.buildClientPairAuth(action.yb), "client/pair-auth",
+                    )
+                    is DynamicPairingAction.SendPairConfirm -> sendEncrypted(
+                        MessageBuilder.buildClientPairConfirm(action.tb, action.wrappedNonceB),
+                        "client/pair-confirm",
+                    )
+                    is DynamicPairingAction.SendPairFinalize -> sendEncrypted(
+                        MessageBuilder.buildClientPairFinalizeWrapped(action.wrappedPsk),
+                        "client/pair-finalize (wrapped_psk)",
+                    )
+                    is DynamicPairingAction.SendPairAbort -> sendPairAbort(action.reason)
+                    is DynamicPairingAction.PersistRecord -> persistRecord(action.psk)
+                    DynamicPairingAction.StopEmittingCode -> if (codeFile.delete()) {
+                        println("         pairing code cleared")
+                    }
+                    DynamicPairingAction.ProtocolError -> fail("dynamic pairing protocol error")
+                    // No gesture UI and no timer: the run is bounded by its own timeout.
+                    DynamicPairingAction.RequestGesture, DynamicPairingAction.StartAttemptTimeout -> Unit
+                }
+            }
+        }
+
         driver = SendSpinHandshakeDriver(
             identity = identity,
-            candidates = candidates,
+            candidates = candidates(),
             onEvent = { event ->
                 when (event) {
                     is SendSpinHandshakeDriver.Event.SendCleartext -> {
@@ -147,6 +302,7 @@ object NoiseHandshakeCheck {
                         println("HANDSHAKE OK  server=${event.serverInit.serverId} " +
                             "psk=${event.matchedPsk.category}")
                         matchedCategory = event.matchedPsk.category
+                        initialCategory = event.matchedPsk.category
                         ready = event
                         handshakeHash = event.transport.handshakeHash
                         // Nothing is sent yet: client/hello answers server/hello.
@@ -185,7 +341,7 @@ object NoiseHandshakeCheck {
                                 val session = ready ?: return fail("re-handshake before a handshake")
                                 val outcome = RehandshakeDriver(
                                     identity = identity,
-                                    candidates = candidates,
+                                    candidates = candidates(),
                                     serverId = session.serverInit.serverId,
                                     serverStaticKey = session.serverInit.serverStaticKey,
                                     suite = SendSpinHandshakeDriver.DEFAULT_SUITE,
@@ -206,6 +362,11 @@ object NoiseHandshakeCheck {
                                         handshakeHash = outcome.transport.handshakeHash
                                         matchedCategory = outcome.matched.category
                                         rehandshakes++
+                                        // The count restarts with every Noise
+                                        // handshake, and a dynamic attempt is
+                                        // bound to the old handshake hash.
+                                        pairingIndex = 0
+                                        dynamicFlow = null
                                         println("RE-HANDSHAKE OK  psk=${outcome.matched.category} " +
                                             "(no client/hello sent; awaiting server/activate)")
                                     }
@@ -226,6 +387,7 @@ object NoiseHandshakeCheck {
                                         ),
                                         softwareVersion = "check",
                                         unpairedAccessEnabled = true,
+                                        supportedPairMethods = pairMethods,
                                     ),
                                     "client/hello",
                                 )
@@ -236,6 +398,8 @@ object NoiseHandshakeCheck {
                                 if (rehandshakes > 0) activationsAfterRehandshake++
                                 val activate = ServerActivateRules.parse(payload)
                                     ?: return fail("malformed server/activate")
+                                val pairing = Activity.PAIRING in activate.activities
+                                if (pairing) pairingIndex++
                                 // Same rules the app applies.
                                 val outcome = ServerActivateRules.evaluate(
                                     activate = activate,
@@ -243,7 +407,7 @@ object NoiseHandshakeCheck {
                                     unpairedAccessEnabled = true,
                                     previousRoles = grantedRoles,
                                     isFirstActivation = !activationSeen,
-                                    offeredPairMethods = setOf("pairing_psk"),
+                                    offeredPairMethods = pairMethods.map { it.wireName }.toSet(),
                                 )
                                 when (outcome) {
                                     is ActivationOutcome.Accept -> {
@@ -271,19 +435,52 @@ object NoiseHandshakeCheck {
                                             ),
                                             "client/time",
                                         )
-                                        if (Activity.PAIRING in activate.activities) {
-                                            // This tool does not pair; decline
-                                            // so the server leaves pairing.
-                                            sendEncrypted(
-                                                MessageBuilder.buildPairAbort("user_cancelled"),
-                                                "pair/abort user_cancelled",
-                                            )
+                                        activeMethod = if (pairing) activate.pairingMethod else null
+                                        if (!pair) {
+                                            if (pairing) {
+                                                // Not asked to pair; decline
+                                                // so the server leaves pairing.
+                                                sendEncrypted(
+                                                    MessageBuilder.buildPairAbort("user_cancelled"),
+                                                    "pair/abort user_cancelled",
+                                                )
+                                            }
+                                        } else when (activeMethod) {
+                                            PairMethod.PAIRING_PSK -> {
+                                                runDynamicActions(DynamicPairingEvent.NonPairingActivation)
+                                                runPskActions(
+                                                    PairingEvent.PairingActivation(pairingIndex, matchedCategory)
+                                                )
+                                            }
+                                            PairMethod.DYNAMIC_PAIRING_CODE -> {
+                                                runPskActions(PairingEvent.NonPairingActivation)
+                                                if (dynamicFlow == null) {
+                                                    dynamicFlow = DynamicPairingCodeFlow(
+                                                        handshakeHash,
+                                                        PairingFailureCounter(counterStore),
+                                                        SendSpinHandshakeDriver.DEFAULT_SUITE,
+                                                    )
+                                                }
+                                                runDynamicActions(
+                                                    DynamicPairingEvent.PairingActivation(pairingIndex)
+                                                )
+                                            }
+                                            else -> {
+                                                runPskActions(PairingEvent.NonPairingActivation)
+                                                runDynamicActions(DynamicPairingEvent.NonPairingActivation)
+                                            }
                                         }
+                                        val pairingDone = recordsPersisted > 0 &&
+                                            matchedCategory == PskCategory.LONG_TERM
                                         if (hold) {
                                             println("         holding connection open - " +
                                                 "configure this player in Music Assistant now")
                                         } else if (holdSeconds != null) {
                                             // The hold loop below ends the run.
+                                        } else if (pair && !pairingDone) {
+                                            // Still waiting for the pairing, the
+                                            // re-handshake to its record and the
+                                            // activation after that.
                                         } else if (Activity.PLAYBACK in activate.activities) {
                                             Thread { Thread.sleep(4000); done.countDown() }.start()
                                         } else {
@@ -297,11 +494,57 @@ object NoiseHandshakeCheck {
                                 }
                             }
 
-                            SendSpinProtocol.MessageType.STREAM_START ->
+                            SendSpinProtocol.MessageType.PAIR_ABORT -> {
+                                val reason = payload?.get("reason")?.jsonPrimitive?.contentOrNull
+                                    ?: "unspecified"
+                                runPskActions(PairingEvent.PairAbortReceived(reason))
+                                runDynamicActions(DynamicPairingEvent.PairAbortReceived(reason))
+                            }
+
+                            SendSpinProtocol.MessageType.SERVER_PAIR_INIT ->
+                                MessageParser.parseServerPairInit(payload)
+                                    ?.let { runDynamicActions(DynamicPairingEvent.ServerPairInit(it)) }
+                                    ?: fail("malformed server/pair-init")
+
+                            SendSpinProtocol.MessageType.SERVER_PAIR_AUTH ->
+                                MessageParser.parseServerPairAuth(payload)
+                                    ?.let { runDynamicActions(DynamicPairingEvent.ServerPairAuth(it)) }
+                                    ?: fail("malformed server/pair-auth")
+
+                            SendSpinProtocol.MessageType.SERVER_PAIR_CONFIRM ->
+                                MessageParser.parseServerPairConfirm(payload)
+                                    ?.let { runDynamicActions(DynamicPairingEvent.ServerPairConfirm(it)) }
+                                    ?: fail("malformed server/pair-confirm")
+
+                            SendSpinProtocol.MessageType.SERVER_PAIR_FINALIZE ->
+                                if (activeMethod == PairMethod.DYNAMIC_PAIRING_CODE) {
+                                    runDynamicActions(DynamicPairingEvent.ServerPairFinalize)
+                                } else {
+                                    runPskActions(PairingEvent.ServerPairFinalize)
+                                }
+
+                            SendSpinProtocol.MessageType.STREAM_START -> {
                                 MessageParser.parseStreamStart(payload)?.let { audio.onStreamStart(it) }
+                                if (payload?.containsKey("artwork") == true) artwork.onStreamStart()
+                            }
+
+                            SendSpinProtocol.MessageType.STREAM_END -> {
+                                val roles = payload?.get("roles")?.jsonArray
+                                    ?.map { it.jsonPrimitive.content }
+                                if (roles == null || roles.any {
+                                        SendSpinProtocol.isStreamRole(it, SendSpinProtocol.StreamRoles.ARTWORK)
+                                    }
+                                ) artwork.onStreamEnd()
+                            }
                         }
                     }
-                    is NoiseWireCodec.Decoded.Typed -> {
+                    is NoiseWireCodec.Decoded.Typed -> if (
+                        decoded.type - SendSpinProtocol.BinaryType.ARTWORK_BASE in 0..3
+                    ) {
+                        // The real receiver: reassembly and every protocol
+                        // error the spec lists.
+                        artwork.onMessage(decoded.type, decoded.body)?.let { fail("artwork: $it") }
+                    } else {
                         // The real parser: a wrong header size shows up here as
                         // a payload that is not a whole number of PCM frames.
                         val message = BinaryMessageParser.parse(decoded.type, decoded.body)
@@ -371,25 +614,53 @@ object NoiseHandshakeCheck {
             "(server/activate after: $activationsAfterRehandshake, psk now $matchedCategory)")
         println("  activities     : ${grantedActivities.map { it.wireName }}")
         println("  active_roles   : $grantedRoles")
+        println("  initial psk    : $initialCategory")
+        if (pair) {
+            println("  pairing        : $recordsPersisted record(s) persisted, " +
+                "${store.listRecords().size} stored; pair/abort sent: $abortsSent")
+        }
         audio.report().forEach { println("  $it") }
+        artwork.report().forEach { println("  $it") }
         println()
 
         val err = failure
         val audioProblem = if (expectAudio) audio.problem() else null
+        val artworkProblem = if (expectArtwork) artwork.problem() else null
         when {
             err != null -> exitFail(err)
             !finished -> exitFail("timed out")
             serverHellos == 0 -> exitFail("no encrypted server/hello")
             audioProblem != null -> exitFail("audio: $audioProblem")
+            artworkProblem != null -> exitFail("artwork: $artworkProblem")
+            expectPaired && initialCategory != PskCategory.LONG_TERM ->
+                exitFail("the initial handshake matched $initialCategory, not a pairing record")
+            pair && recordsPersisted == 0 -> exitFail("no pairing record was persisted")
+            pair && matchedCategory != PskCategory.LONG_TERM ->
+                exitFail("the server never re-handshook to the new long-term PSK (psk is $matchedCategory)")
+            pair && activationsAfterRehandshake == 0 ->
+                exitFail("no server/activate followed the re-handshake")
+            pair && serverHellos != 1 ->
+                exitFail("server/hello was sent $serverHellos times; a re-handshake re-sends neither hello")
+            pair && store.listRecords().size != 1 ->
+                exitFail("${store.listRecords().size} records stored for one server; a new record replaces the old")
+            expectMismatches != null && mismatches != expectMismatches ->
+                exitFail("sent $mismatches pairing_code_mismatch aborts, expected $expectMismatches")
+            pair -> println(
+                "PASS: paired, re-handshook to the long-term PSK and activated" +
+                    (expectMismatches?.let { " after $it pairing_code_mismatch" } ?: "")
+            )
+            expectPaired -> println("PASS: authenticated with the stored pairing record")
             expectRehandshake && rehandshakes == 0 -> exitFail("the server never re-handshook")
             expectRehandshake && activationsAfterRehandshake == 0 ->
                 exitFail("no server/activate followed the re-handshake")
             expectRehandshake && serverHellos != 1 ->
                 exitFail("server/hello was sent $serverHellos times; a re-handshake re-sends neither hello")
-            expectAudio || expectRehandshake -> println(
-                "PASS:" + (if (expectAudio) " audio received and verified" else "") +
-                    (if (expectAudio && expectRehandshake) ";" else "") +
-                    (if (expectRehandshake) " re-handshake completed and activated" else "")
+            expectAudio || expectArtwork || expectRehandshake -> println(
+                "PASS: " + listOfNotNull(
+                    "audio received and verified".takeIf { expectAudio },
+                    "artwork reassembled and cleared".takeIf { expectArtwork },
+                    "re-handshake completed and activated".takeIf { expectRehandshake },
+                ).joinToString("; ")
             )
             Activity.PLAYBACK !in grantedActivities -> {
                 // Never a client bug, but two very different situations share
@@ -513,6 +784,91 @@ object NoiseHandshakeCheck {
             partialFrameChunks > 0 -> "$partialFrameChunks chunks were not whole PCM frames"
             timestampGaps > 0 -> "$timestampGaps timestamp discontinuities"
             counterBreaks > 0 -> "$counterBreaks breaks in the frame counter"
+            else -> null
+        }
+    }
+
+    /**
+     * Checks the artwork the server transferred, as reassembled by
+     * [ArtworkReceiver].
+     *
+     * Each image is reported with its SHA-256, to compare with the one
+     * `dev_server.py --send-test-artwork` logs for the bytes it sent.
+     */
+    private class ArtworkCheck {
+        private val receiver = ArtworkReceiver()
+        private var streamActive = false
+        private var streamStarts = 0
+        private var partsInFlight = 0
+        private var multiPartImages = 0
+
+        /** "image" or "clear" for every completed transfer, in order. */
+        private val completed = mutableListOf<String>()
+        private val lines = mutableListOf<String>()
+
+        @Synchronized
+        fun onStreamStart() {
+            streamActive = true
+            streamStarts++
+        }
+
+        @Synchronized
+        fun onStreamEnd() {
+            streamActive = false
+            receiver.reset()
+        }
+
+        /** @return why the connection must close, or null. */
+        @Synchronized
+        fun onMessage(type: Int, body: ByteArray): String? {
+            // "Servers MUST NOT send artwork messages outside an active artwork stream."
+            if (!streamActive) return "message outside an active artwork stream"
+            val channel = type - SendSpinProtocol.BinaryType.ARTWORK_BASE
+            if (body.isNotEmpty() && body[0].toInt() == 0) partsInFlight++
+            when (val result = receiver.accept(type, body)) {
+                is ArtworkReceiver.Result.ProtocolError -> return result.reason
+                is ArtworkReceiver.Result.None -> {}
+                is ArtworkReceiver.Result.Discard -> {
+                    partsInFlight = 0
+                    if (body[0].toInt() == ArtworkReceiver.FLAG_CANCEL) note("channel $channel cancel")
+                }
+                is ArtworkReceiver.Result.Image -> if (result.data.isEmpty()) {
+                    completed += "clear"
+                    note("channel $channel clear ts=${result.timestampMicros}")
+                } else {
+                    completed += "image"
+                    if (partsInFlight > 1) multiPartImages++
+                    val sha = MessageDigest.getInstance("SHA-256").digest(result.data)
+                        .joinToString("") { "%02x".format(it) }
+                    val jpeg = result.data.size > 2 &&
+                        result.data[0] == 0xFF.toByte() && result.data[1] == 0xD8.toByte()
+                    note("channel $channel image ${result.data.size} bytes in $partsInFlight part(s) " +
+                        "ts=${result.timestampMicros} jpeg=$jpeg sha256=$sha")
+                }
+            }
+            return null
+        }
+
+        private fun note(line: String) {
+            lines += line
+            println("<- enc   artwork $line")
+        }
+
+        @Synchronized
+        fun report(): List<String> = buildList {
+            add("artwork        : $streamStarts stream/start, " +
+                "${completed.count { it == "image" }} images ($multiPartImages in several parts), " +
+                "${completed.count { it == "clear" }} clears")
+            lines.forEach { add("  $it") }
+        }
+
+        /** Why the artwork is not acceptable, or null if it is. */
+        @Synchronized
+        fun problem(): String? = when {
+            streamStarts == 0 -> "no stream/start carried an artwork object"
+            "image" !in completed -> "no image received"
+            multiPartImages == 0 -> "no image arrived in more than one part"
+            completed.last() != "clear" -> "the last image was not cleared"
             else -> null
         }
     }

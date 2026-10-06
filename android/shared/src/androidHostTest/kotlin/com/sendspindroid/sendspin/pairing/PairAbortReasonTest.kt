@@ -25,7 +25,6 @@ class PairAbortReasonTest {
                 "attempt_timeout",
                 "concurrent_attempt",
                 "method_not_supported",
-                "pin_mismatch",
                 "pairing_code_mismatch",
                 "user_cancelled",
             ),

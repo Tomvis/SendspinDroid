@@ -480,7 +480,11 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     // Unconfined, so a send the handler launches has reached sendBinaryFrame
     // by the time the call that triggered it returns.
-    private val testScope = CoroutineScope(UnconfinedTestDispatcher())
+    private val testDispatcher = UnconfinedTestDispatcher()
+    private val testScope = CoroutineScope(testDispatcher)
+
+    /** Virtual time for whatever the handler has scheduled with `delay`. */
+    val testScheduler get() = testDispatcher.scheduler
     private val timeFilter = SendspinTimeFilter()
     val sentMessages = mutableListOf<String>()
     val metadataUpdates = mutableListOf<TrackMetadata>()
@@ -558,7 +562,9 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     override fun getTimeFilter(): SendspinTimeFilter = timeFilter
 
-    override fun isLowMemoryMode(): Boolean = false
+    var lowMemoryMode = false
+
+    override fun isLowMemoryMode(): Boolean = lowMemoryMode
 
     override fun getClientId(): String = "test-client-id"
 
@@ -606,8 +612,12 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     val artworkDeliveries = mutableListOf<Int>()
 
+    /** Every image made current, in order; an empty one is a clear. */
+    val artworkImages = mutableListOf<ByteArray>()
+
     override fun onArtwork(channel: Int, payload: ByteArray) {
         artworkDeliveries.add(channel)
+        artworkImages.add(payload)
     }
 
     override fun onSyncOffsetApplied(offsetMs: Double, source: String) {}

@@ -124,14 +124,15 @@ CPace exchange keyed by that code -- never by transmitting the code itself.
      `paired=True` on reconnect without repeating this procedure).
    - **The re-handshake to the new long-term PSK succeeds.** The dynamic
      pairing exchange itself runs over the *old* connection security; once
-     it finishes, the client is expected to reconnect (or the connection is
-     expected to renegotiate) using the newly stored PSK. Confirm the
-     tablet's connection stays healthy across that transition rather than
-     dropping and failing to come back.
+     it finishes, the server re-handshakes in band to the newly stored PSK
+     without closing the WebSocket. Confirm the tablet's connection stays
+     healthy across that transition rather than dropping.
 
-A wrong code produces a `pair/abort` with reason `pairing_code_mismatch`
-instead of a success -- see the device-acceptance checklist below for what to
-confirm about the client's recovery from that.
+A wrong code makes the client send `pair/abort` with reason
+`pairing_code_mismatch` and stop showing the code. The attempt is over (the
+client runs a single round and does not send `client/pair-retry`); the
+connection stays open, and `pair-dynamic` again starts a new attempt with a new
+code.
 
 ## Verifying the wire end to end
 
@@ -155,6 +156,13 @@ It passes only if audio arrived, every chunk was a whole number of PCM frames,
 the chunk timestamps follow one another, and the frame counter never breaks.
 The server log must contain no `non-compliant client` line.
 
+`--send-test-artwork` makes the server send two album artwork images to the
+first client with an artwork stream - one that fits a single part and one that
+needs several - and then clear the channel. Add `--expect-artwork` to the
+client: it reassembles them with the app's `ArtworkReceiver` and passes only if
+an image arrived in more than one part and the last one was cleared. Both sides
+print each image's SHA-256, which must match.
+
 To exercise the in-band re-handshake as well, add
 `--pair-token-file <identity-file>.token` to the server and
 `--expect-rehandshake` to the client. The tool writes its pairing token to that
@@ -162,6 +170,40 @@ file; the server then starts a Pairing PSK pairing, which re-handshakes the
 Sentinel-keyed connection to the pairing PSK. The tool checks that no hello was
 repeated and that `server/activate` followed, then declines the pairing with
 `pair/abort`.
+
+### Pairing without an operator
+
+With `--pair` the tool runs the pairing instead of declining it, through the
+app's own `PairingPskFlow` and `DynamicPairingCodeFlow`. It keeps its records
+in `<identity-file>.records`, and passes once the record is persisted, the
+server has re-handshaken to the new long-term PSK and a `server/activate` has
+followed. A second run with `--expect-paired` then passes only if the fresh
+handshake matched that record.
+
+```bash
+ID=/tmp/noisecheck/client.key
+CHECK="java -cp conformance-client/build/libs/conformance-client-all.jar \
+    com.sendspindroid.conformance.NoiseHandshakeCheck ws://127.0.0.1:18931/sendspin $ID"
+
+# Pairing PSK: the server reads the token the tool writes.
+python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
+    --trust-all-unpaired --no-console --debug --pair-token-file $ID.token
+$CHECK --pair && $CHECK --expect-paired
+
+# Dynamic pairing code: the server enters the code the tool writes to $ID.code.
+# --pair-dynamic-wrong-codes 1 enters a wrong code first; the tool answers
+# pair/abort pairing_code_mismatch, stays connected and pairs on the next
+# attempt, which --expect-mismatches=1 requires.
+python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
+    --trust-all-unpaired --no-console --debug \
+    --pair-dynamic-code-file $ID.code --pair-dynamic-wrong-codes 1
+$CHECK --pair --expect-mismatches=1 && $CHECK --expect-paired
+```
+
+Use a fresh `--state-dir` and identity file per run. `--pair` does not drive
+`SendSpinProtocolHandler`, which is Android-only: the `pairing_index` count,
+the routing of messages to the selected flow and the attempt timer are covered
+by `PairingAttemptTest` instead.
 
 ## Verifying the target is configured correctly
 

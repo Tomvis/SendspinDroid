@@ -57,6 +57,14 @@ class FakeAudioSink(
     val writes: List<WriteRecord> get() = _writes.toList()
     val totalBytesWritten = AtomicLong(0)
 
+    /** Last gain passed to setVolume(); AudioTrack starts at unity. */
+    @Volatile var volume = 1f
+        private set
+
+    override fun setVolume(gain: Float) {
+        volume = gain
+    }
+
     @Volatile private var nextTimestamp: SinkTimestamp? = null
 
     /** Configure what getTimestamp() returns next. Null means "not ready." */

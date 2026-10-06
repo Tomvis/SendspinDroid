@@ -56,15 +56,15 @@ object UserSettings {
     // Record semantics live in the trust store; this is only the blob.
     const val KEY_PSK_RECORDS = "sendspin_psk_records"
 
-    // Pairing configuration. The PSK is sensitive; the two flags are policy.
+    // Pairing configuration. The PSK is sensitive; the flags are policy.
     // All of it is read and written only through the pairing config store -
     // these are plain accessors with no policy of their own.
     const val KEY_PAIRING_PSK = "sendspin_pairing_psk"
-    const val KEY_PAIRING_PSK_ENABLED = "sendspin_pairing_psk_enabled"
     const val KEY_UNPAIRED_ACCESS = "sendspin_unpaired_access"
     const val KEY_DYNAMIC_PAIRING_CODE_ENABLED = "sendspin_dynamic_pairing_code_enabled"
     const val KEY_PAIRING_CODE_FAILURES = "pairing_code_failures"
     const val KEY_OUTPUT_DELAY_MS = "output_delay_ms"
+    const val KEY_PLAYER_MUTED = "player_muted"
 
     const val KEY_LAST_REMOTE_ID = "last_remote_id"
     const val KEY_LAST_PROXY_URL = "last_proxy_url"
@@ -298,18 +298,6 @@ object UserSettings {
     fun setPairingPskBlob(blob: String): Boolean =
         sensitivePrefs?.edit()?.putString(KEY_PAIRING_PSK, blob)?.commit() ?: false
 
-    fun getPairingPskEnabled(): Boolean =
-        sensitivePrefs?.getBoolean(KEY_PAIRING_PSK_ENABLED, true) ?: true
-
-    /**
-     * @return false if the change was not persisted.
-     *
-     * `commit()` rather than `apply()`, and the result is propagated, so a
-     * caller never reports a pairing setting as changed when it was not.
-     */
-    fun setPairingPskEnabled(enabled: Boolean): Boolean =
-        sensitivePrefs?.edit()?.putBoolean(KEY_PAIRING_PSK_ENABLED, enabled)?.commit() ?: false
-
     fun getUnpairedAccessEnabled(): Boolean =
         sensitivePrefs?.getBoolean(KEY_UNPAIRED_ACCESS, true) ?: true
 
@@ -343,6 +331,17 @@ object UserSettings {
 
     fun setOutputDelayMs(value: Int): Boolean =
         prefs?.edit()?.putInt(KEY_OUTPUT_DELAY_MS, value.coerceIn(0, 5000))?.commit() ?: false
+
+    /**
+     * The player's `muted` state. roles/player/v1.md: "Persisting volume and
+     * muted across reboots is RECOMMENDED". Volume needs no entry here - it is
+     * the device media volume, which Android persists.
+     */
+    fun getPlayerMuted(): Boolean =
+        prefs?.getBoolean(KEY_PLAYER_MUTED, false) ?: false
+
+    fun setPlayerMuted(muted: Boolean): Boolean =
+        prefs?.edit()?.putBoolean(KEY_PLAYER_MUTED, muted)?.commit() ?: false
 
     fun getPairingCodeFailures(): Int =
         sensitivePrefs?.getInt(KEY_PAIRING_CODE_FAILURES, 0) ?: 0

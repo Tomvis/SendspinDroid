@@ -74,24 +74,24 @@ class CPaceResponderTest {
 
     private companion object {
         // Captured from ci/conformance/cpace_oracle.py. PRS = "123456",
-        // handshake hash = bytes 0x00..0x1f, pairing_index = 1.
+        // handshake hash = bytes 0x00..0x1f, pairing_index = 1, round = 1.
         const val ORACLE_SID =
             "73656e647370696e2d706169722d70616b652d763100010203040506070809" +
-            "0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000001"
+            "0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000100000001"
         const val ORACLE_YA =
-            "9e9481280468a6ef3bb3c6b962d564f96b523ca957c41420319b0b2408de5861"
+            "290f6bd1559626855a6b05bb67f1f364356ad16184f0ab898339a45c1fee6601"
         const val ORACLE_YB =
-            "ffc9edf7457e8acf737d5bb2099e50592ec1313dee9658df6a628954cee55135"
+            "23cbc858e3e96f476800600beeefa665a23cae3a58f44be371589385efe71156"
         const val ORACLE_YB_SCALAR =
             "025984ca800ed7505e9f20a4b92314c3721e16112fe1447bd807e2fcf9813398"
         const val ORACLE_ISK =
-            "727136d942eec1e10f9cfc1cdb2426391f217e98348143b978045c747b4f25ee" +
-            "fc9f45864558c4329c2dc1a30424d84ec3965cb1da5863ea8e1239237f559f06"
+            "3ea260815b47e68b6cc07a22038452efc470e85425bc8485344a2987da473ca9" +
+            "5cee9bbd47933370bb4c4626581c47c5f24e55a12aa1f6e0375560014210bf70"
         const val ORACLE_SERVER_KC =
-            "110fcfde4aa2b30072787f30d78eeefc4dbfe93b4310d594b79e91ed8f9c0a9e" +
-            "426040bf012f84fa68705f00e5b745c91c4d27a70cbb9e12b5e41c5db5fe5eb1"
+            "97cd8c996a88c39bcd03f6abf26e529c2b848ad2263c791ba13e2544217bd407" +
+            "9912b2ecd4e78139e92fb0ead22d137126bf30e237325cbde8b6a839fb1ea6a1"
         const val ORACLE_CLIENT_KC =
-            "b3192b30dcf4f3d0fdbfb125dc17fb071984894762e0d0d0ad6b13272802194f" +
-            "e4aee13a7bd1bc6bbca50b6592a1fafc4e44c0258dfda4815b524ddee0acea0c"
+            "38fb10d9677e2e27b3113ea371469657a13442654ac7f318423437fd48a5213f" +
+            "385002bedc22e4197511087058136038f01cbac0bcee8ae82e71fd89ba7a0a5b"
     }
 }

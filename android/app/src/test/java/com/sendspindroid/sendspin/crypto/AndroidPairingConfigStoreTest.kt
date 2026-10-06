@@ -112,32 +112,15 @@ class AndroidPairingConfigStoreTest {
     }
 
     @Test
-    fun defaultsEnablePairingAndUnpairedAccess() {
-        val config = AndroidPairingConfigStore().load()
-        assertTrue(config.pairingPskEnabled)
-        assertTrue(config.unpairedAccessEnabled)
+    fun unpairedAccessDefaultsToEnabled() {
+        assertTrue(AndroidPairingConfigStore().load().unpairedAccessEnabled)
     }
 
     @Test
-    fun enabledAndUnpairedAccessFlagsPersist() {
-        val store = AndroidPairingConfigStore()
-        store.setEnabled(false)
-        store.setUnpairedAccess(false)
+    fun theUnpairedAccessFlagPersists() {
+        AndroidPairingConfigStore().setUnpairedAccess(false)
 
-        val reloaded = AndroidPairingConfigStore().load()
-        assertFalse(reloaded.pairingPskEnabled)
-        assertFalse(reloaded.unpairedAccessEnabled)
-    }
-
-    @Test
-    fun disablingTheMethodDoesNotDiscardThePsk() {
-        // Re-enabling must restore the same secret, or every previously issued
-        // pairing token silently stops working.
-        val store = AndroidPairingConfigStore()
-        val before = store.load().pairingPsk
-        store.setEnabled(false)
-        store.setEnabled(true)
-        assertArrayEquals(before, AndroidPairingConfigStore().load().pairingPsk)
+        assertFalse(AndroidPairingConfigStore().load().unpairedAccessEnabled)
     }
 
     @Test
