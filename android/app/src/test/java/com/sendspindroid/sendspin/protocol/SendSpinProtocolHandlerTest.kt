@@ -156,26 +156,21 @@ class SendSpinProtocolHandlerTest {
     // ========== Controller State Tests ==========
 
     @Test
-    fun `controller state from server_state is merged and published`() {
+    fun `controller state from server_state is published`() {
         handler.handleTextMessageForTest(
             """{"type":"server/state","payload":{"controller":{
                 "supported_commands":["play","pause","volume"],
                 "volume":60,"muted":false,"repeat":"off","shuffle":false}}}"""
         )
-        // Partial delta: only volume changes; earlier fields must survive.
-        handler.handleTextMessageForTest(
-            """{"type":"server/state","payload":{"controller":{"volume":80}}}"""
-        )
 
-        assertEquals(2, handler.controllerStateUpdates.size)
-        val merged = handler.controllerStateUpdates.last()
-        assertEquals(80, merged.volume)
-        assertEquals(listOf("play", "pause", "volume"), merged.supportedCommands)
-        assertEquals("off", merged.repeat)
+        val state = handler.controllerStateUpdates.single()
+        assertEquals(60, state.volume)
+        assertEquals(listOf("play", "pause", "volume"), state.supportedCommands)
+        assertEquals("off", state.repeat)
     }
 
     @Test
-    fun `unchanged controller delta does not republish`() {
+    fun `unchanged controller state does not republish`() {
         val msg = """{"type":"server/state","payload":{"controller":{"volume":60}}}"""
         handler.handleTextMessageForTest(msg)
         handler.handleTextMessageForTest(msg)
@@ -505,6 +500,7 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     fun lastMuteDecision(): Boolean = muteEvents.lastOrNull() ?: false
     fun evaluateAndPublishSyncStateForTest() = evaluateAndPublishSyncState()
     fun sendGoodbyeForTest(reason: GoodbyeReason) = sendGoodbye(reason)
+    fun resetServerStateForTest() = resetServerState()
     fun resetSyncStateTrackingForTest() = resetSyncStateTracking()
 
     fun handleTextMessageForTest(text: String) {
@@ -604,7 +600,11 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     override fun onStreamClear() {}
 
-    override fun onStreamEnd() {}
+    var streamEnds = 0
+
+    override fun onStreamEnd() {
+        streamEnds++
+    }
 
     override fun onAudioChunk(timestampMicros: Long, audioData: ByteArray) {
         audioChunks.add(timestampMicros to audioData)

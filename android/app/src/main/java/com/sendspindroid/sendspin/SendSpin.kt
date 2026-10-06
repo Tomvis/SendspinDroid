@@ -220,7 +220,7 @@ class SendSpin(
     @Volatile
     var selfReconnectEnabled: Boolean = true
 
-    // Merged controller (group-level) state: supported_commands, group
+    // Controller (group-level) state: supported_commands, group
     // volume/mute, repeat, shuffle. Null until the server first sends a
     // server/state controller object.
     private val _controllerState = MutableStateFlow<ControllerState?>(null)
@@ -717,7 +717,7 @@ class SendSpin(
         this.serverId = serverId
 
         // Controller state belongs to the previous session; the handler's
-        // merged copy was reset, so reset the published flow too.
+        // copy was reset, so reset the published flow too.
         _controllerState.value = null
 
         // Check if this is a reconnection

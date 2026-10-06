@@ -90,11 +90,16 @@ abstract class SendSpinProtocolHandler(
     private var pendingArtwork: Job? = null
 
     // Last received values for change detection (avoids unnecessary UI recomposition)
-    private var lastMetadata: TrackMetadata? = null
     private var lastPlaybackState: String? = null
     private var lastGroupInfo: GroupInfo? = null
 
-    // Merged controller (group-level) state from server/state deltas.
+    // Scheduled metadata (roles/metadata/v1.md): at most one update waiting
+    // for its timestamp. [metadataLock] orders it coming due on the timer
+    // scope against the receive thread replacing or discarding it.
+    private val metadataLock = Any()
+    private var pendingMetadata: Job? = null
+
+    // Controller (group-level) state from the latest server/state.
     private var currentControllerState: ControllerState? = null
 
     // Time sync manager (lazy initialized by subclass)
@@ -203,7 +208,7 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun onSyncOffsetApplied(offsetMs: Double, source: String)
 
     /**
-     * Called when the merged controller (group-level) state changes:
+     * Called when the controller (group-level) state changes:
      * supported_commands, group volume/mute, repeat, shuffle.
      * Default no-op for handlers that don't surface controller state.
      */
@@ -895,10 +900,9 @@ abstract class SendSpinProtocolHandler(
         _streamActive = false
         _currentStreamConfig = null
         resetArtworkStream()
-        lastMetadata = null
+        resetServerState()
         lastPlaybackState = null
         lastGroupInfo = null
-        currentControllerState = null
         activationSeen = false
         activeRoles = emptyList()
 
@@ -1002,11 +1006,13 @@ abstract class SendSpinProtocolHandler(
             }
 
             is ActivationOutcome.Accept -> {
+                val removedRoles = activeRoles - outcome.activeRoles.toSet()
                 activities = activate.activities
                 activeRoles = outcome.activeRoles
                 activationSeen = true
                 Log.i(tag, "server/activate accepted: activities=${activate.activities} " +
                     "roles=${outcome.activeRoles}")
+                if (removedRoles.isNotEmpty()) discardRemovedRoles(removedRoles)
                 onAdmissionStateChanged(
                     AdmissionState.from(activate.activities, outcome.activeRoles)
                 )
@@ -1055,6 +1061,35 @@ abstract class SendSpinProtocolHandler(
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * `messaging.md#server--client-serveractivate`, "When applying a
+     * `server/activate`, the client MUST": stop the output and clear the
+     * buffers of every removed stream role, and "immediately discard the
+     * current state and any pending scheduled update" of every removed role
+     * with a `server/state` object.
+     *
+     * [removed] is what dropped out of `active_roles`, which covers all three
+     * kinds of removal the spec lists: explicit, implicit (the connection is
+     * no longer playback-capable) and a replaced role version.
+     */
+    private fun discardRemovedRoles(removed: List<String>) {
+        Log.i(tag, "Roles removed by server/activate: $removed")
+        // The server owes a stream/end before removing a stream role, and ours
+        // leaves nothing playing, so these only act when that did not arrive.
+        if (SendSpinProtocol.Roles.PLAYER in removed && _streamActive) endPlayerStream()
+        if (SendSpinProtocol.Roles.ARTWORK in removed && artworkStreamActive) endArtworkStream()
+        if (SendSpinProtocol.Roles.METADATA in removed) {
+            synchronized(metadataLock) {
+                discardPendingMetadata()
+                onMetadataUpdate(TrackMetadata())
+            }
+        }
+        if (SendSpinProtocol.Roles.CONTROLLER in removed) {
+            currentControllerState = null
+            onControllerStateUpdate(ControllerState())
         }
     }
 
@@ -1527,62 +1562,86 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * `server/state` is a delta, so every field is merged into the cached role
-     * state rather than replacing it.
+     * `server/state`: "Every message MUST carry the full state of each role
+     * object it includes. Omitting a role object leaves that role's state
+     * unchanged and any pending scheduled update in place."
      *
-     * Before this merge existed, a delta carrying only `progress` arrived as a
-     * metadata object with empty title, artist and album, and blanked the Now
-     * Playing screen on every progress tick.
+     * So an included role object replaces that role's state outright. A field
+     * it does not carry is gone: a `metadata` object with only a `timestamp`
+     * is an empty track, and one without `progress` has no position.
      */
     protected fun handleServerState(payload: JsonObject?) {
-        val (metadataUpdate, state, controllerUpdate) = MessageParser.parseServerState(payload)
+        val (metadata, state, controller) = MessageParser.parseServerState(payload)
 
-        when (metadataUpdate) {
-            RoleUpdate.Absent -> Unit
-
-            RoleUpdate.Cleared -> {
-                // The role was dropped from active_roles; the UI must blank
-                // rather than keep showing a track the server no longer has.
-                lastMetadata = null
-                onMetadataCleared()
-            }
-
-            is RoleUpdate.Delta -> {
-                val merged = metadataUpdate.applyTo(lastMetadata)
-                lastMetadata = merged
-                // Fired even when the merged value is unchanged: progress
-                // extrapolation needs a fresh receive-time anchor on every
-                // message, not only on a change.
-                if (merged != null) onMetadataUpdate(merged)
-            }
-        }
+        if (metadata != null) scheduleMetadata(metadata)
 
         if (state != null && state != lastPlaybackState) {
             lastPlaybackState = state
             onPlaybackStateChanged(state)
         }
 
-        when (controllerUpdate) {
-            RoleUpdate.Absent -> Unit
+        if (controller != null && controller != currentControllerState) {
+            currentControllerState = controller
+            onControllerStateUpdate(controller)
+        }
+    }
 
-            RoleUpdate.Cleared -> {
-                currentControllerState = null
-                onControllerStateUpdate(ControllerState())
-            }
-
-            is RoleUpdate.Delta -> {
-                val merged = controllerUpdate.applyTo(currentControllerState)
-                if (merged != null && merged != currentControllerState) {
-                    currentControllerState = merged
-                    onControllerStateUpdate(merged)
+    /**
+     * roles/metadata/v1.md, "Scheduled metadata updates": "Clients keep a
+     * current state plus at most one pending update." The current state is
+     * whatever [onMetadataUpdate] last delivered.
+     *
+     * "A message whose `timestamp`, translated to the local clock via the
+     * time filter (current best estimate, no waiting for convergence), is
+     * still in the future becomes the pending update, replacing any held one,
+     * and is applied when that moment is reached. A message whose translated
+     * timestamp is in the past or present is applied immediately and discards
+     * any held pending update." Before the filter has any estimate there is
+     * nothing to translate with, so the update is applied at once, which the
+     * spec allows ("Clients MAY show the pending update early").
+     */
+    private fun scheduleMetadata(metadata: TrackMetadata) = synchronized(metadataLock) {
+        discardPendingMetadata()
+        val filter = getTimeFilter()
+        val timestamp = metadata.timestamp
+        val delayMicros = if (timestamp == null || !filter.isReady) {
+            0L
+        } else {
+            filter.serverToClient(timestamp) - System.nanoTime() / 1000
+        }
+        if (delayMicros <= 0) {
+            // Delivered even when nothing changed: progress extrapolation
+            // needs a fresh anchor on every message.
+            onMetadataUpdate(metadata)
+            return@synchronized
+        }
+        Log.d(tag, "Metadata pending for ${delayMicros / 1000}ms")
+        pendingMetadata = getCoroutineScope().launch {
+            delay(delayMicros / 1000)
+            // A cancel takes the same lock, so an update discarded while this
+            // was waiting for it is no longer active here.
+            synchronized(metadataLock) {
+                if (isActive) {
+                    pendingMetadata = null
+                    onMetadataUpdate(metadata)
                 }
             }
         }
     }
 
-    /** The server dropped the metadata role. Default: treat as an empty track. */
-    protected open fun onMetadataCleared() {
-        onMetadataUpdate(TrackMetadata())
+    private fun discardPendingMetadata() {
+        pendingMetadata?.cancel()
+        pendingMetadata = null
+    }
+
+    /**
+     * Forget the `server/state` roles, on a new connection or on leaving one,
+     * so a metadata update still pending cannot come due afterwards. Does not
+     * touch what is on display.
+     */
+    protected fun resetServerState() {
+        synchronized(metadataLock) { discardPendingMetadata() }
+        currentControllerState = null
     }
 
     protected fun handleServerCommand(payload: JsonObject?) {
@@ -1686,13 +1745,7 @@ abstract class SendSpinProtocolHandler(
                 SendSpinProtocol.isStreamRole(it, SendSpinProtocol.StreamRoles.ARTWORK)
             })
         ) {
-            // "On stream/end for the artwork role, clients MUST clear the
-            // current image and discard any pending image."
-            Log.i(tag, "Artwork stream ended - clearing artwork")
-            synchronized(artworkLock) {
-                resetArtworkStream()
-                onArtwork(0, ByteArray(0))
-            }
+            endArtworkStream()
         }
 
         if (roles != null && roles.none {
@@ -1704,9 +1757,26 @@ abstract class SendSpinProtocolHandler(
         }
 
         Log.i(tag, "Stream end - server terminated playback (roles=${roles ?: "all"})")
+        endPlayerStream()
+    }
+
+    /** Stop the player's output and clear its buffers; the stream is over. */
+    private fun endPlayerStream() {
         _streamActive = false
         _currentStreamConfig = null
         onStreamEnd()
+    }
+
+    /**
+     * "On stream/end for the artwork role, clients MUST clear the current
+     * image and discard any pending image."
+     */
+    private fun endArtworkStream() {
+        Log.i(tag, "Artwork stream ended - clearing artwork")
+        synchronized(artworkLock) {
+            resetArtworkStream()
+            onArtwork(0, ByteArray(0))
+        }
     }
 
     protected fun handleClientSyncOffset(payload: JsonObject?) {
