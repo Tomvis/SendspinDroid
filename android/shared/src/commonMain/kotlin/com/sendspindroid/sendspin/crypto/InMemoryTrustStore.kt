@@ -32,6 +32,13 @@ open class InMemoryTrustStore(
      */
     protected open fun onChanged(): Boolean = true
 
+    /**
+     * [onChanged], with a write that throws counted as a write that failed.
+     * An encrypted store can throw from the write itself; letting that escape
+     * would leave this list changed and the stored one not.
+     */
+    private fun persist(): Boolean = runCatching { onChanged() }.getOrDefault(false)
+
     override fun listRecords(): List<PskRecord> = records.toList()
 
     override fun findByPskId(pskId: String): PskRecord? =
@@ -49,7 +56,7 @@ open class InMemoryTrustStore(
         val before = records.toList()
         if (serverId != null) records.removeAll { it.serverId == serverId }
         records += record
-        if (!onChanged()) {
+        if (!persist()) {
             // Not stored, so not paired: put back what was held, or this
             // process would authenticate with a record the next one has lost.
             records.clear()
@@ -61,7 +68,7 @@ open class InMemoryTrustStore(
 
     override fun removeRecord(pskId: String): Boolean {
         val removed = records.removeAll { it.pskId == pskId }
-        if (removed) onChanged()
+        if (removed) persist()
         return removed
     }
 
@@ -70,7 +77,7 @@ open class InMemoryTrustStore(
         if (index < 0) return
         if (records[index].used) return  // idempotent; no needless write
         records[index] = records[index].withUsed(true)
-        onChanged()
+        persist()
     }
 
     override fun candidates(): List<Psk> =
