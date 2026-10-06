@@ -78,7 +78,6 @@ class DynamicPairingCodeOptInTest {
     }
 
     private fun hello(methods: List<MessageBuilder.PairMethodDescriptor>) = MessageBuilder.buildClientHello(
-        clientId = null,
         deviceName = "TestDevice",
         bufferCapacity = 1,
         manufacturer = "Test",

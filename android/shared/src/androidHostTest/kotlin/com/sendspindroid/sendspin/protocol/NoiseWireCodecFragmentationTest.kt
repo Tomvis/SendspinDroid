@@ -1,6 +1,7 @@
 package com.sendspindroid.sendspin.protocol
 
 import com.sendspindroid.sendspin.protocol.message.FragmentWriter
+import com.sendspindroid.sendspin.protocol.message.Fragmentation
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -26,17 +27,14 @@ class NoiseWireCodecFragmentationTest {
     fun aFragmentedJsonMessageIsReassembledIntoJson() {
         // orig_type 0 must come back out as Json, not as a Typed frame of type 0.
         val codec = plaintextCodec()
-        val json = """{"type":"server/state","payload":{}}"""
+        // Padded with spaces past the single-message limit, so it is still
+        // valid JSON and has to be fragmented.
+        val json = """{"type":"server/state","payload":{}}""" + " ".repeat(70_000)
         val frames = FragmentWriter.frames(
             SendSpinProtocol.BinaryType.JSON,
             json.encodeToByteArray(),
         )
-        // Force fragmentation regardless of size by feeding hand-built frames.
-        val big = FragmentWriter.frames(
-            SendSpinProtocol.BinaryType.JSON,
-            ByteArray(70_000) { 0x20 },  // spaces, so it is still valid UTF-8
-        )
-        assertTrue("precondition: should have fragmented", big.size > 1)
+        assertTrue("precondition: should have fragmented", frames.size > 1)
 
         var last: NoiseWireCodec.Decoded? = null
         for (frame in frames) last = codec.decode(frame)
@@ -75,19 +73,43 @@ class NoiseWireCodecFragmentationTest {
 
     @Test
     fun aMalformedFragmentSequenceIsAProtocolError() {
-        // fragment-end with nothing in flight. The caller closes the socket on
-        // this, so it must not be swallowed as an ignorable unknown frame.
+        // A last fragment with nothing in flight. The caller closes the socket
+        // on this, so it must not be swallowed as an ignorable unknown frame.
         val codec = plaintextCodec()
         val decoded = codec.decode(
-            byteArrayOf(SendSpinProtocol.BinaryType.FRAGMENT_END.toByte(), 0xA)
+            byteArrayOf(
+                SendSpinProtocol.BinaryType.FRAGMENT.toByte(),
+                Fragmentation.FLAG_LAST.toByte(),
+                0xA,
+            )
         )
         assertTrue(decoded is NoiseWireCodec.Decoded.ProtocolError)
     }
 
     @Test
+    fun theReservedTypesTwoAndThreeAreDeliveredAsUnknownTypes() {
+        // The pre-rc1 fragment IDs. Now reserved: they reach the caller as
+        // ordinary typed messages, which it ignores like any unknown ID, and
+        // they neither start nor disturb a reassembly.
+        val codec = plaintextCodec()
+        for (type in listOf(2, 3)) {
+            val decoded = codec.decode(byteArrayOf(type.toByte(), 0, 0xA))
+            assertTrue("type $type: got $decoded", decoded is NoiseWireCodec.Decoded.Typed)
+            assertEquals(type, (decoded as NoiseWireCodec.Decoded.Typed).type)
+        }
+    }
+
+    @Test
     fun aNonFragmentFrameArrivingMidSequenceIsAProtocolError() {
         val codec = plaintextCodec()
-        codec.decode(byteArrayOf(SendSpinProtocol.BinaryType.FRAGMENT_MORE.toByte(), 0, 0xA))
+        codec.decode(
+            byteArrayOf(
+                SendSpinProtocol.BinaryType.FRAGMENT.toByte(),
+                Fragmentation.FLAG_FIRST.toByte(),
+                0,
+                0xA,
+            )
+        )
         val decoded = codec.decode(
             byteArrayOf(SendSpinProtocol.BinaryType.AUDIO.toByte(), 1, 2, 3)
         )
@@ -107,12 +129,13 @@ class NoiseWireCodecFragmentationTest {
     }
 
     @Test
-    fun encodeNoLongerThrowsOnAnOversizePayload() {
-        // Before fragmentation landed this threw MessageTooLarge. It must now
-        // succeed, or artwork over 64 KB can never be sent.
-        val codec = plaintextCodec()
-        kotlinx.coroutines.runBlocking {
-            codec.encode(SendSpinProtocol.BinaryType.ARTWORK_BASE, ByteArray(300_000))
+    fun whatEncodeFragmentsDecodeReassembles() {
+        val payload = ByteArray(300_000) { (it % 253).toByte() }
+        val frames = kotlinx.coroutines.runBlocking {
+            plaintextCodec().encode(SendSpinProtocol.BinaryType.AUDIO, payload)
         }
+        val receiver = plaintextCodec()
+        val complete = frames.map { receiver.decode(it) }.last()
+        assertArrayEquals(payload, (complete as NoiseWireCodec.Decoded.Typed).body)
     }
 }

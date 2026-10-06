@@ -33,17 +33,28 @@ class RehandshakeDriverTest {
 
     private val clientStatic = hex("606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f")
     private val serverStaticPublic = hex("358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254")
-    private val priorH = hex("c67193e08139054878140bfcb63e2006de919f0d77951210f76789073f781385")
+    private val priorH = hex("1f1486e42c483083db088f6c6c7246b509245554f2a2cf941c5dea2de9fe25cb")
 
     /** The PSK the server is promoting the channel to. */
     private val newPsk = hex("b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0")
 
+    /** Message 1 referencing [newPsk] as a long-term PSK (`psk_category: lt`). */
     private val message1B64 = Base64Url.encode(
         hex(
             "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c" +
                 "dd9e7b6b8fa1b6c5c8cc1ef96a3059b5cff80039bba7a44cee3f0aba6535fe54" +
-                "5d1152fbbf44c65ed703e61a0705a2d583167bbb654a0593a7006bbcd9da3991" +
-                "3dc53c0cf5c6f0e52a"
+                "5d1152fbbf44c65ed703e61a0705a2d583167bbb654a0593f6514c69f1a8585a" +
+                "bd67c1d63e048ea10710f4ec526a5961849b6a7372e470f13e94cb5711ab36"
+        )
+    )
+
+    /** The same promotion referencing [newPsk] as the pairing PSK (`psk_category: pr`). */
+    private val message1PairingB64 = Base64Url.encode(
+        hex(
+            "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c" +
+                "dd9e7b6b8fa1b6c5c8cc1ef96a3059b5cff80039bba7a44cee3f0aba6535fe54" +
+                "5d1152fbbf44c65ed703e61a0705a2d583167bbb654a0593f6514c69f1a8585a" +
+                "bd67c1d63e048ea10710f4f0546a59b94c739c0ea977027bc1ad95db21751a"
         )
     )
 
@@ -57,7 +68,7 @@ class RehandshakeDriverTest {
         withServerId: String = serverId,
     ) = RehandshakeDriver(
         identity = identity(),
-        candidates = PskCandidateSet.of(candidates).getOrThrow(),
+        candidates = PskCandidateSet(candidates),
         serverId = withServerId,
         serverStaticKey = serverStaticPublic,
         suite = NoiseCipherSuite.CHACHA_POLY,
@@ -73,7 +84,7 @@ class RehandshakeDriverTest {
 
     @Test
     fun aValidRehandshakeProducesASignedReplyAndTheNewTransport() {
-        val outcome = driver(listOf(SentinelPsk.psk, pairingCandidate())).handle(message1B64)
+        val outcome = driver(listOf(SentinelPsk.psk, pairingCandidate())).handle(message1PairingB64)
         assertTrue("expected a Reply, got $outcome", outcome is RehandshakeDriver.Outcome.Reply)
         outcome as RehandshakeDriver.Outcome.Reply
 
@@ -92,7 +103,7 @@ class RehandshakeDriverTest {
     }
 
     @Test
-    fun promotingToALongTermRecordIsWhatRaisesTrustLevel() {
+    fun promotingToALongTermRecordMatchesTheRecord() {
         // The pairing case: the record was persisted moments ago and must be
         // visible to this selection.
         val outcome = driver(listOf(SentinelPsk.psk, recordCandidate(serverId))).handle(message1B64)
@@ -117,9 +128,24 @@ class RehandshakeDriverTest {
 
     @Test
     fun aPskIdMatchingNothingFails() {
+        // "The fallback applies only there: a miss during a re-handshake ...
+        // fail[s] the handshake as before."
         val outcome = driver(listOf(SentinelPsk.psk)).handle(message1B64)
         assertTrue(outcome is RehandshakeDriver.Outcome.Fail)
-        assertTrue((outcome as RehandshakeDriver.Outcome.Fail).reason.contains("matches none"))
+        assertTrue((outcome as RehandshakeDriver.Outcome.Fail).reason.contains("matches no"))
+    }
+
+    @Test
+    fun aPskHeldUnderAnotherCategoryIsAMiss() {
+        // The lookup is bound to psk_category. The client holds this PSK, but
+        // as its pairing PSK; a server naming it as a long-term record - or the
+        // reverse - must not match.
+        val asLongTerm = driver(listOf(SentinelPsk.psk, pairingCandidate())).handle(message1B64)
+        assertTrue("got $asLongTerm", asLongTerm is RehandshakeDriver.Outcome.Fail)
+
+        val asPairing = driver(listOf(SentinelPsk.psk, recordCandidate(serverId)))
+            .handle(message1PairingB64)
+        assertTrue("got $asPairing", asPairing is RehandshakeDriver.Outcome.Fail)
     }
 
     @Test
@@ -129,7 +155,7 @@ class RehandshakeDriverTest {
         val outcome = driver(
             listOf(SentinelPsk.psk, pairingCandidate()),
             prologue = ByteArray(32),
-        ).handle(message1B64)
+        ).handle(message1PairingB64)
         assertTrue(outcome is RehandshakeDriver.Outcome.Fail)
         assertTrue(
             (outcome as RehandshakeDriver.Outcome.Fail).reason.contains("message 1 rejected"),

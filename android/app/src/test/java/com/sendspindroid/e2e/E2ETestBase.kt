@@ -7,6 +7,7 @@ import com.sendspindroid.UserSettings
 import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
+import com.sendspindroid.sendspin.protocol.PlaintextCrypto
 import com.sendspindroid.sendspin.transport.SendSpinTransport
 import io.mockk.every
 import io.mockk.mockk
@@ -104,6 +105,8 @@ abstract class E2ETestBase {
      * 1. Sets the transport field
      * 2. Creates and registers a TransportEventListener
      * 3. Sets connection info
+     * 4. Installs the encrypted channel a completed Noise handshake would
+     *    have produced, over [PlaintextCrypto]
      */
     protected fun injectTransportAndConnect(
         serverAddress: String? = "192.168.1.100:8927",
@@ -136,10 +139,15 @@ abstract class E2ETestBase {
         constructor.isAccessible = true
         val listener = constructor.newInstance(client) as SendSpinTransport.Listener
         fakeTransport.setListener(listener)
+
+        // No fake server speaks Noise, so the handshake driver never reaches
+        // transport mode here. Install what it would have installed.
+        client.installEncryptedChannel(PlaintextCrypto)
     }
 
     /**
-     * Perform a full handshake: inject transport, simulate connect, exchange hello.
+     * Perform a full handshake: inject transport, simulate connect, exchange
+     * hello, and receive the initial activation.
      */
     protected fun connectAndHandshake(
         serverAddress: String? = "192.168.1.100:8927",

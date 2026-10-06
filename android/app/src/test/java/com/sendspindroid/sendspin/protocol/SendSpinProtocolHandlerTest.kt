@@ -1,9 +1,14 @@
 package com.sendspindroid.sendspin.protocol
 
 import com.sendspindroid.sendspin.SendspinTimeFilter
+import com.sendspindroid.sendspin.crypto.PskCategory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -450,7 +455,9 @@ class SendSpinProtocolHandlerTest {
  */
 class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
-    private val testScope = TestScope()
+    // Unconfined, so a send the handler launches has reached sendBinaryFrame
+    // by the time the call that triggered it returns.
+    private val testScope = CoroutineScope(UnconfinedTestDispatcher())
     private val timeFilter = SendspinTimeFilter()
     val sentMessages = mutableListOf<String>()
     val metadataUpdates = mutableListOf<TrackMetadata>()
@@ -469,21 +476,58 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     fun exposedTimeFilter(): SendspinTimeFilter = timeFilter
     fun lastMuteDecision(): Boolean = muteEvents.lastOrNull() ?: false
     fun evaluateAndPublishSyncStateForTest() = evaluateAndPublishSyncState()
+    fun sendGoodbyeForTest(reason: GoodbyeReason) = sendGoodbye(reason)
     fun resetSyncStateTrackingForTest() = resetSyncStateTracking()
 
     fun handleTextMessageForTest(text: String) {
         handleTextMessage(text)
     }
 
-    override fun sendTextMessage(text: String) {
-        sentMessages.add(text)
+    /** Deliver a frame the way the transport does: `[type][body]`, since the channel is plaintext. */
+    fun handleBinaryMessageForTest(frame: ByteArray) = handleBinaryMessage(frame)
+
+    var matchedCategory: PskCategory = PskCategory.SENTINEL
+    var unpairedAccess = true
+    var formats: List<MessageBuilder.FormatEntry> = emptyList()
+
+    /** What reached the wire and when the connection was closed, in order. */
+    val events = mutableListOf<String>()
+    val audioChunks = mutableListOf<Pair<Long, ByteArray>>()
+    val protocolFailures = mutableListOf<String>()
+
+    override fun matchedPskCategory(): PskCategory = matchedCategory
+
+    override fun isUnpairedAccessEnabled(): Boolean = unpairedAccess
+
+    override fun currentServerId(): String = "srv1"
+
+    override fun closeConnectionAfterFlush() {
+        events.add("close")
     }
 
-    /** Frames sent on the encrypted path, in order. */
-    val sentBinaryFrames = mutableListOf<ByteArray>()
+    override fun onProtocolFailure(reason: String) {
+        protocolFailures.add(reason)
+    }
+
+    /**
+     * Stands in for the connection's re-handshake: reply under the current
+     * keys, swap, then reset what a re-handshake invalidates. [matchedCategory]
+     * is whatever the test set before delivering the `noise/handshake`.
+     */
+    override fun onRehandshakeMessage(payload: JsonObject?) {
+        sendAndSwapKeys("""{"type":"noise/handshake","payload":{"data":"reply"}}""", PlaintextCrypto) {
+            resetForRehandshake()
+        }
+    }
+
+    init {
+        installEncryptedChannel(PlaintextCrypto)
+    }
 
     override fun sendBinaryFrame(bytes: ByteArray) {
-        sentBinaryFrames.add(bytes)
+        val text = bytes.jsonFrameText() ?: return
+        sentMessages.add(text)
+        events.add("send:" + Json.parseToJsonElement(text).jsonObject["type"]?.jsonPrimitive?.content)
     }
 
     override fun getCoroutineScope(): CoroutineScope = testScope
@@ -498,7 +542,7 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     override fun getManufacturer(): String = "TestManufacturer"
 
-    override fun getSupportedFormats(): List<MessageBuilder.FormatEntry> = emptyList()
+    override fun getSupportedFormats(): List<MessageBuilder.FormatEntry> = formats
 
     override fun getSoftwareVersion(): String = "test"
 
@@ -532,9 +576,15 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     override fun onStreamEnd() {}
 
-    override fun onAudioChunk(timestampMicros: Long, audioData: ByteArray) {}
+    override fun onAudioChunk(timestampMicros: Long, audioData: ByteArray) {
+        audioChunks.add(timestampMicros to audioData)
+    }
 
-    override fun onArtwork(channel: Int, payload: ByteArray) {}
+    val artworkDeliveries = mutableListOf<Int>()
+
+    override fun onArtwork(channel: Int, payload: ByteArray) {
+        artworkDeliveries.add(channel)
+    }
 
     override fun onSyncOffsetApplied(offsetMs: Double, source: String) {}
 

@@ -7,16 +7,15 @@ import com.sendspindroid.UserSettings
  * The trust store, persisted in `UserSettings`' sensitive preferences.
  *
  * Android-only because `androidx.security` is an `app/` dependency. All the
- * record and namespace logic is inherited from [InMemoryTrustStore]; this adds
+ * record logic is inherited from [InMemoryTrustStore]; this adds
  * exactly two things - load on construction, flush on change.
  *
  * Subclassing rather than wrapping is deliberate: a delegating wrapper would
  * have to redeclare every member of [TrustStore] purely to add a write, and the
  * one that got missed would drop records with no symptom until the next connect.
  *
- * @param pairingPskId the client's own Pairing PSK id once 2.2 (#203) provides
- *   one. It holds a place in the shared `psk_id` namespace even though it is
- *   never a record.
+ * @param pairingPskId the client's own Pairing PSK id, which no record may
+ *   reuse.
  */
 class EncryptedPrefsTrustStore(
     pairingPskId: String? = null,

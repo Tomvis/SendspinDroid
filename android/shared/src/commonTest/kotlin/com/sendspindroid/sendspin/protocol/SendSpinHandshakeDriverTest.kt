@@ -37,7 +37,7 @@ class SendSpinHandshakeDriverTest {
     }
 
     private val psk = Psk(hex(WireTestVectors.psk), PskCategory.LONG_TERM, WireTestVectors.serverId)
-    private val candidates = PskCandidateSet.of(listOf(psk)).getOrThrow()
+    private val candidates = PskCandidateSet(listOf(psk))
 
     private class Recorder {
         val sent = mutableListOf<String>()
@@ -171,13 +171,85 @@ class SendSpinHandshakeDriverTest {
         assertNull(r.ready)
     }
 
+    /** Run the handshake with [message1Frame] in place of the reference message 1. */
+    private fun failureFor(
+        message1Frame: String,
+        candidates: PskCandidateSet = this.candidates,
+    ): Recorder {
+        val r = Recorder()
+        val driver = SendSpinHandshakeDriver(
+            identity = ClientIdentity(hex(WireTestVectors.clientStaticPrivate)),
+            candidates = candidates,
+            onEvent = r::handle,
+            ephemeralOverrideForTest = { hex(WireTestVectors.clientEphemeralPrivate) },
+        )
+        driver.start()
+        driver.onCleartextFrame(WireTestVectors.serverInitFrame.encodeToByteArray())
+        driver.onCleartextFrame(message1Frame.encodeToByteArray())
+        assertEquals(SendSpinHandshakeDriver.Phase.Failed, driver.phase)
+        // A silent failure: nothing after our own client/init was sent.
+        assertEquals(1, r.sent.size, "must not reply to a refused message 1")
+        assertNull(r.ready)
+        return r
+    }
+
+    @Test
+    fun aMalformedInnerPayloadIsASilentFailure() {
+        // messaging.md: "A malformed inner handshake payload (not valid UTF-8
+        // JSON of the shape above, including a psk_category outside the three
+        // defined codes) is a silent failure and closes the WebSocket."
+        val malformed = mapOf(
+            "no psk_category" to WireTestVectors.noiseHandshake1NoCategoryFrame,
+            "psk_category outside lt/pr/sn" to WireTestVectors.noiseHandshake1UnknownCategoryFrame,
+            "no psk_id" to WireTestVectors.noiseHandshake1NoPskIdFrame,
+            "not JSON" to WireTestVectors.noiseHandshake1NotJsonFrame,
+            "invalid UTF-8" to WireTestVectors.noiseHandshake1InvalidUtf8Frame,
+        )
+        for ((what, frame) in malformed) {
+            val r = failureFor(frame)
+            assertEquals(
+                NoiseHandshakeException.Cause.PayloadNotJson,
+                r.failures.single().first,
+                "inner payload with $what",
+            )
+        }
+    }
+
+    @Test
+    fun aPskHeldUnderAnotherCategoryIsALookupMiss() {
+        // The transcript's PSK is a long-term record here. The same psk_id
+        // declared as the pairing PSK must not match it.
+        val r = failureFor(WireTestVectors.noiseHandshake1PairingCategoryFrame)
+        assertEquals(NoiseHandshakeException.Cause.PskLookupMiss, r.failures.single().first)
+
+        // And the reverse: held as the pairing PSK, declared long-term.
+        val asPairing = PskCandidateSet(listOf(Psk(hex(WireTestVectors.psk), PskCategory.PAIRING)))
+        val reverse = failureFor(WireTestVectors.noiseHandshake1Frame, asPairing)
+        assertEquals(NoiseHandshakeException.Cause.PskLookupMiss, reverse.failures.single().first)
+
+        // Held under the declared category, that same frame is accepted.
+        val accepted = Recorder()
+        val driver = SendSpinHandshakeDriver(
+            identity = ClientIdentity(hex(WireTestVectors.clientStaticPrivate)),
+            candidates = asPairing,
+            onEvent = accepted::handle,
+            ephemeralOverrideForTest = { hex(WireTestVectors.clientEphemeralPrivate) },
+        )
+        driver.start()
+        driver.onCleartextFrame(WireTestVectors.serverInitFrame.encodeToByteArray())
+        driver.onCleartextFrame(
+            WireTestVectors.noiseHandshake1PairingCategoryFrame.encodeToByteArray()
+        )
+        assertEquals(PskCategory.PAIRING, assertNotNull(accepted.ready).matchedPsk.category)
+    }
+
     @Test
     fun aRecordBoundToAnotherServerIsRejected() {
         val wrongBinding = Psk(hex(WireTestVectors.psk), PskCategory.LONG_TERM, "some-other-server")
         val r = Recorder()
         val driver = SendSpinHandshakeDriver(
             identity = ClientIdentity(hex(WireTestVectors.clientStaticPrivate)),
-            candidates = PskCandidateSet.of(listOf(wrongBinding)).getOrThrow(),
+            candidates = PskCandidateSet(listOf(wrongBinding)),
             onEvent = r::handle,
             ephemeralOverrideForTest = { hex(WireTestVectors.clientEphemeralPrivate) },
         )
@@ -230,9 +302,9 @@ class SendSpinHandshakeDriverTest {
     }
 
     @Test
-    fun aLegacyServerHelloReplyIsReportedAsLackingEncryption() {
+    fun aServerHelloReplyIsReportedAsLackingEncryption() {
         // A server predating mandatory encryption (spec #84) answers client/init
-        // with a legacy server/hello. Nothing is malformed - it is a well-formed
+        // with a server/hello. Nothing is malformed - it is a well-formed
         // message in an older dialect - and it is the only handshake failure the
         // user can act on, so it must be distinguishable from the crypto
         // failures for the app to say "upgrade your server" rather than

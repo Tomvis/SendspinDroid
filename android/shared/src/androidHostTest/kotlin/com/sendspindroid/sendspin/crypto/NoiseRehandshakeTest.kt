@@ -32,7 +32,7 @@ class NoiseRehandshakeTest {
 
     /** `h` from the initial handshake. The re-handshake's prologue, verbatim. */
     private val priorHandshakeHash =
-        hex("c67193e08139054878140bfcb63e2006de919f0d77951210f76789073f781385")
+        hex("1f1486e42c483083db088f6c6c7246b509245554f2a2cf941c5dea2de9fe25cb")
 
     /** The initial handshake's own prologue - the wrong answer, kept to prove it is wrong. */
     private val initialPrologue = "sendspin-rehandshake-initial-prologue-v1".encodeToByteArray()
@@ -45,15 +45,15 @@ class NoiseRehandshakeTest {
     private val message1 = hex(
         "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c" +
             "dd9e7b6b8fa1b6c5c8cc1ef96a3059b5cff80039bba7a44cee3f0aba6535fe54" +
-            "5d1152fbbf44c65ed703e61a0705a2d583167bbb654a0593a7006bbcd9da3991" +
-            "3dc53c0cf5c6f0e52a"
+            "5d1152fbbf44c65ed703e61a0705a2d583167bbb654a0593f6514c69f1a8585a" +
+            "bd67c1d63e048ea10710f4ec526a5961849b6a7372e470f13e94cb5711ab36"
     )
     private val expectedMessage2 = hex(
         "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a" +
-            "d16bef1e916c9d494334fe0e6769045dda6f"
+            "d16b6e879fea8b30416e49861249a228dde3"
     )
     private val expectedHandshakeHash =
-        hex("f7965fde8e621d2710bb578620d4a159829d4ad06de77c612fdd04b93a977228")
+        hex("5ed35be63f1d35325b1259041c5db9aa2dedf592f494b11d3f30502244bdaebe")
 
     private fun responder(prologue: ByteArray) = NoiseHandshake(
         suite = NoiseCipherSuite.CHACHA_POLY,
@@ -69,7 +69,7 @@ class NoiseRehandshakeTest {
 
         val payload = handshake.readMessage1(message1)
         assertEquals(
-            """{"psk_id": "6A-_lYjSwe_Zdvax32HHlWsJ_EDijylfWfnhN1VOsaY"}""",
+            """{"psk_id": "6A-_lYjSwe_Zdvax32HHlWsJ_EDijylfWfnhN1VOsaY", "psk_category": "lt"}""",
             payload.decodeToString(),
         )
 

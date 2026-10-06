@@ -9,7 +9,7 @@ import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -19,12 +19,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Regression tests for two device-acceptance-only defects in the dynamic
- * pairing flow (found against a live server, invisible to unit tests):
+ * Pairing alongside the rest of the connection, and the `pairing_index` tally.
  *
- * D1: `client/time` racing a pairing activation. The server rejects it as a
- * malformed `client/pair-auth` because it is sitting in `_receive_pairing`
- * waiting for that exact message.
+ * D1: pairing does not quiesce the connection. pairing.md, "Entering and
+ * leaving pairing": "Pairing can run alongside playback. A server/activate
+ * that adds 'pairing' to activities does not by itself affect active_roles,
+ * streams, or group membership." So the clock stays synchronized and
+ * client/state keeps being reported through a pairing activation. (Before
+ * 1.0.0-rc1 the two were mutually exclusive and this client stopped both.)
  *
  * D2: `pairing_index` (pairing.md line 335: "the number of pairing
  * server/activate messages received since the last Noise handshake") was
@@ -41,59 +43,68 @@ class DynamicPairingDeviceFixesTest {
             """{"type":"server/activate","payload":{"activities":[$activities],"pairing":{"method":"$method"}}}"""
         }
 
-    // ========== D1: time sync vs. pairing ==========
+    // ========== D1: pairing runs alongside playback ==========
+
+    private val playbackRoles = "\"active_roles\":[\"player@v1\"]"
 
     @Test
-    fun `a pairing activation stops time sync and sends no player state`() {
+    fun `a pairing activation keeps time sync running and still reports state`() {
         val handler = DeviceFixTestHandler()
         handler.matchedCategory = PskCategory.SENTINEL
 
-        // Non-pairing activation first: time sync running, state reported.
-        handler.handleTextMessageForTest(activateJson("\"playback\""))
-        assertTrue("time sync should be running before pairing", handler.timeSyncManagerForTest()!!.isRunning)
+        handler.handleTextMessageForTest(
+            """{"type":"server/activate","payload":{"activities":["playback"],$playbackRoles}}"""
+        )
+        assertTrue("time sync should be running", handler.timeSyncManagerForTest()!!.isRunning)
         assertTrue(
             "player state should have been sent",
             handler.sent.any { it.contains("\"type\":\"client/state\"") }
         )
         handler.sent.clear()
 
-        // Pairing activation: server is waiting for client/pair-finalize and
-        // nothing else - a client/time burst here is read as that message.
-        handler.handleTextMessageForTest(activateJson("\"pairing\"", "dynamic_pairing_code"))
+        // Pairing joins playback; active_roles is omitted and so persists.
+        handler.handleTextMessageForTest(activateJson("\"playback\",\"pairing\"", "dynamic_pairing_code"))
 
-        assertFalse(
-            "time sync must be stopped while pairing",
+        assertTrue(
+            "time sync must keep running while pairing",
             handler.timeSyncManagerForTest()!!.isRunning
         )
+        val state = handler.sent.single { it.contains("\"type\":\"client/state\"") }
         assertTrue(
-            "no player state should be sent while pairing",
-            handler.sent.none { it.contains("\"type\":\"client/state\"") }
+            "the player role is still active, so its state object is still reported",
+            state.contains("\"player\":{")
+        )
+        assertTrue(
+            "the pairing attempt starts alongside it",
+            handler.sent.any { it.contains("\"type\":\"client/pair-init\"") }
         )
     }
 
     @Test
-    fun `leaving pairing restores time sync and state even though it is not the first activation`() {
+    fun `a pairing-only activation on an idle connection reports state too`() {
         val handler = DeviceFixTestHandler()
         handler.matchedCategory = PskCategory.SENTINEL
 
-        // First activation: empty activities. Time sync starts.
-        handler.handleTextMessageForTest(activateJson(""))
-        assertTrue(handler.timeSyncManagerForTest()!!.isRunning)
-
-        // Second activation: enters pairing. Time sync stops.
+        // No roles were ever granted, so the state carries availability alone.
         handler.handleTextMessageForTest(activateJson("\"pairing\"", "dynamic_pairing_code"))
-        assertFalse(handler.timeSyncManagerForTest()!!.isRunning)
+
+        assertTrue(handler.timeSyncManagerForTest()!!.isRunning)
+        val state = handler.sent.single { it.contains("\"type\":\"client/state\"") }
+        assertFalse("no player object for an inactive role", state.contains("\"player\""))
+    }
+
+    @Test
+    fun `leaving pairing keeps time sync and state going`() {
+        val handler = DeviceFixTestHandler()
+        handler.matchedCategory = PskCategory.SENTINEL
+
+        handler.handleTextMessageForTest(activateJson(""))
+        handler.handleTextMessageForTest(activateJson("\"pairing\"", "dynamic_pairing_code"))
         handler.sent.clear()
 
-        // Third activation: leaves pairing again. This is NOT the first
-        // activation on the connection - the bug under test is a `first &&`
-        // condition that would leave time sync and state reporting dead here.
         handler.handleTextMessageForTest(activateJson("\"playback\""))
 
-        assertTrue(
-            "time sync must restart on a later non-pairing activation",
-            handler.timeSyncManagerForTest()!!.isRunning
-        )
+        assertTrue(handler.timeSyncManagerForTest()!!.isRunning)
         assertTrue(
             "player state must be reported again",
             handler.sent.any { it.contains("\"type\":\"client/state\"") }
@@ -174,7 +185,7 @@ class DeviceFixTestHandler : SendSpinProtocolHandler("DeviceFixTest") {
     var matchedCategory: PskCategory = PskCategory.SENTINEL
     var offeredMethods: Set<String> = setOf("pairing_psk", "dynamic_pairing_code")
 
-    val scope = TestScope()
+    val scope = CoroutineScope(UnconfinedTestDispatcher())
     val sent = mutableListOf<String>()
 
     private val timeFilter = SendspinTimeFilter()
@@ -218,11 +229,13 @@ class DeviceFixTestHandler : SendSpinProtocolHandler("DeviceFixTest") {
 
     override fun closeConnectionAfterFlush() = Unit
 
-    override fun sendTextMessage(text: String) {
-        sent.add(text)
+    init {
+        installEncryptedChannel(PlaintextCrypto)
     }
 
-    override fun sendBinaryFrame(bytes: ByteArray) = Unit
+    override fun sendBinaryFrame(bytes: ByteArray) {
+        bytes.jsonFrameText()?.let { sent.add(it) }
+    }
 
     override fun getCoroutineScope(): CoroutineScope = scope
 

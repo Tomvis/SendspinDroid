@@ -181,7 +181,6 @@ fun main(argv: Array<String>) {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             webSocket.send(
                 MessageBuilder.buildClientHello(
-                    clientId = clientId,
                     deviceName = clientName,
                     bufferCapacity = 2_000_000,
                     manufacturer = "SendSpinDroid",
@@ -223,7 +222,11 @@ fun main(argv: Array<String>) {
         }
 
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-            val message = BinaryMessageParser.parse(bytes.toByteArray()) ?: return
+            val raw = bytes.toByteArray()
+            if (raw.isEmpty()) return
+            val message = BinaryMessageParser.parse(
+                raw[0].toInt() and 0xFF, raw.copyOfRange(1, raw.size)
+            ) ?: return
             if (message is BinaryMessageParser.BinaryMessage.Audio) {
                 val config = streamConfig
                 if (config == null) {

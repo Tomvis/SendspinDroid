@@ -204,8 +204,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         UserSettings.setPreferredCodec(codec)
         _preferredCodec.value = codec
 
-        // Tell PlaybackService so a live session can switch via
-        // stream/request-format instead of waiting for the next connect.
+        // Tell PlaybackService so a live session can report the new format
+        // preference instead of waiting for the next connect.
         val intent = Intent(ACTION_PREFERRED_CODEC_CHANGED).apply {
             putExtra(EXTRA_PREFERRED_CODEC, codec)
         }

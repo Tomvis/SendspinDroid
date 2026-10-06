@@ -46,24 +46,12 @@ class MessageParserTest {
     // --- parseServerHello ---
 
     @Test
-    fun parseServerHello_validPayload_returnsResult() {
+    fun parseServerHello_returnsTheServerName() {
         val payload = buildJsonObject {
             put("name", "TestServer")
-            put("server_id", "abc-123")
-            put("connection_reason", "user_request")
-            put("active_roles", buildJsonArray {
-                add(JsonPrimitive("player@v1"))
-                add(JsonPrimitive("controller@v1"))
-            })
+            put("languages", buildJsonArray { add(JsonPrimitive("en")) })
         }
-        val result = MessageParser.parseServerHello(payload, "default")
-
-        assertNotNull(result)
-        assertEquals("TestServer", result!!.serverName)
-        assertEquals("abc-123", result.serverId)
-        assertEquals("user_request", result.connectionReason)
-        assertEquals(2, result.activeRoles.size)
-        assertEquals("player@v1", result.activeRoles[0])
+        assertEquals("TestServer", MessageParser.parseServerHello(payload, "default"))
     }
 
     @Test
@@ -72,15 +60,8 @@ class MessageParserTest {
     }
 
     @Test
-    fun parseServerHello_missingOptionalFields_usesDefaults() {
-        val payload = buildJsonObject { } // empty
-        val result = MessageParser.parseServerHello(payload, "MyDefault")
-
-        assertNotNull(result)
-        assertEquals("MyDefault", result!!.serverName)
-        assertEquals("", result.serverId)
-        assertEquals("discovery", result.connectionReason)
-        assertTrue(result.activeRoles.isEmpty())
+    fun parseServerHello_missingName_usesDefault() {
+        assertEquals("MyDefault", MessageParser.parseServerHello(buildJsonObject { }, "MyDefault"))
     }
 
     // --- parseServerTime ---

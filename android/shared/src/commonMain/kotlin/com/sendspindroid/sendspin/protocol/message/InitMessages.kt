@@ -1,11 +1,14 @@
 package com.sendspindroid.sendspin.protocol.message
 
 import com.sendspindroid.sendspin.crypto.Base64Url
+import com.sendspindroid.sendspin.crypto.PskCategory
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
@@ -76,6 +79,26 @@ object InitMessages {
     }
 
     /**
+     * Parse the payload carried inside Noise message 1, in the initial
+     * handshake and in a re-handshake alike.
+     *
+     * @return null for "a malformed inner handshake payload (not valid UTF-8
+     *   JSON of the shape above, including a `psk_category` outside the three
+     *   defined codes)", which is a silent failure: the caller closes the
+     *   socket and sends nothing.
+     */
+    fun parseNoiseMessage1Payload(payload: ByteArray): NoiseMessage1Payload? = try {
+        val obj = Json.parseToJsonElement(payload.decodeToString(throwOnInvalidSequence = true))
+            .jsonObject
+        val pskId = obj["psk_id"]?.jsonPrimitive?.takeIf { it.isString }?.content
+        val category = obj["psk_category"]?.jsonPrimitive?.takeIf { it.isString }?.content
+            ?.let { PskCategory.fromWire(it) }
+        if (pskId == null || category == null) null else NoiseMessage1Payload(pskId, category)
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
      * Decode a 43-character base64url identity key.
      *
      * `connection.md#identities`: "The `client_id` and `server_id` fields are
@@ -90,6 +113,9 @@ object InitMessages {
 
     const val KEY_B64_LENGTH = 43
 }
+
+/** The PSK the server referenced in Noise message 1, and the category it uses it as. */
+data class NoiseMessage1Payload(val pskId: String, val pskCategory: PskCategory)
 
 /** Parsed `server/init`. */
 data class ServerInit(

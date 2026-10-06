@@ -128,12 +128,14 @@ class InMemoryTrustStoreTest {
     }
 
     @Test
-    fun candidatesFormAValidCandidateSet() {
-        // The namespace guarantee the store makes must be strong enough that
-        // PskCandidateSet.of never rejects what the store produces.
+    fun candidatesAreSelectableByCategory() {
         val store = InMemoryTrustStore()
         store.addRecord(psk(1), "server-a")
         store.addRecord(psk(2), "server-b")
-        assertTrue(PskCandidateSet.of(store.candidates()).isSuccess)
+        val set = PskCandidateSet(store.candidates())
+        assertTrue(
+            set.select(PskId.derive(psk(2)), PskCategory.LONG_TERM, "server-b")
+                is PskCandidateSet.Selection.Matched
+        )
     }
 }

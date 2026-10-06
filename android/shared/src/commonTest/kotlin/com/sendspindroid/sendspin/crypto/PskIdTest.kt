@@ -131,7 +131,7 @@ class PskCandidateSetTest {
     @Test
     fun sentinelOnlyResolvesThePublishedId() {
         val set = PskCandidateSet.sentinelOnly()
-        val matched = set.resolve(SentinelPsk.EXPECTED_PSK_ID)
+        val matched = set.resolve(SentinelPsk.EXPECTED_PSK_ID, PskCategory.SENTINEL)
         assertNotNull(matched)
         assertEquals(PskCategory.SENTINEL, matched.category)
     }
@@ -139,63 +139,37 @@ class PskCandidateSetTest {
     @Test
     fun resolveReturnsNullOnAMissRatherThanThrowing() {
         // A miss is the caller's decision to escalate, not this layer's.
-        assertNull(PskCandidateSet.sentinelOnly().resolve("nope"))
-        assertNull(PskCandidateSet.sentinelOnly().resolve(""))
+        assertNull(PskCandidateSet.sentinelOnly().resolve("nope", PskCategory.SENTINEL))
+        assertNull(PskCandidateSet.sentinelOnly().resolve("", PskCategory.SENTINEL))
     }
 
     @Test
-    fun constructionRejectsADuplicatePskIdAcrossCategories() {
-        // The single-namespace rule: one wire psk_id must not map to two trust
-        // levels. Same bytes registered as a record and as the Pairing PSK.
-        val result = PskCandidateSet.of(
-            listOf(
-                psk(9, PskCategory.LONG_TERM, "server-a"),
-                psk(9, PskCategory.PAIRING),
-            )
-        )
-        assertTrue(result.isFailure)
-        assertTrue(
-            result.exceptionOrNull()!!.message!!.contains("namespace"),
-            "the error should explain why, not just that it failed",
-        )
+    fun resolveIsBoundToTheDeclaredCategory() {
+        // connection.md#pre-shared-key: the client compares psk_id against
+        // "each candidate PSK of the declared psk_category". The same bytes
+        // held as a record and as the pairing PSK are two candidates, and the
+        // category decides which one a handshake matches.
+        val record = psk(9, PskCategory.LONG_TERM, "server-a")
+        val pairing = psk(9, PskCategory.PAIRING)
+        val set = PskCandidateSet(listOf(record, pairing, SentinelPsk.psk))
+
+        assertEquals(PskCategory.LONG_TERM, set.resolve(record.pskId, PskCategory.LONG_TERM)!!.category)
+        assertEquals(PskCategory.PAIRING, set.resolve(record.pskId, PskCategory.PAIRING)!!.category)
+        assertNull(set.resolve(record.pskId, PskCategory.SENTINEL))
+        assertNull(set.resolve(SentinelPsk.EXPECTED_PSK_ID, PskCategory.LONG_TERM))
     }
 
     @Test
-    fun constructionAcceptsDistinctCandidates() {
-        val result = PskCandidateSet.of(
-            listOf(
-                psk(1, PskCategory.LONG_TERM, "server-a"),
-                psk(2, PskCategory.PAIRING),
-                SentinelPsk.psk,
-            )
-        )
-        assertTrue(result.isSuccess)
-        assertEquals(3, result.getOrThrow().all.size)
-    }
-
-    @Test
-    fun resolveHonoursOrderingForDistinctIds() {
-        val record = psk(1, PskCategory.LONG_TERM, "server-a")
-        val set = PskCandidateSet.of(listOf(record, SentinelPsk.psk)).getOrThrow()
-        assertEquals(PskCategory.LONG_TERM, set.resolve(record.pskId)!!.category)
-        assertEquals(PskCategory.SENTINEL, set.resolve(SentinelPsk.EXPECTED_PSK_ID)!!.category)
-    }
-
-    @Test
-    fun serverBindingPassesForAMatchingRecordAndFailsOtherwise() {
-        val set = PskCandidateSet.sentinelOnly()
-        val bound = psk(1, PskCategory.LONG_TERM, "server-a")
-        assertTrue(set.verifyServerBinding(bound, "server-a"))
-        assertTrue(!set.verifyServerBinding(bound, "server-b"))
-    }
-
-    @Test
-    fun serverBindingAlwaysPassesForAnUnboundCandidate() {
-        // The Sentinel and the Pairing PSK are not bound to any server, so the
-        // check must not reject them just because server_id differs.
-        val set = PskCandidateSet.sentinelOnly()
-        assertTrue(set.verifyServerBinding(SentinelPsk.psk, "anything"))
-        assertTrue(set.verifyServerBinding(psk(2, PskCategory.PAIRING), "anything"))
+    fun categoryWireCodesAreTheThreeTheSpecDefines() {
+        assertEquals("lt", PskCategory.LONG_TERM.wire)
+        assertEquals("pr", PskCategory.PAIRING.wire)
+        assertEquals("sn", PskCategory.SENTINEL.wire)
+        for (category in PskCategory.entries) {
+            assertEquals(category, PskCategory.fromWire(category.wire))
+        }
+        assertNull(PskCategory.fromWire("sentinel"))
+        assertNull(PskCategory.fromWire("LT"))
+        assertNull(PskCategory.fromWire(""))
     }
 }
 

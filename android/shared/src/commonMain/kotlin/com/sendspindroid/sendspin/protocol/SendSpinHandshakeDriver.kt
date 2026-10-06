@@ -136,9 +136,9 @@ class SendSpinHandshakeDriver(
         val envelope = parseEnvelope(raw) ?: return
         if (envelope.first != SendSpinProtocol.MessageType.SERVER_INIT) {
             // A server that predates mandatory encryption answers client/init
-            // with a legacy server/hello rather than server/init. That is the
-            // one failure here a user can do something about, so it gets its
-            // own cause instead of being folded into MalformedMessage.
+            // with something other than server/init. That is the one failure
+            // here a user can do something about, so it gets its own cause
+            // instead of being folded into MalformedMessage.
             return fail(
                 NoiseHandshakeException.Cause.ServerLacksEncryption,
                 "expected server/init, got ${envelope.first}",
@@ -201,11 +201,13 @@ class SendSpinHandshakeDriver(
         }
 
         // The payload decrypts WITHOUT a PSK - that is the point of psk2 - and
-        // carries the psk_id telling us which one to mix for message 2.
-        val pskId = parsePskId(payload) ?: return fail(
+        // carries the psk_id and psk_category telling us which one to mix for
+        // message 2.
+        val referenced = InitMessages.parseNoiseMessage1Payload(payload) ?: return fail(
             NoiseHandshakeException.Cause.PayloadNotJson,
-            "message 1 payload is not {\"psk_id\": ...}",
+            "message 1 payload is not {\"psk_id\": ..., \"psk_category\": lt|pr|sn}",
         )
+        val pskId = referenced.pskId
         val init = serverInit ?: return fail(
             NoiseHandshakeException.Cause.WrongPhase, "no server/init retained"
         )
@@ -213,12 +215,14 @@ class SendSpinHandshakeDriver(
         // or run in the wrong order. Both failures close the socket in silence,
         // so this detail string is the only diagnostic that will ever exist -
         // hence spelling out which of the two happened, and the candidate count.
-        val matched = when (val selection = candidates.select(pskId, init.serverId)) {
+        val matched = when (
+            val selection = candidates.select(pskId, referenced.pskCategory, init.serverId)
+        ) {
             is PskCandidateSet.Selection.Matched -> selection.candidate
 
             PskCandidateSet.Selection.NoMatch -> return fail(
                 NoiseHandshakeException.Cause.PskLookupMiss,
-                "no candidate PSK matches psk_id $pskId " +
+                "no ${referenced.pskCategory} candidate PSK matches psk_id $pskId " +
                     "(${candidates.all.size} candidates offered)",
             )
 
@@ -261,13 +265,6 @@ class SendSpinHandshakeDriver(
             return null
         }
         return type to (obj["payload"] as? JsonObject)
-    }
-
-    private fun parsePskId(payload: ByteArray): String? = try {
-        json.parseToJsonElement(payload.decodeToString())
-            .jsonObject["psk_id"]?.jsonPrimitive?.contentOrNull
-    } catch (_: Exception) {
-        null
     }
 
     private fun fail(reason: NoiseHandshakeException.Cause, detail: String) {

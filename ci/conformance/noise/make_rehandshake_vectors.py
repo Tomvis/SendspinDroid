@@ -61,8 +61,11 @@ def psk_id(psk: bytes) -> str:
 # Real derived ids, not placeholders: the client selects its PSK by matching
 # this value, so a placeholder would make the vector unusable for any test that
 # exercises selection.
-MSG1_PAYLOAD_1 = json.dumps({"psk_id": psk_id(PSK_1)}).encode()
-MSG1_PAYLOAD_2 = json.dumps({"psk_id": psk_id(PSK_2)}).encode()
+MSG1_PAYLOAD_1 = json.dumps({"psk_id": psk_id(PSK_1), "psk_category": "sn"}).encode()
+MSG1_PAYLOAD_2 = json.dumps({"psk_id": psk_id(PSK_2), "psk_category": "lt"}).encode()
+# The same promotion with PSK_2 referenced as the client's pairing PSK: the
+# lookup is category-bound, so this is a different handshake to the client.
+MSG1_PAYLOAD_2_PAIRING = json.dumps({"psk_id": psk_id(PSK_2), "psk_category": "pr"}).encode()
 MSG2_PAYLOAD = b"{}"
 
 
@@ -128,6 +131,10 @@ def main() -> int:
     # Handshake 2: prologue is the RAW 32 bytes of the prior h.
     second = run(prior_h, PSK_2, SERVER_EPHEMERAL_2, CLIENT_EPHEMERAL_2, MSG1_PAYLOAD_2)
 
+    second_pairing = run(
+        prior_h, PSK_2, SERVER_EPHEMERAL_2, CLIENT_EPHEMERAL_2, MSG1_PAYLOAD_2_PAIRING,
+    )
+
     # The chained case: a third handshake's prologue is the second's h, proving
     # the rule composes rather than being special-cased to "the first one".
     third = run(
@@ -188,6 +195,7 @@ def main() -> int:
         "client_static_public": x25519_pub(CLIENT_STATIC).hex(),
         "initial": first,
         "rehandshake": second,
+        "rehandshake_pairing": second_pairing,
         "chained": third,
         "wrong_prologue_message_2": mismatched["message_2"],
         "wrong_prologue_handshake_hash": mismatched["handshake_hash"],
