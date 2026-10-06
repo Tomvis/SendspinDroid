@@ -429,10 +429,8 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Public hook for code outside the protocol handler (e.g.
-     * [OutputLatencyEstimator] via [SyncAudioPlayer]) to push a fresh
-     * `client/state` to the server, for example after auto-measured
-     * `static_delay_ms` converges.
+     * Public hook for code outside the protocol handler to push a fresh
+     * `client/state` to the server.
      */
     fun sendClientStateSnapshot() {
         if (!handshakeComplete) return

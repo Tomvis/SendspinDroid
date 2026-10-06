@@ -260,7 +260,6 @@ class SyncAudioPlayer(
     private val channels: Int = SendSpinProtocol.AudioFormat.CHANNELS,
     private val bitDepth: Int = SendSpinProtocol.AudioFormat.BIT_DEPTH,
     private val maxQueueSamples: Long = 0,  // 0 = unlimited; >0 caps queue to this many samples
-    private val requestClientStateSnapshot: () -> Unit = {},
     // Injectable monotonic clock for testability; production default is System.nanoTime().
     private val nowNs: () -> Long = { System.nanoTime() },
     // Injectable audio sink factory for testability; production default wraps AudioTrack.
@@ -389,12 +388,6 @@ class SyncAudioPlayer(
 
     // Flag to track if release() has been called
     private val isReleased = AtomicBoolean(false)
-
-    // Output latency estimator: measures hardware write-to-DAC delay during
-    // the pre-playback window and writes the result to timeFilter before PLAYING.
-    private val latencyEstimator = com.sendspindroid.sendspin.latency.OutputLatencyEstimator(
-        nowNs = nowNs,
-    )
 
     // Audio output
     private var audioSink: AudioSink? = null
@@ -594,30 +587,6 @@ class SyncAudioPlayer(
             if (muted) audioSink?.setVolume(0f)
 
             AppLog.Audio.i("AudioTrack initialized: ${sampleRate}Hz, ${channels}ch, ${bitDepth}bit, buffer=${bufferSize}bytes")
-
-            // Start latency measurement. The estimator collects write/DAC-timestamp
-            // pairs during the pre-playback window and fires the callback once it
-            // converges (20 samples) or times out (2 s). The WAITING_FOR_START gate
-            // (Task 13) holds until the result arrives.
-            latencyEstimator.start { result ->
-                when (result) {
-                    is com.sendspindroid.sendspin.latency.OutputLatencyEstimator.Result.Converged -> {
-                        timeFilter.setAutoMeasuredDelayMicros(
-                            result.latencyMicros,
-                            com.sendspindroid.sendspin.latency.StaticDelaySource.AUTO,
-                        )
-                        AppLog.Audio.i("[delay-cal] converged: ${result.latencyMicros}us from ${result.sampleCount} samples")
-                    }
-                    is com.sendspindroid.sendspin.latency.OutputLatencyEstimator.Result.TimedOut -> {
-                        timeFilter.setAutoMeasuredDelayMicros(
-                            0L,
-                            com.sendspindroid.sendspin.latency.StaticDelaySource.NONE,
-                        )
-                        AppLog.Audio.w("[delay-cal] timed out with ${result.sampleCount} samples; falling back to 0")
-                    }
-                }
-                requestClientStateSnapshot()
-            }
         } catch (e: Exception) {
             AppLog.Audio.e("Failed to create AudioTrack", e)
         }
@@ -1060,9 +1029,6 @@ class SyncAudioPlayer(
         // Phase 3: Re-acquire lock for final resource cleanup
         stateLock.withLock {
             isFlushPending.set(false)  // Clear any pending flush since we're releasing
-            // Cancel any in-flight latency measurement before releasing the track.
-            latencyEstimator.cancel()
-
             // Release AudioTrack
             try {
                 audioSink?.stop()
@@ -1499,26 +1465,6 @@ class SyncAudioPlayer(
      * @return true if we should continue waiting, false if ready to play
      */
     private fun handleStartGatingDacAware(track: AudioSink): Boolean {
-        // Wind the estimator's timeout clock before checking its status. Once
-        // dacTimestampsStable flips to true, the WAITING_FOR_START branch of
-        // the main loop stops calling preCalibrateDacTiming() -- which was the
-        // only other path that ticked the estimator. Without this call, an
-        // estimator that hasn't accepted 20 samples before DAC stabilises
-        // stays in Measuring indefinitely, and the status check below holds
-        // us in WAITING_FOR_START forever. On-device that surfaces as
-        // MediaSession BUFFERING with a growing chunk queue and no audio.
-        latencyEstimator.tick()
-
-
-        // Measurement-complete clause: don't transition to PLAYING until
-        // the latency estimator has converged or timed out. If we don't
-        // wait here, an unusually-early server-scheduled start could make
-        // us enter PLAYING with staticDelay=0, then change it mid-stream
-        // once measurement finishes -- causing a one-time sync jump / click.
-        if (latencyEstimator.status == com.sendspindroid.sendspin.latency.OutputLatencyEstimator.Status.Measuring) {
-            return true  // keep waiting
-        }
-
         val nowMicros = nowNs() / 1000
         val headChunk = chunkQueue.peek() ?: return true  // No chunks yet, keep waiting
 
@@ -1733,7 +1679,6 @@ class SyncAudioPlayer(
 
         // Write pre-allocated silence (10ms = 480 frames at 48kHz)
         val silenceBytes = silenceBuffer.size
-        val silenceWriteTimeNs = nowNs()
         val written = track.write(silenceBuffer, 0, silenceBytes)
         if (written <= 0) return
 
@@ -1743,17 +1688,11 @@ class SyncAudioPlayer(
         val framesWritten = written / bytesPerFrame
         totalFramesWritten.addAndGet(framesWritten.toLong())
 
-        // Record the silence write so the latency estimator can pair it with
-        // the subsequent getTimestamp() report for this same batch of frames.
-        latencyEstimator.recordWrite(totalFramesWritten.get(), silenceWriteTimeNs)
-
         // Try to get DAC timestamp for stability tracking
         val ts = track.getTimestamp()
         if (ts != null) {
             // Only count usable timestamps (DAC has started, track is running)
             if (dacTimeOfNextWriteUs(track) != null) {
-                latencyEstimator.recordDacTimestamp(ts.framePosition, ts.nanoTime)
-
                 // Track consecutive valid reads for DAC-aware start gating
                 consecutiveValidTimestamps++
                 if (consecutiveValidTimestamps >= TIMESTAMP_STABLE_READS && !dacTimestampsStable) {
@@ -1768,7 +1707,6 @@ class SyncAudioPlayer(
             // getTimestamp() failed - reset stability counter
             consecutiveValidTimestamps = 0
         }
-        latencyEstimator.tick()
     }
 
     /**
@@ -1788,10 +1726,8 @@ class SyncAudioPlayer(
         // 10ms per loop iteration is slightly less than real time, so the track
         // would drain and sit in permanent underrun. Without a timestamp
         // (pendingUs == 0) the depth is unknown, so write the one block only.
-        val keepAliveWriteTimeNs = nowNs()
         val deficitUs = if (pendingUs > 0) SILENCE_KEEPALIVE_THRESHOLD_US - pendingUs else 0L
         writeSilence(track, (deficitUs * sampleRate) / 1_000_000 + silenceFrameCount)
-        latencyEstimator.recordWrite(totalFramesWritten.get(), keepAliveWriteTimeNs)
     }
 
     /**
@@ -2108,7 +2044,6 @@ class SyncAudioPlayer(
         AppLog.Audio.w(
             "WATCHDOG: state=$state stuck for ${stuckUs / 1000}ms, " +
                 "buffered=${bufferedMs}ms, chunks=${chunkQueue.size}, " +
-                "estimatorStatus=${latencyEstimator.status}, " +
                 "dacTimestampsStable=$dacTimestampsStable"
         )
     }
@@ -2173,17 +2108,11 @@ class SyncAudioPlayer(
         snapDropFrames -= skipFrames
         framesDropped += skipFrames
 
-        val writeTimeNs = nowNs()
         val written = writeWithCorrection(track, chunk.pcmData, skipFrames * bytesPerFrame)
 
         // Update frame tracking
         val framesWritten = written / bytesPerFrame
         totalFramesWritten.addAndGet(framesWritten.toLong())
-
-        // Feed the latency estimator with the cumulative write position and wall time.
-        if (written > 0) {
-            latencyEstimator.recordWrite(totalFramesWritten.get(), writeTimeNs)
-        }
 
         // Update server timeline cursor - tracks input frames CONSUMED (read side).
         // Initialize from chunk's server timestamp on first chunk, then advance
