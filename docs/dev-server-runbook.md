@@ -171,6 +171,13 @@ Sentinel-keyed connection to the pairing PSK. The tool checks that no hello was
 repeated and that `server/activate` followed, then declines the pairing with
 `pair/abort`.
 
+`--offer-seek SEEK_MAX_MS` makes the server offer `seek` (up to that position)
+and `seek_relative` to the first controller, and log a `controller event:` line
+for every command it accepts. Add `--seek` to the client: once the controller
+state offers both, it sends one of each, built by the app's
+`MessageBuilder.buildCommand`. The server log must then show a
+`ControllerSeekEvent` and a `ControllerSeekRelativeEvent`.
+
 ### Pairing without an operator
 
 With `--pair` the tool runs the pairing instead of declining it, through the

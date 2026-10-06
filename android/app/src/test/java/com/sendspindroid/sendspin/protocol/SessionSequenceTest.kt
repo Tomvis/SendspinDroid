@@ -241,6 +241,9 @@ class SessionSequenceTest {
         assertEquals(listOf("client/state"), sentTypes())
         assertTrue(handler.sentMessages.single().contains("\"volume\":50"))
 
+        handler.handleTextMessageForTest(
+            """{"type":"server/state","payload":{"controller":{"supported_commands":["play"]}}}"""
+        )
         handler.sendCommand("play")
         assertEquals(listOf("client/state", "client/command"), sentTypes())
     }

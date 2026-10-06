@@ -111,6 +111,7 @@ class SendSpinHandshakeDriverTest {
         assertEquals(WireTestVectors.handshakeHash, ready.transport.handshakeHash.hex())
         assertEquals(WireTestVectors.serverId, ready.serverInit.serverId)
         assertEquals(WireTestVectors.pskId, ready.matchedPsk.pskId)
+        assertNull(ready.lookupMiss)
     }
 
     @Test
@@ -154,21 +155,53 @@ class SendSpinHandshakeDriverTest {
         assertEquals(WireTestVectors.appFrameClientToServer, outbound[0].hex())
     }
 
-    @Test
-    fun anUnknownPskIdFailsAsALookupMiss() {
+    /** Run the reference handshake holding [candidates] instead of the transcript's PSK. */
+    private fun handshakeWith(
+        candidates: PskCandidateSet,
+        message1Frame: String = WireTestVectors.noiseHandshake1Frame,
+    ): Recorder {
         val r = Recorder()
         val driver = SendSpinHandshakeDriver(
             identity = ClientIdentity(hex(WireTestVectors.clientStaticPrivate)),
-            // Sentinel only: the transcript's PSK is not a candidate.
-            candidates = PskCandidateSet.sentinelOnly(),
+            candidates = candidates,
             onEvent = r::handle,
             ephemeralOverrideForTest = { hex(WireTestVectors.clientEphemeralPrivate) },
         )
         driver.start()
         driver.onCleartextFrame(WireTestVectors.serverInitFrame.encodeToByteArray())
-        driver.onCleartextFrame(WireTestVectors.noiseHandshake1Frame.encodeToByteArray())
-        assertEquals(NoiseHandshakeException.Cause.PskLookupMiss, r.failures.single().first)
-        assertNull(r.ready)
+        driver.onCleartextFrame(message1Frame.encodeToByteArray())
+        return r
+    }
+
+    @Test
+    fun aLookupMissCompletesTheHandshakeWithTheSentinel() {
+        // connection.md, Sentinel Fallback: "On a lookup miss in the initial
+        // handshake the client completes the second handshake message with
+        // the Sentinel PSK instead of failing."
+        val lostRecord = handshakeWith(PskCandidateSet.sentinelOnly())
+
+        assertTrue(lostRecord.failures.isEmpty(), "unexpected failure: ${lostRecord.failures}")
+        val ready = assertNotNull(lostRecord.ready)
+        assertEquals(PskCategory.SENTINEL, ready.matchedPsk.category)
+        assertEquals(SentinelPsk.psk.pskId, ready.matchedPsk.pskId)
+        assertTrue(WireTestVectors.pskId in assertNotNull(ready.lookupMiss))
+        assertEquals(2, lostRecord.sent.size, "client/init, then Noise message 2")
+
+        // Message 2 is keyed by the Sentinel whatever else the client holds:
+        // a stale record for another PSK produces the very same bytes, and
+        // they are not the bytes the referenced PSK would have produced.
+        val staleRecord = handshakeWith(
+            PskCandidateSet(
+                listOf(
+                    Psk(ByteArray(32) { 7 }, PskCategory.LONG_TERM, WireTestVectors.serverId),
+                    SentinelPsk.psk,
+                )
+            )
+        )
+        assertEquals(lostRecord.sent[1], staleRecord.sent[1])
+        assertTrue(
+            lostRecord.sent[1] != InitMessages.buildNoiseHandshake(WireTestVectors.noiseMessage2B64u)
+        )
     }
 
     /** Run the handshake with [message1Frame] in place of the reference message 1. */
@@ -217,29 +250,20 @@ class SendSpinHandshakeDriverTest {
 
     @Test
     fun aPskHeldUnderAnotherCategoryIsALookupMiss() {
-        // The transcript's PSK is a long-term record here. The same psk_id
-        // declared as the pairing PSK must not match it.
-        val r = failureFor(WireTestVectors.noiseHandshake1PairingCategoryFrame)
-        assertEquals(NoiseHandshakeException.Cause.PskLookupMiss, r.failures.single().first)
+        // "The client holds the referenced PSK under a different category
+        // than the declared psk_category" is a miss, so it must never be
+        // mixed in: the session falls back to the Sentinel. The transcript's
+        // PSK is a long-term record here, declared as the pairing PSK.
+        val r = handshakeWith(candidates, WireTestVectors.noiseHandshake1PairingCategoryFrame)
+        assertEquals(PskCategory.SENTINEL, assertNotNull(r.ready).matchedPsk.category)
 
         // And the reverse: held as the pairing PSK, declared long-term.
         val asPairing = PskCandidateSet(listOf(Psk(hex(WireTestVectors.psk), PskCategory.PAIRING)))
-        val reverse = failureFor(WireTestVectors.noiseHandshake1Frame, asPairing)
-        assertEquals(NoiseHandshakeException.Cause.PskLookupMiss, reverse.failures.single().first)
+        val reverse = handshakeWith(asPairing)
+        assertEquals(PskCategory.SENTINEL, assertNotNull(reverse.ready).matchedPsk.category)
 
-        // Held under the declared category, that same frame is accepted.
-        val accepted = Recorder()
-        val driver = SendSpinHandshakeDriver(
-            identity = ClientIdentity(hex(WireTestVectors.clientStaticPrivate)),
-            candidates = asPairing,
-            onEvent = accepted::handle,
-            ephemeralOverrideForTest = { hex(WireTestVectors.clientEphemeralPrivate) },
-        )
-        driver.start()
-        driver.onCleartextFrame(WireTestVectors.serverInitFrame.encodeToByteArray())
-        driver.onCleartextFrame(
-            WireTestVectors.noiseHandshake1PairingCategoryFrame.encodeToByteArray()
-        )
+        // Held under the declared category, that same frame matches it.
+        val accepted = handshakeWith(asPairing, WireTestVectors.noiseHandshake1PairingCategoryFrame)
         assertEquals(PskCategory.PAIRING, assertNotNull(accepted.ready).matchedPsk.category)
     }
 
@@ -322,6 +346,27 @@ class SendSpinHandshakeDriverTest {
         assertEquals(SendSpinHandshakeDriver.Phase.Failed, driver.phase)
         // Never reply to it: only our own client/init was ever sent.
         assertEquals(1, r.sent.size)
+    }
+
+    @Test
+    fun aServerErrorIsReportedWithItsReason() {
+        // messaging.md, server/error: "Sent by the server in place of
+        // server/init when it cannot accept the client's client/init." It is
+        // a server that does speak the encrypted protocol, so it must not be
+        // reported as one that lacks it.
+        for (reason in listOf("unsupported_version", "unsupported_suite", "malformed")) {
+            val r = Recorder()
+            val driver = driverWith(r)
+            driver.start()
+            driver.onCleartextFrame(
+                """{"type":"server/error","payload":{"reason":"$reason"}}""".encodeToByteArray()
+            )
+            val (cause, detail) = r.failures.single()
+            assertEquals(NoiseHandshakeException.Cause.InitRejected, cause)
+            assertTrue(reason in detail, "the reason must reach the log: $detail")
+            assertEquals(SendSpinHandshakeDriver.Phase.Failed, driver.phase)
+            assertEquals(1, r.sent.size, "must not reply to server/error")
+        }
     }
 
     @Test

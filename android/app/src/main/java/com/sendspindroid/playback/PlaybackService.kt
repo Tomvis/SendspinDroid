@@ -755,6 +755,13 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
+        // The media session offers only what the server's controller state allows.
+        serviceScope.launch {
+            sendSpinClient?.controllerState?.collect { state ->
+                sendSpinPlayer?.updateControllerState(state)
+            }
+        }
+
         // Drives the work formerly in SendSpin.Callback.onConnected /
         // onDisconnected / onError / onReconnecting / onReconnected. Phase 4 Task 5
         // removed those callbacks; consumers observe the StateFlow instead.
@@ -1143,6 +1150,12 @@ class PlaybackService : MediaLibraryService() {
             Log.e(TAG, "Decode error, dropping chunk", e)
             return
         }
+        // Checked again: a stream/clear or stream/end that landed while this
+        // chunk was decoding has already cleared the player, and queueing it
+        // now would leave one chunk with the old stream's timestamp at the
+        // head of the queue. The new stream's audio is then discarded as
+        // overlap until it catches up - seconds of silence after a skip.
+        if (t.generation != decodeGeneration) return
         val player = syncAudioPlayer ?: return
         player.queueChunk(t.serverTimeMicros, pcmData)
     }
@@ -2096,10 +2109,8 @@ class PlaybackService : MediaLibraryService() {
         // Connecting branch of the connectionState collector announces it.
 
         try {
-            if (sendSpinClient?.isConnected == true) {
-                Log.d(TAG, "Already connected, disconnecting first...")
-                sendSpinClient?.disconnect()
-            }
+            // No disconnect() first: connect() leaves the current server
+            // itself, with the goodbye reason a server switch requires.
 
             // Read current device volume and set as initial volume for server and UI
             val am = audioManager

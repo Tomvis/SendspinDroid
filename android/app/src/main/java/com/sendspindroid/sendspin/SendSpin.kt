@@ -220,7 +220,7 @@ class SendSpin(
     @Volatile
     var selfReconnectEnabled: Boolean = true
 
-    // Merged controller (group-level) state: supported_commands, group
+    // Controller (group-level) state: supported_commands, group
     // volume/mute, repeat, shuffle. Null until the server first sends a
     // server/state controller object.
     private val _controllerState = MutableStateFlow<ControllerState?>(null)
@@ -345,12 +345,19 @@ class SendSpin(
     // ========== Encrypted handshake (spec) ==========
 
     private var handshakeDriver: SendSpinHandshakeDriver? = null
+    private var handshakeTimeoutJob: Job? = null
+
+    /** Test seam for the handshake-phase timeout. */
+    internal var handshakeTimeoutMs = SendSpinProtocol.HANDSHAKE_TIMEOUT_MS
 
     private fun startEncryptedHandshake() {
         // Cleared here rather than on disconnect: every fresh handshake passes
         // through this point, so a stale category from the previous session can
         // never survive into the next one and overstate what it is paired with.
+        // The same goes for its channel: nothing sent from here until the new
+        // handshake completes may be encrypted under the old session's keys.
         matchedPsk = null
+        clearEncryptedChannel()
 
         // The wire client_id for an encrypted session is the base64url public
         // key, NOT the legacy UUID player id - the two are different
@@ -363,6 +370,21 @@ class SendSpin(
         )
         handshakeDriver = driver
         driver.start()
+
+        // "Implementations SHOULD apply a timeout (e.g., 30 seconds) for each
+        // side to receive the next expected message during the prologue and
+        // Noise-handshake phases." One window for the whole exchange, which
+        // bounds each of its two messages. It only acts on the socket this
+        // handshake started on: a stale timer must not fail a later
+        // connection, or one the user has already left.
+        val socket = transport
+        handshakeTimeoutJob?.cancel()
+        handshakeTimeoutJob = timerScope.launch {
+            delay(handshakeTimeoutMs)
+            if (transport === socket && socket?.isConnected == true) {
+                synchronized(driver) { driver.onTimeout() }
+            }
+        }
     }
 
     private fun onHandshakeEvent(event: SendSpinHandshakeDriver.Event) {
@@ -375,6 +397,11 @@ class SendSpin(
             is SendSpinHandshakeDriver.Event.TransportReady -> {
                 Log.i(TAG, "Noise handshake complete with ${event.serverInit.serverId} " +
                     "(psk=${event.matchedPsk.category})")
+                // The Sentinel Fallback. The session is unpaired from here on;
+                // no record is touched - only a new pairing replaces one.
+                event.lookupMiss?.let {
+                    Log.w(TAG, "Credential mismatch, continuing unpaired with the Sentinel PSK: $it")
+                }
                 // Retained rather than logged and dropped: the category decides
                 // which activities the server may declare and whether pairing
                 // may run. Recomputing it anywhere else would let those two
@@ -411,7 +438,10 @@ class SendSpin(
                 handshakeDriver = null
                 // A server too old to speak the encrypted handshake is the one
                 // failure the user can fix, so it is reported as itself rather
-                // than as a generic handshake failure.
+                // than as a generic handshake failure. A server/error is the
+                // opposite case - the server does speak it and refused our
+                // client/init - so it stays a handshake failure, with its
+                // reason in the line above.
                 val reason = if (event.reason ==
                     NoiseHandshakeException.Cause.ServerLacksEncryption
                 ) {
@@ -717,7 +747,7 @@ class SendSpin(
         this.serverId = serverId
 
         // Controller state belongs to the previous session; the handler's
-        // merged copy was reset, so reset the published flow too.
+        // copy was reset, so reset the published flow too.
         _controllerState.value = null
 
         // Check if this is a reconnection
@@ -983,8 +1013,15 @@ class SendSpin(
      */
     fun connectLocal(address: String, path: String = SendSpinProtocol.ENDPOINT_PATH) {
         if (isConnected) {
-            Log.w(TAG, "Already connected, disconnecting first")
-            disconnect()
+            // "A client that leaves one server for another MUST send this
+            // reason to the server it is leaving."
+            val reason = if (address == serverAddress) {
+                GoodbyeReason.RESTART
+            } else {
+                GoodbyeReason.ANOTHER_SERVER
+            }
+            Log.i(TAG, "Already connected to $serverAddress, leaving it first (${reason.wire})")
+            disconnect(reason)
         }
 
         val normalizedPath = normalizePath(path)
@@ -1067,28 +1104,21 @@ class SendSpin(
         reconnectJob = null
 
         stopTimeSync()
-        resetArtworkStream()
         reconnecting.set(false)
         waitingForNetwork.set(false)
-        // Spec reason enum is another_server | shutdown | restart |
-        // user_request. "restart" fits: we will reconnect (after the outer
-        // loop re-selects the transport) and the server should auto-reconnect.
-        sendGoodbye(GoodbyeReason.RESTART)
-        // Clear the transport listener BEFORE closing to prevent the async onClosed
-        // callback from firing a second onDisconnected after we fire one synchronously below.
-        transport?.setListener(null)
-        transport?.close(1000, "Reselection")
-        transport = null
-        handshakeComplete = false
-        _connectionState.value = TransportState.Idle
+        // "restart" fits: we will reconnect (after the outer loop re-selects
+        // the transport) and the server should auto-reconnect.
+        closeWithGoodbye(GoodbyeReason.RESTART, "Reselection")
     }
 
     /**
      * Disconnect from the current server.
      */
-    fun disconnect() {
+    fun disconnect() = disconnect(GoodbyeReason.USER_REQUEST)
+
+    private fun disconnect(reason: GoodbyeReason) {
         stopStallWatchdog()
-        Log.d(TAG, "Disconnecting (user-initiated)")
+        Log.d(TAG, "Disconnecting (${reason.wire})")
         userInitiatedDisconnect.set(true)
 
         // Cancel any pending reconnect coroutine to prevent race condition
@@ -1096,15 +1126,33 @@ class SendSpin(
         reconnectJob = null
 
         stopTimeSync()
-        resetArtworkStream()
         reconnecting.set(false)
         waitingForNetwork.set(false)
-        sendGoodbye(GoodbyeReason.USER_REQUEST)
+        closeWithGoodbye(reason, "User disconnect")
+    }
+
+    /**
+     * Say why we are leaving, then close: the tail of every deliberate
+     * disconnect.
+     *
+     * The goodbye is encrypted and handed to the transport before this
+     * returns, and the close waits for the transport to flush it. Both
+     * matter: the callers go straight on to open the next connection or to
+     * cancel the coroutine scopes, and a plain close() drops whatever is
+     * still queued.
+     */
+    private fun closeWithGoodbye(reason: GoodbyeReason, closeReason: String) {
+        resetArtworkStream()
+        resetServerState()
+        val closing = transport
+        transport = null
         // Clear the transport listener BEFORE closing to prevent the async onClosed
         // callback from firing a second onDisconnected after we fire one synchronously below.
-        transport?.setListener(null)
-        transport?.close(1000, "User disconnect")
-        transport = null
+        closing?.setListener(null)
+        if (closing != null) {
+            encodeGoodbye(reason).forEach { closing.send(it) }
+            closing.closeAfterFlush(1000, closeReason)
+        }
         handshakeComplete = false
         _connectionState.value = TransportState.Idle
     }
@@ -1135,6 +1183,12 @@ class SendSpin(
     /** Enable or disable shuffle. */
     fun setShuffle(enabled: Boolean) = sendCommand(if (enabled) "shuffle" else "unshuffle")
 
+    /** Seek to an absolute position, clamped to 0..seek_max_ms. */
+    fun seek(positionMs: Long) = sendCommand("seek", positionMs = positionMs)
+
+    /** Seek by a signed offset from the current position. */
+    fun seekRelative(offsetMs: Long) = sendCommand("seek_relative", offsetMs = offsetMs)
+
     /**
      * Clean up resources.
      */
@@ -1148,8 +1202,9 @@ class SendSpin(
 
         reconnecting.set(false)
         // disconnect() sets userInitiatedDisconnect unconditionally; no need
-        // to pre-set it here.
-        disconnect()
+        // to pre-set it here. "When the device is powering off or otherwise
+        // not coming back ... clients SHOULD send this reason."
+        disconnect(GoodbyeReason.SHUTDOWN)
 
         // Cancel both scopes before closing the timer dispatcher.
         // Cancelling the scope cancels all its launched coroutines; closing
@@ -1510,7 +1565,9 @@ class SendSpin(
             val driver = handshakeDriver
             if (driver != null && driver.phase != SendSpinHandshakeDriver.Phase.Transport) {
                 lastByteReceivedAtMs.set(System.currentTimeMillis())
-                driver.onCleartextFrame(rawUtf8)
+                // Serialized against the handshake timeout, which fires on
+                // the timer thread.
+                synchronized(driver) { driver.onCleartextFrame(rawUtf8) }
                 return
             }
             // "a cleartext message received after switching to transport mode

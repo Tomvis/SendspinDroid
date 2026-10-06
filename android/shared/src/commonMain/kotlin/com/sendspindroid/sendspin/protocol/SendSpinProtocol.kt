@@ -18,6 +18,15 @@ object SendSpinProtocol {
     const val PAIR_ATTEMPT_TIMEOUT_MS = 120_000L
 
     /**
+     * How long the cleartext init exchange and the Noise handshake may take.
+     *
+     * "Implementations SHOULD apply a timeout (e.g., 30 seconds) for each side
+     * to receive the next expected message during the prologue and
+     * Noise-handshake phases."
+     */
+    const val HANDSHAKE_TIMEOUT_MS = 30_000L
+
+    /**
      * Audio chunk header (roles/player/v1.md): 1 byte type + 8 bytes big-endian
      * int64 timestamp + 4 bytes big-endian uint32 `send_ahead`.
      */
@@ -130,6 +139,7 @@ object SendSpinProtocol {
         // in a binary frame once transport mode begins.
         const val CLIENT_INIT = "client/init"
         const val SERVER_INIT = "server/init"
+        const val SERVER_ERROR = "server/error"
         const val NOISE_HANDSHAKE = "noise/handshake"
 
         const val CLIENT_HELLO = "client/hello"
@@ -251,10 +261,8 @@ data class TrackMetadata(
     val track: Int? = null,
     val progress: TrackProgress? = null
 ) {
-    // Every field is nullable because `server/state` can clear any of them
-    // individually. Null means "the server has no value for this", which is
-    // distinct from the empty string - the old representation, which could not
-    // tell a cleared title from a title the delta simply did not mention.
+    // Null means "the server has no value for this": every `server/state`
+    // carries the role's full state, so a field it omits is gone.
 
     // Convenience properties for backwards compatibility
     val durationMs: Long get() = progress?.trackDuration ?: 0L
@@ -328,9 +336,9 @@ data class StreamConfig(
 /**
  * Controller (group-level) state from the server/state `controller` object.
  *
- * Fields are nullable because server/state carries delta updates; null means
- * "not included in this update". [com.sendspindroid.sendspin.protocol.SendSpinProtocolHandler]
- * merges deltas into the current state before publishing.
+ * Null means the state has no value for the field: before the first
+ * `server/state` controller object, and for `seek_max_ms` whenever 'seek' is
+ * not offered.
  *
  * @param supportedCommands Subset of: play, pause, stop, next, previous,
  *   volume, mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch
@@ -350,12 +358,13 @@ data class ControllerState(
 )
 
 /**
- * Result of parsing a server/state message.
+ * Result of parsing a server/state message. A null role object was not in the
+ * message, which leaves that role's state unchanged.
  */
 data class ServerStateResult(
-    val metadata: RoleUpdate<TrackMetadata>,
+    val metadata: TrackMetadata?,
     val playbackState: String?,
-    val controller: RoleUpdate<ControllerState>
+    val controller: ControllerState?
 )
 
 /**

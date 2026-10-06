@@ -156,54 +156,108 @@ class SendSpinProtocolHandlerTest {
     // ========== Controller State Tests ==========
 
     @Test
-    fun `controller state from server_state is merged and published`() {
+    fun `controller state from server_state is published`() {
         handler.handleTextMessageForTest(
             """{"type":"server/state","payload":{"controller":{
                 "supported_commands":["play","pause","volume"],
                 "volume":60,"muted":false,"repeat":"off","shuffle":false}}}"""
         )
-        // Partial delta: only volume changes; earlier fields must survive.
-        handler.handleTextMessageForTest(
-            """{"type":"server/state","payload":{"controller":{"volume":80}}}"""
-        )
 
-        assertEquals(2, handler.controllerStateUpdates.size)
-        val merged = handler.controllerStateUpdates.last()
-        assertEquals(80, merged.volume)
-        assertEquals(listOf("play", "pause", "volume"), merged.supportedCommands)
-        assertEquals("off", merged.repeat)
+        val state = handler.controllerStateUpdates.single()
+        assertEquals(60, state.volume)
+        assertEquals(listOf("play", "pause", "volume"), state.supportedCommands)
+        assertEquals("off", state.repeat)
     }
 
     @Test
-    fun `unchanged controller delta does not republish`() {
+    fun `unchanged controller state does not republish`() {
         val msg = """{"type":"server/state","payload":{"controller":{"volume":60}}}"""
         handler.handleTextMessageForTest(msg)
         handler.handleTextMessageForTest(msg)
         assertEquals(1, handler.controllerStateUpdates.size)
     }
 
+    private fun activateRoles(roles: String) = handler.handleTextMessageForTest(
+        """{"type":"server/activate","payload":{"activities":[],"active_roles":[$roles]}}"""
+    )
+
+    private fun controllerState(fields: String) = handler.handleTextMessageForTest(
+        """{"type":"server/state","payload":{"controller":{$fields}}}"""
+    )
+
+    private fun sentCommands() = handler.sentMessages.filter { it.contains("client/command") }
+
     @Test
     fun `sendCommand drops commands outside server supported_commands`() {
-        handler.handleTextMessageForTest(
-            """{"type":"server/state","payload":{"controller":{
-                "supported_commands":["play","pause"],
-                "volume":60,"muted":false,"repeat":"off","shuffle":false}}}"""
+        activateRoles("\"player@v1\",\"controller@v1\"")
+        controllerState(
+            """"supported_commands":["play","pause"],
+                "volume":60,"muted":false,"repeat":"off","shuffle":false"""
         )
-        handler.sentMessages.clear()
 
         handler.sendCommand("shuffle")
-        assertEquals("Unsupported command must be dropped", 0, handler.sentMessages.size)
+        assertEquals("Unsupported command must be dropped", 0, sentCommands().size)
 
         handler.sendCommand("play")
-        assertEquals(1, handler.sentMessages.size)
-        assertTrue(handler.sentMessages[0].contains("\"command\":\"play\""))
+        assertEquals(1, sentCommands().size)
+        assertTrue(sentCommands()[0].contains("\"command\":\"play\""))
     }
 
     @Test
-    fun `sendCommand is not gated before controller state is known`() {
-        handler.sentMessages.clear()
+    fun `sendCommand sends nothing before a controller state has arrived`() {
+        activateRoles("\"player@v1\",\"controller@v1\"")
         handler.sendCommand("play")
-        assertEquals(1, handler.sentMessages.size)
+        assertEquals(0, sentCommands().size)
+    }
+
+    @Test
+    fun `sendCommand sends nothing while the controller role is not active`() {
+        // "Only valid from clients whose `controller` role is active."
+        activateRoles("\"player@v1\"")
+        controllerState(""""supported_commands":["play","pause"]""")
+        handler.sendCommand("play")
+        assertEquals(0, sentCommands().size)
+    }
+
+    @Test
+    fun `seek carries position_ms clamped to 0 through seek_max_ms`() {
+        activateRoles("\"controller@v1\"")
+        controllerState(""""supported_commands":["seek"],"seek_max_ms":200000""")
+
+        handler.sendCommand("seek", positionMs = 42_000)
+        handler.sendCommand("seek", positionMs = 999_000)
+        handler.sendCommand("seek", positionMs = -5)
+
+        assertEquals(3, sentCommands().size)
+        assertTrue(sentCommands()[0].contains("\"position_ms\":42000"))
+        assertTrue(sentCommands()[1].contains("\"position_ms\":200000"))
+        assertTrue(sentCommands()[2].contains("\"position_ms\":0"))
+    }
+
+    @Test
+    fun `seek is dropped without a seek_max_ms or a position`() {
+        activateRoles("\"controller@v1\"")
+        controllerState(""""supported_commands":["seek","seek_relative"]""")
+
+        handler.sendCommand("seek", positionMs = 42_000)
+        handler.sendCommand("seek_relative")
+        assertEquals(0, sentCommands().size)
+
+        controllerState(""""seek_max_ms":200000""")
+        handler.sendCommand("seek")
+        assertEquals(0, sentCommands().size)
+    }
+
+    @Test
+    fun `seek_relative carries a signed offset_ms`() {
+        activateRoles("\"controller@v1\"")
+        controllerState(""""supported_commands":["seek_relative"]""")
+
+        handler.sendCommand("seek_relative", offsetMs = -10_000)
+
+        assertEquals(1, sentCommands().size)
+        assertTrue(sentCommands()[0].contains("\"command\":\"seek_relative\""))
+        assertTrue(sentCommands()[0].contains("\"offset_ms\":-10000"))
     }
 
     // ========== Sync State Validation Tests ==========
@@ -504,7 +558,8 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     fun exposedTimeFilter(): SendspinTimeFilter = timeFilter
     fun lastMuteDecision(): Boolean = muteEvents.lastOrNull() ?: false
     fun evaluateAndPublishSyncStateForTest() = evaluateAndPublishSyncState()
-    fun sendGoodbyeForTest(reason: GoodbyeReason) = sendGoodbye(reason)
+    fun sendGoodbyeForTest(reason: GoodbyeReason) = encodeGoodbye(reason).forEach { sendBinaryFrame(it) }
+    fun resetServerStateForTest() = resetServerState()
     fun resetSyncStateTrackingForTest() = resetSyncStateTracking()
 
     fun handleTextMessageForTest(text: String) {
@@ -604,7 +659,11 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     override fun onStreamClear() {}
 
-    override fun onStreamEnd() {}
+    var streamEnds = 0
+
+    override fun onStreamEnd() {
+        streamEnds++
+    }
 
     override fun onAudioChunk(timestampMicros: Long, audioData: ByteArray) {
         audioChunks.add(timestampMicros to audioData)

@@ -25,6 +25,8 @@ import com.sendspindroid.sendspin.pairing.PairingPskFlow
 import com.sendspindroid.sendspin.pairing.PairingToken
 import com.sendspindroid.sendspin.protocol.ActivationOutcome
 import com.sendspindroid.sendspin.protocol.Activity
+import com.sendspindroid.sendspin.protocol.ControllerState
+import com.sendspindroid.sendspin.protocol.GoodbyeReason
 import com.sendspindroid.sendspin.protocol.NoiseWireCodec
 import com.sendspindroid.sendspin.protocol.RehandshakeDriver
 import com.sendspindroid.sendspin.protocol.SendSpinHandshakeDriver
@@ -63,7 +65,13 @@ import java.util.concurrent.TimeUnit
  *
  * Usage: `NoiseHandshakeCheck <ws://host:port/sendspin> [identity-file]
  *   [--hold | --hold-seconds=N] [--expect-audio] [--expect-artwork]
- *   [--expect-rehandshake] [--pair] [--expect-mismatches=N] [--expect-paired]`
+ *   [--expect-rehandshake] [--pair] [--expect-mismatches=N] [--expect-paired]
+ *   [--seek]`
+ *
+ * With `--seek` it sends one `seek` and one `seek_relative`, built by the real
+ * `MessageBuilder.buildCommand`, once the server's controller state offers
+ * both (`dev_server.py --offer-seek`), and fails if that never happens. The
+ * server's log shows whether it accepted them.
  *
  * The tool also holds a pairing PSK, persisted beside the identity, and writes
  * its pairing token to `<identity-file>.token`. Handing that token to the
@@ -118,6 +126,8 @@ object NoiseHandshakeCheck {
             ?.substringAfter('=')?.toIntOrNull()
         // Fail unless the initial handshake matched a stored pairing record.
         val expectPaired = args.contains("--expect-paired")
+        // Send a seek and a seek_relative once the server offers both.
+        val seek = args.contains("--seek")
         val identityFile = File(positional.getOrNull(1) ?: ".dev/noisecheck-identity.key")
         val identity = loadOrCreateIdentity(identityFile)
         val pairingPsk = loadOrCreatePairingPsk(File(identityFile.path + ".pairing-psk"))
@@ -173,6 +183,8 @@ object NoiseHandshakeCheck {
         var grantedRoles: List<String> = emptyList()
         val audio = AudioCheck()
         val artwork = ArtworkCheck()
+        var controllerState: ControllerState? = null
+        var seeksSent = false
 
         // Pairing (--pair). pairing_index counts every pairing server/activate
         // since the last Noise handshake.
@@ -289,6 +301,7 @@ object NoiseHandshakeCheck {
             onReady = { event ->
                 println("HANDSHAKE OK  server=${event.serverInit.serverId} " +
                     "psk=${event.matchedPsk.category}")
+                event.lookupMiss?.let { println("SENTINEL FALLBACK  $it") }
                 matchedCategory = event.matchedPsk.category
                 initialCategory = event.matchedPsk.category
                 ready = event
@@ -465,6 +478,32 @@ object NoiseHandshakeCheck {
                                 }
                             }
 
+                            SendSpinProtocol.MessageType.SERVER_STATE -> {
+                                // Full state: a controller object replaces what we held.
+                                MessageParser.parseServerState(payload).controller
+                                    ?.let { controllerState = it }
+                                val supported = controllerState?.supportedCommands.orEmpty()
+                                val seekMaxMs = controllerState?.seekMaxMs
+                                // The app's rules: the role is active, both
+                                // commands are in the latest supported_commands
+                                // and the position is within 0..seek_max_ms.
+                                if (seek && !seeksSent && !rehandshakeInProgress &&
+                                    SendSpinProtocol.Roles.CONTROLLER in grantedRoles &&
+                                    "seek" in supported && "seek_relative" in supported &&
+                                    seekMaxMs != null
+                                ) {
+                                    seeksSent = true
+                                    sendEncrypted(
+                                        MessageBuilder.buildCommand("seek", positionMs = seekMaxMs / 2),
+                                        "client/command seek position_ms=${seekMaxMs / 2}",
+                                    )
+                                    sendEncrypted(
+                                        MessageBuilder.buildCommand("seek_relative", offsetMs = -10_000),
+                                        "client/command seek_relative offset_ms=-10000",
+                                    )
+                                }
+                            }
+
                             SendSpinProtocol.MessageType.PAIR_ABORT -> {
                                 val reason = payload?.get("reason")?.jsonPrimitive?.contentOrNull
                                     ?: "unspecified"
@@ -571,6 +610,15 @@ object NoiseHandshakeCheck {
         }
 
         val finished = done.await(40, TimeUnit.SECONDS)
+        // The process is going away, so a session that got as far as the
+        // hellos says so before it closes. OkHttp writes queued frames ahead
+        // of the close frame.
+        if (failure == null && serverHellos > 0 && !rehandshakeInProgress) {
+            sendEncrypted(
+                MessageBuilder.buildGoodbye(GoodbyeReason.SHUTDOWN),
+                "client/goodbye shutdown",
+            )
+        }
         socket.close()
         client.dispatcher.executorService.shutdown()
 
@@ -623,11 +671,13 @@ object NoiseHandshakeCheck {
                 exitFail("no server/activate followed the re-handshake")
             expectRehandshake && serverHellos != 1 ->
                 exitFail("server/hello was sent $serverHellos times; a re-handshake re-sends neither hello")
-            expectAudio || expectArtwork || expectRehandshake -> println(
+            seek && !seeksSent -> exitFail("the server never offered both seek and seek_relative")
+            expectAudio || expectArtwork || expectRehandshake || seek -> println(
                 "PASS: " + listOfNotNull(
                     "audio received and verified".takeIf { expectAudio },
                     "artwork reassembled and cleared".takeIf { expectArtwork },
                     "re-handshake completed and activated".takeIf { expectRehandshake },
+                    "seek and seek_relative sent".takeIf { seek },
                 ).joinToString("; ")
             )
             Activity.PLAYBACK !in grantedActivities -> {
