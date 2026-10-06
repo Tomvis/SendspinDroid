@@ -347,22 +347,30 @@ class MessageParserTest {
     }
 
     @Test
-    fun parseServerCommand_setOutputDelayOutOfRange_returnsNull() {
-        val tooBig = buildJsonObject {
-            put("player", buildJsonObject {
-                put("command", "set_output_delay")
-                put("output_delay_ms", 6000)
-            })
+    fun parseServerCommand_setOutputDelayOutOfRange_isClamped() {
+        // "Clients MUST clamp output_delay_ms to the range 0-5000."
+        fun delayFor(value: Long): Int {
+            val payload = buildJsonObject {
+                put("player", buildJsonObject {
+                    put("command", "set_output_delay")
+                    put("output_delay_ms", value)
+                })
+            }
+            return (MessageParser.parseServerCommand(payload) as ServerCommandResult.SetOutputDelay).delayMs
         }
-        assertNull(MessageParser.parseServerCommand(tooBig))
+        assertEquals(5000, delayFor(6000))
+        assertEquals(5000, delayFor(10_000_000_000L))
+        assertEquals(0, delayFor(-1))
+    }
 
-        val negative = buildJsonObject {
+    @Test
+    fun parseServerCommand_setOutputDelayMissing_returnsNull() {
+        val payload = buildJsonObject {
             put("player", buildJsonObject {
                 put("command", "set_output_delay")
-                put("output_delay_ms", -1)
             })
         }
-        assertNull(MessageParser.parseServerCommand(negative))
+        assertNull(MessageParser.parseServerCommand(payload))
     }
 
     // --- parseServerCommand ---
@@ -430,16 +438,15 @@ class MessageParserTest {
     }
 
     @Test
-    fun parseServerCommand_muteMissing_usesDefault() {
-        // When "mute" key is absent, booleanOrDefault should return the default (false)
+    fun parseServerCommand_muteMissing_returnsNull() {
+        // `mute` is "required if command is mute". Without it there is nothing
+        // to apply, and defaulting to false would unmute a muted player.
         val payload = buildJsonObject {
             put("player", buildJsonObject {
                 put("command", "mute")
             })
         }
-        val result = MessageParser.parseServerCommand(payload)
-        assertTrue(result is ServerCommandResult.Mute)
-        assertFalse((result as ServerCommandResult.Mute).muted)
+        assertNull(MessageParser.parseServerCommand(payload))
     }
 
     @Test

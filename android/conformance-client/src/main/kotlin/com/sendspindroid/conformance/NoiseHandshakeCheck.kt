@@ -38,18 +38,12 @@ import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.InitMessages
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import com.sendspindroid.sendspin.protocol.message.MessageParser
-import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import okio.ByteString
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
@@ -173,7 +167,6 @@ object NoiseHandshakeCheck {
 
         val done = CountDownLatch(1)
         var failure: String? = null
-        var codec: NoiseWireCodec? = null
         var matchedCategory = PskCategory.SENTINEL
         var initialCategory: PskCategory? = null
         var serverHellos = 0
@@ -211,8 +204,7 @@ object NoiseHandshakeCheck {
         val json = Json { ignoreUnknownKeys = true }
         val client = OkHttpClient.Builder().readTimeout(30, TimeUnit.SECONDS).build()
 
-        lateinit var socket: WebSocket
-        lateinit var driver: SendSpinHandshakeDriver
+        lateinit var socket: EncryptedSocket
 
         fun fail(reason: String) {
             if (failure == null) failure = reason
@@ -220,8 +212,7 @@ object NoiseHandshakeCheck {
         }
 
         fun sendEncrypted(text: String, label: String) {
-            val c = codec ?: return fail("no transport for $label")
-            runBlocking { c.encodeJson(text).forEach { socket.send(ByteString.of(*it)) } }
+            if (!socket.send(text)) return fail("no transport for $label")
             println("-> enc   $label")
         }
 
@@ -301,40 +292,22 @@ object NoiseHandshakeCheck {
             }
         }
 
-        driver = SendSpinHandshakeDriver(
+        socket = EncryptedSocket(
+            client = client,
+            url = url,
             identity = identity,
             candidates = candidates(),
-            onEvent = { event ->
-                when (event) {
-                    is SendSpinHandshakeDriver.Event.SendCleartext -> {
-                        println("-> text  ${event.text.take(90)}")
-                        socket.send(event.text)
-                    }
-                    is SendSpinHandshakeDriver.Event.TransportReady -> {
-                        println("HANDSHAKE OK  server=${event.serverInit.serverId} " +
-                            "psk=${event.matchedPsk.category}")
-                        matchedCategory = event.matchedPsk.category
-                        initialCategory = event.matchedPsk.category
-                        ready = event
-                        handshakeHash = event.transport.handshakeHash
-                        // Nothing is sent yet: client/hello answers server/hello.
-                        codec = NoiseWireCodec(event.transport)
-                    }
-                    is SendSpinHandshakeDriver.Event.Fail ->
-                        fail("${event.reason}: ${event.detail}")
-                }
+            onCleartextSent = { println("-> text  ${it.take(90)}") },
+            onReady = { event ->
+                println("HANDSHAKE OK  server=${event.serverInit.serverId} " +
+                    "psk=${event.matchedPsk.category}")
+                matchedCategory = event.matchedPsk.category
+                initialCategory = event.matchedPsk.category
+                ready = event
+                handshakeHash = event.transport.handshakeHash
             },
-        )
-
-        socket = client.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) = driver.start()
-
-            override fun onMessage(webSocket: WebSocket, text: String) =
-                driver.onCleartextFrame(text.toByteArray(Charsets.UTF_8))
-
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                val c = codec ?: return fail("binary frame before transport mode")
-                when (val decoded = c.decode(bytes.toByteArray())) {
+            onFrame = fun(decoded: NoiseWireCodec.Decoded) {
+                when (decoded) {
                     is NoiseWireCodec.Decoded.Json -> {
                         val obj = runCatching {
                             json.parseToJsonElement(decoded.text).jsonObject
@@ -364,13 +337,11 @@ object NoiseHandshakeCheck {
                                         return fail("re-handshake failed: ${outcome.reason}")
                                     is RehandshakeDriver.Outcome.Reply -> {
                                         // Message 2 under the old keys, then the swap.
-                                        runBlocking {
-                                            c.encodeAndSwap(
-                                                SendSpinProtocol.BinaryType.JSON,
-                                                outcome.replyJson.encodeToByteArray(),
-                                                outcome.transport.asNoiseCrypto(),
-                                            )
-                                        }.forEach { socket.send(ByteString.of(*it)) }
+                                        socket.sendAndSwap(
+                                            SendSpinProtocol.BinaryType.JSON,
+                                            outcome.replyJson.encodeToByteArray(),
+                                            outcome.transport.asNoiseCrypto(),
+                                        )
                                         handshakeHash = outcome.transport.handshakeHash
                                         matchedCategory = outcome.matched.category
                                         rehandshakes++
@@ -603,16 +574,13 @@ object NoiseHandshakeCheck {
                     is NoiseWireCodec.Decoded.ProtocolError ->
                         fail("decode failed: ${decoded.reason}")
                 }
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) =
-                fail("socket failure: ${t.message}")
-
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            },
+            onFail = { fail(it) },
+            onClosed = { code, reason ->
                 println("socket closed: $code $reason")
                 done.countDown()
-            }
-        })
+            },
+        )
 
         if (hold || holdSeconds != null) {
             println()
@@ -640,12 +608,12 @@ object NoiseHandshakeCheck {
         }
 
         val finished = done.await(40, TimeUnit.SECONDS)
-        socket.close(1000, "done")
+        socket.close()
         client.dispatcher.executorService.shutdown()
 
         println()
         println("RESULT")
-        println("  handshake      : ${if (codec != null) "OK" else "FAILED"}")
+        println("  handshake      : ${if (socket.codec != null) "OK" else "FAILED"}")
         println("  server/hello   : ${if (serverHellos > 0) "received ($serverHellos)" else "MISSING"}")
         println("  re-handshakes  : $rehandshakes " +
             "(server/activate after: $activationsAfterRehandshake, psk now $matchedCategory)")

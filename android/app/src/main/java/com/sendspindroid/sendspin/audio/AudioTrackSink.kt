@@ -30,6 +30,10 @@ class AudioTrackSink(
     override fun write(buffer: ByteArray, offset: Int, size: Int): Int =
         track.write(buffer, offset, size)
 
+    override fun setVolume(gain: Float) {
+        track.setVolume(gain)
+    }
+
     override fun getTimestamp(): SinkTimestamp? =
         if (track.getTimestamp(ts)) SinkTimestamp(ts.framePosition, ts.nanoTime)
         else null

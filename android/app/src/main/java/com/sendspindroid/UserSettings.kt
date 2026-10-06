@@ -64,6 +64,7 @@ object UserSettings {
     const val KEY_DYNAMIC_PAIRING_CODE_ENABLED = "sendspin_dynamic_pairing_code_enabled"
     const val KEY_PAIRING_CODE_FAILURES = "pairing_code_failures"
     const val KEY_OUTPUT_DELAY_MS = "output_delay_ms"
+    const val KEY_PLAYER_MUTED = "player_muted"
 
     const val KEY_LAST_REMOTE_ID = "last_remote_id"
     const val KEY_LAST_PROXY_URL = "last_proxy_url"
@@ -330,6 +331,17 @@ object UserSettings {
 
     fun setOutputDelayMs(value: Int): Boolean =
         prefs?.edit()?.putInt(KEY_OUTPUT_DELAY_MS, value.coerceIn(0, 5000))?.commit() ?: false
+
+    /**
+     * The player's `muted` state. roles/player/v1.md: "Persisting volume and
+     * muted across reboots is RECOMMENDED". Volume needs no entry here - it is
+     * the device media volume, which Android persists.
+     */
+    fun getPlayerMuted(): Boolean =
+        prefs?.getBoolean(KEY_PLAYER_MUTED, false) ?: false
+
+    fun setPlayerMuted(muted: Boolean): Boolean =
+        prefs?.edit()?.putBoolean(KEY_PLAYER_MUTED, muted)?.commit() ?: false
 
     fun getPairingCodeFailures(): Int =
         sensitivePrefs?.getInt(KEY_PAIRING_CODE_FAILURES, 0) ?: 0
