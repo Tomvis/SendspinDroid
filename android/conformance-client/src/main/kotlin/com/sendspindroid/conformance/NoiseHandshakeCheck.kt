@@ -289,6 +289,7 @@ object NoiseHandshakeCheck {
             onReady = { event ->
                 println("HANDSHAKE OK  server=${event.serverInit.serverId} " +
                     "psk=${event.matchedPsk.category}")
+                event.lookupMiss?.let { println("SENTINEL FALLBACK  $it") }
                 matchedCategory = event.matchedPsk.category
                 initialCategory = event.matchedPsk.category
                 ready = event

@@ -375,6 +375,11 @@ class SendSpin(
             is SendSpinHandshakeDriver.Event.TransportReady -> {
                 Log.i(TAG, "Noise handshake complete with ${event.serverInit.serverId} " +
                     "(psk=${event.matchedPsk.category})")
+                // The Sentinel Fallback. The session is unpaired from here on;
+                // no record is touched - only a new pairing replaces one.
+                event.lookupMiss?.let {
+                    Log.w(TAG, "Credential mismatch, continuing unpaired with the Sentinel PSK: $it")
+                }
                 // Retained rather than logged and dropped: the category decides
                 // which activities the server may declare and whether pairing
                 // may run. Recomputing it anywhere else would let those two
@@ -411,7 +416,10 @@ class SendSpin(
                 handshakeDriver = null
                 // A server too old to speak the encrypted handshake is the one
                 // failure the user can fix, so it is reported as itself rather
-                // than as a generic handshake failure.
+                // than as a generic handshake failure. A server/error is the
+                // opposite case - the server does speak it and refused our
+                // client/init - so it stays a handshake failure, with its
+                // reason in the line above.
                 val reason = if (event.reason ==
                     NoiseHandshakeException.Cause.ServerLacksEncryption
                 ) {

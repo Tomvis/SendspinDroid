@@ -7,6 +7,7 @@ import com.sendspindroid.sendspin.crypto.NoiseHandshake
 import com.sendspindroid.sendspin.crypto.NoiseHandshakeException
 import com.sendspindroid.sendspin.crypto.Psk
 import com.sendspindroid.sendspin.crypto.PskCandidateSet
+import com.sendspindroid.sendspin.crypto.SentinelPsk
 import com.sendspindroid.sendspin.protocol.message.InitMessages
 import com.sendspindroid.sendspin.protocol.message.ServerInit
 import kotlinx.serialization.json.Json
@@ -38,7 +39,9 @@ import kotlinx.serialization.json.jsonPrimitive
  * every real server, with no error message on either side.
  *
  * Every failure path here closes the socket and sends nothing
- * (`connection.md#failure-handling`).
+ * (`connection.md#failure-handling`). A `psk_id` lookup miss is not one of
+ * them: it completes the handshake with the Sentinel PSK
+ * (`connection.md#sentinel-fallback`).
  */
 class SendSpinHandshakeDriver(
     private val identity: ClientIdentity,
@@ -62,6 +65,13 @@ class SendSpinHandshakeDriver(
             val transport: com.sendspindroid.sendspin.crypto.NoiseTransport,
             val serverInit: ServerInit,
             val matchedPsk: Psk,
+            /**
+             * Set when [matchedPsk] is the Sentinel only because the server
+             * referenced a PSK this client cannot use
+             * (`connection.md#sentinel-fallback`); says which. The session is
+             * an ordinary unpaired one, and this is for the log.
+             */
+            val lookupMiss: String? = null,
         ) : Event
 
         /** Close the socket. Send nothing - the spec allows no error message. */
@@ -134,6 +144,16 @@ class SendSpinHandshakeDriver(
 
     private fun handleServerInit(raw: ByteArray) {
         val envelope = parseEnvelope(raw) ?: return
+        if (envelope.first == SendSpinProtocol.MessageType.SERVER_ERROR) {
+            // "Sent by the server in place of server/init when it cannot
+            // accept the client's client/init." Unauthenticated, so the reason
+            // is "a hint for logging and operator display" and nothing more.
+            val reason = envelope.second?.get("reason")?.jsonPrimitive?.contentOrNull
+            return fail(
+                NoiseHandshakeException.Cause.InitRejected,
+                "server/error reason=${reason ?: "(none)"}",
+            )
+        }
         if (envelope.first != SendSpinProtocol.MessageType.SERVER_INIT) {
             // A server that predates mandatory encryption answers client/init
             // with something other than server/init. That is the one failure
@@ -212,23 +232,30 @@ class SendSpinHandshakeDriver(
             NoiseHandshakeException.Cause.WrongPhase, "no server/init retained"
         )
         // One call, so the lookup and the stored-pubkey check cannot drift apart
-        // or run in the wrong order. Both failures close the socket in silence,
-        // so this detail string is the only diagnostic that will ever exist -
-        // hence spelling out which of the two happened, and the candidate count.
+        // or run in the wrong order.
+        var lookupMiss: String? = null
         val matched = when (
             val selection = candidates.select(pskId, referenced.pskCategory, init.serverId)
         ) {
             is PskCandidateSet.Selection.Matched -> selection.candidate
 
-            PskCandidateSet.Selection.NoMatch -> return fail(
-                NoiseHandshakeException.Cause.PskLookupMiss,
-                "no ${referenced.pskCategory} candidate PSK matches psk_id $pskId " +
-                    "(${candidates.all.size} candidates offered)",
-            )
+            PskCandidateSet.Selection.NoMatch -> {
+                // "On a lookup miss in the initial handshake the client
+                // completes the second handshake message with the Sentinel PSK
+                // instead of failing." The server retries its verification
+                // under the Sentinel and the session carries on as an unpaired
+                // one. Nothing is removed or replaced on this signal alone.
+                lookupMiss = "no ${referenced.pskCategory} candidate PSK matches psk_id $pskId " +
+                    "(${candidates.all.size} candidates held)"
+                SentinelPsk.psk
+            }
 
             is PskCandidateSet.Selection.ServerIdMismatch -> return fail(
-                // Usually a server that rotated its static keypair rather than
-                // an attack: "A server that rotates its static keypair ...
+                // "A failed stored-pubkey post-match check (a misbinding, not
+                // a miss)" still fails, and in silence, so this detail string
+                // is the only diagnostic that will ever exist. Usually a
+                // server that rotated its static keypair rather than an
+                // attack: "A server that rotates its static keypair ...
                 // appears to clients as a different server."
                 NoiseHandshakeException.Cause.PskLookupMiss,
                 "psk_id $pskId is a record for server ${selection.expected}, " +
@@ -246,7 +273,7 @@ class SendSpinHandshakeDriver(
         onEvent(Event.SendCleartext(
             InitMessages.buildNoiseHandshake(Base64Url.encode(message2.message))
         ))
-        onEvent(Event.TransportReady(message2.transport, init, matched))
+        onEvent(Event.TransportReady(message2.transport, init, matched, lookupMiss))
     }
 
     private fun parseEnvelope(raw: ByteArray): Pair<String, JsonObject?>? {

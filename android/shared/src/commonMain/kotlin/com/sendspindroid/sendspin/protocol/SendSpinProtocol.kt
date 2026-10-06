@@ -130,6 +130,7 @@ object SendSpinProtocol {
         // in a binary frame once transport mode begins.
         const val CLIENT_INIT = "client/init"
         const val SERVER_INIT = "server/init"
+        const val SERVER_ERROR = "server/error"
         const val NOISE_HANDSHAKE = "noise/handshake"
 
         const val CLIENT_HELLO = "client/hello"
