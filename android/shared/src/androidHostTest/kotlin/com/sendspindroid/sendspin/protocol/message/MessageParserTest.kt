@@ -353,32 +353,32 @@ class MessageParserTest {
     }
 
     @Test
-    fun parseServerCommand_setStaticDelay_returnsResult() {
+    fun parseServerCommand_setOutputDelay_returnsResult() {
         val payload = buildJsonObject {
             put("player", buildJsonObject {
-                put("command", "set_static_delay")
-                put("static_delay_ms", 150)
+                put("command", "set_output_delay")
+                put("output_delay_ms", 150)
             })
         }
         val result = MessageParser.parseServerCommand(payload)
-        assertTrue(result is ServerCommandResult.SetStaticDelay)
-        assertEquals(150, (result as ServerCommandResult.SetStaticDelay).delayMs)
+        assertTrue(result is ServerCommandResult.SetOutputDelay)
+        assertEquals(150, (result as ServerCommandResult.SetOutputDelay).delayMs)
     }
 
     @Test
-    fun parseServerCommand_setStaticDelayOutOfRange_returnsNull() {
+    fun parseServerCommand_setOutputDelayOutOfRange_returnsNull() {
         val tooBig = buildJsonObject {
             put("player", buildJsonObject {
-                put("command", "set_static_delay")
-                put("static_delay_ms", 6000)
+                put("command", "set_output_delay")
+                put("output_delay_ms", 6000)
             })
         }
         assertNull(MessageParser.parseServerCommand(tooBig))
 
         val negative = buildJsonObject {
             put("player", buildJsonObject {
-                put("command", "set_static_delay")
-                put("static_delay_ms", -1)
+                put("command", "set_output_delay")
+                put("output_delay_ms", -1)
             })
         }
         assertNull(MessageParser.parseServerCommand(negative))

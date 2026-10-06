@@ -65,6 +65,7 @@ object UserSettings {
     const val KEY_DYNAMIC_PAIRING_CODE_ENABLED = "sendspin_dynamic_pairing_code_enabled"
     const val KEY_RECORD_MODE_PSK_ID = "sendspin_record_mode_psk_id"
     const val KEY_PAIRING_CODE_FAILURES = "pairing_code_failures"
+    const val KEY_OUTPUT_DELAY_MS = "output_delay_ms"
 
     const val KEY_LAST_REMOTE_ID = "last_remote_id"
     const val KEY_LAST_PROXY_URL = "last_proxy_url"
@@ -333,6 +334,23 @@ object UserSettings {
 
     fun setRecordModePskId(pskId: String): Boolean =
         sensitivePrefs?.edit()?.putString(KEY_RECORD_MODE_PSK_ID, pskId)?.commit() ?: false
+
+    /**
+     * The spec's `output_delay_ms`: delay beyond the audio port, 0-5000 ms.
+     *
+     * roles/player/v1.md requires this be persisted "locally across reboots
+     * and server reconnections", so it lives here rather than only in the time
+     * filter. Stored in the ordinary preferences, not the encrypted ones - it
+     * is a speaker-placement setting, not a secret.
+     *
+     * Deliberately NOT the same quantity as the auto-measured hardware
+     * latency, which the client compensates itself and must not report.
+     */
+    fun getOutputDelayMs(): Int =
+        prefs?.getInt(KEY_OUTPUT_DELAY_MS, 0)?.coerceIn(0, 5000) ?: 0
+
+    fun setOutputDelayMs(value: Int): Boolean =
+        prefs?.edit()?.putInt(KEY_OUTPUT_DELAY_MS, value.coerceIn(0, 5000))?.commit() ?: false
 
     fun getPairingCodeFailures(): Int =
         sensitivePrefs?.getInt(KEY_PAIRING_CODE_FAILURES, 0) ?: 0

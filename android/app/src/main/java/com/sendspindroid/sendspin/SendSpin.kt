@@ -239,7 +239,15 @@ class SendSpin(
     private val clientId = UserSettings.getPlayerId()
 
     // Time synchronization (Kalman filter)
-    private val timeFilter = SendspinTimeFilter()
+    private val timeFilter = SendspinTimeFilter().apply {
+        // roles/player/v1.md requires output_delay_ms be persisted "across
+        // reboots and server reconnections", so restore it here rather than
+        // waiting for a server to set it again. Without this the reported value
+        // and the applied compensation would both silently reset to 0 on every
+        // launch, which is the failure the persistence requirement exists to
+        // prevent.
+        setOutputDelayMs(UserSettings.getOutputDelayMs().toDouble())
+    }
 
     // Reconnection state
     private val userInitiatedDisconnect = AtomicBoolean(false)

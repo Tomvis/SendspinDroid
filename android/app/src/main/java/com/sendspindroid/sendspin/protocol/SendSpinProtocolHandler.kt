@@ -1,6 +1,7 @@
 package com.sendspindroid.sendspin.protocol
 
 import android.util.Log
+import com.sendspindroid.UserSettings
 import com.sendspindroid.sendspin.AdaptiveBufferPolicy
 import com.sendspindroid.sendspin.SendspinTimeFilter
 import com.sendspindroid.sendspin.crypto.NoiseCipherSuite
@@ -355,7 +356,10 @@ abstract class SendSpinProtocolHandler(
      * Send player state update (volume/muted/availability).
      */
     protected fun sendPlayerStateUpdate() {
-        val delayMs = getTimeFilter().staticDelayMs
+        // The spec's output_delay_ms, NOT our signed staticDelayMs: the
+        // latter is the hardware latency we already compensate ourselves, and
+        // reporting it would invite the server to compensate it again.
+        val delayMs = getTimeFilter().outputDelayMs
         val minBufferMs = synchronized(adaptiveBufferLock) {
             val target = adaptiveBuffer?.currentTargetMs ?: SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS
             lastReportedMinBufferMs = target
@@ -1664,13 +1668,15 @@ abstract class SendSpinProtocolHandler(
                 onMuteCommand(result.muted)
                 sendPlayerStateUpdate()
             }
-            is ServerCommandResult.SetStaticDelay -> {
-                Log.i(tag, "Server command: set static delay to ${result.delayMs}ms")
-                // Same application path as the client/sync_offset extension:
-                // a server-pushed correction on top of the auto-measured
-                // hardware latency.
-                getTimeFilter().setServerSyncOffsetMs(result.delayMs.toDouble())
-                onSyncOffsetApplied(result.delayMs.toDouble(), "server_command")
+            is ServerCommandResult.SetOutputDelay -> {
+                Log.i(tag, "Server command: set output delay to ${result.delayMs}ms")
+                // This is NOT a sync-offset correction, which is how it used to
+                // be applied. roles/player/v1.md defines it as delay BEYOND the
+                // audio port - an external amplifier or powered speaker - which
+                // sits on top of the hardware latency the client compensates
+                // itself. It must also survive a reboot.
+                getTimeFilter().setOutputDelayMs(result.delayMs.toDouble())
+                UserSettings.setOutputDelayMs(result.delayMs)
                 sendPlayerStateUpdate()
             }
             is ServerCommandResult.Unknown -> {

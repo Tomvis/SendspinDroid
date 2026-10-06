@@ -264,6 +264,38 @@ class SendspinTimeFilter {
     }
 
     /**
+     * The spec's `output_delay_ms`: delay BEYOND the audio port, such as an
+     * external amplifier or powered speaker.
+     *
+     * Deliberately separate from [staticDelayMs], which is the hardware
+     * latency we measure and compensate ourselves. roles/player/v1.md is
+     * explicit that output delay "does not cover processing delays before the
+     * port (DAC latency, audio buffers), which the client compensates itself",
+     * so folding the two together would report a quantity the server must not
+     * be told about and invite it to compensate a second time.
+     *
+     * Non-negative by spec ("Negative values are not supported") and clamped
+     * to 0-5000, unlike the signed [staticDelayMs].
+     */
+    @Volatile
+    private var outputDelayMicros: Long = 0
+
+    /** Output delay in milliseconds, 0-5000. */
+    val outputDelayMs: Double
+        get() = outputDelayMicros / 1000.0
+
+    /**
+     * Set the beyond-the-port output delay, clamped to the spec's 0-5000 ms.
+     *
+     * Sign: audio that takes [ms] longer to reach the listener must LEAVE the
+     * port that much earlier, so this SUBTRACTS from the client-side play
+     * time. That is the opposite direction to [staticDelayMs], which adds.
+     */
+    fun setOutputDelayMs(ms: Double) {
+        outputDelayMicros = (ms.coerceIn(0.0, 5000.0) * 1000).toLong()
+    }
+
+    /**
      * Write the user's manual sync-offset correction (milliseconds).
      * Called by the settings slider's broadcast path.
      */
@@ -633,7 +665,7 @@ class SendspinTimeFilter {
      */
     fun serverToClient(serverTimeMicros: Long): Long {
         val baseResult = serverTimeMicros - offset.toLong()
-        return baseResult + autoMeasuredDelayMicros + userSyncOffsetMicros
+        return baseResult + autoMeasuredDelayMicros + userSyncOffsetMicros - outputDelayMicros
     }
 
     /**
@@ -641,6 +673,7 @@ class SendspinTimeFilter {
      * for why drift is not applied. Lock-free.
      */
     fun clientToServer(clientTimeMicros: Long): Long {
-        return clientTimeMicros + offset.toLong() - autoMeasuredDelayMicros - userSyncOffsetMicros
+        return clientTimeMicros + offset.toLong() - autoMeasuredDelayMicros - userSyncOffsetMicros +
+            outputDelayMicros
     }
 }
