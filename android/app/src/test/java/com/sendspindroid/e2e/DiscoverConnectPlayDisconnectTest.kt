@@ -143,19 +143,28 @@ class DiscoverConnectPlayDisconnectTest : E2ETestBase() {
     }
 
     @Test
-    fun `artwork transfers are ignored rather than misread`() {
+    fun `artwork transfers reach the artwork callbacks`() {
         connectAndHandshake()
+        val image = ByteArray(100) { it.toByte() }
+
+        // "Servers MUST NOT send artwork messages outside an active artwork
+        // stream", so before stream/start a transfer is dropped.
+        fakeServer.sendArtwork(channel = 0, imageData = image)
+        verify(exactly = 0) { mockCallback.onArtwork(any()) }
 
         // Announce + part, a clear (an announce of an empty image), a cancel.
-        // The announce/part/cancel transfer is not implemented yet; what
-        // matters here is that none of it is read with the pre-rc1 layout,
-        // delivered as an image, or treated as a protocol error.
-        fakeServer.sendArtwork(channel = 0, imageData = ByteArray(100) { it.toByte() })
+        fakeServer.sendArtworkStreamStart()
+        fakeServer.sendArtwork(channel = 0, imageData = image)
+        verify(exactly = 1) { mockCallback.onArtwork(match { it.contentEquals(image) }) }
         fakeServer.sendArtwork(channel = 0, imageData = ByteArray(0))
+        verify(exactly = 1) { mockCallback.onArtworkCleared() }
         fakeServer.cancelArtwork(channel = 0)
 
-        verify(exactly = 0) { mockCallback.onArtwork(any()) }
-        verify(exactly = 0) { mockCallback.onArtworkCleared() }
+        // stream/end for the role clears whatever is on display.
+        fakeServer.sendArtwork(channel = 0, imageData = image)
+        fakeTransport.simulateTextMessage("""{"type":"stream/end","payload":{"roles":["artwork"]}}""")
+        verify(exactly = 2) { mockCallback.onArtwork(any()) }
+        verify(exactly = 2) { mockCallback.onArtworkCleared() }
         assertFalse("artwork must not close the connection", fakeTransport.closed)
 
         // The connection carries on: audio after it is still delivered.

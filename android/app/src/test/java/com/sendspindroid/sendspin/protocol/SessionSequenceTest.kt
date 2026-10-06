@@ -294,12 +294,12 @@ class SessionSequenceTest {
     }
 
     @Test
-    fun `artwork and unknown binary messages are ignored without closing`() {
+    fun `artwork outside a stream and unknown binary messages are ignored without closing`() {
         handler.handleTextMessageForTest(serverHello)
         handler.handleTextMessageForTest(activate("\"playback\"", "$playerRoles,\"artwork@v1\""))
 
-        // An artwork announce, part and cancel on channel 0; the reserved IDs
-        // 2 and 3; a visualizer message.
+        // An artwork announce, part and cancel on channel 0 with no artwork
+        // stream started; the reserved IDs 2 and 3; a visualizer message.
         handler.handleBinaryMessageForTest(frame(8, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 3))
         handler.handleBinaryMessageForTest(frame(8, 0, 0xFF, 0xD8, 0xFF))
         handler.handleBinaryMessageForTest(frame(8, 1))
