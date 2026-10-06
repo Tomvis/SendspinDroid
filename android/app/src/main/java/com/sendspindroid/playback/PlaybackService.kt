@@ -265,17 +265,27 @@ class PlaybackService : MediaLibraryService() {
     // accompanying `server/state` metadata (observed with MA in playlist
     // contexts; see docs/architecture/sendspin-ma-metadata-flow.md §7 Q4/Q5).
     //
-    // Policy: URL artwork is authoritative when available. Binary artwork is
-    // used only as a bridge before the URL fetch completes, matching what the
-    // app's own mini-player already does via Coil on the `artworkUrl` state.
+    // Policy: while the track's metadata carries an `artwork_url`, only the
+    // image fetched from that URL is shown, matching what the app's own
+    // mini-player already does via Coil on the `artworkUrl` state. Binary
+    // artwork is shown only while the metadata carries no URL.
+    //
+    // The two are never mixed, and each has one owner. urlArtwork belongs to
+    // lastArtworkUrl and is dropped when that changes. binaryArtwork is the
+    // artwork stream's current image (roles/artwork/v1.md): the server sends
+    // an image once and clears it explicitly, so it is replaced or cleared
+    // only by onArtwork/onArtworkCleared, never by a metadata update.
     //
     // effectiveArtwork is recomputed on every write and passed to MediaSession.
     private var lastArtworkUrl: String? = null
     private var lastTrackTitle: String? = null
     private var urlArtwork: Bitmap? = null
     private var binaryArtwork: Bitmap? = null
+    // Bumped whenever binaryArtwork is superseded, so a decode still running
+    // for an older image cannot bring it back. Main thread only.
+    private var binaryArtworkGeneration = 0
     private val effectiveArtwork: Bitmap?
-        get() = urlArtwork ?: binaryArtwork
+        get() = if (lastArtworkUrl != null) urlArtwork else binaryArtwork
     // ImageLoader is null when low memory mode is enabled
     private var imageLoader: ImageLoader? = null
 
@@ -825,6 +835,7 @@ class PlaybackService : MediaLibraryService() {
                         lastTrackTitle = null
                         urlArtwork = null
                         binaryArtwork = null
+                        binaryArtworkGeneration++
 
                         // Clear lock screen metadata
                         forwardingPlayer?.clearMetadata()
@@ -872,6 +883,7 @@ class PlaybackService : MediaLibraryService() {
                             lastTrackTitle = null
                             urlArtwork = null
                             binaryArtwork = null
+                            binaryArtworkGeneration++
 
                             // Clear lock screen metadata
                             forwardingPlayer?.clearMetadata()
@@ -1418,24 +1430,22 @@ class PlaybackService : MediaLibraryService() {
                     durationMs = durationMs
                 )
 
-                // Title change invalidates BOTH artwork caches so the
+                // A title or URL change invalidates the URL artwork so the
                 // notification doesn't briefly show the prior track's image
-                // alongside the new track's title. The next URL fetch
-                // (kicked off below) or server-pushed binary artwork
-                // (onArtwork) will repopulate. Coil caches by URL so a
-                // re-fetch on the same album is essentially free.
+                // alongside the new track's title. The URL fetch kicked off
+                // below repopulates it. Coil caches by URL so a re-fetch on
+                // the same album is essentially free. Binary artwork is left
+                // alone: the artwork stream replaces or clears it itself.
                 val newTitle = title.ifEmpty { null }
                 val titleChanged = newTitle != lastTrackTitle
-                if (titleChanged) {
-                    lastTrackTitle = newTitle
-                    urlArtwork = null
-                    binaryArtwork = null
-                }
+                lastTrackTitle = newTitle
 
                 if (artworkUrl.isEmpty()) {
                     lastArtworkUrl = null
+                    urlArtwork = null
                 } else if (artworkUrl != lastArtworkUrl || titleChanged) {
                     lastArtworkUrl = artworkUrl
+                    urlArtwork = null
                     fetchArtwork(artworkUrl)
                 }
 
@@ -1449,23 +1459,30 @@ class PlaybackService : MediaLibraryService() {
                 return
             }
 
-            serviceScope.launch {
+            // Posted like onArtworkCleared, so an image and a clear take effect
+            // in the order the server sent them.
+            mainHandler.post {
                 Log.d(TAG, "Artwork received: ${imageData.size} bytes")
-                try {
-                    val scaled = withContext(Dispatchers.IO) {
-                        val bitmap = BitmapFactory.decodeByteArray(imageData, 0, imageData.size)
-                        bitmap?.let { scaleArtwork(it) }
-                    }
-                    if (scaled != null) {
-                        binaryArtwork = scaled
-                        // Only push to MediaSession if we don't already have URL-based
-                        // artwork; URL is preferred (see urlArtwork field comment).
-                        if (urlArtwork == null) {
-                            updateMediaSessionArtwork(scaled)
+                val generation = ++binaryArtworkGeneration
+                serviceScope.launch {
+                    val scaled = try {
+                        withContext(Dispatchers.IO) {
+                            val bitmap = BitmapFactory.decodeByteArray(imageData, 0, imageData.size)
+                            bitmap?.let { scaleArtwork(it) }
                         }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to decode artwork", e)
+                        null
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to decode artwork", e)
+                    if (generation != binaryArtworkGeneration) return@launch
+                    // An image that does not decode still replaces the one
+                    // before it; effectiveArtwork decides whether it is shown.
+                    binaryArtwork = scaled
+                    updateMediaMetadata(
+                        _playbackState.value.title ?: "",
+                        _playbackState.value.artist ?: "",
+                        _playbackState.value.album ?: ""
+                    )
                 }
             }
         }
@@ -1473,6 +1490,7 @@ class PlaybackService : MediaLibraryService() {
         override fun onArtworkCleared() {
             mainHandler.post {
                 Log.d(TAG, "Artwork cleared by server (empty payload)")
+                binaryArtworkGeneration++
                 binaryArtwork = null
                 updateMediaMetadata(
                     _playbackState.value.title ?: "",
@@ -1758,9 +1776,9 @@ class PlaybackService : MediaLibraryService() {
                     val bitmap = result.drawable.toBitmap()
                     val scaled = scaleArtwork(bitmap)
                     mainHandler.post {
+                        // The track moved on while this was loading.
+                        if (url != lastArtworkUrl) return@post
                         urlArtwork = scaled
-                        // URL is preferred over binary; push this to MediaSession
-                        // unconditionally.
                         updateMediaSessionArtwork(scaled)
                     }
                 }
