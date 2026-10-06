@@ -104,6 +104,15 @@ class SyncErrorFilter(
     }
 
     /**
+     * Move the offset estimate by a known amount: a correction the caller has
+     * just applied to the quantity being measured. Keeps the estimate from
+     * lagging behind the caller's own corrections.
+     */
+    fun shift(deltaMicros: Double) {
+        offset += deltaMicros
+    }
+
+    /**
      * Feed a new sync-error measurement. Non-monotonic timestamps are
      * silently dropped after the first sample.
      *

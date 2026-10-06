@@ -242,7 +242,8 @@ interface SyncAudioPlayerCallback {
  * insert/drop which is completely imperceptible:
  * - Behind schedule: Drop frames to catch up (skip input samples)
  * - Ahead of schedule: Insert duplicate frames to slow down
- * - At 48kHz with 2ms error: ~48 corrections/sec = 1 frame every 1000 frames
+ * - At most one 21us step per 20ms (0.1% speed change)
+ * - Past +/-1ms, at startup and after an underrun: one-shot resync instead
  *
  * ## Architecture
  * ```
@@ -269,13 +270,18 @@ class SyncAudioPlayer(
         ::defaultSinkFactory,
 ) {
     companion object {
-        // Sync correction thresholds (microseconds)
-        private const val DEADBAND_THRESHOLD_US = 10_000L       // 10ms - no correction needed
+        // Sync correction thresholds (microseconds), from the spec's suggested
+        // strategy (roles/player/v1.md, "Sample deletion and insertion")
+        private const val DEADBAND_THRESHOLD_US = 100L          // 100us - no correction needed
+        private const val SNAP_THRESHOLD_US = 1_000L            // 1ms accuracy floor - one-shot resync beyond it
         private const val HARD_RESYNC_THRESHOLD_US = 200_000L   // 200ms - hard resync (drop/skip chunks)
 
-        // Sample insert/drop correction constants (matching Windows SDK for stability)
-        private const val MAX_SPEED_CORRECTION = 0.02           // +/-2% max correction rate (was 4%)
-        private const val CORRECTION_TARGET_SECONDS = 3.0       // Fix error over 3 seconds (was 2)
+        // Soft correction: one step of CORRECTION_STEP_US of audio (1 frame at
+        // 48kHz) at most every CORRECTION_INTERVAL_US. 21us per 20ms is a 0.1%
+        // speed change, inside the spec's +/-0.5% over 150ms, and corrects 1ms
+        // of error per second.
+        private const val CORRECTION_STEP_US = 21L
+        private const val CORRECTION_INTERVAL_US = 20_000L
 
         // Startup grace period - no corrections until timing stabilizes (Windows SDK: 500ms)
         private const val STARTUP_GRACE_PERIOD_US = 500_000L    // 500ms grace period
@@ -287,15 +293,13 @@ class SyncAudioPlayer(
         private const val BUFFER_SIZE_MULTIPLIER = 4  // Multiplier for minimum buffer size
 
         // Sync error Kalman filter parameters
-        // Expected measurement noise in microseconds (5ms jitter)
-        private const val SYNC_ERROR_MEASUREMENT_NOISE_US = 5_000L
+        // AudioTimestamp jitter is about +/-0.65ms peak; the process noise lets
+        // the estimate follow time-filter updates within about a second.
+        private const val SYNC_ERROR_MEASUREMENT_NOISE_US = 400L
+        private const val SYNC_ERROR_PROCESS_STD_DEV = 0.085
 
-        // DAC calibration parameters
-        private const val MAX_DAC_CALIBRATIONS = 50  // Keep last N calibration pairs
-        private const val MIN_CALIBRATION_INTERVAL_US = 10_000L  // Don't calibrate more often than 10ms
-
-        // Sync error update interval
-        private const val SYNC_ERROR_UPDATE_INTERVAL = 5  // Update every N chunks
+        // An AudioTimestamp older than this means the track has stalled (underrun)
+        private const val TIMESTAMP_MAX_AGE_US = 100_000L
 
         // Start gating configuration (from Python reference)
         private const val MIN_BUFFER_BEFORE_START_MS = 200  // Wait for 200ms buffer before scheduling
@@ -304,7 +308,7 @@ class SyncAudioPlayer(
         // DAC-position-aware startup alignment
         private const val TARGET_PENDING_US = 250_000L      // 250ms target write-to-DAC distance
         private const val PENDING_TOL_US = 50_000L           // 50ms pacing tolerance
-        private const val START_ALIGN_TOL_US = 50_000L       // 50ms start alignment tolerance
+        private const val START_PAD_MAX_US = 20_000L         // start once the head chunk is due within 20ms
         private const val TIMESTAMP_STABLE_READS = 3         // consecutive valid getTimestamp() reads
         private const val REANCHOR_COOLDOWN_US = 5_000_000L // 5 second cooldown between reanchors
 
@@ -323,20 +327,6 @@ class SyncAudioPlayer(
         // Gap/overlap detection
         private const val GAP_THRESHOLD_US = 10_000L  // 10ms minimum gap before filling with silence
         private const val DISCONTINUITY_THRESHOLD_US = 100_000L  // 100ms gap indicates discontinuity (for logging)
-
-        // Symmetric crossfade window around each correction (frames before + after)
-        private const val CROSSFADE_FRAMES = 4  // 4 frames each side = 83µs at 48kHz
-
-        // 3-point interpolation weights
-        private const val BLEND_OUTER = 0.25   // weight for lastOutput and secondary
-        private const val BLEND_CENTER = 0.50  // weight for primary frame
-
-        // Baseline refresh interval -- how often to re-derive the server-time baseline
-        // from the Kalman filter so early convergence error doesn't stick forever.
-        // Python does this on every callback; we do it every 5 seconds for efficiency.
-        private const val BASELINE_REFRESH_INTERVAL_US = 5_000_000L  // 5 seconds
-        // Minimum Kalman measurements before trusting a refresh (filter must have converged)
-        private const val BASELINE_REFRESH_MIN_MEASUREMENTS = 10
 
         // Logging and diagnostics
         private const val CHUNK_DROP_LOG_INTERVAL = 100  // Log every Nth dropped chunk when time sync not ready
@@ -454,7 +444,6 @@ class SyncAudioPlayer(
     @Volatile private var streamGeneration = 0  // Incremented on stream/clear to invalidate old chunks
 
     // Sync error tracking
-    private var syncUpdateCounter = 0  // Counter for update interval
     private val totalFramesWritten = AtomicLong(0)  // Total frames written to AudioTrack
 
     // Playback position tracking (in server timeline)
@@ -468,24 +457,15 @@ class SyncAudioPlayer(
     // Sync Error Tracking
     // ========================================================================
     //
-    // Sync error = actualPlaybackServerTimeUs - expectedPlaybackServerTimeUs
-    //   - actual: baseline + DAC frame delta (advances at DAC hardware clock rate)
-    //   - expected: fresh Kalman conversion at DAC time (advances at server clock rate)
-    // At calibration these are identical; divergence = DAC-vs-server clock drift.
+    // Sync error = server time at which a chunk will reach the DAC, minus the
+    // chunk's own server timestamp. See updateSyncError().
     //
     // Sign convention:
-    //   Positive = DAC ahead of expected (playing fast) -> need DROP
-    //   Negative = DAC behind expected (playing slow) -> need INSERT
+    //   Positive = audio reaches the DAC late  -> need DROP
+    //   Negative = audio reaches the DAC early -> need INSERT
     //
     private var playbackStartTimeUs = 0L          // When playback started (for stats display)
-    private var startTimeCalibrated = false       // Has playback start been calibrated from AudioTimestamp?
-
-    // Server-time baseline tracking for absolute sync error calculation
-    // At calibration, we capture the relationship between DAC frame position and server time.
-    // The baseline is periodically refreshed as the Kalman filter converges (see BASELINE_REFRESH_INTERVAL_US).
-    private var baselineFramePosition = 0L        // DAC frame position at calibration
-    private var baselineServerTimeUs = 0L         // Corresponding server time at calibration
-    private var lastBaselineRefreshUs = 0L        // When baseline was last refreshed
+    private var startTimeCalibrated = false       // Has a sync error been measured since playback (re)started?
     private var samplesReadSinceStart = 0L        // Total samples consumed since playback started
     @Volatile private var syncErrorUs = 0L        // Current sync error (for display)
 
@@ -495,35 +475,17 @@ class SyncAudioPlayer(
     // 2D Kalman filter for sync error smoothing (tracks offset + drift)
     // Based on Python reference implementation for optimal noise filtering
     private val syncErrorFilter = SyncErrorFilter(
+        processStdDev = SYNC_ERROR_PROCESS_STD_DEV,
         measurementNoiseUs = SYNC_ERROR_MEASUREMENT_NOISE_US
     )
 
-    // DAC calibration state - tracks (dacTimeUs, loopTimeUs) pairs for time conversion
-    // Used to convert DAC hardware time to loop/system time
-    private data class DacCalibration(val dacTimeUs: Long, val loopTimeUs: Long)
-    private val dacLoopCalibrations = ArrayDeque<DacCalibration>()
-    private var lastDacCalibrationTimeUs = 0L
-
-    // Frame position wrap detection for pre-API-28 hardware.
-    // Some HAL implementations use 32-bit counters internally, causing framePosition
-    // to wrap around ~4.29 billion frames (~24.8 hours at 48kHz). Track the last valid
-    // frame position so we can detect and reject wrapped values.
-    private var lastValidFramePosition = 0L
-
-    // Sample insert/drop correction state (from Python reference)
-    private var insertEveryNFrames: Int = 0      // Insert duplicate frame every N frames (slow down)
-    private var dropEveryNFrames: Int = 0        // Drop frame every N frames (speed up)
-    private var framesUntilNextInsert: Int = 0   // Countdown to next insert
-    private var framesUntilNextDrop: Int = 0     // Countdown to next drop
-    private var lastOutputFrame: ByteArray = ByteArray(0)  // Last frame written (for duplication)
-
-    // Crossfade and interpolation state for smooth sync corrections
-    private var secondLastOutputFrame = ByteArray(0)  // For 3-point INSERT interpolation
-    private var crossfadeState = CrossfadeState.IDLE
-    private var crossfadeProgress = 0
-    private var crossfadeTargetFrame = ByteArray(0)   // Blended frame to crossfade toward/from
-
-    private enum class CrossfadeState { IDLE, FADING_IN, FADING_OUT }
+    // Sample insert/drop correction state
+    private val correctionFrames = maxOf(1, ((CORRECTION_STEP_US * sampleRate + 500_000) / 1_000_000).toInt())
+    private val correctionIntervalFrames = ((CORRECTION_INTERVAL_US * sampleRate) / 1_000_000).toInt()
+    private var insertEveryNFrames: Int = 0      // Duplicating a frame every N frames (slow down), 0 = off
+    private var dropEveryNFrames: Int = 0        // Dropping a frame every N frames (speed up), 0 = off
+    private var framesSinceCorrection: Int = 0   // Frames written since the last correction slot
+    private var snapDropFrames: Long = 0         // One-shot resync: leading frames still to drop
 
     // Startup grace period tracking (Windows SDK style)
     // No corrections applied until STARTUP_GRACE_PERIOD_US after entering PLAYING state
@@ -630,12 +592,6 @@ class SyncAudioPlayer(
         try {
             audioSink = sinkFactory(sampleRate, channels, bitDepth, bufferSize)
             if (muted) audioSink?.setVolume(0f)
-
-            // Pre-allocate frame buffers for sync correction (avoids GC in audio callback)
-            lastOutputFrame = ByteArray(bytesPerFrame)
-            secondLastOutputFrame = ByteArray(bytesPerFrame)
-            crossfadeTargetFrame = ByteArray(bytesPerFrame)
-            crossfadeScratchBuf = ByteArray(bytesPerFrame)
 
             AppLog.Audio.i("AudioTrack initialized: ${sampleRate}Hz, ${channels}ch, ${bitDepth}bit, buffer=${bufferSize}bytes")
 
@@ -796,28 +752,20 @@ class SyncAudioPlayer(
                 expectedNextTimestampUs = null
             }
 
-            // Clear stale DAC calibrations - they become invalid during pause
-            // because System.nanoTime() continues advancing
-            clearDacCalibrations()
+            // pause() flushed the track, which restarts its frame position from
+            // zero. Have the playback loop flush again and restart its own frame
+            // count with it, on the thread that does the writes.
+            isFlushPending.set(true)
 
-            // Reset DAC timestamp stability -- must re-establish after resume
-            consecutiveValidTimestamps = 0
-            dacTimestampsStable = false
-
-            // Reset sync error filter and server-time baseline - pre-pause state is no longer relevant
+            // Reset sync error filter - pre-pause state is no longer relevant
             syncErrorFilter.reset()
             syncErrorUs = 0L
             startTimeCalibrated = false        // Force recalibration after resume
-            baselineFramePosition = 0L
-            baselineServerTimeUs = 0L
 
             // Reset correction schedule - start fresh
             insertEveryNFrames = 0
             dropEveryNFrames = 0
-            framesUntilNextInsert = 0
-            framesUntilNextDrop = 0
-            crossfadeState = CrossfadeState.IDLE
-            crossfadeProgress = 0
+            snapDropFrames = 0
 
             // Reset grace period to allow sync to stabilize after resume
             playingStateEnteredAtUs = nowUs
@@ -899,6 +847,7 @@ class SyncAudioPlayer(
             isFlushPending.set(false)  // Clear any pending flush since we flush directly below
             audioSink?.stop()
             audioSink?.flush()
+            totalFramesWritten.set(0)
             chunkQueue.clear()
             totalQueuedSamples.set(0)
 
@@ -957,19 +906,14 @@ class SyncAudioPlayer(
             firstServerTimestampUs = null
 
             // Reset sync error tracking
-            syncUpdateCounter = 0
             totalFramesWritten.set(0)
             serverTimelineCursor = 0L
             serverTimelineCursorRemainder = 0L
             playbackStartTimeUs = 0L
             startTimeCalibrated = false
-            baselineFramePosition = 0L
-            baselineServerTimeUs = 0L
-            lastBaselineRefreshUs = 0L
             samplesReadSinceStart = 0L
             syncErrorUs = 0L
             syncErrorFilter.reset()
-            clearDacCalibrations()
             playingStateEnteredAtUs = 0L
 
             // Reset DAC timestamp stability tracking so it re-warms
@@ -980,14 +924,7 @@ class SyncAudioPlayer(
             // Reset sample insert/drop correction state
             insertEveryNFrames = 0
             dropEveryNFrames = 0
-            framesUntilNextInsert = 0
-            framesUntilNextDrop = 0
-            lastOutputFrame.fill(0)
-            secondLastOutputFrame.fill(0)
-            crossfadeTargetFrame.fill(0)
-            crossfadeScratchBuf.fill(0)
-            crossfadeState = CrossfadeState.IDLE
-            crossfadeProgress = 0
+            snapDropFrames = 0
 
             // Reset gap/overlap tracking
             expectedNextTimestampUs = null
@@ -1212,39 +1149,25 @@ class SyncAudioPlayer(
             // Note: lastReanchorTimeUs is NOT reset to maintain cooldown across clears
 
             // Reset sync error tracking (decoupled architecture)
-            syncUpdateCounter = 0
             totalFramesWritten.set(0)
             serverTimelineCursor = 0L
             serverTimelineCursorRemainder = 0L
             playbackStartTimeUs = 0L
             startTimeCalibrated = false
-            baselineFramePosition = 0L       // Reset server-time baseline
-            baselineServerTimeUs = 0L
-            lastBaselineRefreshUs = 0L
             samplesReadSinceStart = 0L
             syncErrorUs = 0L
             syncErrorFilter.reset()
-            clearDacCalibrations()  // Clear DAC calibration history
             playingStateEnteredAtUs = 0L  // Reset grace period
 
             // Reset DAC timestamp stability tracking
             consecutiveValidTimestamps = 0
             dacTimestampsStable = false
             lastDacPacingLogTimeUs = 0L
-            lastValidFramePosition = 0L  // Reset frame position wrap detection
 
             // Reset sample insert/drop correction state
             insertEveryNFrames = 0
             dropEveryNFrames = 0
-            framesUntilNextInsert = 0
-            framesUntilNextDrop = 0
-            // Clear frame buffers but keep the pre-allocated arrays
-            lastOutputFrame.fill(0)
-            secondLastOutputFrame.fill(0)
-            crossfadeTargetFrame.fill(0)
-            crossfadeScratchBuf.fill(0)
-            crossfadeState = CrossfadeState.IDLE
-            crossfadeProgress = 0
+            snapDropFrames = 0
 
             // Reset gap/overlap tracking
             expectedNextTimestampUs = null
@@ -1538,8 +1461,6 @@ class SyncAudioPlayer(
     private fun resetSyncBaselines(nowMicros: Long) {
         playbackStartTimeUs = nowMicros
         startTimeCalibrated = false
-        baselineFramePosition = 0L
-        baselineServerTimeUs = 0L
         samplesReadSinceStart = 0L
         syncErrorUs = 0L
         syncErrorFilter.reset()
@@ -1550,10 +1471,8 @@ class SyncAudioPlayer(
      *
      * Two paths:
      * 1. **DAC-aware** (preferred): If AudioTrack timestamps are stable, use the
-     *    hardware DAC position to align the queue head. The key insight is that
-     *    `startErr = headChunkServerTime - desiredDacHeadServerTime` cancels
-     *    Kalman offset error because both sides go through the same linear
-     *    transform (`clientToServer(x) = x + offset - staticDelay`).
+     *    hardware DAC position to align the queue head to the write cursor in
+     *    one shot.
      * 2. **Kalman fallback**: If timestamps are not yet stable, use the existing
      *    Kalman-predicted `scheduledStartLoopTimeUs` approach.
      *
@@ -1570,12 +1489,12 @@ class SyncAudioPlayer(
     /**
      * DAC-position-aware start gating.
      *
-     * Uses AudioTrack.getTimestamp() to determine what the DAC is currently
-     * outputting, then aligns the chunk queue head to TARGET_PENDING_US ahead
-     * of the DAC position. This is resilient to Kalman filter offset error at
-     * startup because both `headChunkServerTime` and `desiredDacHeadServerTime`
-     * go through the same linear offset transform -- the error cancels in the
-     * difference.
+     * Uses AudioTrack.getTimestamp() to determine when a frame written now
+     * will reach the DAC, and starts the queue head exactly there (spec:
+     * "Large errors and startup"): it waits while the head chunk is not due
+     * yet, pads the last few milliseconds with silence, and drops the leading
+     * audio that is already late. The playback loop keeps the track fed with
+     * silence meanwhile, so its timestamps stay live.
      *
      * @return true if we should continue waiting, false if ready to play
      */
@@ -1601,35 +1520,24 @@ class SyncAudioPlayer(
         }
 
         val nowMicros = nowNs() / 1000
-        val pendingToDacUs = getPendingToDacUs(track)
-
-        if (pendingToDacUs <= 0) {
-            // Timestamp read failed despite being "stable" -- fall back to Kalman
-            AppLog.Sync.w("DAC-aware start: getPendingToDacUs returned $pendingToDacUs, falling back to Kalman")
-            return handleStartGatingKalman()
-        }
-
-        // What server time is the DAC currently outputting?
-        val dacNowServerUs = timeFilter.clientToServer(nowMicros - pendingToDacUs)
-
-        // Where should the queue head be in server time?
-        // The first real chunk goes at the write cursor, which is pendingToDacUs
-        // ahead of the DAC output. Use the actual measured pending (not the
-        // steady-state TARGET_PENDING_US constant) so the chunk exits the DAC
-        // at the correct wall-clock moment regardless of how much silence
-        // accumulated during pre-calibration.
-        val desiredHeadServerUs = dacNowServerUs + pendingToDacUs
-
         val headChunk = chunkQueue.peek() ?: return true  // No chunks yet, keep waiting
 
-        // How far is the actual queue head from where we want it?
-        // Positive = head chunk is AHEAD of desired (normal buffer), Negative = head chunk BEHIND (stale)
-        val startErrUs = headChunk.serverTimeMicros - desiredHeadServerUs
+        // What server time will a frame written now reach the DAC at?
+        val dacTimeUs = dacTimeOfNextWriteUs(track)
+        if (dacTimeUs == null) {
+            // Timestamp read failed despite being "stable" -- fall back to Kalman
+            AppLog.Sync.w("DAC-aware start: no usable DAC timestamp, falling back to Kalman")
+            return handleStartGatingKalman()
+        }
+        val writeCursorServerUs = timeFilter.clientToServer(dacTimeUs)
 
-        if (startErrUs > START_ALIGN_TOL_US) {
-            // Queue head is too far ahead of where the DAC needs it -- wait for
-            // the DAC to catch up by playing through existing silence. Without
-            // this gate, starting with startErr=200ms bakes in a permanent offset.
+        // How far is the queue head from the write cursor?
+        // Positive = head chunk is not due yet, Negative = head chunk is late (stale)
+        val startErrUs = headChunk.serverTimeMicros - writeCursorServerUs
+
+        if (startErrUs > START_PAD_MAX_US) {
+            // Queue head is not due yet -- wait while the playback loop feeds
+            // the track silence.
             //
             // This branch runs every playback-loop iteration (~10ms) while we wait.
             // Rate-limit the log: first-time entry, then once per second progress,
@@ -1637,7 +1545,7 @@ class SyncAudioPlayer(
             if (alignmentWaitStartedAtUs == 0L) {
                 alignmentWaitStartedAtUs = nowMicros
                 alignmentWaitLastLoggedUs = nowMicros
-                AppLog.Sync.d("DAC-aware start: waiting for alignment, startErr=${startErrUs/1000}ms > ${START_ALIGN_TOL_US/1000}ms")
+                AppLog.Sync.d("DAC-aware start: waiting for alignment, startErr=${startErrUs/1000}ms > ${START_PAD_MAX_US/1000}ms")
             } else if (nowMicros - alignmentWaitLastLoggedUs > 1_000_000L) {
                 alignmentWaitLastLoggedUs = nowMicros
                 val elapsedMs = (nowMicros - alignmentWaitStartedAtUs) / 1000
@@ -1646,15 +1554,15 @@ class SyncAudioPlayer(
             return true
         }
 
-        if (startErrUs < -START_ALIGN_TOL_US) {
-            // Head chunk is behind the DAC -- drop stale chunks until aligned
+        if (startErrUs < 0) {
+            // Head chunk is late -- drop the chunks that are late in full
             var droppedFrames = 0
             var droppedChunks = 0
 
             while (true) {
                 val chunk = chunkQueue.peek() ?: break
-                val err = chunk.serverTimeMicros - desiredHeadServerUs
-                if (err >= -START_ALIGN_TOL_US) break  // This chunk is close enough
+                val chunkEndUs = chunk.serverTimeMicros + (chunk.sampleCount * 1_000_000L) / sampleRate
+                if (chunkEndUs > writeCursorServerUs) break  // Part of this chunk is still due
 
                 chunkQueue.poll()
                 totalQueuedSamples.addAndGet(-chunk.sampleCount.toLong())
@@ -1675,6 +1583,16 @@ class SyncAudioPlayer(
             return true
         }
 
+        // One-shot alignment of the head chunk to the write cursor: silence up
+        // to its start time if early, or drop its late leading frames.
+        val finalErr = alignedHead.serverTimeMicros - writeCursorServerUs
+        val alignFrames = (abs(finalErr) * sampleRate) / 1_000_000
+        if (finalErr >= 0) {
+            writeSilence(track, alignFrames)
+        } else {
+            snapDropFrames = alignFrames
+        }
+
         firstServerTimestampUs = alignedHead.serverTimeMicros
         scheduledStartLoopTimeUs = timeFilter.serverToClient(alignedHead.serverTimeMicros)
 
@@ -1682,10 +1600,8 @@ class SyncAudioPlayer(
 
         // Diagnostic logging
         val bufferedMs = (totalQueuedSamples.get() * 1000) / sampleRate
-        val finalErr = alignedHead.serverTimeMicros - desiredHeadServerUs
         AppLog.Sync.i("DAC-aware start gating transition: " +
-            "startErr=${startErrUs/1000}ms, finalErr=${finalErr/1000}ms, " +
-            "pendingToDac=${pendingToDacUs/1000}ms, " +
+            "startErr=${startErrUs/1000}ms, finalErr=${finalErr}us, " +
             "firstServerTs=${firstServerTimestampUs}us, " +
             "kalmanOffset=${timeFilter.offsetMicros/1000}ms, " +
             "kalmanMeasurements=${timeFilter.measurementCountValue}, " +
@@ -1803,8 +1719,8 @@ class SyncAudioPlayer(
     /**
      * Pre-calibrate DAC timing by writing silence during WAITING_FOR_START.
      *
-     * This allows us to gather DAC calibration pairs before real audio arrives,
-     * making sync error calculations reliable from the first measurement.
+     * This gets the DAC timestamps going before real audio arrives, making
+     * sync error calculations reliable from the first measurement.
      *
      * Android's AudioTimestamp API requires ~21k frames (~443ms at 48kHz) to be
      * played before returning valid data. By actively writing silence during
@@ -1831,15 +1747,11 @@ class SyncAudioPlayer(
         // the subsequent getTimestamp() report for this same batch of frames.
         latencyEstimator.recordWrite(totalFramesWritten.get(), silenceWriteTimeNs)
 
-        // Try to get DAC timestamp for calibration and stability tracking
+        // Try to get DAC timestamp for stability tracking
         val ts = track.getTimestamp()
         if (ts != null) {
-            val dacTimeUs = ts.nanoTime / 1000
-            val loopTimeUs = nowNs() / 1000
-
-            // Sanity check - only store valid timestamps (framePosition > 0 means DAC has started)
-            if (ts.framePosition > 0) {
-                storeDacCalibration(dacTimeUs, loopTimeUs)
+            // Only count usable timestamps (DAC has started, track is running)
+            if (dacTimeOfNextWriteUs(track) != null) {
                 latencyEstimator.recordDacTimestamp(ts.framePosition, ts.nanoTime)
 
                 // Track consecutive valid reads for DAC-aware start gating
@@ -1872,13 +1784,14 @@ class SyncAudioPlayer(
         val pendingUs = getPendingToDacUs(track)
         if (pendingUs > SILENCE_KEEPALIVE_THRESHOLD_US) return
 
-        // Write pre-allocated silence (10ms) to top up the buffer
+        // Top the buffer back up to the threshold plus one 10ms block. A fixed
+        // 10ms per loop iteration is slightly less than real time, so the track
+        // would drain and sit in permanent underrun. Without a timestamp
+        // (pendingUs == 0) the depth is unknown, so write the one block only.
         val keepAliveWriteTimeNs = nowNs()
-        val written = track.write(silenceBuffer, 0, silenceBuffer.size)
-        if (written > 0) {
-            totalFramesWritten.addAndGet((written / bytesPerFrame).toLong())
-            latencyEstimator.recordWrite(totalFramesWritten.get(), keepAliveWriteTimeNs)
-        }
+        val deficitUs = if (pendingUs > 0) SILENCE_KEEPALIVE_THRESHOLD_US - pendingUs else 0L
+        writeSilence(track, (deficitUs * sampleRate) / 1_000_000 + silenceFrameCount)
+        latencyEstimator.recordWrite(totalFramesWritten.get(), keepAliveWriteTimeNs)
     }
 
     /**
@@ -1935,29 +1848,22 @@ class SyncAudioPlayer(
             lastChunkServerTime = 0L
             insertEveryNFrames = 0
             dropEveryNFrames = 0
-            crossfadeState = CrossfadeState.IDLE
-            crossfadeProgress = 0
+            snapDropFrames = 0
 
             // Reset sync error state (decoupled architecture)
-            syncUpdateCounter = 0
             totalFramesWritten.set(0)
             serverTimelineCursor = 0L
             serverTimelineCursorRemainder = 0L
             playbackStartTimeUs = 0L
             startTimeCalibrated = false
-            baselineFramePosition = 0L       // Reset server-time baseline
-            baselineServerTimeUs = 0L
-            lastBaselineRefreshUs = 0L
             samplesReadSinceStart = 0L
             syncErrorUs = 0L
             syncErrorFilter.reset()
-            clearDacCalibrations()  // Clear DAC calibration history
             playingStateEnteredAtUs = 0L  // Reset grace period
 
             // Reset DAC timestamp stability tracking
             consecutiveValidTimestamps = 0
             dacTimestampsStable = false
-            lastValidFramePosition = 0L  // Reset frame position wrap detection
 
             // Transition to INITIALIZING to wait for new chunks
             setPlaybackState(PlaybackState.INITIALIZING)
@@ -2014,6 +1920,12 @@ class SyncAudioPlayer(
                             AppLog.Audio.w("Failed to flush AudioTrack (deferred)", e)
                         }
                     }
+                    // The flush restarts the track's frame position from zero.
+                    // Restart our count here, on the thread that writes, so a
+                    // write that raced the clear cannot leave the two apart.
+                    totalFramesWritten.set(0)
+                    consecutiveValidTimestamps = 0
+                    dacTimestampsStable = false
                 }
 
                 // State machine for synchronized playback
@@ -2036,26 +1948,18 @@ class SyncAudioPlayer(
                         // (MIN_CHUNKS_BEFORE_START=16) added unnecessary delay and is now
                         // replaced by DAC timestamp stability tracking in preCalibrateDacTiming()
                         val bufferedMs = (totalQueuedSamples.get() * 1000) / sampleRate
-                        if (bufferedMs < MIN_BUFFER_BEFORE_START_MS) {
-                            // Pre-calibrate DAC timing while waiting for buffer to fill
-                            // This establishes timing calibration BEFORE real audio arrives.
-                            // Once stable, stop writing silence -- further writes just inflate
-                            // totalFramesWritten and increase the DAC-to-first-chunk gap.
+                        if (bufferedMs < MIN_BUFFER_BEFORE_START_MS || handleStartGating()) {
+                            // Still waiting for buffer or for the scheduled start.
+                            // Keep the track fed with silence throughout: a track
+                            // left to underrun stalls with its timestamps frozen,
+                            // and a start aligned against those is off by however
+                            // long it sat idle.
                             if (!dacTimestampsStable) {
                                 preCalibrateDacTiming()
+                            } else {
+                                writeSilenceKeepAlive()
                             }
                             delay(STATE_POLL_DELAY_MS)
-                            continue
-                        }
-
-                        // Handle start gating logic
-                        if (handleStartGating()) {
-                            // Still waiting for scheduled start - continue pre-calibration
-                            // only if timestamps aren't stable yet
-                            if (!dacTimestampsStable) {
-                                preCalibrateDacTiming()
-                            }
-                            delay(STATE_POLL_DELAY_MS)  // Still waiting for scheduled start
                             continue
                         }
                         // handleStartGating() transitioned us to PLAYING
@@ -2115,6 +2019,10 @@ class SyncAudioPlayer(
                         continue
                     }
                     bufferUnderrunCount++
+                    // The track may stall now. Start the sync error estimate over
+                    // and hold corrections until it has settled on fresh readings.
+                    syncErrorFilter.reset()
+                    playingStateEnteredAtUs = nowNs() / 1000
                     delay(BUFFER_EMPTY_DELAY_MS)
                     continue
                 }
@@ -2134,7 +2042,8 @@ class SyncAudioPlayer(
                 checkStuckState()
                 if (dacTimestampsStable && nowMicros - lastDacPacingLogTimeUs > DAC_PACING_LOG_INTERVAL_US) {
                     lastDacPacingLogTimeUs = nowMicros
-                    AppLog.Sync.d("DAC pacing: pending=${pendingToDacUs/1000}ms, syncErr=${syncErrorUs/1000}ms")
+                    AppLog.Sync.d("DAC pacing: pending=${pendingToDacUs/1000}ms, syncErr=${syncErrorUs}us, " +
+                        "smoothed=${syncErrorFilter.offsetMicros}us, dropped=$framesDropped, inserted=$framesInserted")
                 }
 
                 // Pause writing when the AudioTrack buffer is sufficiently full
@@ -2152,7 +2061,6 @@ class SyncAudioPlayer(
                 }
 
                 // Normal playback: update correction schedule and write chunk
-                updateCorrectionSchedule(0)  // param unused, reads syncErrorFilter
                 playChunkWithCorrection(chunk)
             }
 
@@ -2206,187 +2114,40 @@ class SyncAudioPlayer(
     }
 
     /**
-     * Update the sample insert/drop correction schedule based on sync error.
+     * Decide whether the next correction step drops or duplicates frames.
      *
-     * ## Design Overview
+     * Follows the spec's suggested strategy (roles/player/v1.md, "Sample
+     * deletion and insertion"): outside a ~100us dead band, remove or repeat
+     * [correctionFrames] frames (21us of audio) so the error shrinks. The
+     * decision is taken once per [correctionIntervalFrames] (20ms), which
+     * bounds the speed change to about 0.1% -- well inside the spec's +/-0.5%
+     * over 150ms -- while still absorbing 1ms of drift per second.
      *
-     * This implements **proportional control** for imperceptible audio sync correction.
-     * Instead of changing playback rate (which causes audible pitch/tempo changes), we
-     * insert or drop individual sample frames. At 48kHz, a single frame is ~21 microseconds
-     * - far below the ~10ms threshold of human perception for audio discontinuities.
-     *
-     * ## Why Proportional Control?
-     *
-     * A simple on/off correction (always correct at max rate when error exists) would:
-     * - Overshoot the target, causing oscillation around zero
-     * - Create more audible artifacts due to rapid insert/drop transitions
-     *
-     * Proportional control provides:
-     * - Gentle corrections for small errors (most common case)
-     * - Aggressive corrections only when truly needed
-     * - Smooth convergence to zero error without oscillation
-     *
-     * ## The Math: Sync Error to Correction Interval
-     *
-     * Given a sync error in microseconds, we calculate how often to insert/drop frames:
-     *
-     * ```
-     * 1. Convert error to frames:
-     *    framesError = |errorUs| * sampleRate / 1,000,000
-     *    Example: 2ms error at 48kHz = 2000 * 48000 / 1000000 = 96 frames
-     *
-     * 2. Calculate desired corrections per second:
-     *    correctionsPerSec = framesError / CORRECTION_TARGET_SECONDS
-     *    Example: 96 frames / 3 seconds = 32 corrections/sec
-     *
-     * 3. Cap at maximum correction rate:
-     *    maxCorrectionsPerSec = sampleRate * MAX_SPEED_CORRECTION
-     *    Example: 48000 * 0.02 = 960 corrections/sec max
-     *
-     * 4. Calculate interval between corrections:
-     *    intervalFrames = sampleRate / correctionsPerSec
-     *    Example: 48000 / 32 = 1500 frames between corrections
-     *    (drop/insert 1 frame every 1500 frames = 31ms)
-     * ```
-     *
-     * ## Why MAX_SPEED_CORRECTION = 2% (0.02)?
-     *
-     * The 2% limit balances correction speed against audibility:
-     * - Below ~4%: Sample insert/drop is completely imperceptible
-     * - At 2%: Very conservative - even sensitive listeners won't notice
-     * - Correction of 2% at 48kHz = 960 samples/sec = 1 frame every ~1ms
-     * - This can correct up to 960 * 21us = ~20ms of error per second
-     *
-     * Note: The Python reference uses 4%, but 2% provides extra safety margin.
-     *
-     * ## Why CORRECTION_TARGET_SECONDS = 3 seconds?
-     *
-     * This controls the responsiveness vs smoothness tradeoff:
-     * - Shorter (1-2s): More responsive but more aggressive corrections
-     * - Longer (5-10s): Smoother but slow to converge
-     * - 3 seconds: Good balance - corrects typical drift within acceptable time
-     *   while keeping correction rate low for normal operation
-     *
-     * With 3 second target:
-     * - 20ms error -> ~320 corrections/sec -> 1 frame every ~150 frames (3ms)
-     * - 10ms error -> ~160 corrections/sec -> 1 frame every ~300 frames (6ms)
-     * - Below 10ms: deadband, no corrections applied
-     *
-     * ## Deadband: Why 10ms Threshold?
-     *
-     * The DEADBAND_THRESHOLD_US (10ms / 10000us) creates a "good enough" zone:
-     * - Errors below 10ms don't trigger any correction
-     * - This prevents constant tiny corrections during normal playback
-     * - 10ms is well within acceptable sync tolerance (human perception ~20-80ms)
-     * - When corrections do activate (>10ms error), the proportional controller
-     *   converges quickly: 10ms error → ~160 corrections/sec → fixed in ~3s
-     *
-     * Without a deadband, noise in the sync error measurement would cause
-     * continuous small corrections even when perfectly synced.
-     *
-     * ## Correction Direction
-     *
-     * Uses Kalman-filtered sync error from [updateSyncError]:
-     * - **Positive error** = behind schedule (DAC ahead of read cursor)
-     *   -> DROP frames to catch up (skip input samples, output less)
-     * - **Negative error** = ahead of schedule (DAC behind read cursor)
-     *   -> INSERT duplicate frames to slow down (output more, effective slowdown)
-     *
-     * @param processingTimeErrorUs Unused - kept for API compatibility.
-     *        Sync error is obtained from [syncErrorFilter] (Kalman-filtered).
+     * Sign convention: positive error = audio reaches the DAC late -> DROP,
+     * negative error = early -> INSERT.
      */
-    private fun updateCorrectionSchedule(@Suppress("UNUSED_PARAMETER") processingTimeErrorUs: Long) {
-        // Guard: Skip corrections until DAC calibration provides reliable sync error
-        if (!startTimeCalibrated) {
-            insertEveryNFrames = 0
-            dropEveryNFrames = 0
-            return
-        }
-
-        // Guard: Skip corrections during startup grace period (500ms)
-        // AudioTimestamp needs time to stabilize after playback starts
-        if (playingStateEnteredAtUs > 0) {
-            val nowUs = nowNs() / 1000
-            val timeSincePlayingUs = nowUs - playingStateEnteredAtUs
-            if (timeSincePlayingUs < STARTUP_GRACE_PERIOD_US) {
-                insertEveryNFrames = 0
-                dropEveryNFrames = 0
-                return
-            }
-        }
-
-        // Guard: Skip corrections during reconnection stabilization period (2s)
-        // After reconnection, the Kalman filter needs time to re-converge with new measurements
-        if (reconnectedAtUs > 0) {
-            val nowUs = nowNs() / 1000
-            val timeSinceReconnectUs = nowUs - reconnectedAtUs
-            if (timeSinceReconnectUs < RECONNECT_STABILIZATION_US) {
-                insertEveryNFrames = 0
-                dropEveryNFrames = 0
-                return
-            }
-        }
-
-        // Get Kalman-filtered sync error (smooths measurement noise and tracks drift)
-        val effectiveErrorUs = syncErrorFilter.offsetMicros.toDouble()
-        val absErr = abs(effectiveErrorUs)
-
-        // Deadband check: errors below 2ms are "good enough" - no correction needed
-        // This prevents oscillation and unnecessary CPU usage for imperceptible errors
-        if (absErr <= DEADBAND_THRESHOLD_US) {
-            insertEveryNFrames = 0
-            dropEveryNFrames = 0
-            return
-        }
-
-        // Step 1: Convert error from microseconds to sample frames
-        // Example: 2000us * 48000Hz / 1,000,000 = 96 frames
-        val framesError = absErr * sampleRate / 1_000_000.0
-
-        // Step 2: Calculate desired corrections per second using proportional control
-        // We aim to eliminate the error over CORRECTION_TARGET_SECONDS (3 seconds)
-        // Example: 96 frames / 3 seconds = 32 corrections/sec
-        val desiredCorrectionsPerSec = framesError / CORRECTION_TARGET_SECONDS
-
-        // Step 3: Cap at maximum correction rate (2% of sample rate)
-        // Example: 48000 * 0.02 = 960 corrections/sec max
-        // This ensures corrections remain imperceptible even for large errors
-        val maxCorrectionsPerSec = sampleRate * MAX_SPEED_CORRECTION
-        val correctionsPerSec = minOf(desiredCorrectionsPerSec, maxCorrectionsPerSec)
-
-        // Step 4: Calculate interval between corrections (in frames)
-        // Example: 48000 / 32 = 1500 frames between corrections (~31ms at 48kHz)
-        val intervalFrames = if (correctionsPerSec > 0) {
-            (sampleRate / correctionsPerSec).toInt().coerceAtLeast(1)
-        } else {
-            0
-        }
-
-        // Apply correction in the appropriate direction
-        if (effectiveErrorUs > 0) {
-            // Positive error: DAC is ahead of where we've read to
-            // DROP frames to catch up (skip input samples, effectively speeding up)
-            dropEveryNFrames = intervalFrames
-            insertEveryNFrames = 0
-            if (framesUntilNextDrop == 0) {
-                framesUntilNextDrop = intervalFrames
-            }
-        } else {
-            // Negative error: DAC is behind where we've read to
-            // INSERT duplicate frames to slow down (output more samples per input)
-            insertEveryNFrames = intervalFrames
-            dropEveryNFrames = 0
-            if (framesUntilNextInsert == 0) {
-                framesUntilNextInsert = intervalFrames
-            }
-        }
+    private fun updateCorrectionSchedule() {
+        val errorUs = syncErrorFilter.offsetMicros
+        val allowed = correctionsAllowed(nowNs() / 1000)
+        dropEveryNFrames = if (allowed && errorUs > DEADBAND_THRESHOLD_US) correctionIntervalFrames else 0
+        insertEveryNFrames = if (allowed && errorUs < -DEADBAND_THRESHOLD_US) correctionIntervalFrames else 0
     }
 
     /**
-     * Write a chunk to AudioTrack with sample insert/drop corrections.
-     *
-     * When corrections are active, processes frame-by-frame to insert duplicates
-     * or skip frames. When no corrections are needed, writes in bulk for efficiency.
+     * Corrections (soft or one-shot) are held back until a sync error has been
+     * measured, and while timing is still settling after a start, an underrun
+     * or a reconnect.
+     */
+    private fun correctionsAllowed(nowUs: Long): Boolean {
+        if (!startTimeCalibrated) return false
+        if (playingStateEnteredAtUs > 0 && nowUs - playingStateEnteredAtUs < STARTUP_GRACE_PERIOD_US) return false
+        if (reconnectedAtUs > 0 && nowUs - reconnectedAtUs < RECONNECT_STABILIZATION_US) return false
+        return true
+    }
+
+    /**
+     * Write a chunk to AudioTrack, applying any pending one-shot resync and
+     * the soft drop/duplicate correction.
      */
     private fun playChunkWithCorrection(chunk: AudioChunk) {
         chunkQueue.poll() // Remove from queue
@@ -2401,33 +2162,19 @@ class SyncAudioPlayer(
         // Track samples consumed for sync error calculation
         samplesReadSinceStart += chunk.sampleCount
 
-        // Decide if we need frame-by-frame processing or can use fast path
-        // Include crossfade state to ensure fade tail completes even when corrections stop
-        val needsCorrection = insertEveryNFrames > 0 || dropEveryNFrames > 0
-                || crossfadeState != CrossfadeState.IDLE
+        // Measure before writing; skipped while a one-shot drop is still being
+        // applied, because the error it corrects is not gone yet.
+        if (snapDropFrames == 0L) {
+            updateSyncError(track, chunk)
+        }
+
+        // One-shot resync, late case: drop the leading frames we are behind by.
+        val skipFrames = minOf(snapDropFrames, chunk.sampleCount.toLong()).toInt()
+        snapDropFrames -= skipFrames
+        framesDropped += skipFrames
 
         val writeTimeNs = nowNs()
-        val written = if (needsCorrection) {
-            writeWithCorrection(track, chunk.pcmData)
-        } else {
-            // Fast path: write entire chunk at once
-            val result = track.write(chunk.pcmData, 0, chunk.pcmData.size)
-            // Store last two frames for potential future interpolation
-            if (chunk.pcmData.size >= bytesPerFrame) {
-                // Update secondLastOutputFrame from the previous lastOutputFrame
-                System.arraycopy(lastOutputFrame, 0, secondLastOutputFrame, 0, bytesPerFrame)
-                // Store the last frame of this chunk
-                System.arraycopy(
-                    chunk.pcmData, chunk.pcmData.size - bytesPerFrame,
-                    lastOutputFrame, 0, bytesPerFrame
-                )
-            }
-            result
-        }
-
-        if (written < 0) {
-            AppLog.Audio.e("AudioTrack write error: $written")
-        }
+        val written = writeWithCorrection(track, chunk.pcmData, skipFrames * bytesPerFrame)
 
         // Update frame tracking
         val framesWritten = written / bytesPerFrame
@@ -2450,311 +2197,74 @@ class SyncAudioPlayer(
         advanceServerCursorFrames(chunk.sampleCount)
 
         chunksPlayed++
-
-        // Update sync error periodically
-        syncUpdateCounter++
-        if (syncUpdateCounter >= SYNC_ERROR_UPDATE_INTERVAL) {
-            syncUpdateCounter = 0
-            updateSyncError()
-        }
-    }
-
-    // ========================================================================
-    // PCM Blending Helpers - Zero-allocation weighted interpolation
-    // ========================================================================
-
-    /** Extract a 16-bit little-endian sample as a signed Int. */
-    private fun readInt16LE(data: ByteArray, offset: Int): Int {
-        return (data[offset].toInt() and 0xFF) or (data[offset + 1].toInt() shl 8)
-    }
-
-    /** Write a 16-bit little-endian sample, clamping to Int16 range. */
-    private fun writeInt16LE(data: ByteArray, offset: Int, value: Int) {
-        val clamped = value.coerceIn(-32768, 32767)
-        data[offset] = (clamped and 0xFF).toByte()
-        data[offset + 1] = (clamped shr 8).toByte()
     }
 
     /**
-     * Weighted blend of two stereo frames into output buffer.
-     * Processes each channel independently with Int16 clamping.
-     */
-    private fun blendFrames(
-        frameA: ByteArray, offA: Int,
-        frameB: ByteArray, offB: Int,
-        wA: Double, wB: Double,
-        output: ByteArray, outOff: Int
-    ) {
-        for (ch in 0 until channels) {
-            val byteOff = ch * 2
-            val sampleA = readInt16LE(frameA, offA + byteOff)
-            val sampleB = readInt16LE(frameB, offB + byteOff)
-            val blended = (sampleA * wA + sampleB * wB).toInt()
-            writeInt16LE(output, outOff + byteOff, blended)
-        }
-    }
-
-    /**
-     * 3-point weighted interpolation: 0.25*A + 0.50*B + 0.25*C per channel.
-     * Creates a smooth waveform transition at correction points.
-     */
-    private fun interpolate3Point(
-        frameA: ByteArray, offA: Int,
-        frameB: ByteArray, offB: Int,
-        frameC: ByteArray, offC: Int,
-        output: ByteArray, outOff: Int
-    ) {
-        for (ch in 0 until channels) {
-            val byteOff = ch * 2
-            val sA = readInt16LE(frameA, offA + byteOff)
-            val sB = readInt16LE(frameB, offB + byteOff)
-            val sC = readInt16LE(frameC, offC + byteOff)
-            val blended = (sA * BLEND_OUTER + sB * BLEND_CENTER + sC * BLEND_OUTER).toInt()
-            writeInt16LE(output, outOff + byteOff, blended)
-        }
-    }
-
-    // ========================================================================
-    // Crossfade State Machine - Smooth transitions around corrections
-    // ========================================================================
-
-    /** Begin fading toward targetFrame over CROSSFADE_FRAMES. */
-    private fun startFadeIn(targetFrame: ByteArray, targetOff: Int = 0) {
-        System.arraycopy(targetFrame, targetOff, crossfadeTargetFrame, 0, bytesPerFrame)
-        crossfadeState = CrossfadeState.FADING_IN
-        crossfadeProgress = 0
-    }
-
-    /** Begin fading back from targetFrame to normal over CROSSFADE_FRAMES. */
-    private fun startFadeOut(targetFrame: ByteArray, targetOff: Int = 0) {
-        System.arraycopy(targetFrame, targetOff, crossfadeTargetFrame, 0, bytesPerFrame)
-        crossfadeState = CrossfadeState.FADING_OUT
-        crossfadeProgress = 0
-    }
-
-    /**
-     * Apply crossfade blending and write a frame to AudioTrack.
-     * During IDLE, writes normalFrame directly.
-     * During FADING_IN, blends from normalFrame toward crossfadeTargetFrame.
-     * During FADING_OUT, blends from crossfadeTargetFrame back to normalFrame.
+     * Write PCM from [startOffset], dropping or duplicating [correctionFrames]
+     * frames at most once per [correctionIntervalFrames].
      *
-     * Uses crossfadeScratchBuf as a pre-allocated scratch buffer for blended output.
-     */
-    private var crossfadeScratchBuf = ByteArray(0)
-
-    private fun applyCrossfadeAndWrite(track: AudioSink, normalFrame: ByteArray, normalOff: Int = 0): Int {
-        when (crossfadeState) {
-            CrossfadeState.FADING_IN -> {
-                crossfadeProgress++
-                val alpha = crossfadeProgress.toDouble() / CROSSFADE_FRAMES
-                if (alpha >= 1.0) {
-                    // Fade complete - write the target frame
-                    crossfadeState = CrossfadeState.IDLE
-                    return track.write(crossfadeTargetFrame, 0, bytesPerFrame)
-                }
-                // Blend: normalFrame*(1-alpha) + targetFrame*alpha
-                blendFrames(
-                    normalFrame, normalOff,
-                    crossfadeTargetFrame, 0,
-                    1.0 - alpha, alpha,
-                    crossfadeScratchBuf, 0
-                )
-                return track.write(crossfadeScratchBuf, 0, bytesPerFrame)
-            }
-            CrossfadeState.FADING_OUT -> {
-                crossfadeProgress++
-                val alpha = 1.0 - (crossfadeProgress.toDouble() / CROSSFADE_FRAMES)
-                if (alpha <= 0.0) {
-                    // Fade complete - write normal frame
-                    crossfadeState = CrossfadeState.IDLE
-                    return track.write(normalFrame, normalOff, bytesPerFrame)
-                }
-                // Blend: targetFrame*alpha + normalFrame*(1-alpha)
-                blendFrames(
-                    crossfadeTargetFrame, 0,
-                    normalFrame, normalOff,
-                    alpha, 1.0 - alpha,
-                    crossfadeScratchBuf, 0
-                )
-                return track.write(crossfadeScratchBuf, 0, bytesPerFrame)
-            }
-            CrossfadeState.IDLE -> {
-                return track.write(normalFrame, normalOff, bytesPerFrame)
-            }
-        }
-    }
-
-    /**
-     * Write PCM data with sample insert/drop corrections applied.
+     * Drop leaves out the last frames of a slice so its neighbours abut;
+     * duplicate repeats the last frame of the slice. Everything else is
+     * written bit-exact.
      *
-     * For 16-bit PCM, uses 3-point weighted interpolation and symmetric crossfade
-     * windows for smooth waveform transitions at correction points.
-     *
-     * For 24-bit and 32-bit PCM, sample-level crossfade is skipped because the
-     * blending helpers operate on 16-bit samples. Insert/drop corrections still
-     * work at the frame level (duplicate or skip whole frames).
-     *
-     * @param track The AudioTrack to write to
-     * @param pcmData The raw PCM data
      * @return Total bytes written to AudioTrack
      */
-    private fun writeWithCorrection(track: AudioSink, pcmData: ByteArray): Int {
-        // For non-16-bit formats, use simplified insert/drop without sample-level crossfade
-        if (bitDepth != 16) {
-            return writeWithCorrectionSimple(track, pcmData)
-        }
-
-        val inputFrameCount = pcmData.size / bytesPerFrame
+    private fun writeWithCorrection(track: AudioSink, pcmData: ByteArray, startOffset: Int): Int {
+        var offset = startOffset
         var totalWritten = 0
-        var inputOffset = 0
 
-        for (i in 0 until inputFrameCount) {
-            // --- Pre-correction fade-in: anticipate upcoming corrections ---
-            if (crossfadeState == CrossfadeState.IDLE) {
-                if (dropEveryNFrames > 0 && framesUntilNextDrop <= CROSSFADE_FRAMES && framesUntilNextDrop > 1) {
-                    // Approaching a DROP - compute the blended frame we'll transition through
-                    // Use lastOutputFrame blended with current as approach target
-                    blendFrames(lastOutputFrame, 0, pcmData, inputOffset, 0.5, 0.5, crossfadeScratchBuf, 0)
-                    startFadeIn(crossfadeScratchBuf)
-                } else if (insertEveryNFrames > 0 && framesUntilNextInsert <= CROSSFADE_FRAMES && framesUntilNextInsert > 1) {
-                    // Approaching an INSERT - blend lastOutput with current as approach target
-                    blendFrames(lastOutputFrame, 0, pcmData, inputOffset, 0.5, 0.5, crossfadeScratchBuf, 0)
-                    startFadeIn(crossfadeScratchBuf)
+        while (pcmData.size - offset >= bytesPerFrame) {
+            val frames = minOf(
+                (pcmData.size - offset) / bytesPerFrame,
+                correctionIntervalFrames - framesSinceCorrection
+            )
+            framesSinceCorrection += frames
+            var size = frames * bytesPerFrame
+            var duplicates = 0
+
+            if (framesSinceCorrection >= correctionIntervalFrames) {
+                framesSinceCorrection = 0
+                updateCorrectionSchedule()
+                // The filter is told about each step so it keeps estimating the
+                // remaining error instead of lagging behind our own corrections.
+                if (dropEveryNFrames > 0 && frames > correctionFrames) {
+                    size -= correctionFrames * bytesPerFrame
+                    framesDropped += correctionFrames
+                    syncErrorFilter.shift(-correctionFrames * microsPerSample)
+                } else if (insertEveryNFrames > 0) {
+                    duplicates = correctionFrames
+                    framesInserted += correctionFrames
+                    syncErrorFilter.shift(correctionFrames * microsPerSample)
                 }
             }
 
-            // --- DROP: 3-point interpolation + fade-out ---
-            if (dropEveryNFrames > 0) {
-                framesUntilNextDrop--
-                if (framesUntilNextDrop <= 0) {
-                    framesUntilNextDrop = dropEveryNFrames
-                    framesDropped++
-
-                    // 3-point interpolation: 0.25*lastOutput + 0.50*dropped + 0.25*next
-                    val hasNext = (i + 1 < inputFrameCount)
-                    if (hasNext) {
-                        interpolate3Point(
-                            lastOutputFrame, 0,
-                            pcmData, inputOffset,
-                            pcmData, inputOffset + bytesPerFrame,
-                            crossfadeScratchBuf, 0
-                        )
-                    } else {
-                        // Edge case: no next frame - fall back to 2-point blend
-                        blendFrames(
-                            lastOutputFrame, 0,
-                            pcmData, inputOffset,
-                            0.5, 0.5,
-                            crossfadeScratchBuf, 0
-                        )
-                    }
-                    // Start fade-out from the interpolated frame back to normal
-                    startFadeOut(crossfadeScratchBuf)
-
-                    // Skip this input frame (the actual drop)
-                    inputOffset += bytesPerFrame
-                    continue
+            var written = track.write(pcmData, offset, size)
+            repeat(duplicates) {
+                if (written >= 0) {
+                    val dup = track.write(pcmData, offset + size - bytesPerFrame, bytesPerFrame)
+                    written = if (dup < 0) dup else written + dup
                 }
             }
-
-            // --- INSERT: 3-point interpolation + fade-out ---
-            if (insertEveryNFrames > 0) {
-                framesUntilNextInsert--
-                if (framesUntilNextInsert <= 0 && lastOutputFrame.isNotEmpty()) {
-                    framesUntilNextInsert = insertEveryNFrames
-                    framesInserted++
-
-                    // 3-point interpolation: 0.25*secondLast + 0.50*lastOutput + 0.25*current
-                    val hasSecondLast = secondLastOutputFrame.size == bytesPerFrame &&
-                            !secondLastOutputFrame.all { it == 0.toByte() }
-                    if (hasSecondLast) {
-                        interpolate3Point(
-                            secondLastOutputFrame, 0,
-                            lastOutputFrame, 0,
-                            pcmData, inputOffset,
-                            crossfadeScratchBuf, 0
-                        )
-                    } else {
-                        // Fallback: 2-point blend between lastOutput and current
-                        blendFrames(
-                            lastOutputFrame, 0,
-                            pcmData, inputOffset,
-                            0.5, 0.5,
-                            crossfadeScratchBuf, 0
-                        )
-                    }
-
-                    // Write the interpolated inserted frame
-                    val insertWritten = applyCrossfadeAndWrite(track, crossfadeScratchBuf, 0)
-                    if (insertWritten > 0) totalWritten += insertWritten
-
-                    // Start fade-out from the inserted frame back to normal
-                    startFadeOut(crossfadeScratchBuf)
-                }
+            if (written < 0) {
+                AppLog.Audio.e("AudioTrack write error: $written")
+                break
             }
-
-            // --- Normal frame output with crossfade applied ---
-            val written = applyCrossfadeAndWrite(track, pcmData, inputOffset)
-            if (written > 0) {
-                totalWritten += written
-                // Update frame history
-                System.arraycopy(lastOutputFrame, 0, secondLastOutputFrame, 0, bytesPerFrame)
-                System.arraycopy(pcmData, inputOffset, lastOutputFrame, 0, bytesPerFrame)
-            }
-            inputOffset += bytesPerFrame
+            totalWritten += written
+            offset += frames * bytesPerFrame
         }
 
         return totalWritten
     }
 
-    /**
-     * Simplified write with insert/drop corrections for non-16-bit PCM formats.
-     *
-     * Performs frame-level insert (duplicate last frame) and drop (skip frame) without
-     * sample-level crossfade or interpolation. This avoids needing format-specific
-     * sample blending code for 24-bit packed and 32-bit integer encodings.
-     */
-    private fun writeWithCorrectionSimple(track: AudioSink, pcmData: ByteArray): Int {
-        val inputFrameCount = pcmData.size / bytesPerFrame
-        var totalWritten = 0
-        var inputOffset = 0
-
-        for (i in 0 until inputFrameCount) {
-            // --- DROP: skip this frame ---
-            if (dropEveryNFrames > 0) {
-                framesUntilNextDrop--
-                if (framesUntilNextDrop <= 0) {
-                    framesUntilNextDrop = dropEveryNFrames
-                    framesDropped++
-                    // Skip this input frame
-                    inputOffset += bytesPerFrame
-                    continue
-                }
-            }
-
-            // --- INSERT: duplicate last output frame ---
-            if (insertEveryNFrames > 0) {
-                framesUntilNextInsert--
-                if (framesUntilNextInsert <= 0 && lastOutputFrame.isNotEmpty()) {
-                    framesUntilNextInsert = insertEveryNFrames
-                    framesInserted++
-                    // Write a duplicate of the last output frame
-                    val insertWritten = track.write(lastOutputFrame, 0, bytesPerFrame)
-                    if (insertWritten > 0) totalWritten += insertWritten
-                }
-            }
-
-            // --- Normal frame output ---
-            val written = track.write(pcmData, inputOffset, bytesPerFrame)
-            if (written > 0) {
-                totalWritten += written
-                System.arraycopy(lastOutputFrame, 0, secondLastOutputFrame, 0, bytesPerFrame)
-                System.arraycopy(pcmData, inputOffset, lastOutputFrame, 0, bytesPerFrame)
-            }
-            inputOffset += bytesPerFrame
+    /** Write [frames] frames of silence, keeping the frame accounting in step. */
+    private fun writeSilence(track: AudioSink, frames: Long) {
+        var remaining = frames * bytesPerFrame
+        while (remaining > 0) {
+            val written = track.write(silenceBuffer, 0, minOf(remaining, silenceBuffer.size.toLong()).toInt())
+            if (written <= 0) return
+            totalFramesWritten.addAndGet((written / bytesPerFrame).toLong())
+            remaining -= written
         }
-
-        return totalWritten
     }
 
     // ========================================================================
@@ -2762,198 +2272,74 @@ class SyncAudioPlayer(
     // ========================================================================
 
     /**
-     * Update sync error by comparing DAC playback position to Kalman-expected position.
+     * Measure the sync error of [chunk], which is about to be written, and
+     * resync in one shot if it is beyond what soft correction should handle.
      *
-     * Both terms are evaluated at the DAC output point in server time:
-     *   - actualPlaybackServerTimeUs: baseline + DAC frame delta (advances at DAC clock rate)
-     *   - expectedPlaybackServerTimeUs: fresh Kalman conversion (advances at server clock rate)
+     * The error is where the write cursor will reach the DAC, converted to
+     * server time by the time filter, minus the chunk's own server timestamp.
+     * Each chunk is measured against its own timestamp, so nothing is carried
+     * over from the start of the stream that could hide a constant offset.
      *
-     * At calibration these are identical. Over time they diverge by DAC-vs-server
-     * clock drift, which is exactly what insert/drop corrections fix.
+     * Sign convention:
+     *   Positive = chunk reaches the DAC late  -> need DROP
+     *   Negative = chunk reaches the DAC early -> need INSERT
      *
-     * This avoids comparing the write cursor to the DAC position, sidestepping
-     * the Android push-model problem where the write cursor is ~300ms ahead of
-     * the DAC output and totalFramesWritten/framePosition can mismatch after flush.
-     *
-     * Sign convention (matching Python CLI):
-     *   Positive = DAC is ahead of expected (playing fast) -> need DROP
-     *   Negative = DAC is behind expected (playing slow) -> need INSERT
+     * One-shot resync (spec: "Large errors and startup"): once the smoothed
+     * error is past the +/-1ms floor, drop a leading prefix equal to the error
+     * if late, or write silence of the same duration if early. This reading
+     * must agree with the estimate from the readings before it, so a single
+     * bad timestamp cannot trigger it.
      */
-    private fun updateSyncError() {
-        val track = audioSink ?: return
+    private fun updateSyncError(track: AudioSink, chunk: AudioChunk) {
         if (playbackState != PlaybackState.PLAYING) return
+        val dacTimeUs = dacTimeOfNextWriteUs(track) ?: return
+        val nowUs = nowNs() / 1000
 
-        try {
-            // Query AudioTimestamp on every update
-            val ts = track.getTimestamp()
-            if (ts != null) {
-                latencyEstimator.recordDacTimestamp(ts.framePosition, ts.nanoTime)
-            }
-            latencyEstimator.tick()
-            if (ts == null) {
-                return
-            }
+        val errorUs = timeFilter.clientToServer(dacTimeUs) - chunk.serverTimeMicros
+        syncErrorUs = errorUs
+        startTimeCalibrated = true
+        val smoothedUs = syncErrorFilter.offsetMicros
+        syncErrorFilter.update(errorUs, nowUs)
 
-            val dacTimeMicros = ts.nanoTime / 1000
-            val framePosition = ts.framePosition
-            val loopTimeUs = nowNs() / 1000
+        if (!correctionsAllowed(nowUs)) return
+        val late = errorUs > SNAP_THRESHOLD_US && smoothedUs > SNAP_THRESHOLD_US
+        val early = errorUs < -SNAP_THRESHOLD_US && smoothedUs < -SNAP_THRESHOLD_US
+        if (!late && !early) return
 
-            // Sanity check - framePosition should be reasonable
-            if (framePosition <= 0 || framePosition > totalFramesWritten.get() + sampleRate) {
-                return
-            }
-
-            // Detect 32-bit frame counter wrap on pre-API-28 HAL implementations.
-            // A backward jump of more than 1 second of frames indicates the counter
-            // wrapped rather than a genuine regression. Skip this reading.
-            if (lastValidFramePosition > 0 && framePosition < lastValidFramePosition - sampleRate) {
-                AppLog.Sync.w("Frame position wrap detected: last=$lastValidFramePosition, " +
-                    "current=$framePosition, totalWritten=${totalFramesWritten.get()}")
-                return
-            }
-            lastValidFramePosition = framePosition
-
-            // Store DAC calibration pair for time conversion
-            storeDacCalibration(dacTimeMicros, loopTimeUs)
-
-            // ================================================================
-            // INITIAL BASELINE: Capture on first valid AudioTimestamp
-            // ================================================================
-            // Use Kalman conversion (same as periodic refresh) so that the
-            // baseline reflects what the DAC is actually playing, not the
-            // first queued chunk's server time which may be seconds ahead.
-            if (!startTimeCalibrated) {
-                if (firstServerTimestampUs == null) {
-                    return
-                }
-
-                val loopAtDac = estimateLoopTimeForDacTime(dacTimeMicros)
-                if (loopAtDac <= 0) {
-                    return  // Need calibration pairs first
-                }
-                val kalmanServerTimeUs = computeServerTime(loopAtDac)
-
-                startTimeCalibrated = true
-                baselineFramePosition = framePosition
-                baselineServerTimeUs = kalmanServerTimeUs
-                lastBaselineRefreshUs = loopTimeUs
-
-                // Reconcile totalFramesWritten and serverTimelineCursor so the
-                // sync error equation starts from a consistent baseline.
-                //
-                // Problem: by this point, pre-calibration silence has inflated
-                // totalFramesWritten, and several real audio chunks have already
-                // advanced serverTimelineCursor. Snapping totalFramesWritten alone
-                // would erase real-audio frames from the accounting while leaving
-                // the cursor ahead, producing a large false sync error.
-                //
-                // Solution: compute the current pending depth and set the cursor
-                // so that cursorAtDac = kalmanServerTimeUs (the Kalman-derived
-                // server time at the DAC output right now). This is the same
-                // reference point the DAC-aware start gating uses.
-                val pendingFrames = (totalFramesWritten.get() - framePosition).coerceAtLeast(0)
-                val currentPendingUs = (pendingFrames * 1_000_000L) / sampleRate
-                serverTimelineCursor = kalmanServerTimeUs + currentPendingUs
-                serverTimelineCursorRemainder = 0L
-
-                AppLog.Sync.i("Sync baseline calibrated: " +
-                    "framePos=$framePosition, totalWritten=${totalFramesWritten.get()}, " +
-                    "pending=${currentPendingUs/1000}ms, " +
-                    "baselineServerTime=${baselineServerTimeUs}us")
-            }
-
-            // ================================================================
-            // PERIODIC BASELINE REFRESH (matching Python's continuous Kalman use)
-            // ================================================================
-            // The Python CLI converts DAC->server on every callback via _compute_server_time().
-            // We periodically refresh the baseline so that early Kalman convergence error
-            // doesn't stay baked in for the entire session.
-            //
-            if (loopTimeUs - lastBaselineRefreshUs > BASELINE_REFRESH_INTERVAL_US
-                && timeFilter.isReady
-                && timeFilter.measurementCountValue >= BASELINE_REFRESH_MIN_MEASUREMENTS) {
-
-                // Convert current DAC loop time to server time via Kalman
-                val loopAtDac = estimateLoopTimeForDacTime(dacTimeMicros)
-                if (loopAtDac > 0) {
-                    val kalmanServerTimeUs = computeServerTime(loopAtDac)
-                    val oldBaselineServerUs = baselineServerTimeUs
-                    val oldBaselineFramePos = baselineFramePosition
-
-                    // Update baseline to current position
-                    baselineFramePosition = framePosition
-                    baselineServerTimeUs = kalmanServerTimeUs
-                    lastBaselineRefreshUs = loopTimeUs
-
-                    val expectedServerUs = oldBaselineServerUs +
-                        ((framePosition - oldBaselineFramePos) * 1_000_000L) / sampleRate
-                    val shiftUs = kalmanServerTimeUs - expectedServerUs
-                    if (abs(shiftUs) > 1000) {  // Only log shifts > 1ms
-                        AppLog.Sync.d("Baseline refreshed via Kalman: shift=${shiftUs/1000}ms, " +
-                            "newServerTime=${kalmanServerTimeUs}us, framePos=$framePosition")
-                    }
-                }
-            }
-
-            // ================================================================
-            // SYNC ERROR: Cursor-based measurement (matching Python CLI)
-            // ================================================================
-            // Ground-truth cursor: serverTimelineCursor tracks the server time
-            // of audio written to the AudioTrack. Subtract pending frames to get
-            // the server time at the DAC output point ("where the DAC SHOULD be").
-            //
-            // Kalman DAC position: convert the hardware DAC timestamp to server
-            // time via Kalman ("where the DAC IS in server time").
-            //
-            // The old baseline approach had both sides Kalman-derived, causing
-            // real offsets to cancel. This cursor approach uses one ground-truth
-            // side, so actual offsets are visible to the correction loop.
-
-            val pendingFrames = (totalFramesWritten.get() - framePosition).coerceAtLeast(0)
-            val pendingUs = (pendingFrames * 1_000_000L) / sampleRate
-            val cursorAtDacUs = serverTimelineCursor - pendingUs
-            if (serverTimelineCursor == 0L || cursorAtDacUs <= 0) return
-
-            // Kalman-derived DAC position: where the DAC IS in server time
-            val loopAtDac = estimateLoopTimeForDacTime(dacTimeMicros)
-            if (loopAtDac <= 0) return
-            val dacPlaybackServerTimeUs = computeServerTime(loopAtDac)
-
-            // Sync error = actual - expected (matching Python CLI sign convention)
-            // Positive = DAC ahead (fast) -> DROP, Negative = DAC behind (slow) -> INSERT
-            val rawSyncError = dacPlaybackServerTimeUs - cursorAtDacUs
-            syncErrorUs = rawSyncError
-
-            // Apply 2D Kalman filter smoothing for display stability
-            syncErrorFilter.update(rawSyncError, loopTimeUs)
-
-            // Periodic log to confirm cursor-based measurement is working
-            if (chunksPlayed % 100 == 0L) {
-                AppLog.Sync.d("Sync: err=${rawSyncError / 1000}ms, " +
-                    "pending=${pendingUs / 1000}ms, " +
-                    "cursor=${serverTimelineCursor}us, " +
-                    "dacServer=${dacPlaybackServerTimeUs}us")
-            }
-
-        } catch (e: Exception) {
-            AppLog.Sync.w("Failed to update sync error", e)
+        val frames = (abs(errorUs) * sampleRate) / 1_000_000
+        if (late) {
+            snapDropFrames = frames
+        } else {
+            writeSilence(track, frames)
+            framesInserted += frames
         }
+        AppLog.Sync.w("One-shot resync: error=${errorUs}us, smoothed=${smoothedUs}us, " +
+            "${if (late) "dropping" else "inserting"} $frames frames")
+        syncCorrections++
+        syncErrorFilter.reset()
+        playingStateEnteredAtUs = nowUs  // let the filter settle before correcting again
     }
 
-    // ========================================================================
-    // DAC Calibration - Maps DAC hardware time to loop/system time
-    // ========================================================================
-
     /**
-     * Store a DAC calibration pair for time conversion.
+     * Local time (microseconds on the System.nanoTime clock) at which the next
+     * frame written to the track will reach the DAC, or null if there is no
+     * usable AudioTimestamp.
      *
-     * Captures the relationship between DAC hardware time (from AudioTimestamp)
-     * and system monotonic time (from System.nanoTime). This allows us to
-     * convert DAC times to loop times and then to server times.
-     *
-     * @param dacTimeUs DAC hardware time in microseconds
-     * @param loopTimeUs System monotonic time in microseconds
+     * AudioTimestamp.nanoTime is already on the System.nanoTime clock, so it
+     * is used as-is. A timestamp is not usable when the track has stalled
+     * after an underrun (position and time are frozen, so extrapolating from
+     * them is wrong) or when it still reports a position from before a flush.
      */
+    private fun dacTimeOfNextWriteUs(track: AudioSink): Long? {
+        val ts = track.getTimestamp() ?: return null
+        if (ts.framePosition <= 0) return null
+        val tsUs = ts.nanoTime / 1000
+        if (nowNs() / 1000 - tsUs > TIMESTAMP_MAX_AGE_US) return null
+        val pendingFrames = totalFramesWritten.get() - ts.framePosition
+        if (pendingFrames < 0 || pendingFrames > track.bufferSizeInBytes / bytesPerFrame + sampleRate) return null
+        return tsUs + (pendingFrames * 1_000_000L) / sampleRate
+    }
+
     /**
      * Compute microseconds between AudioTrack write cursor and DAC output position.
      * Returns 0 if AudioTimestamp is unavailable or invalid.
@@ -2963,79 +2349,6 @@ class SyncAudioPlayer(
         if (ts.framePosition <= 0) return 0L
         val pendingFrames = (totalFramesWritten.get() - ts.framePosition).coerceAtLeast(0)
         return (pendingFrames * 1_000_000L) / sampleRate
-    }
-
-    private fun storeDacCalibration(dacTimeUs: Long, loopTimeUs: Long) {
-        // Don't store calibrations too frequently
-        if (loopTimeUs - lastDacCalibrationTimeUs < MIN_CALIBRATION_INTERVAL_US) {
-            return
-        }
-
-        dacLoopCalibrations.addLast(DacCalibration(dacTimeUs, loopTimeUs))
-        lastDacCalibrationTimeUs = loopTimeUs
-
-        // Keep only the most recent calibrations
-        while (dacLoopCalibrations.size > MAX_DAC_CALIBRATIONS) {
-            dacLoopCalibrations.removeFirst()
-        }
-    }
-
-    /**
-     * Estimate the loop time that corresponds to a given DAC time.
-     *
-     * Uses linear interpolation between calibration pairs to estimate
-     * what system time corresponds to a DAC hardware timestamp.
-     *
-     * @param dacTimeUs DAC hardware time in microseconds
-     * @return Estimated loop (system) time in microseconds
-     */
-    private fun estimateLoopTimeForDacTime(dacTimeUs: Long): Long {
-        if (dacLoopCalibrations.isEmpty()) {
-            // No calibrations yet - can't estimate
-            return 0L
-        }
-
-        if (dacLoopCalibrations.size == 1) {
-            // Single calibration - use simple offset
-            val cal = dacLoopCalibrations.first()
-            val dacOffset = dacTimeUs - cal.dacTimeUs
-            return cal.loopTimeUs + dacOffset
-        }
-
-        // Find the two calibrations that bracket the target DAC time
-        // or use the nearest pair for extrapolation.
-        // The deque is already time-ordered (addLast with monotonic timestamps),
-        // so we scan directly without sorting.
-        var lower = dacLoopCalibrations.first()
-        var upper = dacLoopCalibrations.last()
-
-        for (i in 0 until dacLoopCalibrations.size - 1) {
-            if (dacLoopCalibrations[i].dacTimeUs <= dacTimeUs && dacLoopCalibrations[i + 1].dacTimeUs >= dacTimeUs) {
-                lower = dacLoopCalibrations[i]
-                upper = dacLoopCalibrations[i + 1]
-                break
-            }
-        }
-
-        // Linear interpolation between the two calibration points
-        val dacDelta = upper.dacTimeUs - lower.dacTimeUs
-        if (dacDelta == 0L) {
-            return lower.loopTimeUs
-        }
-
-        val fraction = (dacTimeUs - lower.dacTimeUs).toDouble() / dacDelta
-        val loopDelta = upper.loopTimeUs - lower.loopTimeUs
-        return lower.loopTimeUs + (fraction * loopDelta).toLong()
-    }
-
-    /**
-     * Convert a loop (system) time to server time using the time filter.
-     *
-     * @param loopTimeUs System monotonic time in microseconds
-     * @return Server time in microseconds
-     */
-    private fun computeServerTime(loopTimeUs: Long): Long {
-        return timeFilter.clientToServer(loopTimeUs)
     }
 
     /**
@@ -3054,14 +2367,6 @@ class SyncAudioPlayer(
             serverTimelineCursorRemainder %= sampleRate
             serverTimelineCursor += incUs
         }
-    }
-
-    /**
-     * Clear DAC calibrations (called on buffer clear/reanchor).
-     */
-    private fun clearDacCalibrations() {
-        dacLoopCalibrations.clear()
-        lastDacCalibrationTimeUs = 0L
     }
 
     /**
@@ -3085,11 +2390,6 @@ class SyncAudioPlayer(
      * Check if start time has been calibrated from AudioTimestamp.
      */
     fun isStartTimeCalibrated(): Boolean = startTimeCalibrated
-
-    /**
-     * Get the number of DAC calibration pairs stored.
-     */
-    fun getDacCalibrationCount(): Int = dacLoopCalibrations.size
 
     /**
      * Get the sync error filter's drift value.
@@ -3254,7 +2554,6 @@ class SyncAudioPlayer(
             // New stats for comprehensive debugging
             reanchorCount = reanchorCount,
             bufferUnderrunCount = bufferUnderrunCount,
-            dacCalibrationCount = dacLoopCalibrations.size,
             syncErrorDrift = syncErrorFilter.driftValue,
             gracePeriodRemainingUs = getGracePeriodRemainingUs(),
             dacTimestampsStable = dacTimestampsStable
