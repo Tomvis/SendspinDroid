@@ -424,4 +424,38 @@ class ArtworkStreamTest {
         assertEquals(1, handler.protocolFailures.size)
         assertImages()
     }
+
+    // ========== low-memory mode ==========
+
+    @Test
+    fun `low memory mode does not advertise the artwork role`() {
+        handler.lowMemoryMode = true
+        handler.handleTextMessageForTest("""{"type":"server/hello","payload":{"name":"Dev"}}""")
+
+        val hello = handler.sentMessages.single { it.contains("client/hello") }
+        assertFalse(hello.contains("artwork"))
+        assertTrue(hello.contains("\"player@v1\""))
+    }
+
+    @Test
+    fun `the artwork role is advertised otherwise`() {
+        handler.handleTextMessageForTest("""{"type":"server/hello","payload":{"name":"Dev"}}""")
+
+        val hello = handler.sentMessages.single { it.contains("client/hello") }
+        assertTrue(hello.contains("\"artwork@v1\""))
+    }
+
+    @Test
+    fun `client state carries no artwork object unless the role is active`() {
+        handler.lowMemoryMode = true
+        handler.handleTextMessageForTest("""{"type":"server/hello","payload":{"name":"Dev"}}""")
+        // What a server activates for a hello that listed no artwork role.
+        handler.handleTextMessageForTest(
+            """{"type":"server/activate","payload":{"activities":[],""" +
+                """"active_roles":["player@v1","controller@v1","metadata@v1"]}}"""
+        )
+
+        val state = handler.sentMessages.last { it.contains("client/state") }
+        assertFalse(state.contains("artwork"))
+    }
 }

@@ -269,6 +269,7 @@ abstract class SendSpinProtocolHandler(
             bufferCapacity = bufferCapacity,
             manufacturer = getManufacturer(),
             supportedFormats = formats,
+            lowMemoryMode = isLowMemoryMode(),
             softwareVersion = getSoftwareVersion(),
             unpairedAccessEnabled = isUnpairedAccessEnabled(),
             supportedPairMethods = getSupportedPairMethods(),
