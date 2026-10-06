@@ -33,7 +33,6 @@ import com.sendspindroid.sendspin.protocol.SendSpinHandshakeDriver
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.ServerActivateRules
 import com.sendspindroid.sendspin.protocol.StreamConfig
-import com.sendspindroid.sendspin.protocol.applyTo
 import com.sendspindroid.sendspin.protocol.message.ArtworkReceiver
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.InitMessages
@@ -480,8 +479,9 @@ object NoiseHandshakeCheck {
                             }
 
                             SendSpinProtocol.MessageType.SERVER_STATE -> {
-                                controllerState = MessageParser.parseServerState(payload)
-                                    .controller.applyTo(controllerState)
+                                // Full state: a controller object replaces what we held.
+                                MessageParser.parseServerState(payload).controller
+                                    ?.let { controllerState = it }
                                 val supported = controllerState?.supportedCommands.orEmpty()
                                 val seekMaxMs = controllerState?.seekMaxMs
                                 // The app's rules: the role is active, both
