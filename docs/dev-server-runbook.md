@@ -350,11 +350,43 @@ adding a log call to that function. (An earlier version of this runbook claimed
 ## Relationship to the conformance harness
 
 The harness (`.github/workflows/conformance.yml`) constructs its own server via
-`Sendspin/conformance`'s `aiosendspin_server.py` adapter, which hardcodes
-`allow_unencrypted=True` and regenerates the identity per run. That is fine for
-the legacy scenarios it runs today but cannot be the encrypted target.
+`Sendspin/conformance`'s `aiosendspin_server.py` adapter. Since 2026-09-04 that
+server requires the Noise handshake (`allow_unencrypted` is off unless a
+scenario asks for the legacy mode), derives its identity from the case's ids on
+every run, and approves every unpaired client that connects.
 
-`ci/conformance/register_sendspindroid.py` now rewrites that literal to read the
-`CONFORMANCE_ALLOW_UNENCRYPTED` environment variable, defaulting to the existing
-behaviour, so a future Phase 1 exit criterion can flip one variable in CI instead
-of forking the harness. The patch fails loudly if the literal disappears upstream.
+The adapter the harness launches (`conformance-client`'s `Main.kt`, through
+`ci/conformance/sendspindroid_client.py`) therefore speaks the encrypted wire
+only. It shares `EncryptedSocket` with `NoiseHandshakeCheck`: the app's
+handshake driver and wire codec, with the app's activation rules, builders and
+parsers on top. It connects unpaired on the Sentinel PSK with a fresh identity.
+
+`ci/conformance/register_sendspindroid.py` copies the launcher into the harness
+and appends the registry entry; it no longer patches the server adapter. The
+workflow asserts on the three client-initiated scenarios:
+
+| scenario | what the adapter does |
+|---|---|
+| `client-initiated-pcm` | hashes the PCM it received; the harness compares it with the source |
+| `client-initiated-request-format-pcm` | starts on 24-bit PCM, then prefers 16-bit |
+| `client-initiated-request-format-flac` | starts on PCM, then prefers FLAC |
+
+The two renegotiation scenarios are named after `stream/request-format`, which
+rc1 removed. The adapter asks the rc1 way, with `format` in the `client/state`
+player object, and the harness only checks that a second `stream/start` carried
+the requested format. Server-initiated scenarios stay declared unsupported: the
+app only ever dials out.
+
+To run it locally, from a directory holding clones of `Sendspin/conformance`,
+`Sendspin/aiosendspin` and `Sendspin/sendspin-cli` (Python 3.12):
+
+```bash
+pip install -e conformance -e aiosendspin
+python <repo>/ci/conformance/register_sendspindroid.py conformance
+cd conformance
+SENDSPINDROID_CLIENT_JAR=<repo>/android/conformance-client/build/libs/conformance-client-all.jar \
+    conformance run --from aiosendspin --to sendspindroid --results-dir results
+```
+
+The command exits non-zero because the server-initiated scenarios are reported
+as failed; each case's logs and summaries are under `results/data/`.

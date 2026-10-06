@@ -1,7 +1,17 @@
 package com.sendspindroid.conformance
 
 import com.sendspindroid.sendspin.SendspinTimeFilter
+import com.sendspindroid.sendspin.crypto.ClientIdentity
+import com.sendspindroid.sendspin.crypto.PairingConfig
+import com.sendspindroid.sendspin.crypto.Psk
+import com.sendspindroid.sendspin.crypto.PskCandidateSet
+import com.sendspindroid.sendspin.crypto.PskCandidates
+import com.sendspindroid.sendspin.crypto.PskCategory
+import com.sendspindroid.sendspin.crypto.secureRandomBytes
+import com.sendspindroid.sendspin.protocol.ActivationOutcome
+import com.sendspindroid.sendspin.protocol.NoiseWireCodec
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
+import com.sendspindroid.sendspin.protocol.ServerActivateRules
 import com.sendspindroid.sendspin.protocol.StreamConfig
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
@@ -14,31 +24,35 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import okio.ByteString
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import kotlin.concurrent.thread
 import kotlin.system.exitProcess
 
 /**
  * Sendspin conformance harness client adapter for SendSpinDroid.
  *
  * Implements the harness adapter contract (see Sendspin/conformance
- * adapters/README.md) for the `client-initiated-pcm` scenario, driving the
- * app's real shared protocol layer: MessageBuilder, MessageParser,
- * BinaryMessageParser, and SendspinTimeFilter. Other scenarios fail fast
- * with an explanatory summary, per the contract.
+ * adapters/README.md) for the client-initiated scenarios, over the encrypted
+ * wire: [EncryptedSocket] runs the app's handshake driver and wire codec, and
+ * everything above it is the app's real shared protocol layer -
+ * ServerActivateRules, MessageBuilder, MessageParser, BinaryMessageParser and
+ * SendspinTimeFilter. Other scenarios fail fast with an explanatory summary,
+ * per the contract.
+ *
+ * The client connects unpaired, on the Sentinel PSK with unpaired access
+ * enabled: the harness server approves every connecting client for exactly
+ * that.
  */
 
 private const val IMPLEMENTATION = "sendspindroid"
+
+private const val SCENARIO_PCM = "client-initiated-pcm"
+private const val SCENARIO_REQUEST_FORMAT_PCM = "client-initiated-request-format-pcm"
+private const val SCENARIO_REQUEST_FORMAT_FLAC = "client-initiated-request-format-flac"
 
 private class Args(argv: Array<String>) {
     private val map = buildMap {
@@ -97,19 +111,24 @@ private fun writeJson(path: String, obj: JsonObject) {
     File(path).writeText(obj.toString())
 }
 
-private fun sha256Hex(bytes: ByteArray): String =
-    MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+private fun formatJson(codec: String, sampleRate: Int, channels: Int, bitDepth: Int) = buildJsonObject {
+    put("codec", codec)
+    put("sample_rate", sampleRate)
+    put("channels", channels)
+    put("bit_depth", bitDepth)
+}
+
+private fun StreamConfig.toJson() = formatJson(codec, sampleRate, channels, bitDepth)
 
 fun main(argv: Array<String>) {
     val args = Args(argv)
     val summaryPath = args.required("summary")
     val readyPath = args.required("ready")
     val registryPath = args.required("registry")
-    val scenarioId = args["scenario-id"] ?: "client-initiated-pcm"
+    val scenarioId = args["scenario-id"] ?: SCENARIO_PCM
     val initiatorRole = args["initiator-role"] ?: "client"
     val preferredCodec = args["preferred-codec"] ?: "pcm"
     val clientName = args["client-name"] ?: "sendspindroid-client"
-    val clientId = args["client-id"] ?: "sendspindroid-client-id"
     val serverName = args["server-name"] ?: "Sendspin Conformance Server"
     val timeoutSeconds = (args["timeout-seconds"] ?: "40").toDouble()
 
@@ -120,16 +139,44 @@ fun main(argv: Array<String>) {
         put("initiator_role", initiatorRole)
     })
 
-    if (scenarioId != "client-initiated-pcm" || initiatorRole != "client") {
+    fun exitWithError(reason: String): Nothing {
         writeJson(summaryPath, buildJsonObject {
             put("status", "error")
-            put(
-                "reason",
-                "sendspindroid adapter currently supports only the client-initiated-pcm scenario " +
-                        "(got scenario_id=$scenarioId, initiator_role=$initiatorRole)"
-            )
+            put("reason", reason)
         })
         exitProcess(1)
+    }
+
+    // What client/hello advertises, in priority order, and for the
+    // renegotiation scenarios the format the client then asks for.
+    fun pcm(bitDepth: Int) = MessageBuilder.FormatEntry("pcm", 8_000, 1, bitDepth)
+    val formats: List<MessageBuilder.FormatEntry>
+    val requestedFormat: MessageBuilder.FormatEntry?
+    when {
+        initiatorRole != "client" -> exitWithError(
+            "sendspindroid adapter supports only client-initiated scenarios " +
+                    "(got scenario_id=$scenarioId, initiator_role=$initiatorRole)"
+        )
+        // Same PCM-only format list the reference aiosendspin adapter
+        // advertises, so the server makes the same format choice and hashes
+        // are comparable.
+        scenarioId == SCENARIO_PCM -> {
+            formats = listOf(
+                MessageBuilder.FormatEntry(preferredCodec, 8_000, 1, 16),
+                MessageBuilder.FormatEntry(preferredCodec, 44_100, 2, 16),
+                MessageBuilder.FormatEntry(preferredCodec, 48_000, 2, 16),
+            )
+            requestedFormat = null
+        }
+        scenarioId == SCENARIO_REQUEST_FORMAT_PCM -> {
+            formats = listOf(pcm(24), pcm(16))
+            requestedFormat = pcm(16)
+        }
+        scenarioId == SCENARIO_REQUEST_FORMAT_FLAC -> {
+            requestedFormat = MessageBuilder.FormatEntry("flac", 8_000, 1, 16)
+            formats = listOf(pcm(16), requestedFormat)
+        }
+        else -> exitWithError("sendspindroid adapter does not support scenario $scenarioId")
     }
 
     // Discover the server URL via the harness registry handoff.
@@ -147,142 +194,163 @@ fun main(argv: Array<String>) {
         }
         Thread.sleep(100)
     }
-    if (serverUrl == null) {
-        writeJson(summaryPath, buildJsonObject {
-            put("status", "error")
-            put("reason", "Timed out waiting for '$serverName' in registry $registryPath")
-        })
-        exitProcess(1)
-    }
+    val url = serverUrl ?: exitWithError("Timed out waiting for '$serverName' in registry $registryPath")
 
-    // Session state collected by the listener.
+    // Session state collected by the socket callbacks.
     val done = CountDownLatch(1)
     val timeFilter = SendspinTimeFilter()
     val pcmHasher = FloatPcmHasher()
     val encodedDigest = MessageDigest.getInstance("SHA-256")
     var chunkCount = 0
     var streamConfig: StreamConfig? = null
+    var initialFormat: StreamConfig? = null
+    var streamStartCount = 0
     var serverHelloPayload: JsonObject? = null
     var failureReason: String? = null
+    var activeRoles: List<String> = emptyList()
+    var activationSeen = false
+    var timeRequests = 0
 
-    // Same PCM-only format list the reference aiosendspin adapter advertises,
-    // so the server makes the same format choice and hashes are comparable.
-    val formats = listOf(
-        MessageBuilder.FormatEntry(preferredCodec, 8_000, 1, 16),
-        MessageBuilder.FormatEntry(preferredCodec, 44_100, 2, 16),
-        MessageBuilder.FormatEntry(preferredCodec, 48_000, 2, 16),
+    fun fail(reason: String) {
+        if (failureReason == null) failureReason = reason
+        done.countDown()
+    }
+
+    val identity = ClientIdentity.generate()
+    val pairingConfig = PairingConfig(
+        secureRandomBytes(Psk.PSK_SIZE), unpairedAccessEnabled = true, dynamicPairingCodeEnabled = false,
     )
-
     val client = OkHttpClient.Builder()
         .pingInterval(5, TimeUnit.SECONDS)
         .build()
 
-    val listener = object : WebSocketListener() {
-        override fun onOpen(webSocket: WebSocket, response: Response) {
-            webSocket.send(
-                MessageBuilder.buildClientHello(
-                    deviceName = clientName,
-                    bufferCapacity = 2_000_000,
-                    manufacturer = "SendSpinDroid",
-                    supportedFormats = formats,
-                    softwareVersion = "conformance"
-                )
+    lateinit var socket: EncryptedSocket
+
+    // client/state, built by the app's real builder. [format] is the rc1 way
+    // to ask for another stream format: "When `format` changes while a
+    // `player` stream is active, the server re-derives the stream format and
+    // sends a `stream/start` if it changed".
+    fun sendState(format: MessageBuilder.FormatEntry? = null) {
+        socket.send(
+            MessageBuilder.buildPlayerState(
+                volume = 100, muted = false, available = true,
+                playerRoleActive = SendSpinProtocol.Roles.PLAYER in activeRoles,
+                format = format,
+                artworkRoleActive = SendSpinProtocol.Roles.ARTWORK in activeRoles,
             )
-        }
-
-        override fun onMessage(webSocket: WebSocket, text: String) {
-            val json = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
-            val type = json["type"]?.jsonPrimitive?.contentOrNull ?: return
-            val payload = json["payload"] as? JsonObject
-
-            when (type) {
-                SendSpinProtocol.MessageType.SERVER_HELLO -> {
-                    serverHelloPayload = payload
-                    // Initial client/state per spec, built by the app's real builder.
-                    webSocket.send(MessageBuilder.buildPlayerState(100, false, available = true, outputDelayMs = 0.0))
-                    // Exercise the clock-sync path with a short burst.
-                    thread(isDaemon = true) {
-                        repeat(5) {
-                            webSocket.send(MessageBuilder.buildClientTime(System.nanoTime() / 1000))
-                            Thread.sleep(100)
-                        }
-                    }
-                }
-                SendSpinProtocol.MessageType.SERVER_TIME -> {
-                    val now = System.nanoTime() / 1000
-                    MessageParser.parseServerTime(payload, now)?.let { m ->
-                        timeFilter.addMeasurement(m.offset, m.rtt / 2, m.clientReceived, m.rtt)
-                    }
-                }
-                SendSpinProtocol.MessageType.STREAM_START -> {
-                    streamConfig = MessageParser.parseStreamStart(payload)
-                }
-                else -> { /* metadata/group/stream-end and others: not verified here */ }
-            }
-        }
-
-        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-            val raw = bytes.toByteArray()
-            if (raw.isEmpty()) return
-            val message = BinaryMessageParser.parse(
-                raw[0].toInt() and 0xFF, raw.copyOfRange(1, raw.size)
-            ) ?: return
-            if (message is BinaryMessageParser.BinaryMessage.Audio) {
-                val config = streamConfig
-                if (config == null) {
-                    failureReason = "Received audio chunk before stream/start"
-                    done.countDown()
-                    return
-                }
-                chunkCount += 1
-                encodedDigest.update(message.payload)
-                pcmHasher.update(message.payload, config.bitDepth)
-            }
-        }
-
-        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            webSocket.close(1000, null)
-        }
-
-        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            done.countDown()
-        }
-
-        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            // The server closing the TCP connection after streaming surfaces
-            // as EOFException here; that is the normal end of the scenario.
-            if (chunkCount == 0) failureReason = "WebSocket failure: ${t.message}"
-            done.countDown()
-        }
+        )
     }
 
-    val ws = client.newWebSocket(Request.Builder().url(serverUrl!!).build(), listener)
+    fun sendTime() {
+        timeRequests += 1
+        socket.send(MessageBuilder.buildClientTime(System.nanoTime() / 1000))
+    }
+
+    socket = EncryptedSocket(
+        client = client,
+        url = url,
+        identity = identity,
+        candidates = PskCandidateSet(PskCandidates.build(emptyList(), pairingConfig)),
+        onFrame = fun(decoded: NoiseWireCodec.Decoded) {
+            when (decoded) {
+                is NoiseWireCodec.Decoded.Json -> {
+                    val json = runCatching { Json.parseToJsonElement(decoded.text).jsonObject }
+                        .getOrNull() ?: return
+                    val payload = json["payload"] as? JsonObject
+                    when (json["type"]?.jsonPrimitive?.contentOrNull) {
+                        SendSpinProtocol.MessageType.SERVER_HELLO -> {
+                            serverHelloPayload = payload
+                            // "Sent by the client once it has received server/hello."
+                            socket.send(
+                                MessageBuilder.buildClientHello(
+                                    deviceName = clientName,
+                                    bufferCapacity = 2_000_000,
+                                    manufacturer = "SendSpinDroid",
+                                    supportedFormats = formats,
+                                    softwareVersion = "conformance",
+                                    unpairedAccessEnabled = true,
+                                )
+                            )
+                        }
+                        SendSpinProtocol.MessageType.SERVER_ACTIVATE -> {
+                            val activate = ServerActivateRules.parse(payload)
+                                ?: return fail("malformed server/activate")
+                            // Same rules the app applies.
+                            val outcome = ServerActivateRules.evaluate(
+                                activate = activate,
+                                category = PskCategory.SENTINEL,
+                                unpairedAccessEnabled = true,
+                                previousRoles = activeRoles,
+                                isFirstActivation = !activationSeen,
+                                offeredPairMethods = setOf(
+                                    MessageBuilder.PairMethodDescriptor.PAIRING_PSK.wireName
+                                ),
+                            )
+                            if (outcome !is ActivationOutcome.Accept) {
+                                return fail("server/activate not accepted: $outcome")
+                            }
+                            activationSeen = true
+                            activeRoles = outcome.activeRoles
+                            // Only now may the client speak, and every role
+                            // this activation made active is owed its state.
+                            sendState()
+                            // Exercise the clock-sync path with a short burst.
+                            if (timeRequests == 0) sendTime()
+                        }
+                        SendSpinProtocol.MessageType.SERVER_TIME -> {
+                            val now = System.nanoTime() / 1000
+                            MessageParser.parseServerTime(payload, now)?.let { m ->
+                                timeFilter.addMeasurement(m.offset, m.rtt / 2, m.clientReceived, m.rtt)
+                            }
+                            if (timeRequests < 5) sendTime()
+                        }
+                        SendSpinProtocol.MessageType.STREAM_START -> {
+                            val config = MessageParser.parseStreamStart(payload) ?: return
+                            streamConfig = config
+                            streamStartCount += 1
+                            if (streamStartCount == 1) {
+                                initialFormat = config
+                                if (requestedFormat != null) sendState(requestedFormat)
+                            }
+                        }
+                        SendSpinProtocol.MessageType.NOISE_HANDSHAKE ->
+                            fail("a re-handshake is outside the harness scenarios")
+                        else -> { /* metadata/group/stream-end and others: not verified here */ }
+                    }
+                }
+                is NoiseWireCodec.Decoded.Typed -> {
+                    val message = BinaryMessageParser.parse(decoded.type, decoded.body)
+                    if (message is BinaryMessageParser.BinaryMessage.Audio) {
+                        val config = streamConfig
+                            ?: return fail("Received audio chunk before stream/start")
+                        chunkCount += 1
+                        encodedDigest.update(message.payload)
+                        if (config.codec == "pcm") pcmHasher.update(message.payload, config.bitDepth)
+                    }
+                }
+                NoiseWireCodec.Decoded.Buffered -> Unit
+                is NoiseWireCodec.Decoded.ProtocolError -> fail("decode failed: ${decoded.reason}")
+            }
+        },
+        // The server closing the connection after streaming is the normal end
+        // of the scenario, and can surface as a socket failure.
+        onFail = { reason -> if (chunkCount == 0) fail(reason) else done.countDown() },
+        onClosed = { _, _ -> done.countDown() },
+    )
 
     val finished = done.await((timeoutSeconds * 1000).toLong(), TimeUnit.MILLISECONDS)
-    ws.cancel()
+    socket.close()
     client.dispatcher.executorService.shutdown()
 
-    if (!finished) {
-        writeJson(summaryPath, buildJsonObject {
-            put("status", "error")
-            put("reason", "Timed out waiting for server disconnect")
-        })
-        exitProcess(1)
-    }
-    if (failureReason != null) {
-        writeJson(summaryPath, buildJsonObject {
-            put("status", "error")
-            put("reason", failureReason!!)
-        })
-        exitProcess(1)
-    }
+    if (!finished) exitWithError("Timed out waiting for server disconnect")
+    failureReason?.let { exitWithError(it) }
 
     val summary = buildJsonObject {
         put("status", "ok")
         put("implementation", IMPLEMENTATION)
         put("role", "client")
         put("client_name", clientName)
-        put("client_id", clientId)
+        put("client_id", identity.clientId)
         put("scenario_id", scenarioId)
         put("initiator_role", initiatorRole)
         put("preferred_codec", preferredCodec)
@@ -290,20 +358,22 @@ fun main(argv: Array<String>) {
             put("type", "server/hello")
             serverHelloPayload?.let { put("payload", it) }
         })
-        streamConfig?.let { config ->
-            put("stream", buildJsonObject {
-                put("codec", config.codec)
-                put("sample_rate", config.sampleRate)
-                put("channels", config.channels)
-                put("bit_depth", config.bitDepth)
+        streamConfig?.let { put("stream", it.toJson()) }
+        if (requestedFormat != null) {
+            put("renegotiation", buildJsonObject {
+                put("stream_start_count", streamStartCount)
+                put("requested", with(requestedFormat) { formatJson(codec, sampleRate, channels, bitDepth) })
+                initialFormat?.let { put("initial_format", it.toJson()) }
+                if (streamStartCount > 1) streamConfig?.let { put("final_format", it.toJson()) }
+            })
+        } else {
+            put("audio", buildJsonObject {
+                put("audio_chunk_count", chunkCount)
+                put("received_encoded_sha256", encodedDigest.digest().joinToString("") { "%02x".format(it) })
+                put("received_pcm_sha256", pcmHasher.hexdigest())
+                put("received_sample_count", pcmHasher.sampleCount)
             })
         }
-        put("audio", buildJsonObject {
-            put("audio_chunk_count", chunkCount)
-            put("received_encoded_sha256", encodedDigest.digest().joinToString("") { "%02x".format(it) })
-            put("received_pcm_sha256", pcmHasher.hexdigest())
-            put("received_sample_count", pcmHasher.sampleCount)
-        })
     }
     writeJson(summaryPath, summary)
     print(File(summaryPath).readText())
