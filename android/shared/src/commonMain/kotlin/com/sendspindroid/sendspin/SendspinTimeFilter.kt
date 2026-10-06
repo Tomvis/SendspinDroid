@@ -140,10 +140,6 @@ class SendspinTimeFilter {
     private var recentOffsetsCount = 0
     private var rejectedCount = 0  // Consecutive rejections (for forced acceptance)
 
-    // Baseline time for relative calculations - prevents drift accumulation over long periods
-    // Set when first measurement is received, used as reference point for time conversions
-    private var baselineClientTime: Long = 0
-
     // Static delay: the sync offset set by the user's slider or pushed by the
     // server. Output latency up to the DAC is not part of it - the player
     // schedules against AudioTrack timestamps, which already include it.
@@ -167,7 +163,6 @@ class SendspinTimeFilter {
         val p10: Double,
         val p11: Double,
         val measurementCount: Int,
-        val baselineClientTime: Long,
         val lastUpdateTime: Long,
         val recentOffsets: DoubleArray,
         val recentOffsetsIndex: Int,
@@ -237,12 +232,6 @@ class SendspinTimeFilter {
         get() = userSyncOffsetMicros / 1000.0
 
     /**
-     * Same value as [staticDelayMs]; kept for the stats bundle.
-     */
-    val userSyncOffsetMs: Double
-        get() = userSyncOffsetMicros / 1000.0
-
-    /**
      * The spec's `output_delay_ms`: delay BEYOND the audio port, such as an
      * external amplifier or powered speaker.
      *
@@ -298,14 +287,6 @@ class SendspinTimeFilter {
         get() = convergenceTimeMs
 
     /**
-     * Filter stability score. Always 1.0 with the upstream-aligned model
-     * (fixed Q + adaptive forgetting); retained for binary compatibility
-     * with stats UI bindings that bundled this value.
-     */
-    val stability: Double
-        get() = 1.0
-
-    /**
      * Reset the filter to initial state.
      * Thread-safe: synchronized to prevent concurrent mutation.
      */
@@ -318,7 +299,6 @@ class SendspinTimeFilter {
         p11 = 0.0
         lastUpdateTime = 0
         measurementCount = 0
-        baselineClientTime = 0
         useDrift = false
         recentOffsetsIndex = 0
         recentOffsetsCount = 0
@@ -354,7 +334,6 @@ class SendspinTimeFilter {
                 p10 = p10,
                 p11 = p11,
                 measurementCount = measurementCount,
-                baselineClientTime = baselineClientTime,
                 lastUpdateTime = lastUpdateTime,
                 recentOffsets = recentOffsets.copyOf(),
                 recentOffsetsIndex = recentOffsetsIndex,
@@ -396,7 +375,6 @@ class SendspinTimeFilter {
             p11 = frozen.p11 * 100.0
 
             measurementCount = MIN_MEASUREMENTS
-            baselineClientTime = frozen.baselineClientTime
             lastUpdateTime = frozen.lastUpdateTime
 
             frozen.recentOffsets.copyInto(recentOffsets)
@@ -429,7 +407,6 @@ class SendspinTimeFilter {
         p11 = 0.0
         lastUpdateTime = 0
         measurementCount = 0
-        baselineClientTime = 0
         useDrift = false
         recentOffsetsIndex = 0
         recentOffsetsCount = 0
@@ -451,14 +428,12 @@ class SendspinTimeFilter {
      * @param measurementOffset The measured offset in microseconds
      * @param maxError The maximum error (uncertainty) in microseconds
      * @param clientTimeMicros The client timestamp when measurement was taken
-     * @param rtt Optional round-trip time in microseconds (ignored, kept for API compatibility)
      * @return true if measurement was accepted, false if rejected as outlier
      */
     fun addMeasurement(
         measurementOffset: Long,
         maxError: Long,
-        clientTimeMicros: Long,
-        rtt: Long = 0L
+        clientTimeMicros: Long
     ): Boolean = synchronized(lock) {
         if (measurementCount > 0 && clientTimeMicros <= lastUpdateTime) {
             return false
@@ -478,7 +453,6 @@ class SendspinTimeFilter {
                 offset = measurement
                 p00 = measurementVariance
                 lastUpdateTime = clientTimeMicros
-                baselineClientTime = clientTimeMicros
                 measurementCount = 1
                 recordAcceptedOffset(measurement)
             }
@@ -571,7 +545,6 @@ class SendspinTimeFilter {
 
     private fun kalmanUpdate(measurement: Double, maxError: Double, clientTimeMicros: Long) {
         val dt = (clientTimeMicros - lastUpdateTime).toDouble()
-        if (dt <= 0) return
         val dtSquared = dt * dt
         val updateStdDev = maxError * MAX_ERROR_SCALE
         val measurementVariance = updateStdDev * updateStdDev
@@ -605,7 +578,6 @@ class SendspinTimeFilter {
         // Update: K = P * H^T * S^-1, x = x + K * y, P = (I - K * H) * P
         // with H = [1, 0] and S = P[0,0] + R.
         val s = p00New + measurementVariance
-        if (s <= 0) return
 
         val k0 = p00New / s
         val k1 = p10New / s
@@ -622,11 +594,6 @@ class SendspinTimeFilter {
 
         lastUpdateTime = clientTimeMicros
         measurementCount++
-
-        if (measurementCount == MIN_MEASUREMENTS) {
-            Log.i(TAG, "Time sync ready: offset=${offset.toLong()}us, error=${errorMicros}us, " +
-                    "drift=${String.format("%.3f", driftPpm)}ppm (after $measurementCount measurements)")
-        }
     }
 
     /**

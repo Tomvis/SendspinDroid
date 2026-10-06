@@ -110,8 +110,6 @@ data class SyncStats(
     // === FILTER DIAGNOSTICS ===
     /** Time to reach convergence in ms */
     val convergenceTimeMs: Long = 0L,
-    /** Innovation variance ratio - should be ~1.0 for well-tuned filter */
-    val stabilityScore: Double = 1.0,
 
     // === PLAYBACK TRACKING ===
     val serverTimelineCursorUs: Long = 0L,
@@ -180,7 +178,6 @@ data class SyncStats(
 
             // Filter diagnostics
             putLong("convergence_time_ms", convergenceTimeMs)
-            putDouble("stability_score", stabilityScore)
 
             // Playback tracking
             putLong("server_timeline_cursor_us", serverTimelineCursorUs)
@@ -260,7 +257,6 @@ data class SyncStats(
 
                 // Filter diagnostics
                 convergenceTimeMs = bundle.getLong("convergence_time_ms", 0L),
-                stabilityScore = bundle.getDouble("stability_score", 1.0),
 
                 // Playback tracking
                 serverTimelineCursorUs = bundle.getLong("server_timeline_cursor_us", 0L),

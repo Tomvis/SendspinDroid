@@ -126,7 +126,7 @@ class TimeSyncManager(
         }
 
         val maxError = computeMaxError(measurement.rtt)
-        timeFilter.addMeasurement(measurement.offset, maxError, measurement.clientReceived, measurement.rtt)
+        timeFilter.addMeasurement(measurement.offset, maxError, measurement.clientReceived)
 
         if (timeFilter.isReady) {
             Log.v(tag, "Time sync: offset=${timeFilter.offsetMicros}μs, error=${timeFilter.errorMicros}μs")
@@ -189,7 +189,7 @@ class TimeSyncManager(
                     (if (staleCount > 0) " ($staleCount stale rejected)" else "") +
                     ", best RTT=${best.rtt}μs, offset=${best.offset}μs")
 
-            val accepted = timeFilter.addMeasurement(best.offset, maxError, best.clientReceived, best.rtt)
+            val accepted = timeFilter.addMeasurement(best.offset, maxError, best.clientReceived)
 
             if (timeFilter.isReady) {
                 Log.v(tag, "Time sync: offset=${timeFilter.offsetMicros}μs, error=${timeFilter.errorMicros}μs, " +
