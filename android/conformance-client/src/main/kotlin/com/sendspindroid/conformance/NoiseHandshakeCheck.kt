@@ -140,7 +140,11 @@ object NoiseHandshakeCheck {
         val store = object : InMemoryTrustStore(
             initial = PskRecordCodec.decode(if (recordsFile.exists()) recordsFile.readText() else ""),
         ) {
-            override fun onChanged() = recordsFile.writeText(PskRecordCodec.encode(listRecords()))
+            override fun onChanged(): Boolean {
+                // A failed write throws, which fails the run.
+                recordsFile.writeText(PskRecordCodec.encode(listRecords()))
+                return true
+            }
         }
         val pairingConfig = PairingConfig(
             pairingPsk.bytes, unpairedAccessEnabled = true, dynamicPairingCodeEnabled = pair,

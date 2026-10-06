@@ -145,6 +145,22 @@ class InMemoryTrustStoreTest {
     }
 
     @Test
+    fun aRecordThatCannotBePersistedIsReportedAndLeavesTheStoreUnchanged() {
+        var persists = true
+        val store = object : InMemoryTrustStore() {
+            override fun onChanged() = persists
+        }
+        store.addRecord(psk(1), "server-a")
+
+        persists = false
+        // Same server: a success would replace the first record.
+        val result = store.addRecord(psk(2), "server-a")
+
+        assertTrue("was $result", result is TrustStore.AddRecordResult.StorageFailed)
+        assertEquals(listOf(PskId.derive(psk(1))), store.listRecords().map { it.pskId })
+    }
+
+    @Test
     fun candidatesAreSelectableByCategory() {
         val store = InMemoryTrustStore()
         store.addRecord(psk(1), "server-a")

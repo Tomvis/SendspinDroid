@@ -39,12 +39,14 @@ class EncryptedPrefsTrustStore(
         }
     }
 
-    override fun onChanged() {
-        if (!UserSettings.setPskRecordsBlob(PskRecordCodec.encode(listRecords()))) {
+    override fun onChanged(): Boolean {
+        val persisted = UserSettings.setPskRecordsBlob(PskRecordCodec.encode(listRecords()))
+        if (!persisted) {
             // Losing this write means the server keeps a credential we have
             // forgotten, so say so rather than failing silently at next connect.
-            Log.e(TAG, "Failed to persist Sendspin PSK records: no storage available")
+            Log.e(TAG, "Failed to persist Sendspin PSK records: the write did not commit")
         }
+        return persisted
     }
 
     private companion object {
