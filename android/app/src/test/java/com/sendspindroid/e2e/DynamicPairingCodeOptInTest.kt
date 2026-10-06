@@ -50,7 +50,6 @@ class DynamicPairingCodeOptInTest {
         every { Log.e(any(), any(), any()) } returns 0
 
         mockkObject(UserSettings)
-        every { UserSettings.getPairingPskEnabled() } returns true
         every { UserSettings.getUnpairedAccessEnabled() } returns true
         every { UserSettings.getDynamicPairingCodeEnabled() } returns false
 

@@ -1,6 +1,8 @@
 package com.sendspindroid.sendspin.protocol
 
 import com.sendspindroid.sendspin.crypto.PskCategory
+import com.sendspindroid.sendspin.pairing.PairMethod
+import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
@@ -28,6 +30,8 @@ data class ServerActivate(
     val activities: Set<Activity>,
     val activeRoles: List<String>?,
     val pairingMethod: String?,
+    /** `pairing.format`: the dynamic pairing code's emission format. */
+    val pairingFormat: String?,
     /** Activities the client did not recognise; ignored, but worth logging. */
     val unknownActivities: List<String>,
 )
@@ -133,6 +137,7 @@ object ServerActivateRules {
             activeRoles = roles,
             // The client ignores `pairing` unless 'pairing' is in activities.
             pairingMethod = pairing?.get("method")?.jsonPrimitive?.contentOrNull,
+            pairingFormat = pairing?.get("format")?.jsonPrimitive?.contentOrNull,
             unknownActivities = unknown,
         )
     }
@@ -209,11 +214,14 @@ object ServerActivateRules {
 
         // "pairing.method MUST be 'pairing_psk' if and only if the matched PSK
         // is the pairing PSK, and MUST be a method present in the client's
-        // supported_pair_methods."
+        // supported_pair_methods." `pairing.format` is "required when method
+        // is 'dynamic_pairing_code'" and must be a format the client offers.
         val pairingOk = Activity.PAIRING !in activities || activate.pairingMethod.let { method ->
             method != null &&
-                (method == "pairing_psk") == (category == PskCategory.PAIRING) &&
-                method in offeredPairMethods
+                (method == PairMethod.PAIRING_PSK) == (category == PskCategory.PAIRING) &&
+                method in offeredPairMethods &&
+                (method != PairMethod.DYNAMIC_PAIRING_CODE ||
+                    activate.pairingFormat in MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.formats)
         }
 
         if (activitiesAndRolesOk(unpairedAccessEnabled) && pairingOk) {
@@ -239,7 +247,8 @@ object ServerActivateRules {
         }
 
         // Rule 3: a pairing method the matched PSK disallows or we do not
-        // currently offer. The connection stays open - the server may
+        // currently offer, or an emission format we do not offer. The
+        // connection stays open - the server may
         // re-activate with a different method.
         return ActivationOutcome.AbortPairing(ABORT_METHOD_NOT_SUPPORTED)
     }

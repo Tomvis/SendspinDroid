@@ -53,7 +53,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val playerName: StateFlow<String> = _playerName.asStateFlow()
 
     /**
-     * The pairing token, or null when the method is disabled.
+     * The pairing token.
      *
      * Computed lazily rather than held in state: it contains the Pairing PSK,
      * so the fewer copies alive the better. Reading it also mints the PSK on
@@ -62,7 +62,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
      */
     fun pairingToken(): String? {
         val config = AndroidPairingConfigStore().load()
-        if (!config.pairingPskEnabled) return null
         // Never logged. The token embeds the Pairing PSK, so anything that
         // writes it to logcat puts a live credential into a buffer that bug
         // reports and any app with log access can read. It leaves this method

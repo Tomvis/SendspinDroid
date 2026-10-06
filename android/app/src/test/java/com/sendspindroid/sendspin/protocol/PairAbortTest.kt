@@ -132,7 +132,7 @@ class PairAbortTest {
         handler.scope.runCurrent()
         handler.clearEvents()
 
-        handler.handleTextMessageForTest(abort(PairAbortReason.PIN_MISMATCH))
+        handler.handleTextMessageForTest(abort(PairAbortReason.PAIRING_CODE_MISMATCH))
         handler.scope.runCurrent()
 
         assertEquals(emptyList<String>(), handler.events)

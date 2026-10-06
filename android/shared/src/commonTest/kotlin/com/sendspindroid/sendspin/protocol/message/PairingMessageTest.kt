@@ -3,6 +3,7 @@ package com.sendspindroid.sendspin.protocol.message
 import com.sendspindroid.sendspin.crypto.Base64Url
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
@@ -24,6 +25,15 @@ class PairingMessageTest {
         assertTrue(json.contains("\"pairing_index\":2"))
         assertTrue(Regex("\"commit_B\":\"[A-Za-z0-9_-]{43}\"").containsMatchIn(json))
         assertTrue(json.contains("=").not())
+    }
+
+    @Test
+    fun `the pairing psk pair-init carries the index alone`() {
+        // commit_B: "Required in the Dynamic Pairing Code Flow; absent otherwise."
+        assertEquals(
+            """{"type":"client/pair-init","payload":{"pairing_index":4}}""",
+            MessageBuilder.buildClientPairInit(4),
+        )
     }
 
     @Test

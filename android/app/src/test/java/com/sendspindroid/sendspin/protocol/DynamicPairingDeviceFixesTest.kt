@@ -40,7 +40,9 @@ class DynamicPairingDeviceFixesTest {
         if (method == null) {
             """{"type":"server/activate","payload":{"activities":[$activities]}}"""
         } else {
-            """{"type":"server/activate","payload":{"activities":[$activities],"pairing":{"method":"$method"}}}"""
+            // `format` is required for the dynamic method and absent otherwise.
+            """{"type":"server/activate","payload":{"activities":[$activities],"pairing":{"method":"$method"""" +
+                (if (method == "dynamic_pairing_code") ""","format":"digits"""" else "") + "}}}"
         }
 
     // ========== D1: pairing runs alongside playback ==========

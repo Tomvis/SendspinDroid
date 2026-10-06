@@ -42,6 +42,9 @@ open class InMemoryTrustStore(
         if (isClaimed(pskId)) return TrustStore.AddRecordResult.AlreadyExists
 
         val record = PskRecord(pskId, psk, serverId, used = false)
+        // "The client MUST persist the new record, replacing any record it
+        // already holds for the server."
+        if (serverId != null) records.removeAll { it.serverId == serverId }
         records += record
         onChanged()
         return TrustStore.AddRecordResult.Ok(record)
