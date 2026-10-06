@@ -1483,11 +1483,14 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.d(TAG, "Metadata update: $title / $artist / $album")
 
+                // server/state carries the role's full state, so "" here
+                // means the track has no such field. It is passed on as "",
+                // which withMetadata clears; null would keep the last track's.
                 _playbackState.value = _playbackState.value.withMetadata(
-                    title = title.ifEmpty { null },
-                    artist = artist.ifEmpty { null },
-                    album = album.ifEmpty { null },
-                    artworkUrl = artworkUrl.ifEmpty { null },
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    artworkUrl = artworkUrl,
                     durationMs = durationMs,
                     positionMs = positionMs,
                     playbackSpeed = playbackSpeed

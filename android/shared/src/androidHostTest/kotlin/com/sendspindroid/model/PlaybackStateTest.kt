@@ -162,6 +162,26 @@ class PlaybackStateTest {
         assertNull(updated.album)
     }
 
+    @Test
+    fun withMetadata_trackWithoutAlbumArtOrDuration_doesNotInheritThePreviousTracks() {
+        // What server/state delivers for a track that has only a title: the
+        // absent fields arrive as "" and 0, and none of the last track's
+        // values may survive.
+        val state = PlaybackState(
+            title = "Old Song", artist = "Old Artist", album = "Old Album",
+            artworkUrl = "https://old.jpg", durationMs = 180000
+        )
+        val updated = state.withMetadata(
+            title = "Radio Stream", artist = "", album = "", artworkUrl = "",
+            durationMs = 0, positionMs = 0
+        )
+        assertEquals("Radio Stream", updated.title)
+        assertNull(updated.artist)
+        assertNull(updated.album)
+        assertNull(updated.artworkUrl)
+        assertEquals(0L, updated.durationMs)
+    }
+
     // --- withClearedMetadata ---
 
     @Test
