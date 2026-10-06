@@ -138,21 +138,4 @@ class PskSelectionTest {
                 is PskCandidateSet.Selection.Matched
         )
     }
-
-    @Test
-    fun aDisabledPairingMethodMakesItsPskIdAMiss() {
-        // "A PSK for a pairing method disabled in the client's pairing config is
-        // excluded from the candidate set, so a handshake referencing it fails
-        // as a lookup miss." Exercised end to end through PskCandidates.build.
-        val config = PairingConfig(
-            psk(7), pairingPskEnabled = false, unpairedAccessEnabled = true,
-            dynamicPairingCodeEnabled = false,
-        )
-        val built = PskCandidates.build(emptyList(), config)
-        val set = PskCandidateSet(built)
-        assertTrue(
-            set.select(config.pairingPskId, PskCategory.PAIRING, serverA)
-                is PskCandidateSet.Selection.NoMatch
-        )
-    }
 }

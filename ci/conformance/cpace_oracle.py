@@ -17,12 +17,27 @@ import secrets
 from cpace import CPace, CPaceRole
 
 # Sendspin instantiation: PRS is the six-digit code as ASCII; sid is the
-# label, the 32-byte Noise handshake hash, and the pairing index as a
-# big-endian uint32; CI is empty; ADa is "server" and ADb is "client".
+# label, the 32-byte Noise handshake hash, and the pairing index and the round
+# number as big-endian uint32s; CI is empty; ADa is "server" and ADb is
+# "client".
 PRS = b"123456"
 HANDSHAKE_HASH = bytes(range(32))
 PAIRING_INDEX = 1
-SID = b"sendspin-pair-pake-v1" + HANDSHAKE_HASH + PAIRING_INDEX.to_bytes(4, "big")
+ROUND = 1
+SID = (
+    b"sendspin-pair-pake-v1"
+    + HANDSHAKE_HASH
+    + PAIRING_INDEX.to_bytes(4, "big")
+    + ROUND.to_bytes(4, "big")
+)
+
+# Where the reference server is installed, hold the sid to its own derivation.
+try:
+    from aiosendspin.noise.pairing import _pake_sid
+except ImportError:
+    pass
+else:
+    assert SID == _pake_sid(HANDSHAKE_HASH, PAIRING_INDEX, ROUND)
 
 # The library draws each scalar from `secrets` inside start(), so an unpatched
 # run is random and cannot reproduce a previously published vector. Pinning the

@@ -7,21 +7,23 @@ import com.sendspindroid.sendspin.crypto.secureRandomBytes
 /** What happened. */
 sealed interface PairingEvent {
     /**
-     * A `server/activate` declaring the `pairing` activity.
+     * A `server/activate` admitting a `pairing_psk` attempt.
      *
+     * @param pairingIndex the number of pairing activations received since the
+     *   last Noise handshake, as sent in `client/pair-init`.
      * @param matchedCategory the category of the PSK that authenticated THIS
      *   connection, from the handshake. Never re-derived: it is the only thing
      *   standing between a long-term secret and an unauthenticated channel.
      */
     data class PairingActivation(
-        val method: String?,
+        val pairingIndex: Int,
         val matchedCategory: PskCategory,
     ) : PairingEvent
 
     /** `server/pair-finalize`: the server has persisted its side. */
     object ServerPairFinalize : PairingEvent
 
-    /** A `server/activate` without `pairing`, which ends any attempt. */
+    /** A `server/activate` that does not admit a `pairing_psk` attempt, which ends any attempt. */
     object NonPairingActivation : PairingEvent
 
     object AttemptTimeout : PairingEvent
@@ -44,6 +46,9 @@ sealed interface PairingEvent {
 
 /** What the connection should do about it. */
 sealed interface PairingAction {
+    /** Send `client/pair-init`, which starts the attempt. */
+    data class SendPairInit(val pairingIndex: Int) : PairingAction
+
     /** Send `client/pair-finalize` carrying this secret. */
     class SendPairFinalize(psk: ByteArray) : PairingAction {
         private val secret = psk.copyOf()
@@ -172,26 +177,29 @@ class PairingPskFlow {
     }
 
     private fun onPairingActivation(event: PairingEvent.PairingActivation): List<PairingAction> {
+        // A new pairing activation supersedes the attempt in flight: its
+        // secret is discarded, and the server discards what is left of it on
+        // the wire by the lower `pairing_index`.
+        val superseded = state == State.AWAITING_ACK
+        discard()
+
         // Refuse before generating anything. Order matters: a PSK minted and
         // then discarded is a PSK that existed in memory for no reason.
         if (event.matchedCategory != PskCategory.PAIRING) {
-            return listOf(PairingAction.SendPairAbort(PairAbortReason.METHOD_NOT_SUPPORTED))
-        }
-        if (event.method != PairMethod.PAIRING_PSK) {
-            // The PIN methods are not offered by this client (audit D2), so any
-            // other method is one we cannot run.
-            return listOf(PairingAction.SendPairAbort(PairAbortReason.METHOD_NOT_SUPPORTED))
-        }
-        if (state == State.AWAITING_ACK) {
-            // An attempt is already in flight. Minting a second secret would
-            // leave the first one un-acknowledgeable.
-            return emptyList()
+            state = State.ABORTED
+            return listOfNotNull(
+                PairingAction.ClearAttemptTimeout.takeIf { superseded },
+                PairingAction.SendPairAbort(PairAbortReason.METHOD_NOT_SUPPORTED),
+            )
         }
 
         val psk = secureRandomBytes(Psk.PSK_SIZE)
         pending = psk
         state = State.AWAITING_ACK
+        // "The client MUST send client/pair-init followed immediately by
+        // client/pair-finalize, without waiting for a server response."
         return listOf(
+            PairingAction.SendPairInit(event.pairingIndex),
             PairingAction.SendPairFinalize(psk),
             PairingAction.StartAttemptTimeout,
         )
@@ -215,10 +223,7 @@ object PairAbortReason {
     /** The activation's method is one the matched PSK disallows, or one we do not offer. */
     const val METHOD_NOT_SUPPORTED = "method_not_supported"
 
-    /** PAKE key confirmation or PIN binding failed. No call site until 4.4 (#220). */
-    const val PIN_MISMATCH = "pin_mismatch"
-
-    /** A verified `server_kc` did not match: the Dynamic Pairing Code flow's in-band mismatch. */
+    /** PAKE key confirmation failed: the Dynamic Pairing Code flow's in-band mismatch. */
     const val PAIRING_CODE_MISMATCH = "pairing_code_mismatch"
 
     /** The operator aborted through a local UI. Either side may send it. */
@@ -228,7 +233,6 @@ object PairAbortReason {
         ATTEMPT_TIMEOUT,
         CONCURRENT_ATTEMPT,
         METHOD_NOT_SUPPORTED,
-        PIN_MISMATCH,
         PAIRING_CODE_MISMATCH,
         USER_CANCELLED,
     )
@@ -247,6 +251,5 @@ object PairAbortReason {
 /** Pairing method wire names. */
 object PairMethod {
     const val PAIRING_PSK = "pairing_psk"
-    const val DYNAMIC_PIN = "dynamic_pin"
-    const val STATIC_PIN = "static_pin"
+    const val DYNAMIC_PAIRING_CODE = "dynamic_pairing_code"
 }

@@ -26,16 +26,9 @@ class AndroidPairingConfigStore : PairingConfigStore {
         }
         return PairingConfig(
             pairingPsk = psk,
-            pairingPskEnabled = UserSettings.getPairingPskEnabled(),
             unpairedAccessEnabled = UserSettings.getUnpairedAccessEnabled(),
             dynamicPairingCodeEnabled = UserSettings.getDynamicPairingCodeEnabled(),
         )
-    }
-
-    override fun setEnabled(enabled: Boolean): Boolean {
-        // Only the flag moves. The secret stays, so re-enabling restores every
-        // token already in circulation rather than silently invalidating them.
-        return UserSettings.setPairingPskEnabled(enabled)
     }
 
     override fun setUnpairedAccess(enabled: Boolean): Boolean =

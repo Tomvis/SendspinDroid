@@ -65,13 +65,30 @@ class InMemoryTrustStoreTest {
     }
 
     @Test
-    fun twoDifferentPsksMayShareAServerId() {
-        // Re-pairing with the same server produces a second record; the
-        // namespace rule is about psk_id, not server_id.
+    fun aNewRecordReplacesTheOneHeldForTheSameServer() {
+        // "The client MUST persist the new record, replacing any record it
+        // already holds for the server."
         val store = InMemoryTrustStore()
         assertTrue(store.addRecord(psk(1), "server-a") is TrustStore.AddRecordResult.Ok)
+        assertTrue(store.addRecord(psk(3), "server-b") is TrustStore.AddRecordResult.Ok)
         assertTrue(store.addRecord(psk(2), "server-a") is TrustStore.AddRecordResult.Ok)
-        assertEquals(2, store.listRecords().size)
+
+        assertEquals(
+            setOf(PskId.derive(psk(2)) to "server-a", PskId.derive(psk(3)) to "server-b"),
+            store.listRecords().map { it.pskId to it.serverId }.toSet(),
+        )
+        assertNull(store.findByPskId(PskId.derive(psk(1))))
+    }
+
+    @Test
+    fun aRejectedRecordLeavesTheServersExistingRecordInPlace() {
+        val store = InMemoryTrustStore()
+        store.addRecord(psk(1), "server-a")
+
+        assertTrue(store.addRecord(SentinelPsk.bytes, "server-a") is TrustStore.AddRecordResult.AlreadyExists)
+        assertTrue(store.addRecord(ByteArray(16), "server-a") is TrustStore.AddRecordResult.Invalid)
+
+        assertEquals(listOf(PskId.derive(psk(1))), store.listRecords().map { it.pskId })
     }
 
     @Test

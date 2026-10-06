@@ -42,7 +42,8 @@ class ServerActivateRulesTest {
         vararg activities: Activity,
         roles: List<String>? = null,
         method: String? = null,
-    ) = ServerActivate(activities.toSet(), roles, method, emptyList())
+        format: String? = if (method == "dynamic_pairing_code") "digits" else null,
+    ) = ServerActivate(activities.toSet(), roles, method, format, emptyList())
 
     private fun evaluate(
         activate: ServerActivate,
@@ -361,6 +362,33 @@ class ServerActivateRulesTest {
     }
 
     @Test
+    fun aDynamicActivationNeedsAnEmissionFormatTheClientOffers() {
+        // "... or a pairing.format the client does not currently offer - reply
+        // with pair/abort reason method_not_supported". Only `digits` is
+        // advertised; `format` is required for this method, so absent is not
+        // an offered format either.
+        assertEquals(
+            ActivationOutcome.Accept(emptyList()),
+            evaluate(activate(pairing, method = "dynamic_pairing_code", format = "digits")),
+        )
+        for (format in listOf("qr_code", "semaphore", null)) {
+            assertEquals(
+                methodNotSupported,
+                evaluate(activate(pairing, method = "dynamic_pairing_code", format = format)),
+                "format $format",
+            )
+        }
+    }
+
+    @Test
+    fun theFormatIsIgnoredForThePairingPskMethod() {
+        assertEquals(
+            ActivationOutcome.Accept(emptyList()),
+            evaluate(activate(pairing, method = "pairing_psk"), category = PskCategory.PAIRING),
+        )
+    }
+
+    @Test
     fun theMethodIsIgnoredWhenPairingIsNotDeclared() {
         // "A client ignores this field when activities does not include
         // 'pairing'."
@@ -382,6 +410,7 @@ class ServerActivateRulesTest {
         assertEquals(setOf(playback, pairing), a.activities)
         assertEquals(listOf("player@v1"), a.activeRoles)
         assertEquals("dynamic_pairing_code", a.pairingMethod)
+        assertEquals("digits", a.pairingFormat)
     }
 
     @Test

@@ -9,10 +9,11 @@ import com.sendspindroid.sendspin.crypto.secureRandomBytes
 sealed interface DynamicPairingEvent {
 
     /**
-     * A `server/activate` declaring the `dynamic_pin` method.
+     * A `server/activate` admitting a `dynamic_pairing_code` attempt.
      *
-     * @param pairingIndex the attempt counter, as sent in `client/pair-init`
-     *   and `client/pair-pending` and folded into the CPace `sid`.
+     * @param pairingIndex the number of pairing activations received since the
+     *   last Noise handshake, as sent in `client/pair-init` and
+     *   `client/pair-pending` and folded into the CPace `sid`.
      */
     data class PairingActivation(val pairingIndex: Int) : DynamicPairingEvent
 
@@ -31,7 +32,7 @@ sealed interface DynamicPairingEvent {
     /** `server/pair-finalize`: the server has persisted its side. */
     object ServerPairFinalize : DynamicPairingEvent
 
-    /** A `server/activate` without `dynamic_pin`, which ends any attempt. */
+    /** A `server/activate` that does not admit a `dynamic_pairing_code` attempt, which ends any attempt. */
     object NonPairingActivation : DynamicPairingEvent
 
     object AttemptTimeout : DynamicPairingEvent
@@ -112,8 +113,15 @@ sealed interface DynamicPairingAction {
  * live connection.
  *
  * States: `Idle -> AwaitingGesture -> AwaitingServerInit -> AwaitingAuth ->
- * AwaitingConfirm -> AwaitingFinalize -> Done`. Single attempt at a time; the
- * connection owns one of these.
+ * AwaitingConfirm -> AwaitingFinalize -> Done`, or `Aborted` once either side
+ * has sent `pair/abort`. Single attempt at a time; the connection owns one of
+ * these.
+ *
+ * An attempt runs a single round. On a failed `server_kc` the client aborts
+ * with `pairing_code_mismatch` instead of sending `client/pair-retry`, which
+ * `pairing.md#rounds` allows ("MAY likewise abort rather than retry short of
+ * the limit"); the operator restarts pairing from the server and gets a new
+ * code. `round` in the CPace `sid` is therefore always 1.
  *
  * @param handshakeHash the Noise handshake hash `h` for this connection.
  * @param counter brute-force protection; shared across attempts on this
@@ -128,7 +136,16 @@ class DynamicPairingCodeFlow(
 ) {
 
     private enum class State {
-        IDLE, AWAITING_GESTURE, AWAITING_SERVER_INIT, AWAITING_AUTH, AWAITING_CONFIRM, AWAITING_FINALIZE, DONE
+        IDLE, AWAITING_GESTURE, AWAITING_SERVER_INIT, AWAITING_AUTH, AWAITING_CONFIRM, AWAITING_FINALIZE, DONE,
+
+        /**
+         * `pair/abort` has been sent or received. "A client that has aborted
+         * an attempt likewise silently discards pairing messages received
+         * before the next `server/activate`."
+         */
+        ABORTED;
+
+        val inAttempt: Boolean get() = this != IDLE && this != DONE && this != ABORTED
     }
 
     private var state: State = State.IDLE
@@ -150,10 +167,10 @@ class DynamicPairingCodeFlow(
         is DynamicPairingEvent.ServerPairAuth -> onServerPairAuth(event)
         is DynamicPairingEvent.ServerPairConfirm -> onServerPairConfirm(event)
         DynamicPairingEvent.ServerPairFinalize -> onServerPairFinalize()
-        DynamicPairingEvent.AttemptTimeout -> onAttemptTimeout()
+        DynamicPairingEvent.AttemptTimeout -> abort(PairAbortReason.ATTEMPT_TIMEOUT)
+        DynamicPairingEvent.UserCancelled -> abort(PairAbortReason.USER_CANCELLED)
+        is DynamicPairingEvent.PairAbortReceived -> onPairAbortReceived()
         DynamicPairingEvent.NonPairingActivation,
-        is DynamicPairingEvent.PairAbortReceived,
-        DynamicPairingEvent.UserCancelled,
         DynamicPairingEvent.ConnectionClosed,
         -> onTerminal()
     }
@@ -163,7 +180,7 @@ class DynamicPairingCodeFlow(
         // during a pairing attempt. On receipt the client abandons the
         // attempt, discarding all pairing state." A re-activation mid-attempt
         // must reset completely, not layer new state over live state.
-        val abandoning = state != State.IDLE && state != State.DONE
+        val abandoning = state.inAttempt
         discard()
         pairingIndex = event.pairingIndex
 
@@ -200,6 +217,7 @@ class DynamicPairingCodeFlow(
     }
 
     private fun onServerPairInit(event: DynamicPairingEvent.ServerPairInit): List<DynamicPairingAction> {
+        if (state == State.ABORTED) return emptyList()
         val nonce = nonceB
         if (state != State.AWAITING_SERVER_INIT || nonce == null) return protocolError()
 
@@ -211,6 +229,7 @@ class DynamicPairingCodeFlow(
     }
 
     private fun onServerPairAuth(event: DynamicPairingEvent.ServerPairAuth): List<DynamicPairingAction> {
+        if (state == State.ABORTED) return emptyList()
         val r = responder
         if (state != State.AWAITING_AUTH || r == null) return protocolError()
 
@@ -227,14 +246,12 @@ class DynamicPairingCodeFlow(
     }
 
     private fun onServerPairConfirm(event: DynamicPairingEvent.ServerPairConfirm): List<DynamicPairingAction> {
+        if (state == State.ABORTED) return emptyList()
         val r = responder
         val nonce = nonceB
         if (state != State.AWAITING_CONFIRM || r == null || nonce == null) return protocolError()
 
-        if (!r.verify(event.ta)) {
-            discard()
-            return listOf(DynamicPairingAction.SendPairAbort(PairAbortReason.PAIRING_CODE_MISMATCH))
-        }
+        if (!r.verify(event.ta)) return abort(PairAbortReason.PAIRING_CODE_MISMATCH)
 
         counter.onServerKcVerified()
         val sid = sidFor(pairingIndex)
@@ -251,6 +268,7 @@ class DynamicPairingCodeFlow(
     }
 
     private fun onServerPairFinalize(): List<DynamicPairingAction> {
+        if (state == State.ABORTED) return emptyList()
         val psk = pendingPsk
         if (state != State.AWAITING_FINALIZE || psk == null) return protocolError()
 
@@ -262,16 +280,33 @@ class DynamicPairingCodeFlow(
         return listOf(action, DynamicPairingAction.StopEmittingCode)
     }
 
-    private fun onAttemptTimeout(): List<DynamicPairingAction> {
-        if (state == State.IDLE || state == State.DONE) return protocolError()
+    /**
+     * End the attempt from this side: a failed `server_kc`, the attempt
+     * timeout, or the operator cancelling. "Aborts a pairing attempt, started
+     * or not", so a gesture-gated attempt is aborted the same way.
+     */
+    private fun abort(reason: String): List<DynamicPairingAction> {
+        // A local timer or a stray tap with nothing in flight has nothing to abort.
+        if (!state.inAttempt) return emptyList()
         discard()
-        return listOf(DynamicPairingAction.SendPairAbort(PairAbortReason.ATTEMPT_TIMEOUT), DynamicPairingAction.StopEmittingCode)
+        state = State.ABORTED
+        return listOf(DynamicPairingAction.SendPairAbort(reason), DynamicPairingAction.StopEmittingCode)
+    }
+
+    /** The server ended the attempt. Nothing is sent back. */
+    private fun onPairAbortReceived(): List<DynamicPairingAction> {
+        // "A pair/abort received after the receiver has itself ended the
+        // attempt has no effect."
+        if (state.inAttempt) {
+            discard()
+            state = State.ABORTED
+        }
+        return listOf(DynamicPairingAction.StopEmittingCode)
     }
 
     /**
-     * `NonPairingActivation`, `PairAbortReceived`, `UserCancelled`,
-     * `ConnectionClosed`: always terminal, regardless of the current state --
-     * discard everything, persist nothing.
+     * `NonPairingActivation`, `ConnectionClosed`: always terminal, regardless
+     * of the current state -- discard everything, persist nothing.
      */
     private fun onTerminal(): List<DynamicPairingAction> {
         discard()
@@ -297,24 +332,23 @@ class DynamicPairingCodeFlow(
         private val SID_LABEL = "sendspin-pair-pake-v1".encodeToByteArray()
 
         /**
-         * `sid = "sendspin-pair-pake-v1" || h || pairing_index` (big-endian uint32).
+         * `sid = "sendspin-pair-pake-v1" || h || pairing_index || round`, the
+         * last two as big-endian uint32. `round` is always 1: see the class
+         * comment.
          *
          * `pairing_index` is used exactly as received on `PairingActivation`,
-         * with no re-basing here. The reference implementation's counter
-         * (`aiosendspin`'s `client/connection.py` `_pairing_index`, also
-         * `server/connection.py`) starts at 0 and is incremented BEFORE use,
-         * so the first attempt on a connection is already `pairing_index = 1`
-         * by the time it reaches `_pake_sid` (`aiosendspin/noise/pairing.py`).
+         * with no re-basing here: the first pairing activation after a Noise
+         * handshake is index 1.
          */
-        internal fun sidFor(handshakeHash: ByteArray, pairingIndex: Int): ByteArray {
-            val counterBytes = byteArrayOf(
-                (pairingIndex ushr 24).toByte(),
-                (pairingIndex ushr 16).toByte(),
-                (pairingIndex ushr 8).toByte(),
-                pairingIndex.toByte(),
-            )
-            return SID_LABEL + handshakeHash + counterBytes
-        }
+        internal fun sidFor(handshakeHash: ByteArray, pairingIndex: Int): ByteArray =
+            SID_LABEL + handshakeHash + uint32(pairingIndex) + uint32(1)
+
+        private fun uint32(value: Int): ByteArray = byteArrayOf(
+            (value ushr 24).toByte(),
+            (value ushr 16).toByte(),
+            (value ushr 8).toByte(),
+            value.toByte(),
+        )
     }
 
     private fun sidFor(pairingIndex: Int): ByteArray = sidFor(handshakeHash, pairingIndex)

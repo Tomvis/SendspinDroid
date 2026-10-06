@@ -89,8 +89,9 @@ interface TrustStore {
     fun findByPskId(pskId: String): PskRecord?
 
     /**
-     * Add a record, rejecting any `psk_id` already claimed. Never overwrites:
-     * a collision is an error, not a merge.
+     * Add a record, replacing any record already held for [serverId] and
+     * rejecting any `psk_id` already claimed: a collision is an error, not a
+     * merge.
      */
     fun addRecord(psk: ByteArray, serverId: String?): AddRecordResult
 
@@ -101,8 +102,7 @@ interface TrustStore {
     fun markUsed(pskId: String)
 
     /**
-     * Every PSK a handshake may match: the records, the Sentinel, and (once 2.2
-     * lands) the Pairing PSK.
+     * The records and the Sentinel. [PskCandidates] adds the Pairing PSK.
      *
      * Feeds [PskCandidateSet] directly.
      */
