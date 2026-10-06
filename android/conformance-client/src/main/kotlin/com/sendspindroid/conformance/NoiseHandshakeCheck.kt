@@ -17,6 +17,7 @@ import com.sendspindroid.sendspin.protocol.SendSpinHandshakeDriver
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.ServerActivateRules
 import com.sendspindroid.sendspin.protocol.StreamConfig
+import com.sendspindroid.sendspin.protocol.message.ArtworkReceiver
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.InitMessages
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
@@ -24,6 +25,7 @@ import com.sendspindroid.sendspin.protocol.message.MessageParser
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
@@ -41,8 +43,8 @@ import java.util.concurrent.TimeUnit
  * End-to-end check of the encrypted path against a real server.
  *
  * Drives the SAME code the Android app uses - `SendSpinHandshakeDriver`,
- * `NoiseWireCodec`, `ServerActivateRules`, `BinaryMessageParser` and the real
- * `MessageBuilder` - over a real WebSocket against an aiosendspin server
+ * `NoiseWireCodec`, `ServerActivateRules`, `BinaryMessageParser`,
+ * `ArtworkReceiver` and the real `MessageBuilder` - over a real WebSocket against an aiosendspin server
  * running with `allow_unencrypted=False`.
  *
  * The identity is **persisted** rather than generated per run. That matters:
@@ -52,7 +54,8 @@ import java.util.concurrent.TimeUnit
  * what earlier versions of this check did.
  *
  * Usage: `NoiseHandshakeCheck <ws://host:port/sendspin> [identity-file]
- *   [--hold | --hold-seconds=N] [--expect-audio] [--expect-rehandshake]`
+ *   [--hold | --hold-seconds=N] [--expect-audio] [--expect-artwork]
+ *   [--expect-rehandshake]`
  *
  * The tool also holds a pairing PSK, persisted beside the identity, and writes
  * its pairing token to `<identity-file>.token`. Handing that token to the
@@ -80,6 +83,8 @@ object NoiseHandshakeCheck {
             ?.substringAfter('=')?.toLongOrNull()
         // Fail unless audio arrived and survived every check in [AudioCheck].
         val expectAudio = args.contains("--expect-audio")
+        // Fail unless artwork arrived as [ArtworkCheck] requires.
+        val expectArtwork = args.contains("--expect-artwork")
         // Fail unless the server re-handshook and then activated, with no
         // second hello in between.
         val expectRehandshake = args.contains("--expect-rehandshake")
@@ -116,6 +121,7 @@ object NoiseHandshakeCheck {
         var grantedActivities: Set<Activity> = emptySet()
         var grantedRoles: List<String> = emptyList()
         val audio = AudioCheck()
+        val artwork = ArtworkCheck()
 
         val json = Json { ignoreUnknownKeys = true }
         val client = OkHttpClient.Builder().readTimeout(30, TimeUnit.SECONDS).build()
@@ -297,11 +303,28 @@ object NoiseHandshakeCheck {
                                 }
                             }
 
-                            SendSpinProtocol.MessageType.STREAM_START ->
+                            SendSpinProtocol.MessageType.STREAM_START -> {
                                 MessageParser.parseStreamStart(payload)?.let { audio.onStreamStart(it) }
+                                if (payload?.containsKey("artwork") == true) artwork.onStreamStart()
+                            }
+
+                            SendSpinProtocol.MessageType.STREAM_END -> {
+                                val roles = payload?.get("roles")?.jsonArray
+                                    ?.map { it.jsonPrimitive.content }
+                                if (roles == null || roles.any {
+                                        SendSpinProtocol.isStreamRole(it, SendSpinProtocol.StreamRoles.ARTWORK)
+                                    }
+                                ) artwork.onStreamEnd()
+                            }
                         }
                     }
-                    is NoiseWireCodec.Decoded.Typed -> {
+                    is NoiseWireCodec.Decoded.Typed -> if (
+                        decoded.type - SendSpinProtocol.BinaryType.ARTWORK_BASE in 0..3
+                    ) {
+                        // The real receiver: reassembly and every protocol
+                        // error the spec lists.
+                        artwork.onMessage(decoded.type, decoded.body)?.let { fail("artwork: $it") }
+                    } else {
                         // The real parser: a wrong header size shows up here as
                         // a payload that is not a whole number of PCM frames.
                         val message = BinaryMessageParser.parse(decoded.type, decoded.body)
@@ -372,24 +395,29 @@ object NoiseHandshakeCheck {
         println("  activities     : ${grantedActivities.map { it.wireName }}")
         println("  active_roles   : $grantedRoles")
         audio.report().forEach { println("  $it") }
+        artwork.report().forEach { println("  $it") }
         println()
 
         val err = failure
         val audioProblem = if (expectAudio) audio.problem() else null
+        val artworkProblem = if (expectArtwork) artwork.problem() else null
         when {
             err != null -> exitFail(err)
             !finished -> exitFail("timed out")
             serverHellos == 0 -> exitFail("no encrypted server/hello")
             audioProblem != null -> exitFail("audio: $audioProblem")
+            artworkProblem != null -> exitFail("artwork: $artworkProblem")
             expectRehandshake && rehandshakes == 0 -> exitFail("the server never re-handshook")
             expectRehandshake && activationsAfterRehandshake == 0 ->
                 exitFail("no server/activate followed the re-handshake")
             expectRehandshake && serverHellos != 1 ->
                 exitFail("server/hello was sent $serverHellos times; a re-handshake re-sends neither hello")
-            expectAudio || expectRehandshake -> println(
-                "PASS:" + (if (expectAudio) " audio received and verified" else "") +
-                    (if (expectAudio && expectRehandshake) ";" else "") +
-                    (if (expectRehandshake) " re-handshake completed and activated" else "")
+            expectAudio || expectArtwork || expectRehandshake -> println(
+                "PASS: " + listOfNotNull(
+                    "audio received and verified".takeIf { expectAudio },
+                    "artwork reassembled and cleared".takeIf { expectArtwork },
+                    "re-handshake completed and activated".takeIf { expectRehandshake },
+                ).joinToString("; ")
             )
             Activity.PLAYBACK !in grantedActivities -> {
                 // Never a client bug, but two very different situations share
@@ -513,6 +541,91 @@ object NoiseHandshakeCheck {
             partialFrameChunks > 0 -> "$partialFrameChunks chunks were not whole PCM frames"
             timestampGaps > 0 -> "$timestampGaps timestamp discontinuities"
             counterBreaks > 0 -> "$counterBreaks breaks in the frame counter"
+            else -> null
+        }
+    }
+
+    /**
+     * Checks the artwork the server transferred, as reassembled by
+     * [ArtworkReceiver].
+     *
+     * Each image is reported with its SHA-256, to compare with the one
+     * `dev_server.py --send-test-artwork` logs for the bytes it sent.
+     */
+    private class ArtworkCheck {
+        private val receiver = ArtworkReceiver()
+        private var streamActive = false
+        private var streamStarts = 0
+        private var partsInFlight = 0
+        private var multiPartImages = 0
+
+        /** "image" or "clear" for every completed transfer, in order. */
+        private val completed = mutableListOf<String>()
+        private val lines = mutableListOf<String>()
+
+        @Synchronized
+        fun onStreamStart() {
+            streamActive = true
+            streamStarts++
+        }
+
+        @Synchronized
+        fun onStreamEnd() {
+            streamActive = false
+            receiver.reset()
+        }
+
+        /** @return why the connection must close, or null. */
+        @Synchronized
+        fun onMessage(type: Int, body: ByteArray): String? {
+            // "Servers MUST NOT send artwork messages outside an active artwork stream."
+            if (!streamActive) return "message outside an active artwork stream"
+            val channel = type - SendSpinProtocol.BinaryType.ARTWORK_BASE
+            if (body.isNotEmpty() && body[0].toInt() == 0) partsInFlight++
+            when (val result = receiver.accept(type, body)) {
+                is ArtworkReceiver.Result.ProtocolError -> return result.reason
+                is ArtworkReceiver.Result.None -> {}
+                is ArtworkReceiver.Result.Discard -> {
+                    partsInFlight = 0
+                    if (body[0].toInt() == ArtworkReceiver.FLAG_CANCEL) note("channel $channel cancel")
+                }
+                is ArtworkReceiver.Result.Image -> if (result.data.isEmpty()) {
+                    completed += "clear"
+                    note("channel $channel clear ts=${result.timestampMicros}")
+                } else {
+                    completed += "image"
+                    if (partsInFlight > 1) multiPartImages++
+                    val sha = MessageDigest.getInstance("SHA-256").digest(result.data)
+                        .joinToString("") { "%02x".format(it) }
+                    val jpeg = result.data.size > 2 &&
+                        result.data[0] == 0xFF.toByte() && result.data[1] == 0xD8.toByte()
+                    note("channel $channel image ${result.data.size} bytes in $partsInFlight part(s) " +
+                        "ts=${result.timestampMicros} jpeg=$jpeg sha256=$sha")
+                }
+            }
+            return null
+        }
+
+        private fun note(line: String) {
+            lines += line
+            println("<- enc   artwork $line")
+        }
+
+        @Synchronized
+        fun report(): List<String> = buildList {
+            add("artwork        : $streamStarts stream/start, " +
+                "${completed.count { it == "image" }} images ($multiPartImages in several parts), " +
+                "${completed.count { it == "clear" }} clears")
+            lines.forEach { add("  $it") }
+        }
+
+        /** Why the artwork is not acceptable, or null if it is. */
+        @Synchronized
+        fun problem(): String? = when {
+            streamStarts == 0 -> "no stream/start carried an artwork object"
+            "image" !in completed -> "no image received"
+            multiPartImages == 0 -> "no image arrived in more than one part"
+            completed.last() != "clear" -> "the last image was not cleared"
             else -> null
         }
     }
