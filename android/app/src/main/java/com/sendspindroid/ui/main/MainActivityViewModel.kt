@@ -4,7 +4,6 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import com.sendspindroid.model.AppConnectionState
-import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -35,12 +34,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     private val _connectionState = MutableStateFlow<AppConnectionState>(AppConnectionState.ServerList)
     val connectionState: StateFlow<AppConnectionState> = _connectionState.asStateFlow()
-
-    private val _currentConnectedServerId = MutableStateFlow<String?>(null)
-    val currentConnectedServerId: StateFlow<String?> = _currentConnectedServerId.asStateFlow()
-
-    private val _userManuallyDisconnected = MutableStateFlow(false)
-    val userManuallyDisconnected: StateFlow<Boolean> = _userManuallyDisconnected.asStateFlow()
 
     // ========================================================================
     // Playback State
@@ -123,18 +116,9 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private val _reconnectingState = MutableStateFlow<ReconnectingState?>(null)
     val reconnectingState: StateFlow<ReconnectingState?> = _reconnectingState.asStateFlow()
 
-    private val _reconnectingToServer = MutableStateFlow<UnifiedServer?>(null)
-    val reconnectingToServer: StateFlow<UnifiedServer?> = _reconnectingToServer.asStateFlow()
-
     // ========================================================================
     // UI State
     // ========================================================================
-
-    private val _isBuffering = MutableStateFlow(false)
-    val isBuffering: StateFlow<Boolean> = _isBuffering.asStateFlow()
-
-    private val _isConnectionLoading = MutableStateFlow(false)
-    val isConnectionLoading: StateFlow<Boolean> = _isConnectionLoading.asStateFlow()
 
     // Music Assistant state
     private val _isMaConnected = MutableStateFlow(false)
@@ -147,17 +131,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     fun updateConnectionState(state: AppConnectionState) {
         Log.d(TAG, "Connection state: $state")
         _connectionState.value = state
-
-        // Update loading state based on connection state
-        _isConnectionLoading.value = state is AppConnectionState.Connecting
-    }
-
-    fun setCurrentConnectedServerId(serverId: String?) {
-        _currentConnectedServerId.value = serverId
-    }
-
-    fun setUserManuallyDisconnected(disconnected: Boolean) {
-        _userManuallyDisconnected.value = disconnected
     }
 
     // ========================================================================
@@ -167,7 +140,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     fun updatePlaybackState(isPlaying: Boolean, state: PlaybackState) {
         _isPlaying.value = isPlaying
         _playbackState.value = state
-        _isBuffering.value = state == PlaybackState.BUFFERING
     }
 
     fun updateMetadata(title: String, artist: String, album: String) {
@@ -221,10 +193,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         _reconnectingState.value = null
     }
 
-    fun setReconnectingToServer(server: UnifiedServer?) {
-        _reconnectingToServer.value = server
-    }
-
     // ========================================================================
     // Music Assistant Updates
     // ========================================================================
@@ -250,7 +218,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         _positionMs.value = 0
         _durationMs.value = 0
         _positionUpdatedAt.value = 0L
-        _isBuffering.value = false
         _isMaConnected.value = false
     }
 
@@ -259,10 +226,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
      */
     fun resetToServerList() {
         _connectionState.value = AppConnectionState.ServerList
-        _currentConnectedServerId.value = null
         _reconnectingState.value = null
-        _reconnectingToServer.value = null
-        _isConnectionLoading.value = false
         _pairingCode.value = null
         _pairingGestureRequested.value = false
         resetPlaybackState()

@@ -47,16 +47,6 @@ data class ReconnectingState(
 }
 
 /**
- * Server status for display in server list.
- */
-sealed class ServerStatus {
-    object Online : ServerStatus()
-    object Offline : ServerStatus()
-    data class Connecting(val progress: Float = 0f) : ServerStatus()
-    data class Reconnecting(val attempt: Int, val nextRetrySeconds: Int) : ServerStatus()
-}
-
-/**
  * Player colors extracted from album artwork.
  */
 data class PlayerColors(

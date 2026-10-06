@@ -38,7 +38,7 @@ object UserSettings {
     /** File name for the encrypted SharedPreferences store. */
     private const val ENCRYPTED_PREFS_FILE = "sendspin_secure_prefs"
 
-    // Preference keys - must match keys in preferences.xml
+    // Preference keys
     const val KEY_PLAYER_ID = "player_id"
     const val KEY_PLAYER_NAME = "player_name"
     const val KEY_SYNC_OFFSET_MS = "sync_offset_ms"
@@ -47,8 +47,6 @@ object UserSettings {
     const val KEY_FULL_SCREEN_MODE = "full_screen_mode"
     const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
     const val KEY_HIGH_POWER_MODE = "high_power_mode"
-    const val KEY_MINI_PLAYER_POSITION = "mini_player_position"
-    const val KEY_ALBUM_ARTISTS_ONLY = "album_artists_only"
     const val KEY_LAYOUT_MODE = "layout_mode"
     const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
 
@@ -65,9 +63,6 @@ object UserSettings {
     const val KEY_PAIRING_CODE_FAILURES = "pairing_code_failures"
     const val KEY_OUTPUT_DELAY_MS = "output_delay_ms"
     const val KEY_PLAYER_MUTED = "player_muted"
-
-    const val KEY_LAST_REMOTE_ID = "last_remote_id"
-    const val KEY_LAST_PROXY_URL = "last_proxy_url"
 
     // Sync offset range limits (milliseconds)
     const val SYNC_OFFSET_MIN = -5000
@@ -394,12 +389,6 @@ object UserSettings {
     }
 
     /**
-     * Gets the default player name (device model).
-     * Used as placeholder/hint in settings UI.
-     */
-    fun getDefaultPlayerName(): String = Build.MODEL
-
-    /**
      * Gets the manual sync offset in milliseconds.
      * Positive = delay playback (plays later), Negative = advance (plays earlier).
      */
@@ -476,10 +465,6 @@ object UserSettings {
     val autoStartOnBoot: Boolean
         get() = prefs?.getBoolean(KEY_AUTO_START_ON_BOOT, false) ?: false
 
-    var albumArtistsOnly: Boolean
-        get() = prefs?.getBoolean(KEY_ALBUM_ARTISTS_ONLY, false) ?: false
-        set(value) { prefs?.edit()?.putBoolean(KEY_ALBUM_ARTISTS_ONLY, value)?.apply() }
-
     /**
      * Layout mode override for adaptive UI.
      * AUTO uses automatic detection; HEADUNIT forces head unit layout.
@@ -501,34 +486,6 @@ object UserSettings {
         set(value) { prefs?.edit()?.putString(KEY_LAYOUT_MODE, value.name)?.apply() }
 
     /**
-     * Position of the mini player in the navigation content area.
-     */
-    enum class MiniPlayerPosition {
-        TOP, BOTTOM
-    }
-
-    /**
-     * Gets the mini player position.
-     * Defaults to TOP (current behavior).
-     */
-    val miniPlayerPosition: MiniPlayerPosition
-        get() {
-            val value = prefs?.getString(KEY_MINI_PLAYER_POSITION, "TOP")
-            return try {
-                MiniPlayerPosition.valueOf(value ?: "TOP")
-            } catch (e: Exception) {
-                MiniPlayerPosition.TOP
-            }
-        }
-
-    /**
-     * Sets the mini player position.
-     */
-    fun setMiniPlayerPosition(position: MiniPlayerPosition) {
-        prefs?.edit()?.putString(KEY_MINI_PLAYER_POSITION, position.name)?.apply()
-    }
-
-    /**
      * Gets the preferred audio codec for streaming.
      * The server will be asked for this codec first; PCM is always used as fallback.
      * Values: "opus" (default), "flac"
@@ -542,26 +499,6 @@ object UserSettings {
      */
     fun setPreferredCodec(codec: String) {
         prefs?.edit()?.putString(KEY_PREFERRED_CODEC, codec)?.apply()
-    }
-
-    // ========== Remote Access Settings ==========
-
-    /**
-     * Gets the last used Remote ID for quick reconnection.
-     * Stored in encrypted prefs (contains connection credential).
-     */
-    fun getLastRemoteId(): String? {
-        return sensitivePrefs?.getString(KEY_LAST_REMOTE_ID, null)
-    }
-
-    // ========== Proxy Access Settings ==========
-
-    /**
-     * Gets the last used proxy URL for quick reconnection.
-     * Stored in encrypted prefs (proxy URL can reveal server identity).
-     */
-    fun getLastProxyUrl(): String? {
-        return sensitivePrefs?.getString(KEY_LAST_PROXY_URL, null)
     }
 
     // ========== Testing Support ==========
