@@ -1514,7 +1514,12 @@ class SendSpin(
                 driver.onCleartextFrame(rawUtf8)
                 return
             }
-            onMessage(text)
+            // "a cleartext message received after switching to transport mode
+            // is a silent failure: the detecting side closes the connection".
+            // A text frame out here was never decrypted, so dispatching it
+            // would let anyone on the path inject server/command, server/unpair
+            // or stream/* as if the server had sent them.
+            onProtocolFailure("cleartext text frame outside the handshake")
         }
 
         override fun onMessage(text: String) {

@@ -101,6 +101,14 @@ class FakeTransport : SendSpinTransport {
     }
 
     /**
+     * Simulate a text frame arriving off the socket, the way the real
+     * transport delivers it: with its raw bytes.
+     */
+    fun simulateRawTextFrame(text: String) {
+        listener?.onMessage(text, text.toByteArray(Charsets.UTF_8))
+    }
+
+    /**
      * Simulate receiving a binary message from the server.
      */
     fun simulateBinaryMessage(bytes: ByteArray) {
