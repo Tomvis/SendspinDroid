@@ -75,7 +75,7 @@ fun MiniPlayer(
     var anchorTime by remember { mutableLongStateOf(positionUpdatedAt) }
     var displayPositionMs by remember { mutableLongStateOf(positionMs) }
 
-    LaunchedEffect(positionMs) {
+    LaunchedEffect(positionMs, positionUpdatedAt) {
         anchorPositionMs = positionMs
         anchorTime = positionUpdatedAt
         displayPositionMs = positionMs

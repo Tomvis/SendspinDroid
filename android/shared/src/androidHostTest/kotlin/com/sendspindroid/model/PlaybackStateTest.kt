@@ -264,43 +264,31 @@ class PlaybackStateTest {
     }
 
     @Test
-    fun withMetadata_zeroPosition_doesNotStampPositionUpdatedAt() {
-        // Simulates initial metadata for a new track: positionMs=0 should not
-        // stamp positionUpdatedAt, preventing phantom progress in interpolation.
-        val state = PlaybackState(positionUpdatedAt = 0L)
+    fun withMetadata_zeroPosition_stampsPositionUpdatedAt() {
+        // A new track starts at 0. Keeping the previous track's stamp made the
+        // display count on from that track's elapsed time.
+        val state = PlaybackState(positionMs = 95_000L, positionUpdatedAt = 5_000L)
         val updated = state.withMetadata(
             title = "New Track", artist = null, album = null, artworkUrl = null,
             durationMs = 180000, positionMs = 0
         )
-        assertEquals(0L, updated.positionUpdatedAt)
+        assertEquals(10_000L, updated.positionUpdatedAt)
     }
 
     @Test
-    fun withMetadata_zeroPosition_preservesExistingTimestamp() {
-        // If there was a previous valid timestamp, zero position preserves it
-        val state = PlaybackState(positionUpdatedAt = 5_000L)
-        val updated = state.withMetadata(
-            title = null, artist = null, album = null, artworkUrl = null,
-            durationMs = 0, positionMs = 0
+    fun interpolatedPositionMs_newTrackAtZero_startsFromZero() {
+        // 5 s into the previous track's last position update when the next
+        // track's metadata arrives with position 0.
+        val playing = PlaybackState(
+            playbackState = PlaybackStateType.PLAYING,
+            positionMs = 95_000L, positionUpdatedAt = 5_000L, durationMs = 180000
         )
-        assertEquals(5_000L, updated.positionUpdatedAt)
-    }
 
-    @Test
-    fun interpolatedPositionMs_zeroPositionAfterClear_returnsZero() {
-        // After withClearedMetadata (positionUpdatedAt=0), a metadata update
-        // with positionMs=0 should keep interpolation at 0, not count up.
-        val cleared = PlaybackState(
-            playbackState = PlaybackStateType.PLAYING
-        ).withClearedMetadata()
-
-        val updated = cleared.withMetadata(
+        val updated = playing.withMetadata(
             title = "New Track", artist = null, album = null, artworkUrl = null,
             durationMs = 180000, positionMs = 0
         )
 
-        // positionUpdatedAt should be 0, so interpolation returns raw positionMs
-        assertEquals(0L, updated.positionUpdatedAt)
         assertEquals(0L, updated.interpolatedPositionMs)
     }
 }
