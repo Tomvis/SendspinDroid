@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import java.net.InetAddress
 import java.util.concurrent.Executors
 
 /**
@@ -216,9 +217,7 @@ class NsdDiscoveryManager(
                     Log.w(TAG, "Failed to unregister ServiceInfoCallback", e)
                 }
 
-                val host = resolvedInfo.hostAddresses.firstOrNull()?.hostAddress
-                val port = resolvedInfo.port
-                handleResolvedService(resolvedInfo, host, port)
+                handleResolvedService(resolvedInfo, resolvedInfo.hostAddresses)
             }
 
             override fun onServiceLost() {
@@ -262,9 +261,7 @@ class NsdDiscoveryManager(
                     resolvingServices.remove(serviceName)
                 }
 
-                val host = serviceInfo.host?.hostAddress
-                val port = serviceInfo.port
-                handleResolvedService(serviceInfo, host, port)
+                handleResolvedService(serviceInfo, listOfNotNull(serviceInfo.host))
             }
         }
 
@@ -281,9 +278,10 @@ class NsdDiscoveryManager(
     /**
      * Processes a resolved service, extracting TXT records and notifying the listener.
      */
-    private fun handleResolvedService(serviceInfo: NsdServiceInfo, host: String?, port: Int) {
-        if (host != null && port > 0) {
-            val address = "$host:$port"
+    private fun handleResolvedService(serviceInfo: NsdServiceInfo, hosts: List<InetAddress>) {
+        val port = serviceInfo.port
+        val address = if (port > 0) MdnsAddress.format(hosts, port) else null
+        if (address != null) {
 
             // Extract path from TXT records (key: "path")
             // Android API 21+ has getAttributes() for TXT records
@@ -313,7 +311,7 @@ class NsdDiscoveryManager(
             Log.d(TAG, "Service resolved: ${serviceInfo.serviceName} at $address path=$path friendlyName=$friendlyName")
             listener.onServerDiscovered(serviceInfo.serviceName, address, path, friendlyName)
         } else {
-            Log.w(TAG, "Service resolved but missing host/port: ${serviceInfo.serviceName}")
+            Log.w(TAG, "Service resolved but no usable host/port: ${serviceInfo.serviceName} hosts=$hosts port=$port")
         }
     }
 
