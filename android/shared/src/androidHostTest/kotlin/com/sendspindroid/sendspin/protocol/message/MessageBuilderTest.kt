@@ -240,8 +240,8 @@ class MessageBuilderTest {
         assertEquals(setOf("source", "format", "width", "height"), channel.keys)
         assertEquals("album", channel["source"]?.jsonPrimitive?.content)
         assertEquals("jpeg", channel["format"]?.jsonPrimitive?.content)
-        assertEquals(500, channel["width"]?.jsonPrimitive?.int)
-        assertEquals(500, channel["height"]?.jsonPrimitive?.int)
+        assertEquals(1024, channel["width"]?.jsonPrimitive?.int)
+        assertEquals(1024, channel["height"]?.jsonPrimitive?.int)
     }
 
     @Test
@@ -253,7 +253,7 @@ class MessageBuilderTest {
                 """"muted":false,"output_delay_ms":120,"required_lead_time_ms":1500,""" +
                 """"min_buffer_ms":350,"supported_commands":["volume","mute","set_output_delay"],""" +
                 """"format":{"codec":"pcm","sample_rate":48000,"channels":2,"bit_depth":16}},""" +
-                """"artwork":{"channels":[{"source":"album","format":"jpeg","width":500,"height":500}]}}}""",
+                """"artwork":{"channels":[{"source":"album","format":"jpeg","width":1024,"height":1024}]}}}""",
             MessageBuilder.buildPlayerState(
                 80, false, available = true, outputDelayMs = 120.0,
                 format = MessageBuilder.FormatEntry("pcm", 48000, 2, 16),

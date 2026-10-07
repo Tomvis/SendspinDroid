@@ -336,6 +336,11 @@ class PlaybackService : MediaLibraryService() {
     private var lastTrackTitle: String? = null
     private var urlArtwork: Bitmap? = null
     private var binaryArtwork: Bitmap? = null
+        set(value) {
+            field = value
+            // Fork: the unscaled bytes go with the bitmap made from them.
+            if (value == null) binaryArtworkFullRes = null
+        }
     // Bumped whenever binaryArtwork is superseded, so a decode still running
     // for an older image cannot bring it back. Main thread only.
     private var binaryArtworkGeneration = 0
@@ -524,6 +529,15 @@ class PlaybackService : MediaLibraryService() {
         const val ARG_SERVER_PATH = "server_path"
         const val ARG_VOLUME = "volume"
         const val ARG_SERVER_ID = "server_id"  // For MA integration
+
+        /**
+         * Fork: unscaled artwork-stream image behind the session's <=300px
+         * bitmap, or null. The MediaSession only carries the small copy, so
+         * the in-process now-playing UI reads the full-size one from here.
+         */
+        @Volatile
+        var binaryArtworkFullRes: ByteArray? = null
+            private set
 
         // Session extras keys for metadata (service → controller)
         const val EXTRA_TITLE = "title"
@@ -1688,6 +1702,7 @@ class PlaybackService : MediaLibraryService() {
                     // An image that does not decode still replaces the one
                     // before it; effectiveArtwork decides whether it is shown.
                     binaryArtwork = scaled
+                    if (scaled != null) binaryArtworkFullRes = imageData
                     updateMediaMetadata()
                 }
             }
@@ -2146,8 +2161,11 @@ class PlaybackService : MediaLibraryService() {
      * themselves, so an absent URL has to leave them on the bitmap blob
      * (artworkData) that MetadataForwardingPlayer already ships.
      */
-    private fun externalArtworkUri(url: String?): Uri? {
-        if (url.isNullOrEmpty()) return null
+    private fun externalArtworkUri(url: String?): Uri {
+        // Fork: Uri.EMPTY, not null. MetadataForwardingPlayer reads null as
+        // "preserve", which kept the previous track's URL on a track whose
+        // art comes from the artwork stream; MainActivity prefers the URL.
+        if (url.isNullOrEmpty()) return Uri.EMPTY
         return Uri.parse(url)
     }
 

@@ -90,7 +90,9 @@ object SendSpinProtocol {
      * Artwork request constants for the `client/state` artwork object.
      */
     object Artwork {
-        const val REQUEST_SIZE = 500  // Requested artwork width/height in pixels
+        // Requested artwork width/height in pixels: MA's largest thumbnail
+        // bucket, so the full-screen and TV views are not upscaled.
+        const val REQUEST_SIZE = 1024
     }
 
     /**

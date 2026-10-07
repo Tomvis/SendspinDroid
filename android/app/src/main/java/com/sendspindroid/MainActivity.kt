@@ -73,6 +73,8 @@ import kotlin.math.roundToInt
 import com.sendspindroid.ui.main.MainActivityViewModel
 import com.sendspindroid.ui.main.PlaybackState
 import com.sendspindroid.ui.main.ArtworkSource
+import com.sendspindroid.ui.main.nowPlayingArtworkSource
+import com.sendspindroid.ui.main.nowPlayingArtworkUrl
 import com.sendspindroid.ui.main.ServerListScreen
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
@@ -1109,7 +1111,7 @@ class MainActivity : AppCompatActivity() {
             viewModel.updateMetadata(title, artist, album, albumArtist, year, albumTrack, queueTrack, totalTracks)
 
             if (artworkUrl.isNotEmpty()) {
-                viewModel.updateArtwork(ArtworkSource.Url(artworkUrl))
+                viewModel.updateArtwork(ArtworkSource.Url(nowPlayingArtworkUrl(artworkUrl)))
             }
         }
 
@@ -2028,20 +2030,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateAlbumArt(mediaMetadata: MediaMetadata) {
-        val artworkData = mediaMetadata.artworkData
         val artworkUri = mediaMetadata.artworkUri
+        // Fork: the session's artworkData is a <=300px lock-screen copy; see
+        // nowPlayingArtworkSource for what the in-app views show instead.
+        val source = nowPlayingArtworkSource(
+            artworkData = mediaMetadata.artworkData,
+            artworkUri = artworkUri?.toString(),
+            fullResBytes = PlaybackService.binaryArtworkFullRes,
+        ) ?: artworkUri?.let { ArtworkSource.Uri(it) }
 
-        when {
-            artworkData != null && artworkData.isNotEmpty() -> {
-                viewModel.updateArtwork(ArtworkSource.ByteArray(artworkData))
-            }
-            artworkUri != null -> {
-                viewModel.updateArtwork(ArtworkSource.Uri(artworkUri))
-            }
-            else -> {
-                viewModel.clearArtwork()
-            }
-        }
+        if (source != null) viewModel.updateArtwork(source) else viewModel.clearArtwork()
     }
 
     /**
