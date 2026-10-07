@@ -30,10 +30,11 @@ IMPLEMENTATIONS["sendspindroid"] = ImplementationSpec(
         entrypoint="conformance.adapters.sendspindroid_client",
         supports_server_initiated=False,
         supports_client_initiated=True,
-        supports_flac=False,
+        # Only gates client-initiated-state-format-flac for this adapter: the
+        # other FLAC scenario is server-initiated.
+        supports_flac=True,
         supports_opus=False,
         supports_discovery=False,
-        supports_request_format=True,
         supports_legacy_unencrypted=False,
         supported_role_families=("player",),
     ),
