@@ -3,6 +3,7 @@ package com.sendspindroid.ui.compose
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -29,23 +30,23 @@ class AddServerWizardTest {
     val composeTestRule = createComposeRule()
 
     @Test
-    fun wizard_clientTypeStep_showsTitle() {
+    fun wizard_opensOnFindServer() {
         composeTestRule.setContent {
             SendSpinTheme {
                 AddServerWizardScreen(
-                    state = WizardState(currentStep = WizardStep.ClientType),
+                    state = WizardState(),
                     onClose = {},
                     onBack = {},
                     onNext = {},
-                    onSkip = {},
                     onSave = {},
                     onStepAction = {}
                 )
             }
         }
 
-        // The top bar shows "Add Server" title for ClientType step
-        composeTestRule.onNodeWithText("Add Server").assertIsDisplayed()
+        // No client-type question: the first thing asked for is the server
+        composeTestRule.onAllNodesWithText("Find Your Server")[0].assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("Music Assistant").assertCountEquals(0)
     }
 
     @Test
@@ -57,7 +58,6 @@ class AddServerWizardTest {
                     onClose = {},
                     onBack = {},
                     onNext = {},
-                    onSkip = {},
                     onSave = {},
                     onStepAction = {}
                 )
@@ -77,7 +77,6 @@ class AddServerWizardTest {
                     onClose = {},
                     onBack = {},
                     onNext = {},
-                    onSkip = {},
                     onSave = {},
                     onStepAction = {}
                 )
@@ -97,7 +96,6 @@ class AddServerWizardTest {
                     onClose = {},
                     onBack = {},
                     onNext = {},
-                    onSkip = {},
                     onSave = {},
                     onStepAction = {}
                 )
@@ -109,7 +107,7 @@ class AddServerWizardTest {
 
     @Test
     fun wizard_stepNavigation_forward_updatesContent() {
-        var state by mutableStateOf(WizardState(currentStep = WizardStep.ClientType))
+        var state by mutableStateOf(WizardState(currentStep = WizardStep.SS_FindServer))
 
         composeTestRule.setContent {
             SendSpinTheme {
@@ -118,21 +116,20 @@ class AddServerWizardTest {
                     onClose = {},
                     onBack = {},
                     onNext = {},
-                    onSkip = {},
                     onSave = {},
                     onStepAction = {}
                 )
             }
         }
 
-        // Initially on ClientType
-        composeTestRule.onNodeWithText("Add Server").assertIsDisplayed()
+        // Initially on FindServer
+        composeTestRule.onAllNodesWithText("Find Your Server")[0].assertIsDisplayed()
 
-        // Navigate forward to FindServer
-        state = state.copy(currentStep = WizardStep.SS_FindServer)
+        // Navigate forward to Finish
+        state = state.copy(currentStep = WizardStep.SS_Finish)
         composeTestRule.waitForIdle()
 
-        composeTestRule.onAllNodesWithText("Find Your Server")[0].assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("Save Server")[0].assertIsDisplayed()
     }
 
     @Test
@@ -146,7 +143,6 @@ class AddServerWizardTest {
                     onClose = {},
                     onBack = {},
                     onNext = {},
-                    onSkip = {},
                     onSave = {},
                     onStepAction = {}
                 )
@@ -172,7 +168,6 @@ class AddServerWizardTest {
                     onClose = {},
                     onBack = {},
                     onNext = {},
-                    onSkip = {},
                     onSave = {},
                     onStepAction = {}
                 )

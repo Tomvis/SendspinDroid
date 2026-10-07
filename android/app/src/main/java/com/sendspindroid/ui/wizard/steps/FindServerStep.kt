@@ -45,9 +45,6 @@ import com.sendspindroid.ui.wizard.keepVisibleWhenFocused
 
 /**
  * Find server step - discover servers via mDNS or enter address manually.
- *
- * The Music Assistant checkbox is no longer here — the client mode
- * (SendSpin vs MA) is chosen on the ClientType step.
  */
 @Composable
 fun FindServerStep(
