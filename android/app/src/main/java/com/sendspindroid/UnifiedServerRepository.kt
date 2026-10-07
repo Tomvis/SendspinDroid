@@ -26,13 +26,16 @@ import java.util.UUID
  *
  * ## Serialization Format
  * Uses pipe-delimited format to avoid JSON dependency:
- * `id;;name;;timestamp;;pref;;local;;remote;;proxy;;isDefault;;isMusicAssistant`
+ * `id;;name;;timestamp;;pref;;local;;remote;;proxy;;isDefault;;reserved`
  * Where each connection is encoded as:
  * - local: `address::path`
  * - remote: `remoteId`
  * - proxy: `url::token::username`
  * - isDefault: `1` or `0` (boolean)
- * - isMusicAssistant: `1` or `0` (boolean)
+ * - reserved: always written `0`, ignored on read. Older versions wrote `1`
+ *   here for a server saved as Music Assistant; such a record loads as the
+ *   plain Sendspin server it is. The position is kept so the field count
+ *   does not change under records already on devices.
  *
  * ## Usage
  * ```kotlin
@@ -412,7 +415,7 @@ object UnifiedServerRepository {
 
     /**
      * Serialize servers to pipe-delimited format.
-     * Format: `id;;name;;timestamp;;pref;;local;;remote;;proxy;;isDefault;;isMusicAssistant`
+     * Format: `id;;name;;timestamp;;pref;;local;;remote;;proxy;;isDefault;;reserved`
      * Where each connection component uses :: as subfield separator.
      */
     private fun serializeServers(servers: List<UnifiedServer>): String {
@@ -432,7 +435,7 @@ object UnifiedServerRepository {
                 remoteStr,
                 proxyStr,
                 if (server.isDefaultServer) "1" else "0",
-                if (server.isMusicAssistant) "1" else "0"
+                "0" // reserved (was isMusicAssistant); keeps the record at nine fields
             ).joinToString(FIELD_SEPARATOR)
         }
     }
@@ -442,7 +445,7 @@ object UnifiedServerRepository {
      * Supports backward compatibility:
      * - 7-field format (original)
      * - 8-field format (+ isDefault)
-     * - 9-field format (+ isMusicAssistant)
+     * - 9-field format (+ the reserved field, which is not read)
      */
     private fun parseServers(data: String): List<UnifiedServer> {
         if (data.isBlank()) return emptyList()
@@ -491,9 +494,6 @@ object UnifiedServerRepository {
                 // Parse isDefault (8th field, defaults to false for backward compatibility)
                 val isDefault = fields.getOrNull(7) == "1"
 
-                // Parse isMusicAssistant (9th field, defaults to false for backward compatibility)
-                val isMusicAssistant = fields.getOrNull(8) == "1"
-
                 UnifiedServer(
                     id = id,
                     name = name,
@@ -503,8 +503,7 @@ object UnifiedServerRepository {
                     remote = remote,
                     proxy = proxy,
                     isDiscovered = false,
-                    isDefaultServer = isDefault,
-                    isMusicAssistant = isMusicAssistant
+                    isDefaultServer = isDefault
                 )
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to parse server entry: $serverStr", e)

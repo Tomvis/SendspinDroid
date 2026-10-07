@@ -30,16 +30,6 @@ object WebSocketUrlBuilder {
     }
 
     /**
-     * Build a WebSocket URL when host and port are already separated.
-     * Wraps IPv6 literals in brackets; passes hostnames and IPv4 through unchanged.
-     */
-    fun buildFromHostPort(host: String, port: Int, path: String, scheme: String = "ws"): String {
-        val hostPart = wrapIfIpv6Literal(stripBrackets(host))
-        val pathPart = normalizePath(path)
-        return "$scheme://$hostPart:$port$pathPart"
-    }
-
-    /**
      * Ensure a user-entered address has a port. Appends `:defaultPort` if none is present.
      * Handles IPv6 literals correctly, distinguishing bare-IPv6-2+-colons from host:port.
      *
@@ -63,37 +53,6 @@ object WebSocketUrlBuilder {
             colonCount == 0 -> "$address:$defaultPort"       // hostname/IPv4 bare
             colonCount == 1 -> address                        // host:port already
             else -> "[$address]:$defaultPort"                 // bare IPv6 literal
-        }
-    }
-
-    /**
-     * Extract just the host portion of an address string, discarding any port and
-     * unwrapping IPv6 brackets. The returned value is suitable for passing to
-     * [buildFromHostPort] (which will re-wrap IPv6 literals as needed).
-     *
-     * Examples:
-     * - `192.168.1.1` -> `192.168.1.1`
-     * - `192.168.1.1:8927` -> `192.168.1.1`
-     * - `host.example.com` -> `host.example.com`
-     * - `host.example.com:8080` -> `host.example.com`
-     * - `2001:db8::1` (bare IPv6) -> `2001:db8::1`
-     * - `[2001:db8::1]` -> `2001:db8::1`
-     * - `[2001:db8::1]:8927` -> `2001:db8::1`
-     */
-    fun extractHost(address: String): String {
-        if (address.startsWith("[")) {
-            val closeIdx = address.indexOf(']')
-            if (closeIdx >= 0) {
-                return address.substring(1, closeIdx)
-            }
-            // Malformed bracketed input - return as-is
-            return address
-        }
-        val colonCount = address.count { it == ':' }
-        return when {
-            colonCount == 0 -> address                        // bare host
-            colonCount == 1 -> address.substringBefore(':')   // host:port
-            else -> address                                   // bare IPv6 literal - no port possible
         }
     }
 
@@ -124,18 +83,6 @@ object WebSocketUrlBuilder {
             // 2+ colons and no brackets: bare IPv6 literal, no port
             // Wrap the whole thing in brackets
             else -> "[$address]"
-        }
-    }
-
-    private fun wrapIfIpv6Literal(host: String): String {
-        return if (host.contains(':')) "[$host]" else host
-    }
-
-    private fun stripBrackets(host: String): String {
-        return if (host.startsWith("[") && host.endsWith("]")) {
-            host.substring(1, host.length - 1)
-        } else {
-            host
         }
     }
 

@@ -2,6 +2,8 @@
 
 **Status:** working reference, 2026-04-22. Based on observed on-device log captures and a read of the MA server source at `C:/codeprojects/server/music_assistant/providers/sendspin/` plus the `aiosendspin` library at `/tmp/aiosendspin/`.
 
+**Update, 2026-10-07:** the app no longer has a Music Assistant API client. Actor 7 (the MA command channel), the two MA rows in section 5, the client-side part of Q1 and fix 8a describe a path that was built and has since been removed. Track metadata now reaches the app through SendSpin `server/state` only, so the lag analysed in section 3e is a server-side matter again. Sections 2 to 4, Q3 to Q5 and fix 8b are unaffected.
+
 **Audience:** SendSpinDroid maintainers diagnosing "metadata lags the audio" complaints, "widget shows wrong artwork" complaints, or reasoning about where a fix belongs (client, server, or protocol).
 
 ---
@@ -372,7 +374,6 @@ Additional notes on 8b:
 - Client URL fetch: `android/app/src/main/java/com/sendspindroid/playback/PlaybackService.kt:1478-1509`
 - Client MediaSession update: `android/app/src/main/java/com/sendspindroid/playback/PlaybackService.kt:1563-1583`
 - Client `withMetadata` semantics: `android/shared/src/commonMain/kotlin/com/sendspindroid/model/PlaybackState.kt:45-81`
-- Client queue fetch + id resolution: `android/shared/src/commonMain/kotlin/com/sendspindroid/musicassistant/MaCommandClient.kt:171-194`
 
 - MA SendSpin provider player lifecycle: `music_assistant/providers/sendspin/player.py`
   - `_on_player_media_updated`: line 782

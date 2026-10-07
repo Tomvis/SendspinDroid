@@ -166,8 +166,6 @@
     <string name="no_connection_available">No connection method available</string>
 
     <!-- Add Server Wizard -->
-    <string name="wizard_title_add_server">Add Server</string>
-
     <string name="wizard_name_title">Server Name</string>
     <string name="wizard_name_description">Give your server a friendly name</string>
     <string name="wizard_name_hint">e.g., Living Room, Office</string>
@@ -180,7 +178,6 @@
 
     <string name="wizard_at_least_one_method">Configure at least one connection method</string>
     <string name="wizard_back">Back</string>
-    <string name="wizard_skip">Skip</string>
     <string name="wizard_next">Next</string>
     <string name="wizard_save">Save</string>
 
@@ -214,11 +211,6 @@
     <string name="reconnecting_attempt">Reconnecting to %1$s (attempt %2$d)</string>
     <string name="connecting_to">Connecting to %s</string>
 
-    <!-- Music Assistant Integration -->
-    <string name="wizard_ma_login_title">Music Assistant Login</string>
-    <string name="wizard_ma_login_description">Enter your Music Assistant credentials to enable library browsing and player management</string>
-    <string name="wizard_ma_test_connection">Test Connection</string>
-
     <!-- New Wizard Flow - Find Server -->
     <string name="wizard_find_server_title">Find Your Server</string>
     <string name="wizard_find_server_description">Select a discovered server or enter the address manually</string>
@@ -231,28 +223,9 @@
     <string name="wizard_testing_title">Testing Connection</string>
     <string name="wizard_testing_local">Connecting to local server...</string>
 
-    <!-- Accessibility - Music Assistant -->
-    <string name="accessibility_ma_username_input">Music Assistant username input field</string>
-    <string name="accessibility_ma_password_input">Music Assistant password input field</string>
-
-    <!-- Favorite Track -->
-    <string name="accessibility_favorite_track">Add current track to favorites</string>
-    <string name="favorite_added">Added to favorites</string>
-    <string name="favorite_error">Could not add to favorites</string>
-    <string name="favorite_no_track">No track currently playing</string>
-
     <!-- Wizard - Additional Strings -->
     <string name="wizard_test_success">Connection successful</string>
     <string name="wizard_test_failed">Connection failed</string>
-    <string name="ma_username">Username</string>
-    <string name="ma_password">Password</string>
-    <string name="ma_port">API Port</string>
-    <string name="ma_login_dialog_title">Music Assistant Login</string>
-    <string name="ma_login_dialog_message">Enter your credentials to access library browsing and player management</string>
-    <string name="ma_login_dialog_login">Log In</string>
-    <string name="ma_login_dialog_skip">Skip</string>
-    <string name="ma_login_dialog_logging_in">Logging in\u2026</string>
-    <string name="ma_login_dialog_failed">Login failed: %s</string>
 
     <!-- Common actions (shared across dialogs/buttons) -->
     <string name="action_menu">Menu</string>

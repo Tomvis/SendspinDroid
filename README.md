@@ -1,8 +1,8 @@
 ![GitHub all releases](https://img.shields.io/github/downloads/chrisuthe/SendspinDroid/total?color=blue)
 
-# SendSpin Player & Music Assistant Client for Android
+# SendSpin Player for Android
 
-A native Android client for [SendSpin](https://www.sendspin-audio.com/)
+A native Android client for [SendSpin](https://www.sendspin-audio.com/). It plays from any SendSpin server, Music Assistant included.
 
 
 ## Features
@@ -16,15 +16,6 @@ A native Android client for [SendSpin](https://www.sendspin-audio.com/)
 - Skip, pause, seek, and group switching from any device
 - Adjustable sync offset for speaker delay compensation
 
-### Music Assistant Integration
-- Browse your full music library -- albums, artists, tracks, playlists, and radio
-- Full-text search across your entire collection
-- Album and artist detail screens with cover art
-- Create and manage playlists, add or remove tracks
-- Queue management -- view upcoming tracks, reorder, remove, clear
-- Play Next and Add to Queue from any browse or search screen
-- Shuffle and repeat mode controls
-
 ### Audio Quality
 - **Opus** -- efficient compressed streaming, great for cellular
 - **FLAC** -- lossless quality for critical listening on WiFi
@@ -36,10 +27,8 @@ A native Android client for [SendSpin](https://www.sendspin-audio.com/)
 ### Interface
 - Material You dynamic colors -- matches your wallpaper on Android 12+
 - Full dark and light theme support
-- Bottom navigation with Home, Library, Search, and Playlists tabs
 - Mini player bar with configurable position (top or bottom)
 - Full-screen now playing view with album art and playback controls
-- Queue bottom sheet accessible from the now playing screen
 - Full-screen immersive mode
 - Keep screen on while playing
 - Portrait and landscape support
@@ -55,8 +44,7 @@ A native Android client for [SendSpin](https://www.sendspin-audio.com/)
 
 ### Server Management
 - Multi-server support with saved server list
-- Add Server wizard with guided setup (discover, login, test, save)
-- Music Assistant authentication with token-based login
+- Add Server wizard with guided setup (discover, test, save)
 - Per-server connection configuration
 - Server status monitoring
 

@@ -20,15 +20,13 @@ import org.junit.Test
 class ConnectionCoordinatorTest {
 
     @Test
-    fun `sessionState combines current server, sendSpin state, and ma state`() = runTest {
+    fun `sessionState combines current server and sendSpin state`() = runTest {
         val server = MutableStateFlow<UnifiedServer?>(null)
         val sendSpin = MutableStateFlow<TransportState>(TransportState.Idle)
-        val ma = MutableStateFlow<TransportState>(TransportState.Idle)
 
         val coordinator = ConnectionCoordinator(
             currentServerFlow = server,
             sendSpinStateFlow = sendSpin,
-            musicAssistantStateFlow = ma,
             scope = TestScope(StandardTestDispatcher(testScheduler)),
             connectAttempt = { _, _ -> false },
             context = mockk(relaxed = true),
@@ -39,12 +37,10 @@ class ConnectionCoordinatorTest {
 
         // Transitions on each input flow propagate
         sendSpin.value = TransportState.Ready
-        ma.value = TransportState.Connecting
         testScheduler.runCurrent()
 
         val combined = coordinator.sessionState.first()
         assertEquals(TransportState.Ready, combined.sendSpin)
-        assertEquals(TransportState.Connecting, combined.musicAssistant)
     }
 
     @Test
@@ -270,7 +266,6 @@ class ConnectionCoordinatorTest {
         return ConnectionCoordinator(
             currentServerFlow = MutableStateFlow(null),
             sendSpinStateFlow = MutableStateFlow(TransportState.Idle),
-            musicAssistantStateFlow = MutableStateFlow(TransportState.Idle),
             scope = TestScope(StandardTestDispatcher(testScheduler)),
             connectAttempt = connectAttempt,
             context = mockk(relaxed = true),

@@ -28,7 +28,7 @@ import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
  * Main playback controls: Previous, Play/Pause, Next buttons.
- * Plus optional secondary row with Switch Group and Favorite.
+ * Plus optional secondary row with Switch Group.
  */
 @Composable
 fun PlaybackControls(
@@ -41,9 +41,6 @@ fun PlaybackControls(
     showSecondaryRow: Boolean = true,
     isSwitchGroupEnabled: Boolean = false,
     onSwitchGroupClick: () -> Unit = {},
-    showFavorite: Boolean = false,
-    isFavorite: Boolean = false,
-    onFavoriteClick: () -> Unit = {},
     playButtonSize: Dp = 72.dp,
     controlButtonSize: Dp = 56.dp,
     buttonGap: Dp = 16.dp,
@@ -143,31 +140,6 @@ fun PlaybackControls(
                         modifier = Modifier.size(20.dp)
                     )
                 }
-
-                // Favorite Button (conditionally visible)
-                if (showFavorite) {
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    FilledTonalIconButton(
-                        onClick = onFavoriteClick,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .tvFocusable()
-                    ) {
-                        Icon(
-                            painter = painterResource(
-                                if (isFavorite) R.drawable.ic_favorite
-                                else R.drawable.ic_favorite_border
-                            ),
-                            contentDescription = stringResource(R.string.accessibility_favorite_track),
-                            modifier = Modifier.size(20.dp),
-                            tint = if (isFavorite)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
             }
         }
     }
@@ -198,9 +170,7 @@ private fun PlaybackControlsPlayingPreview() {
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
-            isSwitchGroupEnabled = true,
-            showFavorite = true,
-            isFavorite = true
+            isSwitchGroupEnabled = true
         )
     }
 }

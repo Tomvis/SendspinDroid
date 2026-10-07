@@ -1,7 +1,7 @@
 package com.sendspindroid.coordinator
 
 /**
- * Lifecycle of a single transport (SendSpin or MusicAssistant).
+ * Lifecycle of a single transport.
  *
  * The transport reports state changes; it does not decide retry. The
  * ConnectionCoordinator owns retry decisions based on Failed.reason.
@@ -16,9 +16,8 @@ sealed class TransportState {
 /**
  * Why a transport ended up in TransportState.Failed.
  *
- * The Coordinator inspects this to decide retry/fallback/token-clear policy.
- * AuthRejected is the only reason that clears a stored Music Assistant token,
- * and by construction it requires a completed transport handshake.
+ * The Coordinator inspects this to decide retry/fallback policy.
+ * AuthRejected by construction requires a completed transport handshake.
  */
 sealed class FailureReason {
     object TransientNetwork : FailureReason()
