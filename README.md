@@ -13,22 +13,22 @@ A native Android client for [SendSpin](https://www.sendspin-audio.com/). It play
 - Android Auto integration
 - Android TV support
 - Hardware volume buttons with bidirectional sync
-- Skip, pause, seek, and group switching from any device
+- Play, pause, skip and group switching from the app; seek from the lock screen, notification or Android Auto
+- Phone calls pause the group; other apps' audio mutes this player
 - Adjustable sync offset for speaker delay compensation
 
 ### Audio Quality
-- **Opus** -- efficient compressed streaming, great for cellular
-- **FLAC** -- lossless quality for critical listening on WiFi
-- **PCM** -- uncompressed raw audio
-- Network-aware codec selection -- automatically choose the best format per connection type
-- Separate WiFi and cellular codec preferences
+- **Opus** -- efficient compressed streaming
+- **FLAC** -- lossless quality
+- **PCM** -- uncompressed raw audio, 16, 24 or 32-bit
+- Preferred codec selection
 - 48 kHz stereo output
 
 ### Interface
 - Material You dynamic colors -- matches your wallpaper on Android 12+
 - Full dark and light theme support
-- Mini player bar with configurable position (top or bottom)
-- Full-screen now playing view with album art and playback controls
+- Now playing view with album art and playback controls; swipe the art for the artist photo when the server provides one
+- Layouts for phones, tablets, TVs and car head units
 - Full-screen immersive mode
 - Keep screen on while playing
 - Portrait and landscape support
@@ -36,24 +36,22 @@ A native Android client for [SendSpin](https://www.sendspin-audio.com/). It play
 ### Connectivity
 - Automatic server discovery via mDNS/Zeroconf on local networks
 - Manual server entry for direct connections
-- Remote access via Music Assistant Remote ID (WebRTC)
-- QR code scanner for quick Remote ID input
-- HTTP proxy support for routed connections
-- Automatic reconnection on network changes
-- Works on WiFi, Ethernet, and cellular networks
+- Encrypted connection to the server, with pairing by token or QR code
+- Automatic reconnection when the server or the network comes back
+- Works on WiFi and Ethernet, on the same network as the server
 
 ### Server Management
 - Multi-server support with saved server list
 - Add Server wizard with guided setup (discover, test, save)
-- Per-server connection configuration
-- Server status monitoring
+- Default server with optional auto-start on boot
 
 ### Settings
 - Custom player name
-- Display preferences (full-screen mode, keep screen on, mini-player position)
+- Display preferences (full-screen mode, keep screen on, layout mode)
 - Audio sync offset tuning
-- Preferred codec selection (per WiFi and cellular)
+- Preferred codec selection
 - Low memory mode for older devices
+- High power mode for always-on devices
 - Debug logging with log export
 - Stats for Nerds -- real-time sync diagnostics
 
@@ -68,14 +66,14 @@ For development and testing guides, see the [Wiki](https://github.com/chrisuthe/
 ### Connecting to a Server
 
 - **Local network**: Servers are discovered automatically via mDNS
-- **Manual entry**: Tap "Enter server manually" and type your server address (e.g., `192.168.1.100:7080`)
-- **Remote access**: Enter a Music Assistant Remote ID or scan a QR code to connect from anywhere
-- **Proxy**: Configure an HTTP proxy for routed connections
+- **Manual entry**: Tap "Add Server" and type your server address (e.g., `192.168.1.100:8927`)
+
+The app connects on the local network only. To use it away from home, bring the device onto that network with a VPN.
 
 ### Requirements
 
 - Android 8.0 (Oreo) or higher
-- A [SendSpin](https://www.sendspin-audio.com/) server on your network (or a Remote ID for remote access)
+- A [SendSpin](https://www.sendspin-audio.com/) server on your network that speaks SendSpin 1.0 (Music Assistant 2.11 or newer)
 
 ### Installing the APK
 
@@ -88,14 +86,13 @@ Since SendSpin Player isn't on the Play Store, you'll need to allow installation
 
 ## Architecture
 
-SendSpin Player is built with native Kotlin and Jetpack Compose, using a hybrid architecture:
+SendSpin Player is built with native Kotlin:
 
-- **Jetpack Compose** for library browsing, search, playlists, detail screens, queue, and settings
-- **XML layouts with ViewBinding** for the main activity shell, now playing screen, and server management
-- **Fragments** for navigation within the bottom navigation tabs
-- **ViewModels** for state management across configuration changes
+- **Jetpack Compose** for the whole interface
+- **A Media3 `MediaLibraryService`** that owns the connection and playback, for background audio, notifications and Android Auto
+- **A shared Kotlin Multiplatform module** for the SendSpin protocol, encryption and clock synchronization
+- **`AudioTrack`** for output, with playback aligned to the server's clock
 - **Coroutines** for async operations and WebSocket communication
-- **Media3 MediaSession** for system integration, notifications, and Android Auto
 
 ### The SendSpin Protocol
 
@@ -111,13 +108,14 @@ SendSpin Player uses the following open-source libraries:
 
 | Library | License | Copyright |
 |---------|---------|-----------|
-| [AndroidX](https://developer.android.com/jetpack/androidx) (Core, AppCompat, Lifecycle, Media3, Compose, CameraX, Palette, Preference, Fragment, ViewPager2, SwipeRefreshLayout, ConstraintLayout) | Apache 2.0 | The Android Open Source Project |
+| [AndroidX](https://developer.android.com/jetpack/androidx) (Core, AppCompat, Activity, Lifecycle, Media3, Compose, Security, Preference, Fragment, ViewPager2, SwipeRefreshLayout) | Apache 2.0 | The Android Open Source Project |
 | [Material Components for Android](https://github.com/material-components/material-components-android) | Apache 2.0 | The Android Open Source Project |
-| [Kotlin & Kotlinx Coroutines](https://github.com/Kotlin/kotlinx.coroutines) | Apache 2.0 | JetBrains s.r.o. and contributors |
+| [Kotlin, Kotlinx Coroutines & Kotlinx Serialization](https://github.com/Kotlin) | Apache 2.0 | JetBrains s.r.o. and contributors |
+| [Ktor](https://github.com/ktorio/ktor) | Apache 2.0 | JetBrains s.r.o. and contributors |
 | [OkHttp](https://github.com/square/okhttp) | Apache 2.0 | Square, Inc. |
 | [Coil](https://github.com/coil-kt/coil) | Apache 2.0 | Coil Contributors |
-| [Stream WebRTC Android](https://github.com/nicobatty/webrtc-android) | Apache 2.0 | Stream.io Inc. |
+| [Bouncy Castle](https://www.bouncycastle.org/) | MIT | The Legion of the Bouncy Castle Inc. |
+| [ZXing](https://github.com/zxing/zxing) (pairing QR code) | Apache 2.0 | ZXing authors |
 | [Java-WebSocket](https://github.com/TooTallNate/Java-WebSocket) | MIT | Nathan Rajlich |
-| QR code scanning uses [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) | Apache 2.0 | |
 
 SendspinDroid IS NOT affiliated with or endorsed by Sendspin, Music Assistant or other Open Home Foundation projects directly, this is a standalone project.
