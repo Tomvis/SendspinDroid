@@ -20,7 +20,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import android.content.res.Configuration
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -62,10 +67,42 @@ fun ServerListEmptyState(
     onQuickConnectClick: (UnifiedServer) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val contentPadding = PaddingValues(horizontal = 16.dp, vertical = 24.dp)
+
+    // In landscape the hero card is as tall as the screen, which would leave
+    // the servers that were found below the fold with nothing to say they
+    // are there. They go beside it instead.
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    if (isLandscape && discoveredServers.isNotEmpty()) {
+        Row(modifier = modifier.fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                contentPadding = contentPadding
+            ) {
+                item(key = "hero") {
+                    HeroCard(
+                        isScanning = isScanning,
+                        discoveredCount = discoveredServers.size,
+                        onAddServerClick = onAddServerClick
+                    )
+                }
+            }
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                contentPadding = contentPadding
+            ) {
+                discoveredServerItems(discoveredServers, onQuickConnectClick)
+            }
+        }
+        return
+    }
+
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 24.dp)
+        contentPadding = contentPadding
     ) {
         // Hero card
         item(key = "hero") {
@@ -87,55 +124,63 @@ fun ServerListEmptyState(
                 Spacer(modifier = Modifier.height(16.dp))
             }
 
-            item(key = "quick_connect_header") {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp)
-                ) {
-                    Text(
-                        text = stringResource(R.string.welcome_quick_connect),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = stringResource(R.string.welcome_found_on_network),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                }
-            }
+            discoveredServerItems(discoveredServers, onQuickConnectClick)
+        }
+    }
+}
 
-            itemsIndexed(
-                items = discoveredServers,
-                key = { _, server -> "quick_${server.id}" }
-            ) { index, server ->
-                AnimatedVisibility(
-                    visible = true,
-                    enter = fadeIn(
-                        animationSpec = tween(
-                            durationMillis = 300,
-                            delayMillis = index * 80
-                        )
-                    ) + slideInVertically(
-                        initialOffsetY = { 60 },
-                        animationSpec = tween(
-                            durationMillis = 300,
-                            delayMillis = index * 80
-                        )
-                    )
-                ) {
-                    ServerListItem(
-                        server = server,
-                        status = ServerItemStatus.ONLINE,
-                        onClick = { onQuickConnectClick(server) },
-                        onLongClick = { /* no-op for quick connect */ },
-                        onQuickConnectClick = { onQuickConnectClick(server) }
-                    )
-                }
-            }
+/** The "Quick Connect" heading and one row per server found on the network. */
+private fun LazyListScope.discoveredServerItems(
+    discoveredServers: List<UnifiedServer>,
+    onQuickConnectClick: (UnifiedServer) -> Unit,
+) {
+    item(key = "quick_connect_header") {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.welcome_quick_connect),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = stringResource(R.string.welcome_found_on_network),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+
+    itemsIndexed(
+        items = discoveredServers,
+        key = { _, server -> "quick_${server.id}" }
+    ) { index, server ->
+        AnimatedVisibility(
+            visible = true,
+            enter = fadeIn(
+                animationSpec = tween(
+                    durationMillis = 300,
+                    delayMillis = index * 80
+                )
+            ) + slideInVertically(
+                initialOffsetY = { 60 },
+                animationSpec = tween(
+                    durationMillis = 300,
+                    delayMillis = index * 80
+                )
+            )
+        ) {
+            ServerListItem(
+                server = server,
+                status = ServerItemStatus.ONLINE,
+                onClick = { onQuickConnectClick(server) },
+                onLongClick = { /* no-op for quick connect */ },
+                onQuickConnectClick = { onQuickConnectClick(server) }
+            )
         }
     }
 }

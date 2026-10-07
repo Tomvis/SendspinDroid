@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import android.content.res.Configuration
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.FloatingActionButton
@@ -144,8 +146,17 @@ private fun ServerListScreenContent(
         contentAlignment = if (maxWidth != null) Alignment.TopCenter else Alignment.TopStart
     ) {
         if (!hasSavedServers) {
-            // Welcome / empty state — hero card with discovered servers inline
-            Box(modifier = contentModifier) {
+            // Welcome / empty state — hero card with discovered servers inline.
+            // In landscape it lays the two out side by side, so it gets twice
+            // the width a single column is held to.
+            val isLandscape =
+                LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+            val emptyStateModifier = if (maxWidth != null && isLandscape) {
+                Modifier.widthIn(max = maxWidth * 2).fillMaxWidth()
+            } else {
+                contentModifier
+            }
+            Box(modifier = emptyStateModifier) {
                 ServerListEmptyState(
                     isScanning = isScanning,
                     discoveredServers = discoveredServers,
