@@ -163,6 +163,98 @@ class SyncAudioPlayerLoopTest {
         sink.writes.drop(writeIndex).map { tagOf(it.snapshotFirstBytes) }.filter { it != 0 }
 
     // ========================================================================
+    // Pause leaves the track to the audio thread
+    // ========================================================================
+
+    @Test
+    fun `pause stops the track at once and leaves the flush to the loop`() {
+        queueStream(nowUs + 400_000L, count = 400, tag = 1)
+        tickUntilPlaying()
+        repeat(20) { tick() }
+        val flushes = sink.flushCallCount.get()
+        val pauses = sink.pauseCallCount.get()
+        val plays = sink.playCallCount.get()
+
+        player.pause()
+
+        assertEquals("the track is paused by the caller", pauses + 1, sink.pauseCallCount.get())
+        assertEquals("but not flushed by it", flushes, sink.flushCallCount.get())
+        val writes = sink.writes.size
+        repeat(5) { tick() }
+        assertEquals("nothing is written while paused", writes, sink.writes.size)
+
+        player.resume()
+
+        // Until the loop has flushed, the track holds audio from before the
+        // pause; setting it playing here would let that be heard.
+        assertEquals("resume leaves the restart to the loop", plays, sink.playCallCount.get())
+        assertEquals(flushes, sink.flushCallCount.get())
+
+        tick()
+
+        assertEquals("the loop flushes", flushes + 1, sink.flushCallCount.get())
+        assertEquals("and sets the track playing again", plays + 1, sink.playCallCount.get())
+    }
+
+    @Test
+    fun `a clear while paused restarts the track from the loop`() {
+        queueStream(nowUs + 400_000L, count = 400, tag = 1)
+        tickUntilPlaying()
+        repeat(20) { tick() }
+        player.pause()
+        val flushes = sink.flushCallCount.get()
+        val plays = sink.playCallCount.get()
+
+        player.clearBuffer()
+        // The new stream's "playing" state can arrive after its clear.
+        sink.scriptedPlayState = 2 // AudioTrack.PLAYSTATE_PAUSED
+        player.resume()
+
+        assertEquals(plays, sink.playCallCount.get())
+        assertEquals(flushes, sink.flushCallCount.get())
+
+        tick()
+
+        assertEquals(flushes + 1, sink.flushCallCount.get())
+        assertEquals(plays + 1, sink.playCallCount.get())
+    }
+
+    // ========================================================================
+    // A chunk from before a clear
+    // ========================================================================
+
+    @Test
+    fun `a chunk that is no longer current is not queued`() {
+        player.queueChunk(nowUs + 400_000L, pcm(1)) { false }
+
+        assertEquals(0L, samplesInQueue())
+        assertEquals(0L, queuedSamples())
+    }
+
+    @Test
+    fun `a chunk found current is queued before a clear that is already on its way`() {
+        // The decode thread finds its chunk current; the stream is cleared
+        // before it gets any further. The clear has to wait for the chunk
+        // and remove it, not run first and leave it at the head of the queue.
+        val checking = java.util.concurrent.CountDownLatch(1)
+        val decodeThread = Thread {
+            player.queueChunk(nowUs + 400_000L, pcm(1)) {
+                checking.countDown()
+                Thread.sleep(100)
+                true
+            }
+        }
+        decodeThread.start()
+        assertTrue(checking.await(5, java.util.concurrent.TimeUnit.SECONDS))
+
+        player.clearBuffer()
+        decodeThread.join(5_000)
+
+        assertEquals("a chunk from before the clear is still queued", 0L, samplesInQueue())
+        assertEquals(0L, queuedSamples())
+    }
+
+    // ========================================================================
     // Stream clear against the audio thread
     // ========================================================================
 
@@ -231,8 +323,9 @@ class SyncAudioPlayerLoopTest {
         now.addAndGet(100_000_000L)
         player.resume()
 
-        // pause() flushed 250 ms of written audio, so what is queued is now
-        // early and the one-shot resync pads it with silence. Let that pass.
+        // The reset after a resume flushes 250 ms of written audio, so what
+        // is queued is now early and the one-shot resync pads it with
+        // silence. Let that pass.
         repeat(100) { tick() }
 
         // Target depth 250 ms, tolerance 50 ms, and the chunk that crosses it.
