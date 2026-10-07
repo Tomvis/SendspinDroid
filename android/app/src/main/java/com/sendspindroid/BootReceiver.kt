@@ -15,8 +15,9 @@ import com.sendspindroid.playback.NotificationHelper
 import com.sendspindroid.playback.PlaybackService
 
 /**
- * Receives BOOT_COMPLETED broadcast and resumes auto-connect if the user
- * opted in.
+ * Receives BOOT_COMPLETED and MY_PACKAGE_REPLACED and resumes auto-connect if
+ * the user opted in. An in-place update (ObtainX on the Shield) kills the
+ * process, and with it the MA player, until something restarts the service.
  *
  * On Android 14 and below, the service is started directly via
  * `startForegroundService`. On Android 15+ that path is disallowed for
@@ -32,10 +33,13 @@ class BootReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "BootReceiver"
+
+        internal fun resumesOn(action: String?) =
+            action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        if (!resumesOn(intent.action)) return
 
         UserSettings.initialize(context)
         UnifiedServerRepository.initialize(context)

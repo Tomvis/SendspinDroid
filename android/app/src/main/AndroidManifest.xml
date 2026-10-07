@@ -218,6 +218,7 @@
             - Only active when user enables "Auto-start on boot" in settings
             - Connects to the configured default server without launching UI
             - Handles BOOT_COMPLETED (standard) and QUICKBOOT_POWERON (HTC/some OEMs)
+            - Also MY_PACKAGE_REPLACED: an in-place update kills the running service
         -->
         <receiver
             android:name=".BootReceiver"
@@ -225,6 +226,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 
