@@ -78,7 +78,7 @@ class SyncAudioPlayerIntegrationTest {
     }
 
     @Test
-    fun `setSyncMuted true zero-fills writes through playChunkWithCorrection`() {
+    fun `sync mute silences by gain and keeps writing through playChunkWithCorrection`() {
         val timeFilter = mockk<SendspinTimeFilter>(relaxed = true)
         every { timeFilter.isReady } returns true
         every { timeFilter.serverToClient(any()) } answers { firstArg() }
@@ -101,19 +101,20 @@ class SyncAudioPlayerIntegrationTest {
         val pcm = ByteArray(frames * 4) { 0x42 }
         val chunk = makeAudioChunkReflective(pcm, frames)
 
-        player.setSyncMuted(true)
+        player.setMuted(SyncAudioPlayer.MuteReason.SYNC, true)
         invokePlayChunkWithCorrection(player, chunk)
 
+        assertEquals("sync mute is immediate output gain", 0f, fakeSink.volume)
         val record = fakeSink.writes.firstOrNull()
-            ?: error("expected one write to fake sink")
+            ?: error("a muted player must keep writing so it stays in sync")
         assertTrue(
-            "muted writes must be zero-filled",
-            record.snapshotFirstBytes.all { it == 0.toByte() },
+            "muted writes keep their PCM; the gain silences them",
+            record.snapshotFirstBytes.all { it == 0x42.toByte() },
         )
     }
 
     @Test
-    fun `setSyncMuted false leaves PCM bytes untouched in playChunkWithCorrection`() {
+    fun `unmuted player leaves PCM bytes untouched in playChunkWithCorrection`() {
         val timeFilter = mockk<SendspinTimeFilter>(relaxed = true)
         every { timeFilter.isReady } returns true
         every { timeFilter.serverToClient(any()) } answers { firstArg() }

@@ -105,7 +105,7 @@ import kotlin.math.roundToInt
  * Extends MediaLibraryService to provide:
  * - Background audio playback (screen off, app minimized)
  * - System media integration (notifications, lock screen controls)
- * - Audio focus handling (pause for phone calls, etc.)
+ * - Audio focus handling (pause the group for calls, mute for other audio)
  * - Bluetooth/headset button support
  * - Android Auto browse tree support
  *
@@ -382,14 +382,40 @@ class PlaybackService : MediaLibraryService() {
     private var audioFocusRequest: AudioFocusRequest? = null
     private var hasAudioFocus: Boolean = false
 
+    // What another app taking the output has done to us (main thread only).
+    // See AudioInterruptionPolicy.
+    private var interruptionMuted = false   // output muted for a focus loss or output disconnect
+    private var pausedForCall = false       // we sent 'pause' for a call and nobody has changed playback since
+    private var transientFocusLoss: AudioInterruption? = null  // transient loss still in force
+
+    // A call can take focus slightly before the audio mode says it is a call
+    // (and a VoIP app may only switch mode when answered), so while a transient
+    // loss is being handled as plain audio the mode is polled, and the loss is
+    // decided again once the mode says it is a call.
+    private val callModeRecheckRunnable = object : Runnable {
+        override fun run() {
+            val loss = transientFocusLoss ?: return
+            if (AudioInterruptionPolicy.isCallMode(audioManager?.mode ?: AudioManager.MODE_NORMAL)) {
+                handleAudioInterruption(loss)
+            } else {
+                mainHandler.postDelayed(this, CALL_MODE_RECHECK_MS)
+            }
+        }
+    }
+
     // Receiver for ACTION_AUDIO_BECOMING_NOISY: fired when the audio output is
     // rerouting to the built-in speaker because an external output disconnected
     // (wired headphones unplugged, Bluetooth/Android Auto disconnected). We pause
-    // local playback so we don't abruptly blast the phone speaker.
+    // the group so we don't abruptly blast the phone speaker.
     private var becomingNoisyReceiver: BroadcastReceiver? = null
 
     companion object {
         private const val TAG = "PlaybackService"
+
+        // Every focus change, the audio mode at that moment and the action
+        // taken are logged at INFO under this tag: adb logcat -s AudioFocus
+        private const val FOCUS_TAG = "AudioFocus"
+        private const val CALL_MODE_RECHECK_MS = 1000L
 
         // Wake lock refresh strategy:
         // - Use a 30-minute timeout so if release fails (crash, etc.), max battery drain is 30 min
@@ -992,7 +1018,7 @@ class PlaybackService : MediaLibraryService() {
         // Initialize AudioManager for device volume control
         initializeVolumeControl()
 
-        // Pause local playback when the audio output device disconnects.
+        // Stop the sound when the audio output device disconnects.
         registerBecomingNoisyReceiver()
     }
 
@@ -1242,7 +1268,8 @@ class PlaybackService : MediaLibraryService() {
             // Set callback to update SendSpinPlayer when playback state changes
             setStateCallback(SyncAudioPlayerStateCallback())
             // From settings, not _playbackState: that is reset on disconnect.
-            setMuted(com.sendspindroid.UserSettings.getPlayerMuted())
+            setMuted(SyncAudioPlayer.MuteReason.PLAYER, com.sendspindroid.UserSettings.getPlayerMuted())
+            setMuted(SyncAudioPlayer.MuteReason.INTERRUPTION, interruptionMuted)
             initialize()
             start()
         }
@@ -1356,6 +1383,7 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.d(TAG, "State changed: $state")
                 val newState = PlaybackStateType.fromString(state)
+                noteServerPlaybackState(newState)
 
                 // Handle playback state transitions per SendSpin spec
                 if (newState == PlaybackStateType.STOPPED) {
@@ -1403,6 +1431,7 @@ class PlaybackService : MediaLibraryService() {
                 val currentState = _playbackState.value
                 val isGroupChange = groupId.isNotEmpty() && groupId != currentState.groupId
                 val newPlaybackState = PlaybackStateType.fromString(playbackState)
+                if (playbackState.isNotEmpty()) noteServerPlaybackState(newPlaybackState)
 
                 // Handle playback state transitions per SendSpin spec
                 if (playbackState.isNotEmpty()) {
@@ -1735,7 +1764,7 @@ class PlaybackService : MediaLibraryService() {
                 // Mute silences the output and leaves the volume alone: the
                 // two are independent, and a later volume change must not
                 // make a muted player audible.
-                syncAudioPlayer?.setMuted(muted)
+                syncAudioPlayer?.setMuted(SyncAudioPlayer.MuteReason.PLAYER, muted)
                 com.sendspindroid.UserSettings.setPlayerMuted(muted)
                 // Update playback state with new mute status
                 _playbackState.value = _playbackState.value.copy(muted = muted)
@@ -1755,7 +1784,7 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onSyncMuteChanged(muted: Boolean) {
             mainHandler.post {
-                syncAudioPlayer?.setSyncMuted(muted)
+                syncAudioPlayer?.setMuted(SyncAudioPlayer.MuteReason.SYNC, muted)
             }
         }
 
@@ -2501,7 +2530,10 @@ class PlaybackService : MediaLibraryService() {
 
             audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(audioAttributes)
-                .setWillPauseWhenDucked(false)
+                // Deliver "can duck" losses to the listener instead of letting
+                // the system duck us: ducking one synced player sounds wrong
+                // next to the others, so it is muted like any other transient loss.
+                .setWillPauseWhenDucked(true)
                 .setOnAudioFocusChangeListener { focusChange ->
                     mainHandler.post {
                         handleAudioFocusChange(focusChange)
@@ -2512,10 +2544,12 @@ class PlaybackService : MediaLibraryService() {
 
         val result = am.requestAudioFocus(audioFocusRequest!!)
         hasAudioFocus = (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
-        Log.d(TAG, "Audio focus requested: ${if (hasAudioFocus) "granted" else "denied"}")
+        Log.i(FOCUS_TAG, "focus requested: ${if (hasAudioFocus) "granted" else "denied"}")
         if (hasAudioFocus) {
-            // We own the output again: clear any 'external_source' report.
+            // We own the output again: clear any 'external_source' report
+            // and any mute left by an interruption.
             sendSpinClient?.setExternalSource(false)
+            setInterruptionMuted(false)
         }
     }
 
@@ -2524,53 +2558,117 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun abandonAudioFocus() {
         if (!hasAudioFocus) return
+        // Abandoning now would lose the focus-gain callback that ends the
+        // interruption (un-mute, resume after a call). The gain abandons instead.
+        if (transientFocusLoss != null) return
 
         audioFocusRequest?.let { request ->
             audioManager?.abandonAudioFocusRequest(request)
-            Log.d(TAG, "Audio focus abandoned")
+            Log.i(FOCUS_TAG, "focus abandoned")
         }
         hasAudioFocus = false
     }
 
     /**
      * Handles audio focus changes from the system.
-     *
-     * On Android Auto, focus loss typically means another app (navigation, phone call)
-     * needs audio. We pause/duck accordingly and resume when focus returns.
      */
     private fun handleAudioFocusChange(focusChange: Int) {
-        when (focusChange) {
-            AudioManager.AUDIOFOCUS_GAIN -> {
-                Log.d(TAG, "Audio focus gained")
-                // Focus returned - resume if we were playing before losing focus
-                syncAudioPlayer?.resume()
+        val event = AudioInterruption.fromFocusChange(focusChange)
+        if (event == null) {
+            Log.i(FOCUS_TAG, "focus change $focusChange ignored")
+            return
+        }
+        handleAudioInterruption(event)
+    }
+
+    /**
+     * Another app wants the output, or has given it back: ask
+     * [AudioInterruptionPolicy] what to do, log it and do it.
+     *
+     * A local interruption never pauses [syncAudioPlayer]. It is either a pause
+     * on the server (which then stops sending, and the server-state handling
+     * stops the player) or a mute, under which audio keeps draining in sync.
+     */
+    private fun handleAudioInterruption(event: AudioInterruption) {
+        val audioMode = audioManager?.mode ?: AudioManager.MODE_NORMAL
+        val serverState = _playbackState.value.playbackState
+        val canSendPause = sendSpinClient?.let { it.isConnected && it.canSendCommand("pause") } == true
+        val action = AudioInterruptionPolicy.decide(event, audioMode, serverState, canSendPause, pausedForCall)
+        Log.i(
+            FOCUS_TAG,
+            "$event mode=${AudioInterruptionPolicy.modeName(audioMode)} server=$serverState " +
+                "canSendPause=$canSendPause pausedForCall=$pausedForCall -> $action"
+        )
+
+        mainHandler.removeCallbacks(callModeRecheckRunnable)
+        if (event != AudioInterruption.BECOMING_NOISY) {
+            transientFocusLoss = event.takeIf { it.isTransientLoss }
+        }
+
+        when (action) {
+            InterruptionAction.PAUSE_ON_SERVER -> {
+                // Muted first: the pause takes a round trip to stop the audio.
+                setInterruptionMuted(true)
+                // Only a call is resumed afterwards, never an output disconnect.
+                pausedForCall = event.isTransientLoss
+                sendSpinClient?.pause()
             }
-            AudioManager.AUDIOFOCUS_LOSS -> {
-                Log.d(TAG, "Audio focus lost permanently")
-                // Another app took focus permanently - pause playback and
-                // report 'external_source' per spec. The server parks this
-                // client in a solo group and ends its streams; pressing play
-                // in our UI re-requests focus, which clears the state.
+            InterruptionAction.RESUME_ON_SERVER -> {
+                pausedForCall = false
+                setInterruptionMuted(false)
+                sendSpinClient?.play()
+            }
+            InterruptionAction.MUTE_LOCALLY -> setInterruptionMuted(true)
+            InterruptionAction.UNMUTE_LOCALLY -> setInterruptionMuted(false)
+            InterruptionAction.BECOME_UNAVAILABLE -> {
+                // Another app took focus permanently: report 'external_source'
+                // per spec. The server parks this client in a solo group and
+                // ends its streams; playing again re-requests focus, which
+                // clears the state and the mute.
                 hasAudioFocus = false
-                syncAudioPlayer?.pause()
+                pausedForCall = false
+                setInterruptionMuted(true)
                 sendSpinClient?.setExternalSource(true)
             }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                Log.d(TAG, "Audio focus lost transiently")
-                // Temporary loss (phone call, navigation announcement) - pause
-                syncAudioPlayer?.pause()
-            }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                Log.d(TAG, "Audio focus lost transiently (can duck)")
-                // Could duck volume here, but for synced playback just let it play
-                // since ducking would desync volume with other clients
-            }
+            InterruptionAction.NONE -> {}
+        }
+
+        if (transientFocusLoss != null && !AudioInterruptionPolicy.isCallMode(audioMode)) {
+            mainHandler.postDelayed(callModeRecheckRunnable, CALL_MODE_RECHECK_MS)
+        }
+        // Focus was kept through the interruption (see abandonAudioFocus);
+        // give it up now if nothing is playing.
+        if (event == AudioInterruption.FOCUS_GAIN &&
+            action != InterruptionAction.RESUME_ON_SERVER &&
+            serverState != PlaybackStateType.PLAYING
+        ) {
+            abandonAudioFocus()
+        }
+    }
+
+    private fun setInterruptionMuted(muted: Boolean) {
+        if (interruptionMuted == muted) return
+        interruptionMuted = muted
+        Log.i(FOCUS_TAG, if (muted) "output muted" else "output un-muted")
+        syncAudioPlayer?.setMuted(SyncAudioPlayer.MuteReason.INTERRUPTION, muted)
+    }
+
+    /**
+     * Called with every playback state the server reports, before it is stored:
+     * forget our pause-for-a-call once someone else has changed playback, so the
+     * end of the call does not resume over their choice.
+     */
+    private fun noteServerPlaybackState(newState: PlaybackStateType) {
+        val previous = _playbackState.value.playbackState
+        if (pausedForCall && AudioInterruptionPolicy.callPauseSuperseded(previous, newState)) {
+            pausedForCall = false
+            Log.i(FOCUS_TAG, "call pause superseded (server $previous -> $newState): will not resume")
         }
     }
 
     /**
-     * Register a receiver for ACTION_AUDIO_BECOMING_NOISY so we pause when the
-     * audio output device disconnects. Idempotent.
+     * Register a receiver for ACTION_AUDIO_BECOMING_NOISY so the sound stops when
+     * the audio output device disconnects. Idempotent.
      */
     private fun registerBecomingNoisyReceiver() {
         if (becomingNoisyReceiver != null) return
@@ -2595,10 +2693,10 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Handles ACTION_AUDIO_BECOMING_NOISY: the audio output is rerouting to the
      * built-in speaker because an external output disconnected (wired headphones
-     * unplugged, Bluetooth/Android Auto disconnected). Pause local playback so we
-     * don't abruptly blast the phone speaker, matching standard media-app
-     * behavior. Pausing is local-only (we do not pause the MA group) so other
-     * grouped speakers keep playing.
+     * unplugged, Bluetooth/Android Auto disconnected). Follow the Android
+     * convention and stop the sound: pause the group and do not resume. If the
+     * pause cannot be sent the output is muted instead, until playback is next
+     * started.
      *
      * ACTION_AUDIO_BECOMING_NOISY is fired once by the system per transition, so
      * it is inherently single-fire -- unlike AudioDeviceCallback.onAudioDevicesRemoved,
@@ -2606,8 +2704,7 @@ class PlaybackService : MediaLibraryService() {
      * would need debouncing.
      */
     private fun handleBecomingNoisy() {
-        Log.i(TAG, "Audio becoming noisy (output disconnected) - pausing local playback")
-        syncAudioPlayer?.pause()
+        handleAudioInterruption(AudioInterruption.BECOMING_NOISY)
     }
 
     /**
@@ -3490,6 +3587,9 @@ class PlaybackService : MediaLibraryService() {
         LocalBroadcastManager.getInstance(this).unregisterReceiver(highPowerModeReceiver)
         LocalBroadcastManager.getInstance(this).unregisterReceiver(preferredCodecReceiver)
         releaseHighPowerLocks()
+
+        // Let the final releasePlaybackLocks() abandon focus even mid-interruption
+        transientFocusLoss = null
 
         // Unregister the becoming-noisy receiver (system broadcast)
         becomingNoisyReceiver?.let {
