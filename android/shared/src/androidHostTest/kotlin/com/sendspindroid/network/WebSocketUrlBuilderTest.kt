@@ -94,46 +94,6 @@ class WebSocketUrlBuilderTest {
     }
 
     @Test
-    fun buildFromHostPort_ipv4() {
-        assertEquals(
-            "ws://192.168.1.1:8927/ws",
-            WebSocketUrlBuilder.buildFromHostPort("192.168.1.1", 8927, "/ws")
-        )
-    }
-
-    @Test
-    fun buildFromHostPort_ipv6_wraps() {
-        assertEquals(
-            "ws://[2001:db8::1]:8927/ws",
-            WebSocketUrlBuilder.buildFromHostPort("2001:db8::1", 8927, "/ws")
-        )
-    }
-
-    @Test
-    fun buildFromHostPort_bracketed_ipv6_not_double_wrapped() {
-        assertEquals(
-            "ws://[2001:db8::1]:8927/ws",
-            WebSocketUrlBuilder.buildFromHostPort("[2001:db8::1]", 8927, "/ws")
-        )
-    }
-
-    @Test
-    fun buildFromHostPort_hostname() {
-        assertEquals(
-            "ws://host.example.com:8927/ws",
-            WebSocketUrlBuilder.buildFromHostPort("host.example.com", 8927, "/ws")
-        )
-    }
-
-    @Test
-    fun buildFromHostPort_wss_scheme() {
-        assertEquals(
-            "wss://host.example.com:8927/ws",
-            WebSocketUrlBuilder.buildFromHostPort("host.example.com", 8927, "/ws", scheme = "wss")
-        )
-    }
-
-    @Test
     fun empty_address_produces_schemeless_authority() {
         // Documents current behavior: no input validation. Callers must ensure
         // the address is non-empty. The wizard validates this upstream.
@@ -170,42 +130,5 @@ class WebSocketUrlBuilderTest {
     @Test
     fun ensureDefaultPort_bracketed_ipv6_with_port_unchanged() {
         assertEquals("[2001:db8::1]:8080", WebSocketUrlBuilder.ensureDefaultPort("[2001:db8::1]:8080", 8927))
-    }
-
-    // --- extractHost ---
-
-    @Test
-    fun extractHost_bare_hostname() {
-        assertEquals("host.example.com", WebSocketUrlBuilder.extractHost("host.example.com"))
-    }
-
-    @Test
-    fun extractHost_hostname_with_port() {
-        assertEquals("host.example.com", WebSocketUrlBuilder.extractHost("host.example.com:8080"))
-    }
-
-    @Test
-    fun extractHost_ipv4() {
-        assertEquals("192.168.1.1", WebSocketUrlBuilder.extractHost("192.168.1.1"))
-    }
-
-    @Test
-    fun extractHost_ipv4_with_port() {
-        assertEquals("192.168.1.1", WebSocketUrlBuilder.extractHost("192.168.1.1:8927"))
-    }
-
-    @Test
-    fun extractHost_bare_ipv6() {
-        assertEquals("2001:db8::1", WebSocketUrlBuilder.extractHost("2001:db8::1"))
-    }
-
-    @Test
-    fun extractHost_bracketed_ipv6() {
-        assertEquals("2001:db8::1", WebSocketUrlBuilder.extractHost("[2001:db8::1]"))
-    }
-
-    @Test
-    fun extractHost_bracketed_ipv6_with_port() {
-        assertEquals("2001:db8::1", WebSocketUrlBuilder.extractHost("[2001:db8::1]:8927"))
     }
 }

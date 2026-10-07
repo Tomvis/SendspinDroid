@@ -8,13 +8,10 @@ import com.google.android.material.color.DynamicColors
 import com.sendspindroid.diagnostics.Telemetry
 import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.CrashHandler
-import com.sendspindroid.musicassistant.MaSettings
 
 class SendSpinApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
-        // Initialize MaSettings early so it is available before any Activity or Service.
-        MaSettings.initialize(this)
         // Initialize logging and install crash capture as early as possible, so
         // startup-path issues are captured and an unexpected exit can be reported
         // on the next launch. Runs the one-time log-level migration too.
