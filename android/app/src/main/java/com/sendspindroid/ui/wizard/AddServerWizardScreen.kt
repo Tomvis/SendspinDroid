@@ -45,6 +45,11 @@ import com.sendspindroid.ui.wizard.steps.FinishStep
 import com.sendspindroid.ui.wizard.steps.MaLoginStep
 import com.sendspindroid.ui.wizard.steps.NetworkQuestionStep
 import com.sendspindroid.ui.wizard.steps.TestingStep
+import android.content.res.Configuration
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.ui.platform.LocalConfiguration
 
 /**
  * Main Add Server Wizard screen that hosts all wizard steps.
@@ -53,7 +58,7 @@ import com.sendspindroid.ui.wizard.steps.TestingStep
  * The wizard branches based on user intent (SendSpin vs Music Assistant)
  * and network situation (same network vs remote-only).
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AddServerWizardScreen(
     state: WizardState,
@@ -65,12 +70,18 @@ fun AddServerWizardScreen(
     onStepAction: (WizardStepAction) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // In landscape the keyboard leaves a strip of the screen. The title bar
+    // would take half of it, so it steps aside while the keyboard is up; the
+    // step shows its own title and the system Back still works.
+    val typingInLandscape = WindowInsets.isImeVisible &&
+        LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
     Scaffold(
         modifier = modifier
             .fillMaxSize()
             .imePadding(),
         topBar = {
-            TopAppBar(
+            if (!typingInLandscape) TopAppBar(
                 title = { Text(getStepTitle(state.currentStep)) },
                 navigationIcon = {
                     IconButton(onClick = onClose) {
@@ -124,7 +135,8 @@ fun AddServerWizardScreen(
                 WizardStepContent(
                     step = step,
                     state = state,
-                    onStepAction = onStepAction
+                    onStepAction = onStepAction,
+                    onNext = { if (state.isNextEnabled) onNext() }
                 )
             }
         }
@@ -138,7 +150,8 @@ fun AddServerWizardScreen(
 private fun WizardStepContent(
     step: WizardStep,
     state: WizardState,
-    onStepAction: (WizardStepAction) -> Unit
+    onStepAction: (WizardStepAction) -> Unit,
+    onNext: () -> Unit
 ) {
     when (step) {
         // Entry point
@@ -153,7 +166,8 @@ private fun WizardStepContent(
             isSearching = state.isSearching,
             onAddressChange = { onStepAction(WizardStepAction.UpdateLocalAddress(it)) },
             onServerSelected = { onStepAction(WizardStepAction.SelectDiscoveredServer(it)) },
-            onStartSearch = { onStepAction(WizardStepAction.StartDiscovery) }
+            onStartSearch = { onStepAction(WizardStepAction.StartDiscovery) },
+            onSubmit = onNext
         )
         WizardStep.SS_TestLocal -> TestingStep(
             testState = state.localTestState,
@@ -181,7 +195,8 @@ private fun WizardStepContent(
             isSearching = state.isSearching,
             onAddressChange = { onStepAction(WizardStepAction.UpdateLocalAddress(it)) },
             onServerSelected = { onStepAction(WizardStepAction.SelectDiscoveredServer(it)) },
-            onStartSearch = { onStepAction(WizardStepAction.StartDiscovery) }
+            onStartSearch = { onStepAction(WizardStepAction.StartDiscovery) },
+            onSubmit = onNext
         )
         WizardStep.MA_TestLocal -> TestingStep(
             testState = state.localTestState,
