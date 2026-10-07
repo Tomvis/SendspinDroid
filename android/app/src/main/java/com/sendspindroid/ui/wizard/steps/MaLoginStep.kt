@@ -31,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
 import com.sendspindroid.ui.theme.SendSpinTheme
 import com.sendspindroid.ui.wizard.ConnectionTestState
+import androidx.compose.ui.text.input.ImeAction
+import com.sendspindroid.ui.wizard.keepVisibleWhenFocused
 
 /**
  * Music Assistant login step - enter credentials for MA integration.
@@ -71,9 +73,12 @@ fun MaLoginStep(
         OutlinedTextField(
             value = username,
             onValueChange = onUsernameChange,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().keepVisibleWhenFocused(),
             label = { Text(stringResource(R.string.ma_username)) },
             singleLine = true,
+            // Next moves down the form; Done on the last field closes the
+            // keyboard, which brings the buttons back into reach.
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
             leadingIcon = {
                 Icon(
                     painter = painterResource(R.drawable.ic_person),
@@ -88,11 +93,14 @@ fun MaLoginStep(
         OutlinedTextField(
             value = password,
             onValueChange = onPasswordChange,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().keepVisibleWhenFocused(),
             label = { Text(stringResource(R.string.ma_password)) },
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Password,
+                imeAction = ImeAction.Next
+            ),
             leadingIcon = {
                 Icon(
                     painter = painterResource(R.drawable.ic_lock),
@@ -114,10 +122,13 @@ fun MaLoginStep(
                 portText = filtered
                 filtered.toIntOrNull()?.let { onPortChange(it) }
             },
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().keepVisibleWhenFocused(),
             label = { Text(stringResource(R.string.ma_port)) },
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Done
+            )
         )
 
         Spacer(modifier = Modifier.height(24.dp))

@@ -64,6 +64,9 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.background
 import android.widget.Toast
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 
 /**
  * Settings screen composable with all app preferences.
@@ -740,7 +743,11 @@ private fun PlayerNameDialog(
                 onValueChange = { name = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text(stringResource(R.string.pref_player_name_title)) },
-                singleLine = true
+                singleLine = true,
+                // Done does what OK does: with the keyboard up in landscape
+                // the dialog's buttons can be out of reach.
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onConfirm(name) })
             )
         },
         confirmButton = {
@@ -774,7 +781,11 @@ private fun SyncOffsetDialog(
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text(stringResource(R.string.pref_sync_offset_title)) },
                 singleLine = true,
-                suffix = { Text("ms") }
+                suffix = { Text("ms") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(
+                    onDone = { offsetText.toIntOrNull()?.let { onConfirm(it) } }
+                )
             )
         },
         confirmButton = {

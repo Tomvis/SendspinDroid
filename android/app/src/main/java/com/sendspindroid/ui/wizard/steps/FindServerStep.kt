@@ -37,6 +37,11 @@ import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
 import com.sendspindroid.ui.theme.SendSpinTheme
 import com.sendspindroid.ui.wizard.DiscoveredServerUi
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import com.sendspindroid.ui.wizard.keepVisibleWhenFocused
 
 /**
  * Find server step - discover servers via mDNS or enter address manually.
@@ -52,6 +57,7 @@ fun FindServerStep(
     onAddressChange: (String) -> Unit,
     onServerSelected: (DiscoveredServerUi) -> Unit,
     onStartSearch: () -> Unit,
+    onSubmit: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
@@ -130,10 +136,17 @@ fun FindServerStep(
             OutlinedTextField(
                 value = localAddress,
                 onValueChange = onAddressChange,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().keepVisibleWhenFocused(),
                 label = { Text(stringResource(R.string.server_address)) },
                 placeholder = { Text(stringResource(R.string.wizard_local_address_hint)) },
-                singleLine = true
+                singleLine = true,
+                // The keyboard's own key does what the Next button does, so
+                // the step can be finished without reaching past the keyboard.
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Uri,
+                    imeAction = ImeAction.Go
+                ),
+                keyboardActions = KeyboardActions(onGo = { onSubmit() })
             )
         }
 
