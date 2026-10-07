@@ -51,8 +51,8 @@ import kotlin.system.exitProcess
 private const val IMPLEMENTATION = "sendspindroid"
 
 private const val SCENARIO_PCM = "client-initiated-pcm"
-private const val SCENARIO_REQUEST_FORMAT_PCM = "client-initiated-request-format-pcm"
-private const val SCENARIO_REQUEST_FORMAT_FLAC = "client-initiated-request-format-flac"
+private const val SCENARIO_STATE_FORMAT_PCM = "client-initiated-state-format-pcm"
+private const val SCENARIO_STATE_FORMAT_FLAC = "client-initiated-state-format-flac"
 
 private class Args(argv: Array<String>) {
     private val map = buildMap {
@@ -168,11 +168,11 @@ fun main(argv: Array<String>) {
             )
             requestedFormat = null
         }
-        scenarioId == SCENARIO_REQUEST_FORMAT_PCM -> {
+        scenarioId == SCENARIO_STATE_FORMAT_PCM -> {
             formats = listOf(pcm(24), pcm(16))
             requestedFormat = pcm(16)
         }
-        scenarioId == SCENARIO_REQUEST_FORMAT_FLAC -> {
+        scenarioId == SCENARIO_STATE_FORMAT_FLAC -> {
             requestedFormat = MessageBuilder.FormatEntry("flac", 8_000, 1, 16)
             formats = listOf(pcm(16), requestedFormat)
         }

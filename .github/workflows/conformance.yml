@@ -91,12 +91,12 @@ jobs:
           python - <<'EOF'
           import json, pathlib, sys
 
-          # Every client-initiated scenario. The request-format ones are met
+          # Every client-initiated player scenario. The state-format ones are met
           # the rc1 way, with `format` in the client/state player object.
           SUPPORTED = {
               "client-initiated-pcm",
-              "client-initiated-request-format-pcm",
-              "client-initiated-request-format-flac",
+              "client-initiated-state-format-pcm",
+              "client-initiated-state-format-flac",
           }
           results_dir = pathlib.Path("harness/conformance/results")
           seen = {}
