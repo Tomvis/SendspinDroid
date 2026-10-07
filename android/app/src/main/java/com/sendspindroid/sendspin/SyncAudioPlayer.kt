@@ -230,7 +230,6 @@ class SyncAudioPlayer(
         // strategy (roles/player/v1.md, "Sample deletion and insertion")
         private const val DEADBAND_THRESHOLD_US = 100L          // 100us - no correction needed
         private const val SNAP_THRESHOLD_US = 1_000L            // 1ms accuracy floor - one-shot resync beyond it
-        private const val HARD_RESYNC_THRESHOLD_US = 200_000L   // 200ms - hard resync (drop/skip chunks)
 
         // Soft correction: one step of CORRECTION_STEP_US of audio (1 frame at
         // 48kHz) at most every CORRECTION_INTERVAL_US. 21us per 20ms is a 0.1%
@@ -263,6 +262,11 @@ class SyncAudioPlayer(
         private const val PENDING_TOL_US = 50_000L           // 50ms pacing tolerance
         private const val START_PAD_MAX_US = 20_000L         // start once the head chunk is due within 20ms
         private const val TIMESTAMP_STABLE_READS = 3         // consecutive valid getTimestamp() reads
+        // How long start gating waits for a usable timestamp before starting
+        // without one. On the T901 tablet the first usable timestamp came 32-106ms
+        // after a flush and 152ms after a new track's first write (62 flushes
+        // and starts); this is about three times the slowest.
+        private const val TIMESTAMP_WAIT_MAX_US = 500_000L
         private const val REANCHOR_COOLDOWN_US = 5_000_000L // 5 second cooldown between reanchors
 
         // Silence keepalive: write silence when pending-to-DAC drops below this threshold
@@ -277,16 +281,12 @@ class SyncAudioPlayer(
         private const val DISCONTINUITY_THRESHOLD_US = 100_000L  // 100ms gap indicates discontinuity (for logging)
 
         // Logging and diagnostics
-        private const val CHUNK_DROP_LOG_INTERVAL = 100  // Log every Nth dropped chunk when time sync not ready
         private const val DAC_PACING_LOG_INTERVAL_US = 10_000_000L  // Log DAC pacing stats every 10 seconds
 
         // Stuck-state watchdog: detects when the state machine wedges in a
         // non-PLAYING state while chunks are arriving (diagnostic only).
         private const val STUCK_STATE_WARNING_US = 5_000_000L         // 5s
         private const val STUCK_STATE_WARNING_INTERVAL_US = 10_000_000L  // 10s between warnings
-
-        // Pre-sync buffering - buffer chunks while waiting for time sync to be ready
-        private const val MAX_PENDING_CHUNKS = 500  // ~10 seconds at 48kHz/20ms chunks
 
         // Coroutine cancellation. Best-effort wait after scope.cancel(); the
         // worst case is bounded by a single AudioTrack.write() duration (one
@@ -363,6 +363,7 @@ class SyncAudioPlayer(
     // DAC timestamp stability tracking for start gating
     private var consecutiveValidTimestamps = 0       // counts consecutive valid getTimestamp() reads
     private var dacTimestampsStable = false           // true once TIMESTAMP_STABLE_READS reached; start gating only
+    private var lastUsableTimestampAtUs = 0L          // last usable read, or the start/flush since which there was none
 
     // DAC-aware alignment wait: rate-limit the per-iteration "waiting for alignment"
     // log so a 2-12s wait emits ~3-13 lines instead of 200-1200. Entry log fires once
@@ -446,19 +447,6 @@ class SyncAudioPlayer(
     private var stuckStateEnteredAtUs: Long = 0L
     private var lastObservedState: PlaybackState = PlaybackState.INITIALIZING
     private var lastStuckWarningAtUs: Long = 0L
-
-    // Pre-sync chunk buffer - holds chunks received before time sync is ready.
-    // These will be processed once time sync completes. Mutations require the
-    // `synchronized(pendingChunks)` monitor; see [hasPendingChunks] for the
-    // lock-free reader hint.
-    private val pendingChunks = mutableListOf<Pair<Long, ByteArray>>()
-
-    // Lock-free fast-path hint for [processPendingChunks]. Writes happen under
-    // `synchronized(pendingChunks)`, reads are lock-free. A stale-true read is
-    // benign (one wasted lock acquisition); a stale-false read is prevented
-    // because every add sets this before releasing the monitor, and @Volatile
-    // gives the subsequent reader the correct visibility.
-    @Volatile private var hasPendingChunks = false
 
     // Gap/overlap handling (from Python reference)
     private var expectedNextTimestampUs: Long? = null  // Expected server timestamp of next chunk
@@ -603,6 +591,7 @@ class SyncAudioPlayer(
 
             isPlaying.set(true)
             isPaused.set(false)
+            lastUsableTimestampAtUs = nowNs() / 1000
             track.play()
 
             // Start the playback loop
@@ -747,12 +736,6 @@ class SyncAudioPlayer(
             audioSink?.stop()
             audioSink?.flush()
 
-            // Clear pending chunks buffer
-            synchronized(pendingChunks) {
-                pendingChunks.clear()
-                hasPendingChunks = false
-            }
-
             // A loop started again resets before anything else
             clearQueueAndRequestReset()
 
@@ -772,11 +755,6 @@ class SyncAudioPlayer(
     fun enterIdle() {
         stateLock.withLock {
             AppLog.Audio.i("[cmd-trace] T4 enterIdle ts=${nowNs() / 1_000_000} thread=${Thread.currentThread().name}")
-
-            synchronized(pendingChunks) {
-                pendingChunks.clear()
-                hasPendingChunks = false
-            }
 
             // NOTE: Do NOT stop AudioTrack or cancel playback loop.
             // The loop will continue in INITIALIZING state, writing silence
@@ -839,6 +817,7 @@ class SyncAudioPlayer(
         // Reset DAC timestamp stability tracking so it re-warms
         consecutiveValidTimestamps = 0
         dacTimestampsStable = false
+        lastUsableTimestampAtUs = nowNs() / 1000
         lastDacPacingLogTimeUs = 0L
 
         // Reset sync error tracking
@@ -975,10 +954,6 @@ class SyncAudioPlayer(
             // Clear all buffers and state
             chunkQueue.clear()
             totalQueuedSamples.set(0)
-            synchronized(pendingChunks) {
-                pendingChunks.clear()
-                hasPendingChunks = false
-            }
             stateCallback = null
 
             AppLog.Audio.i("Released")
@@ -1003,12 +978,6 @@ class SyncAudioPlayer(
             // Reset paused state - we're starting a fresh stream (e.g., after seek)
             // This ensures playback loop will process new chunks even if we were paused
             val wasPaused = isPaused.getAndSet(false)
-
-            // Clear pending chunks buffer
-            synchronized(pendingChunks) {
-                pendingChunks.clear()
-                hasPendingChunks = false
-            }
 
             // Ensure AudioTrack hardware matches software state after clearing pause flag
             if (wasPaused) {
@@ -1053,65 +1022,9 @@ class SyncAudioPlayer(
         if (isReleased.get()) return
         chunksReceived++
 
-        // Buffer chunks until time sync is ready
-        if (!timeFilter.isReady) {
-            synchronized(pendingChunks) {
-                if (pendingChunks.size < MAX_PENDING_CHUNKS) {
-                    pendingChunks.add(Pair(serverTimeMicros, pcmData))
-                    hasPendingChunks = true
-                    if (pendingChunks.size == 1) {
-                        AppLog.Audio.d("Buffering chunks while waiting for time sync...")
-                    }
-                } else {
-                    chunksDropped++  // Only drop if buffer is full
-                    if (chunksDropped % CHUNK_DROP_LOG_INTERVAL == 1L) {
-                        AppLog.Audio.w("Pending buffer full, dropping chunk (dropped: $chunksDropped)")
-                    }
-                }
-            }
-            return
-        }
-
-        // Process any pending chunks first (once time sync is ready)
-        processPendingChunks()
-
-        // Now process the current chunk
+        // Queued whether or not the clock is synchronised yet: the timestamps
+        // are server time, and start gating waits for the time filter.
         processChunk(serverTimeMicros, pcmData)
-    }
-
-    /**
-     * Process pending chunks that were buffered while waiting for time sync.
-     * Called when time sync becomes ready.
-     *
-     * Drains `pendingChunks` under its monitor and then processes the drained
-     * snapshot OUTSIDE the monitor. This is required because [processChunk]
-     * acquires `stateLock`, while `stop()`, `clearBuffer()`, `enterIdle()`,
-     * and `release()` acquire `stateLock` BEFORE `synchronized(pendingChunks)`.
-     * Holding `pendingChunks` across a `stateLock` acquisition would create a
-     * lock-order inversion and a potential deadlock.
-     */
-    private fun processPendingChunks() {
-        // Lock-free fast path: the overwhelming steady-state case (sync ready,
-        // buffer already drained) avoids the monitor entirely.
-        if (!hasPendingChunks) return
-
-        val drained: List<Pair<Long, ByteArray>>
-        synchronized(pendingChunks) {
-            if (pendingChunks.isEmpty()) {
-                hasPendingChunks = false
-                return
-            }
-            AppLog.Audio.i("Time sync ready, processing ${pendingChunks.size} buffered chunks")
-            drained = pendingChunks.toList()
-            pendingChunks.clear()
-            hasPendingChunks = false
-        }
-
-        // processChunk() acquires stateLock - MUST be called outside the
-        // synchronized(pendingChunks) block above.
-        for ((timestamp, data) in drained) {
-            processChunk(timestamp, data)
-        }
     }
 
     /**
@@ -1235,7 +1148,7 @@ class SyncAudioPlayer(
         when (playbackState) {
             PlaybackState.INITIALIZING -> {
                 // TRANSITION: INITIALIZING -> WAITING_FOR_START
-                // Trigger: First audio chunk received while time sync is ready
+                // Trigger: First audio chunk received
                 // Action: Record the first chunk's server timestamp as anchor point,
                 //         compute scheduled client-time start, begin buffer filling
                 firstServerTimestampUs = workingServerTimeMicros
@@ -1282,8 +1195,7 @@ class SyncAudioPlayer(
      * Reset sync baselines for a fresh playback start.
      *
      * Called when transitioning to PLAYING from handleStartGating() to set up
-     * clean timing anchors. Deduplicates the reset code that was previously
-     * repeated in the "late" and "on-time" start gating paths.
+     * clean timing anchors.
      *
      * @param nowMicros Current system time in microseconds (System.nanoTime() / 1000)
      */
@@ -1298,24 +1210,20 @@ class SyncAudioPlayer(
     /**
      * Handle start gating - decide when and where to begin playback.
      *
-     * Two paths:
-     * 1. **DAC-aware** (preferred): If AudioTrack timestamps are stable, use the
-     *    hardware DAC position to align the queue head to the write cursor in
-     *    one shot.
-     * 2. **Kalman fallback**: If timestamps are not yet stable, use the existing
-     *    Kalman-predicted `scheduledStartLoopTimeUs` approach.
+     * Waits for the clock to be synchronised and for a usable DAC position,
+     * then lets [handleStartGatingDacAware] align the queue head to the write
+     * cursor in one shot.
      *
      * @return true if we should continue waiting, false if ready to play
      */
     private fun handleStartGating(): Boolean = stateLock.withLock {
         // A clear landed during this iteration: reset before starting anything
         if (resetRequested) return true
+        // Chunks can arrive before the clock is synchronised; they wait here
+        if (!timeFilter.isReady) return true
 
-        val track = audioSink
-        if (track != null && dacTimestampsStable) {
-            return handleStartGatingDacAware(track)
-        }
-        return handleStartGatingKalman()
+        val track = audioSink ?: return true
+        return handleStartGatingDacAware(track)
     }
 
     /**
@@ -1328,6 +1236,11 @@ class SyncAudioPlayer(
      * audio that is already late. The playback loop keeps the track fed with
      * silence meanwhile, so its timestamps stay live.
      *
+     * While there is no usable timestamp it keeps waiting, however late the
+     * head chunk gets: the late audio is dropped once there is one. Only an
+     * output that has given none for [TIMESTAMP_WAIT_MAX_US] is started
+     * anyway, from [dacTimeWithoutTimestampUs].
+     *
      * @return true if we should continue waiting, false if ready to play
      */
     private fun handleStartGatingDacAware(track: AudioSink): Boolean {
@@ -1335,12 +1248,10 @@ class SyncAudioPlayer(
         val headChunk = chunkQueue.peek() ?: return true  // No chunks yet, keep waiting
 
         // What server time will a frame written now reach the DAC at?
-        val dacTimeUs = dacTimeOfNextWriteUs(track)
-        if (dacTimeUs == null) {
-            // Timestamp read failed despite being "stable" -- fall back to Kalman
-            AppLog.Sync.w("DAC-aware start: no usable DAC timestamp, falling back to Kalman")
-            return handleStartGatingKalman()
-        }
+        val measuredDacTimeUs = if (dacTimestampsStable) dacTimeOfNextWriteUs(track) else null
+        val dacTimeUs = measuredDacTimeUs
+            ?: dacTimeWithoutTimestampUs(track, nowMicros)
+            ?: return true  // No usable timestamp yet, keep waiting
         val writeCursorServerUs = timeFilter.clientToServer(dacTimeUs)
 
         // How far is the queue head from the write cursor?
@@ -1410,6 +1321,11 @@ class SyncAudioPlayer(
 
         resetSyncBaselines(nowMicros)
 
+        if (measuredDacTimeUs == null) {
+            AppLog.Sync.w("No usable DAC timestamp for ${(nowMicros - lastUsableTimestampAtUs) / 1000}ms: " +
+                "starting from the playback head position, unsynchronised until one appears")
+        }
+
         // Diagnostic logging
         val bufferedMs = (totalQueuedSamples.get() * 1000) / sampleRate
         AppLog.Sync.i("DAC-aware start gating transition: " +
@@ -1435,97 +1351,18 @@ class SyncAudioPlayer(
     }
 
     /**
-     * Kalman-based start gating (original behavior, used as fallback).
-     *
-     * Waits for `scheduledStartLoopTimeUs` (computed from Kalman filter) before
-     * transitioning to PLAYING. If we're late, drops frames to catch up.
-     *
-     * @return true if we should continue waiting, false if ready to play
+     * Stand-in for [dacTimeOfNextWriteUs] on an output that yields no usable
+     * AudioTimestamp: null until there has been none for
+     * [TIMESTAMP_WAIT_MAX_US], then an estimate from the playback head
+     * position. That counts the audio already written to the track, so the
+     * start is not late by its depth, but not the latency below the mixer,
+     * and nothing measures or corrects the result until timestamps appear.
      */
-    private fun handleStartGatingKalman(): Boolean {
-        val scheduledStart = scheduledStartLoopTimeUs ?: return false
-        val nowMicros = nowNs() / 1000
-        val deltaUs = scheduledStart - nowMicros
-
-        when {
-            deltaUs > 0 -> {
-                // Not yet time to start - AudioTrack is already playing silence
-                return true  // Keep waiting
-            }
-            deltaUs < -HARD_RESYNC_THRESHOLD_US -> {
-                // We're very late - need to drop frames to catch up
-                val framesToDrop = ((-deltaUs * sampleRate) / 1_000_000).toInt()
-                var droppedFrames = 0
-
-                AppLog.Sync.w("Kalman start gating: late by ${-deltaUs/1000}ms, dropping $framesToDrop frames")
-
-                // Drop chunks until we've caught up
-                while (droppedFrames < framesToDrop) {
-                    val chunk = chunkQueue.peek() ?: break
-                    val chunkFrames = chunk.sampleCount
-
-                    if (droppedFrames + chunkFrames <= framesToDrop) {
-                        chunkQueue.poll()
-                        totalQueuedSamples.addAndGet(-chunk.sampleCount.toLong())
-                        droppedFrames += chunkFrames
-                        chunksDropped++
-                    } else {
-                        break
-                    }
-                }
-
-                // Update timing anchors to match what we're actually playing
-                val firstPlayableChunk = chunkQueue.peek()
-                if (firstPlayableChunk != null) {
-                    firstServerTimestampUs = firstPlayableChunk.serverTimeMicros
-                    scheduledStartLoopTimeUs = timeFilter.serverToClient(firstPlayableChunk.serverTimeMicros)
-                }
-
-                resetSyncBaselines(nowNs() / 1000)
-
-                framesDropped += droppedFrames.toLong()
-
-                // Diagnostic logging
-                val bufferedMs = (totalQueuedSamples.get() * 1000) / sampleRate
-                AppLog.Sync.i("Kalman start gating transition (late): " +
-                    "scheduledStart=${scheduledStartLoopTimeUs}us, now=${nowMicros}us, " +
-                    "delta=${deltaUs/1000}ms, " +
-                    "firstServerTs=${firstServerTimestampUs}us, " +
-                    "kalmanOffset=${timeFilter.offsetMicros/1000}ms, " +
-                    "kalmanMeasurements=${timeFilter.measurementCountValue}, " +
-                    "bufferedChunks=${chunkQueue.size}, bufferedMs=$bufferedMs")
-
-                setPlaybackState(PlaybackState.PLAYING)
-                AppLog.Sync.i("Kalman start gating complete: dropped $droppedFrames frames, now PLAYING")
-                return false
-            }
-            else -> {
-                // Within tolerance - start playing
-                val firstChunk = chunkQueue.peek()
-                if (firstChunk != null && firstServerTimestampUs != firstChunk.serverTimeMicros) {
-                    val oldServerTs = firstServerTimestampUs
-                    firstServerTimestampUs = firstChunk.serverTimeMicros
-                    scheduledStartLoopTimeUs = timeFilter.serverToClient(firstChunk.serverTimeMicros)
-                    AppLog.Sync.d("Realigned timing anchor: serverTs ${oldServerTs}->${firstServerTimestampUs}")
-                }
-
-                resetSyncBaselines(nowNs() / 1000)
-
-                // Diagnostic logging
-                val bufferedMs = (totalQueuedSamples.get() * 1000) / sampleRate
-                AppLog.Sync.i("Kalman start gating transition: " +
-                    "scheduledStart=${scheduledStartLoopTimeUs}us, now=${nowMicros}us, " +
-                    "delta=${deltaUs/1000}ms, " +
-                    "firstServerTs=${firstServerTimestampUs}us, " +
-                    "kalmanOffset=${timeFilter.offsetMicros/1000}ms, " +
-                    "kalmanMeasurements=${timeFilter.measurementCountValue}, " +
-                    "bufferedChunks=${chunkQueue.size}, bufferedMs=$bufferedMs")
-
-                setPlaybackState(PlaybackState.PLAYING)
-                AppLog.Sync.i("Kalman start gating complete: delta=${deltaUs/1000}ms, now PLAYING")
-                return false
-            }
-        }
+    private fun dacTimeWithoutTimestampUs(track: AudioSink, nowMicros: Long): Long? {
+        if (nowMicros - lastUsableTimestampAtUs <= TIMESTAMP_WAIT_MAX_US) return null
+        val headFrames = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL  // unsigned 32-bit counter
+        val pendingFrames = (totalFramesWritten.get() - headFrames).coerceAtLeast(0)
+        return nowMicros + (pendingFrames * 1_000_000L) / sampleRate
     }
 
     /**
@@ -1553,6 +1390,7 @@ class SyncAudioPlayer(
         // Start gating waits for consecutive usable reads (DAC has started,
         // track is running)
         if (dacTimeOfNextWriteUs(track) != null) {
+            lastUsableTimestampAtUs = nowNs() / 1000
             consecutiveValidTimestamps++
             if (consecutiveValidTimestamps >= TIMESTAMP_STABLE_READS && !dacTimestampsStable) {
                 dacTimestampsStable = true
@@ -1569,10 +1407,7 @@ class SyncAudioPlayer(
      * Called when sync error exceeds REANCHOR_THRESHOLD_US.
      * Respects cooldown to avoid thrashing.
      *
-     * Note: This is called from the playback loop, so we use tryLock to avoid
-     * blocking if another thread holds the lock.
-     *
-     * @return true if reanchor was triggered, false if still in cooldown or lock unavailable
+     * @return true if reanchor was triggered, false if still in cooldown
      */
     private fun triggerReanchor(): Boolean {
         val nowMicros = nowNs() / 1000

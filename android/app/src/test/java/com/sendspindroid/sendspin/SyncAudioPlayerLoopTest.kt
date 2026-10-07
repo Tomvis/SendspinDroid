@@ -47,7 +47,11 @@ class SyncAudioPlayerLoopTest {
         syncClock()
     }
 
-    private fun newPlayer(sink: AudioSink, maxQueueSamples: Long = 0): SyncAudioPlayer =
+    private fun newPlayer(
+        sink: AudioSink,
+        maxQueueSamples: Long = 0,
+        timeFilter: SendspinTimeFilter = this.timeFilter,
+    ): SyncAudioPlayer =
         SyncAudioPlayer(
             timeFilter = timeFilter,
             sampleRate = sampleRate,
@@ -60,6 +64,7 @@ class SyncAudioPlayerLoopTest {
             initialize()
             // start() needs a Looper; the test runs the loop itself.
             field<AtomicBoolean>(this, "isPlaying").set(true)
+            setField(this, "lastUsableTimestampAtUs", nowUs)
         }
 
     private val sink = FakeAudioSink()
@@ -75,6 +80,10 @@ class SyncAudioPlayerLoopTest {
     @Suppress("UNCHECKED_CAST")
     private fun <T> field(p: SyncAudioPlayer, name: String): T =
         SyncAudioPlayer::class.java.getDeclaredField(name).apply { isAccessible = true }.get(p) as T
+
+    private fun setField(p: SyncAudioPlayer, name: String, value: Any?) {
+        SyncAudioPlayer::class.java.getDeclaredField(name).apply { isAccessible = true }.set(p, value)
+    }
 
     private fun queuedSamples(p: SyncAudioPlayer = player): Long = field<AtomicLong>(p, "totalQueuedSamples").get()
 
@@ -110,10 +119,18 @@ class SyncAudioPlayerLoopTest {
         for (i in 0 until count) player.queueChunk(firstServerTimeUs + i * chunkUs, pcm(tag))
     }
 
-    // Simulated track: plays 10 ms of what it holds per tick and reports it
-    // through the playback head position and, when asked to, a timestamp.
+    // Simulated track: takes 10 ms of what it holds per tick and reports it
+    // through the playback head position. Its timestamps, when it gives any,
+    // are 20 ms behind that, the output latency below the mixer.
+    private val latencyFrames = 960L
     private var head = 0L
     private var flushesSeen = 0
+
+    // As the last tick's loop iteration began: when a frame written then
+    // would reach the DAC of the simulated track, and how many writes the
+    // sink had seen.
+    private var dacTimeOfNextWriteUs = 0L
+    private var writesBeforeTick = 0
 
     /** Advance the clock 10 ms and run one loop iteration. */
     private fun tick(timestamps: Boolean = true) {
@@ -124,7 +141,13 @@ class SyncAudioPlayerLoopTest {
         }
         head = minOf(framesInTrack(), head + sampleRate / 100)
         sink.scriptedPlaybackHeadPosition = head.toInt()
-        sink.scriptTimestamp(if (timestamps && head > 0) SinkTimestamp(head, now.get()) else null)
+        val dacPosition = head - latencyFrames
+        val timestamp = if (timestamps && dacPosition > 0) SinkTimestamp(dacPosition, now.get()) else null
+        sink.scriptTimestamp(timestamp)
+        // Without a timestamp the latency is unknown to the player, and to this.
+        val position = if (timestamp != null) dacPosition else head
+        dacTimeOfNextWriteUs = nowUs + (framesInTrack() - position) * 1_000_000L / sampleRate
+        writesBeforeTick = sink.writes.size
         step()
     }
 
@@ -220,6 +243,119 @@ class SyncAudioPlayerLoopTest {
         }
         assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
         assertTrue("audio kept playing", pendingFrames() > 0)
+    }
+
+    // ========================================================================
+    // Start gating when timestamps are late, missing, or stop
+    // ========================================================================
+
+    /** Queue [count] contiguous chunks, chunk i tagged i + 1. */
+    private fun queueNumberedStream(firstServerTimeUs: Long, count: Int) {
+        for (i in 0 until count) player.queueChunk(firstServerTimeUs + i * chunkUs, pcm(i + 1))
+    }
+
+    /**
+     * For the tick that started playback: when the first audio frame it wrote
+     * will reach the DAC of the simulated track, minus that frame's server
+     * timestamp, in microseconds. Positive is late.
+     */
+    private fun startErrorUs(firstServerTimeUs: Long): Long {
+        val writes = sink.writes.drop(writesBeforeTick)
+        val firstAudio = writes.indexOfFirst { tagOf(it.snapshotFirstBytes) != 0 }
+        assertTrue("the starting tick wrote audio", firstAudio >= 0)
+        val silenceFrames = writes.take(firstAudio).sumOf { it.size } / bytesPerFrame
+        val audio = writes[firstAudio]
+        val frameServerTimeUs = firstServerTimeUs + (tagOf(audio.snapshotFirstBytes) - 1) * chunkUs +
+            (audio.offset / bytesPerFrame) * 1_000_000L / sampleRate
+        return dacTimeOfNextWriteUs + silenceFrames * 1_000_000L / sampleRate - frameServerTimeUs
+    }
+
+    private val oneFrameUs = 1_000_000L / sampleRate + 1
+
+    @Test
+    fun `start waits for timestamps that arrive late and then aligns to them`() {
+        val firstServerTimeUs = nowUs + 153_000L
+        queueNumberedStream(firstServerTimeUs, count = 200)
+
+        // No timestamp for 400 ms: the head chunk comes due and goes by, and
+        // the track is only fed silence.
+        repeat(40) {
+            tick(timestamps = false)
+            assertEquals(PlaybackState.WAITING_FOR_START, player.getPlaybackState())
+        }
+        assertTrue("silence kept the track fed", framesInTrack() > 0)
+        assertTrue("no audio yet", audioTagsWrittenSince(0).isEmpty())
+
+        tickUntilPlaying(timestamps = true, maxTicks = 10)
+
+        val errorUs = startErrorUs(firstServerTimeUs)
+        assertTrue("start is off by ${errorUs}us", kotlin.math.abs(errorUs) <= oneFrameUs)
+        assertTrue("the audio that was late by then is dropped", player.getStats().chunksDropped > 0)
+    }
+
+    @Test
+    fun `without timestamps the start is bounded and allows for what is in the track`() {
+        // Timestamps for 300 ms, so the keepalive has filled the track to its
+        // usual 200 ms ahead of the DAC, and then never again.
+        repeat(30) { tick(timestamps = true) }
+        val pendingBefore = pendingFrames()
+        assertTrue("$pendingBefore frames pending", pendingBefore >= 150 * sampleRate / 1000L)
+
+        val lastTimestampAtUs = nowUs
+        val firstServerTimeUs = nowUs + 153_000L
+        queueNumberedStream(firstServerTimeUs, count = 200)
+
+        var ticks = 0
+        while (player.getPlaybackState() != PlaybackState.PLAYING && ticks < 200) {
+            tick(timestamps = false)
+            ticks++
+            if (nowUs - lastTimestampAtUs <= 500_000L) {
+                assertEquals("no start inside the wait", PlaybackState.WAITING_FOR_START, player.getPlaybackState())
+            }
+        }
+        assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
+        assertEquals("starts as soon as the wait is over", 510_000L, nowUs - lastTimestampAtUs)
+
+        // The audio starts behind the silence already written, not on top of
+        // it: its first frame reaches the DAC when its timestamp says.
+        val errorUs = startErrorUs(firstServerTimeUs)
+        assertTrue("start is off by ${errorUs}us", kotlin.math.abs(errorUs) <= oneFrameUs)
+    }
+
+    @Test
+    fun `an output that never yields a timestamp still plays`() {
+        val firstServerTimeUs = nowUs + 153_000L
+        queueNumberedStream(firstServerTimeUs, count = 200)
+
+        tickUntilPlaying(timestamps = false, maxTicks = 60)
+
+        val errorUs = startErrorUs(firstServerTimeUs)
+        assertTrue("start is off by ${errorUs}us", kotlin.math.abs(errorUs) <= oneFrameUs)
+        repeat(50) { tick(timestamps = false) }
+        assertTrue("audio keeps being written", player.getStats().chunksPlayed > 50)
+    }
+
+    @Test
+    fun `chunks that arrive before the clock is synchronised wait for it`() {
+        val lateFilter = SendspinTimeFilter()
+        val lateSink = FakeAudioSink()
+        val p = newPlayer(lateSink, timeFilter = lateFilter)
+        for (i in 0 until 200) p.queueChunk(nowUs + 150_000L + i * chunkUs, pcm(1))
+        assertEquals(200L * chunkFrames, queuedSamples(p))
+
+        // Well past the first chunk's time and past the wait for timestamps.
+        repeat(100) {
+            now.addAndGet(tickNs)
+            step(p)
+        }
+        assertEquals(PlaybackState.WAITING_FOR_START, p.getPlaybackState())
+        assertTrue("only silence so far", lateSink.writes.all { tagOf(it.snapshotFirstBytes) == 0 })
+
+        lateFilter.addMeasurement(0L, 1_000L, 1L)
+        lateFilter.addMeasurement(0L, 1_000L, 2L)
+        now.addAndGet(tickNs)
+        step(p)
+        assertEquals(PlaybackState.PLAYING, p.getPlaybackState())
     }
 
     /** FakeAudioSink that also hands each loop iteration the tags it wrote. */
