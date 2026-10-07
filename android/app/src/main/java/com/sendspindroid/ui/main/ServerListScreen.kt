@@ -2,8 +2,12 @@ package com.sendspindroid.ui.main
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -150,10 +154,14 @@ private fun ServerListScreenContent(
                 )
             }
         } else {
-            // Normal server list with saved + discovered sections
+            // Normal server list with saved + discovered sections. The list
+            // draws edge to edge, so its last row has to clear the navigation
+            // bar as well as the FAB.
+            val navigationBarHeight =
+                WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
             LazyColumn(
                 modifier = contentModifier,
-                contentPadding = PaddingValues(bottom = 88.dp) // Space for FAB
+                contentPadding = PaddingValues(bottom = 88.dp + navigationBarHeight) // Space for FAB
             ) {
                 // Saved Servers Section
                 item(key = "header_saved") {
@@ -216,6 +224,7 @@ private fun ServerListScreenContent(
                 onClick = onAddServerClick,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
+                    .navigationBarsPadding()
                     .padding(16.dp),
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer

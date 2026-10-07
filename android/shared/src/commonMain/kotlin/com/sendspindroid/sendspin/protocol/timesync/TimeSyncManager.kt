@@ -32,7 +32,7 @@ import kotlinx.coroutines.launch
 class TimeSyncManager(
     private val timeFilter: SendspinTimeFilter,
     private val sendClientTime: () -> Unit,
-    private val onMeasurementApplied: (rttMicros: Long) -> Unit = {},
+    private val onMeasurementApplied: () -> Unit = {},
     private val tag: String = "TimeSyncManager"
 ) {
     companion object {
@@ -126,13 +126,13 @@ class TimeSyncManager(
         }
 
         val maxError = computeMaxError(measurement.rtt)
-        timeFilter.addMeasurement(measurement.offset, maxError, measurement.clientReceived, measurement.rtt)
+        timeFilter.addMeasurement(measurement.offset, maxError, measurement.clientReceived)
 
         if (timeFilter.isReady) {
             Log.v(tag, "Time sync: offset=${timeFilter.offsetMicros}μs, error=${timeFilter.errorMicros}μs")
         }
 
-        onMeasurementApplied(measurement.rtt)
+        onMeasurementApplied()
         return false
     }
 
@@ -160,7 +160,6 @@ class TimeSyncManager(
     }
 
     private fun processBurstResults() {
-        var bestRttMicros = 0L
         synchronized(pendingBurstMeasurements) {
             burstInProgress = false
 
@@ -177,7 +176,6 @@ class TimeSyncManager(
             }
 
             val best = validMeasurements.minByOrNull { it.rtt }!!
-            bestRttMicros = best.rtt
 
             val maxError = computeMaxError(best.rtt)
 
@@ -189,7 +187,7 @@ class TimeSyncManager(
                     (if (staleCount > 0) " ($staleCount stale rejected)" else "") +
                     ", best RTT=${best.rtt}μs, offset=${best.offset}μs")
 
-            val accepted = timeFilter.addMeasurement(best.offset, maxError, best.clientReceived, best.rtt)
+            val accepted = timeFilter.addMeasurement(best.offset, maxError, best.clientReceived)
 
             if (timeFilter.isReady) {
                 Log.v(tag, "Time sync: offset=${timeFilter.offsetMicros}μs, error=${timeFilter.errorMicros}μs, " +
@@ -199,7 +197,7 @@ class TimeSyncManager(
 
             pendingBurstMeasurements.clear()
         }
-        onMeasurementApplied(bestRttMicros)
+        onMeasurementApplied()
     }
 
     private fun computeMaxError(rtt: Long): Long = (rtt / 2L).coerceAtLeast(1L)

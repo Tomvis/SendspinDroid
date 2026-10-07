@@ -12,13 +12,8 @@ import android.database.ContentObserver
 import android.media.AudioManager
 import android.provider.Settings
 import android.content.pm.PackageManager
-import android.content.res.ColorStateList
 import android.content.res.Configuration
-import android.graphics.Bitmap
-import android.graphics.Color
-import android.graphics.drawable.BitmapDrawable
 import android.os.Build
-import android.os.Build.VERSION_CODES
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -28,49 +23,30 @@ import com.sendspindroid.diagnostics.DiagnosticsExport
 import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.CrashHandler
 import android.app.UiModeManager
-import android.annotation.TargetApi
-import android.graphics.RenderEffect
-import android.graphics.Shader
-import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.LayoutInflater
-import android.view.Menu
-import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.view.accessibility.AccessibilityManager
-import android.view.animation.AnimationUtils
 import android.widget.EditText
 import android.widget.FrameLayout
-import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.constraintlayout.widget.ConstraintLayout
-import androidx.constraintlayout.widget.ConstraintSet
-import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.core.content.ContextCompat
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.core.view.updatePadding
-import androidx.palette.graphics.Palette
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
-import androidx.recyclerview.widget.LinearLayoutManager
-import coil.load
-import coil.transform.RoundedCornersTransformation
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
-import com.sendspindroid.databinding.ActivityMainBinding
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.coordinator.ReconnectStatus
 import com.sendspindroid.model.AppConnectionState
@@ -85,25 +61,22 @@ import com.sendspindroid.ui.server.UnifiedServerConnector
 import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.musicassistant.MusicAssistant
 import androidx.activity.viewModels
-import androidx.fragment.app.Fragment
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import com.sendspindroid.ui.main.MainActivityViewModel
 import com.sendspindroid.ui.main.PlaybackState
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.main.ServerListScreen
-import com.sendspindroid.ui.main.components.ServerItemStatus
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.ComposeView
@@ -124,28 +97,12 @@ import com.sendspindroid.ui.theme.SendSpinTheme
  */
 class MainActivity : AppCompatActivity() {
 
-    // ViewBinding provides type-safe access to views (legacy, being phased out)
-    private lateinit var binding: ActivityMainBinding
-
-    // Compose shell overlay -- primary UI, renders on top of XML layout
-    private var composeOverlay: ComposeView? = null
-
-    // Snackbar anchor -- always points to a view that is attached to the window.
-    // After setupComposeShell() removes the CoordinatorLayout, binding.coordinatorLayout
-    // becomes detached and cannot anchor Snackbars (causes IllegalArgumentException).
-    // This field is set to the rootFrame that replaces it in the view hierarchy.
+    // Snackbar anchor -- the FrameLayout that hosts the Compose shell.
+    // Set by setupComposeShell().
     private var snackbarAnchorView: View? = null
 
-    // Server status tracking for Compose server list
-    private val composeServerStatuses = mutableStateMapOf<String, ServerItemStatus>()
-    private val composeReconnectInfo = mutableStateMapOf<String, Pair<Int, Int>>()
+    // Scanning indicator for the Compose server list
     private val composeIsScanning = mutableStateOf(false)
-
-    // Job references for coroutines that must be cancelled on config change
-    // (to avoid duplicates since Activity handles configChanges manually)
-    private var scanningPollJob: Job? = null
-    private var maConnectionObserverJob: Job? = null
-    private var networkStateObserverJob: Job? = null
 
     // ViewModel for managing UI state (survives configuration changes)
     private val viewModel: MainActivityViewModel by viewModels()
@@ -160,11 +117,10 @@ class MainActivity : AppCompatActivity() {
     // Track the currently connected server ID for editing
     private var currentConnectedServerId: String? = null
 
-    // Track last artwork to prevent duplicate background updates
-    private var lastArtworkSource: String? = null
-
-    // Store the last applied background color for restoring after navigation
-    private var lastBackgroundColor: Int? = null
+    // Last subtitle the removed XML toolbar was given. Nothing displays it;
+    // it is kept only because syncUIWithPlayerState() reads it back as the
+    // server name when it has to infer a connection from the player state.
+    private var toolbarSubtitle: String? = null
 
     // NsdManager-based discovery (Android native - more reliable than Go's hashicorp/mdns)
     private var discoveryManager: NsdDiscoveryManager? = null
@@ -248,58 +204,15 @@ class MainActivity : AppCompatActivity() {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
-    // ============================================================================
-    // Accessibility Support
-    // ============================================================================
-
-    /**
-     * Announces an important message to screen readers.
-     * Only announces if accessibility services are enabled.
-     *
-     * @param message The message to announce
-     */
-    @Suppress("DEPRECATION") // View.announceForAccessibility deprecated in API 36, no direct replacement yet
-    private fun announceForAccessibility(message: String) {
-        val accessibilityManager = getSystemService(ACCESSIBILITY_SERVICE) as? AccessibilityManager
-        if (accessibilityManager?.isEnabled == true) {
-            binding.root.announceForAccessibility(message)
-        }
-    }
-
-    /**
-     * Updates the server list content description with current count.
-     * Uses filtered discovered servers to match what the user sees.
-     */
-    private fun updateServerListAccessibility() {
-        val savedCount = UnifiedServerRepository.savedServers.value.size
-        val discoveredCount = UnifiedServerRepository.filteredDiscoveredServers.value.size
-        val totalCount = savedCount + discoveredCount
-        binding.serverListRecyclerView.contentDescription =
-            getString(R.string.accessibility_server_list, totalCount)
-    }
-
-    /**
-     * Updates volume slider content description with current percentage.
-     */
-    private fun updateVolumeAccessibility(volumePercent: Int) {
-        binding.volumeSlider.contentDescription =
-            getString(R.string.accessibility_volume_percent, volumePercent)
-    }
-
     /**
      * Returns a view suitable for anchoring Snackbars.
      *
-     * After [setupComposeShell] runs, [binding.coordinatorLayout] is removed from
-     * its parent and is no longer attached to the window. [Snackbar.make] walks up
-     * the view's parent chain looking for a CoordinatorLayout or the window decor;
-     * a detached view causes IllegalArgumentException.
-     *
-     * This property returns [snackbarAnchorView] (the FrameLayout that replaced the
-     * CoordinatorLayout), falling back to [binding.coordinatorLayout] during the
-     * brief window before [setupComposeShell] runs (e.g. in [onCreate] / [setupUI]).
+     * This property returns [snackbarAnchorView] (the FrameLayout that hosts the
+     * Compose shell), falling back to the window content view during the brief
+     * window before [setupComposeShell] runs (e.g. in [onCreate] / [setupUI]).
      */
     private val snackbarView: View
-        get() = snackbarAnchorView ?: binding.coordinatorLayout
+        get() = snackbarAnchorView ?: findViewById(android.R.id.content)
 
     /**
      * Snackbar error types for different error scenarios.
@@ -333,9 +246,6 @@ class MainActivity : AppCompatActivity() {
         errorType: ErrorType = ErrorType.GENERAL,
         retryAction: (() -> Unit)? = null
     ) {
-        // Announce error to screen readers for accessibility
-        announceForAccessibility("Error: $message")
-
         val snackbar = Snackbar.make(
             snackbarView,
             message,
@@ -449,9 +359,6 @@ class MainActivity : AppCompatActivity() {
                 )
                 show()
             }
-
-            // Announce for accessibility
-            announceForAccessibility("Reconnecting to server. Playback continuing from buffer.")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to show reconnecting indicator", e)
         }
@@ -468,7 +375,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         // Edge-to-edge: must be called before super.onCreate so the
         // activity is set up to draw behind system bars on Android 15+.
-        // Insets are applied programmatically by setupWindowInsets().
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
@@ -482,17 +388,7 @@ class MainActivity : AppCompatActivity() {
         // Initialize UserSettings for accessing user preferences
         UserSettings.initialize(this)
 
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-
-        // Handle window insets for edge-to-edge display
-        setupWindowInsets()
         applyFullScreenMode()
-
-        // Set up the toolbar as the action bar
-        setSupportActionBar(binding.toolbar)
-        supportActionBar?.setDisplayHomeAsUpEnabled(false)
-        supportActionBar?.setDisplayShowHomeEnabled(false)
 
         // Initialize discovery manager BEFORE setupUI, because setupUI calls
         // showSearchingView() which starts auto-discovery
@@ -501,11 +397,8 @@ class MainActivity : AppCompatActivity() {
         initializeMediaController()
         setupUI()
 
-        // Add Compose shell overlay (renders on top of XML layout)
+        // Install the Compose shell as the content view
         setupComposeShell()
-
-        // Setup back press handling for navigation content
-        setupBackPressHandler()
 
         // Show onboarding dialog for first-time users
         showOnboardingIfNeeded()
@@ -515,85 +408,6 @@ class MainActivity : AppCompatActivity() {
 
         // Request notification permission for Android 13+
         requestNotificationPermission()
-    }
-
-    /**
-     * Handle configuration changes (rotation) manually to prevent Activity recreation.
-     * This avoids the false network change detection that causes disconnects on rotation.
-     */
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        Log.d(TAG, "Configuration changed: orientation=${newConfig.orientation}")
-
-        // Dismiss any lingering Snackbar before tearing down the view hierarchy
-        reconnectingSnackbar?.dismiss()
-        reconnectingSnackbar = null
-
-        // Clear the old snackbar anchor -- it will be set again by setupComposeShell()
-        snackbarAnchorView = null
-
-        // Dispose the old Compose overlay cleanly before re-inflation.
-        // DisposeOnViewTreeLifecycleDestroyed handles this when the view is detached
-        // by setContentView(), but we null the reference to avoid stale usage.
-        composeOverlay = null
-
-        // Re-inflate the layout to get the correct orientation-specific layout
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-
-        // Re-apply window insets handling
-        setupWindowInsets()
-        applyFullScreenMode()
-
-        // Re-setup toolbar
-        setSupportActionBar(binding.toolbar)
-        supportActionBar?.setDisplayHomeAsUpEnabled(false)
-        supportActionBar?.setDisplayShowHomeEnabled(false)
-
-        // Re-setup all UI bindings
-        setupUI()
-
-        // Re-add Compose shell overlay (was destroyed when layout was re-inflated)
-        setupComposeShell()
-
-        // Navigation state is now managed by Compose (AppShell) -- no Fragment restoration needed
-
-        // Restore UI state based on current connection state
-        when (val state = connectionState) {
-            is AppConnectionState.ServerList -> showServerListView()
-            is AppConnectionState.Connecting -> {
-                showConnectionLoading(state.serverName)
-            }
-            is AppConnectionState.Connected -> {
-                showNowPlayingView(state.serverName)
-                enablePlaybackControls(true)
-                // Re-apply any cached metadata/artwork from media controller
-                mediaController?.let { controller ->
-                    val metadata = controller.mediaMetadata
-                    updateMetadata(
-                        metadata.title?.toString() ?: "",
-                        metadata.artist?.toString() ?: "",
-                        metadata.albumTitle?.toString() ?: ""
-                    )
-                    updateAlbumArt(metadata)
-                    // Restore play/pause button state
-                    updatePlayPauseButton(controller.isPlaying)
-                }
-            }
-            is AppConnectionState.Reconnecting -> {
-                showNowPlayingView(state.serverName)
-                enablePlaybackControls(true)
-                showReconnectingIndicator(state.attempt, 0L)
-                // Restore play/pause button state
-                mediaController?.let { controller ->
-                    updatePlayPauseButton(controller.isPlaying)
-                }
-            }
-            is AppConnectionState.Error -> {
-                showServerListView()
-                showErrorSnackbar(state.message)
-            }
-        }
     }
 
     /**
@@ -636,32 +450,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Set up window insets handling for edge-to-edge display.
-     * Applies system bar padding to the main content area so content doesn't
-     * overlap with status bar, navigation bar, or display cutouts.
-     */
-    private fun setupWindowInsets() {
-        val contentArea = binding.contentArea
-
-        ViewCompat.setOnApplyWindowInsetsListener(contentArea) { view, windowInsets ->
-            val insets = windowInsets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-            )
-            // Apply insets as padding, plus some extra spacing for aesthetics
-            view.updatePadding(
-                left = insets.left + 24.dpToPx(),
-                top = insets.top + 16.dpToPx(),
-                right = insets.right + 24.dpToPx(),
-                bottom = insets.bottom + 16.dpToPx()
-            )
-            WindowInsetsCompat.CONSUMED
-        }
-    }
-
-    /** Convert dp to pixels */
-    private fun Int.dpToPx(): Int = (this * resources.displayMetrics.density).toInt()
-
-    /**
      * Apply full screen (immersive) mode based on user setting.
      * Uses WindowInsetsControllerCompat for backward compatibility to API 21.
      */
@@ -693,33 +481,6 @@ class MainActivity : AppCompatActivity() {
         // Setup unified server support (connector, observers)
         setupUnifiedServers()
 
-        // FAB for adding servers
-        binding.addServerFab.setOnClickListener {
-            showAddServerWizard()
-        }
-
-        // Playback controls
-        binding.previousButton.setOnClickListener {
-            onPreviousClicked()
-        }
-
-        binding.playPauseButton.setOnClickListener {
-            onPlayPauseClicked()
-        }
-
-        binding.nextButton.setOnClickListener {
-            onNextClicked()
-        }
-
-        binding.switchGroupButton.setOnClickListener {
-            onSwitchGroupClicked()
-        }
-
-        // Favorite button - Only visible when connected to MA server
-        binding.favoriteButton.setOnClickListener {
-            onFavoriteClicked()
-        }
-
         // Observe MA connection state to show/hide MA-dependent UI elements
         observeMaConnectionState()
 
@@ -731,45 +492,20 @@ class MainActivity : AppCompatActivity() {
         // Initialize slider to current device volume
         syncSliderWithDeviceVolume()
 
-        binding.volumeSlider.addOnChangeListener { slider, value, fromUser ->
-            if (fromUser) {
-                onVolumeChanged(value / 100f)
-                // Sync state to ViewModel for Compose UI
-                viewModel.updateVolume(value / 100f)
-                val volumePercent = value.toInt()
-                // Update accessibility description with current volume
-                updateVolumeAccessibility(volumePercent)
-                // Announce volume changes at 10% increments for screen readers
-                // and provide haptic feedback at these increments
-                if (volumePercent % 10 == 0) {
-                    announceForAccessibility("Volume $volumePercent percent")
-                    slider.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                }
-            }
-        }
-
-        // Initialize volume accessibility
-        updateVolumeAccessibility(binding.volumeSlider.value.toInt())
-
         // Start with server list view and begin discovery in background
         showServerListView()
-
-        // Setup bottom navigation (Step 1 - infrastructure only)
-        setupBottomNavigation()
     }
 
     /**
-     * Sets up the Compose shell overlay that renders on top of the XML layout.
+     * Installs the Compose shell as the activity's content view.
      *
      * The ComposeView hosts AppShell which provides:
      * - Server list (Compose)
      * - Now Playing screen (Compose)
      * - Toolbar (Compose)
      *
-     * The XML layout remains underneath for backward compatibility while
-     * the migration is completed. Business logic methods (volume, discovery,
-     * media controller) continue to work and update the ViewModel, which
-     * the Compose UI observes.
+     * Business logic methods (volume, discovery, media controller) update
+     * the ViewModel, which the Compose UI observes.
      */
     @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
     private fun setupComposeShell() {
@@ -777,14 +513,7 @@ class MainActivity : AppCompatActivity() {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         }
 
-        // Replace the old XML layout entirely with a FrameLayout containing Compose
-        val contentParent = binding.coordinatorLayout.parent as? ViewGroup
-        Log.d(TAG, "Compose shell: replacing content view (parent=${contentParent?.javaClass?.simpleName})")
-
-        // Remove the old CoordinatorLayout from the content view
-        contentParent?.removeView(binding.coordinatorLayout)
-
-        // Create a FrameLayout wrapper for Compose + detail fragments
+        // Create a FrameLayout wrapper for Compose
         val rootFrame = FrameLayout(this).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -801,14 +530,10 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        // Add the new FrameLayout as the content view
-        contentParent?.addView(rootFrame)
+        setContentView(rootFrame)
 
-        // rootFrame is now the attached view in the hierarchy -- use it for Snackbar anchoring
-        // (binding.coordinatorLayout was just removed from its parent and is detached)
+        // rootFrame is the attached view in the hierarchy -- use it for Snackbar anchoring
         snackbarAnchorView = rootFrame
-
-        composeOverlay = overlay
 
         overlay.setContent {
             val windowSizeClass = calculateWindowSizeClass(this)
@@ -848,11 +573,11 @@ class MainActivity : AppCompatActivity() {
                                 discoveredServers = UnifiedServerRepository.filteredDiscoveredServers,
                                 onlineSavedServerIds = UnifiedServerRepository.onlineSavedServerIds,
                                 isScanning = composeIsScanning.value,
-                                serverStatuses = composeServerStatuses,
-                                reconnectInfo = composeReconnectInfo,
+                                serverStatuses = emptyMap(),
+                                reconnectInfo = emptyMap(),
                                 onServerClick = { server -> onUnifiedServerSelected(server) },
                                 onServerLongClick = { server -> showUnifiedServerContextMenu(server) },
-                                onQuickConnectClick = { server -> onUnifiedServerQuickConnect(server) },
+                                onQuickConnectClick = { server -> onUnifiedServerSelected(server) },
                                 onAddServerClick = { showAddServerWizard() }
                             )
                         },
@@ -890,9 +615,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Sync scanning state with discovery manager.
-        // Cancel any previous poll job to prevent duplicates on config change.
-        scanningPollJob?.cancel()
-        scanningPollJob = lifecycleScope.launch {
+        lifecycleScope.launch {
             // Update scanning state when discovery starts/stops.
             // repeatOnLifecycle ensures polling stops when the activity is not visible.
             lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -901,211 +624,6 @@ class MainActivity : AppCompatActivity() {
                     delay(1000)
                 }
             }
-        }
-    }
-
-
-
-    // Track whether navigation content is currently shown (vs full player)
-    // Legacy field - navigation is now Compose-based but some callbacks still reference this
-    private var isNavigationContentVisible = false
-
-    // setupBottomNavigation() removed - navigation is now Compose-based (AppShell)
-    private fun setupBottomNavigation() {
-        // Bottom navigation and mini player are now handled by Compose AppShell
-        // This method is kept as a no-op until all callers are cleaned up
-    }
-
-    /**
-     * Sets up both Compose-based mini player views (top and bottom) with the ViewModel.
-     * Only one is visible at a time based on user setting.
-     */
-    private fun setupMiniPlayerComposeView() {
-        listOf(binding.miniPlayerTop, binding.miniPlayerBottom).forEach { miniPlayer ->
-            miniPlayer.apply {
-                viewModel = this@MainActivity.viewModel
-
-                onCardClick = {
-                    Log.d(TAG, "Mini player tapped - returning to full player")
-                    hideNavigationContent()
-                }
-
-                onPlayPauseClick = {
-                    Log.d(TAG, "Mini player: Play/Pause pressed")
-                    onPlayPauseClicked()
-                }
-
-                onPreviousClick = {
-                    Log.d(TAG, "Mini player: Previous pressed")
-                    onPreviousClicked()
-                }
-
-                onNextClick = {
-                    Log.d(TAG, "Mini player: Next pressed")
-                    onNextClicked()
-                }
-            }
-        }
-    }
-
-    /**
-     * Updates the mini-player position based on user setting.
-     * Simply toggles visibility of top vs bottom mini player instances.
-     */
-    private fun updateMiniPlayerPosition() {
-        if (!isNavigationContentVisible) return  // Only matters when nav content is showing
-
-        val position = UserSettings.miniPlayerPosition
-        binding.miniPlayerTop.visibility =
-            if (position == UserSettings.MiniPlayerPosition.TOP) View.VISIBLE else View.GONE
-        binding.miniPlayerBottom.visibility =
-            if (position == UserSettings.MiniPlayerPosition.BOTTOM) View.VISIBLE else View.GONE
-    }
-
-    /**
-     * Shows the navigation content view with the specified fragment.
-     * Hides the full player (now playing view) and shows the mini player.
-     */
-    private fun showNavigationContent(fragment: Fragment) {
-        if (!isNavigationContentVisible) {
-            isNavigationContentVisible = true
-            Log.d(TAG, "Showing navigation content")
-
-            // Content visibility: show nav fragment, hide others
-            binding.nowPlayingView.visibility = View.GONE
-            binding.serverListView.visibility = View.GONE
-            binding.navFragmentContainer.visibility = View.VISIBLE
-            binding.addServerFab.visibility = View.GONE
-
-            // Show mini player in correct position
-            val position = UserSettings.miniPlayerPosition
-            binding.miniPlayerTop.visibility =
-                if (position == UserSettings.MiniPlayerPosition.TOP) View.VISIBLE else View.GONE
-            binding.miniPlayerBottom.visibility =
-                if (position == UserSettings.MiniPlayerPosition.BOTTOM) View.VISIBLE else View.GONE
-
-            // Clear the big player background (blurred art + tint) when navigating away
-            clearPlayerBackground()
-        }
-
-        // Update toolbar to reflect the current tab
-        updateToolbarForNavigation()
-
-        // Load the fragment
-        supportFragmentManager.beginTransaction()
-            .replace(R.id.navFragmentContainer, fragment)
-            .commitAllowingStateLoss()
-    }
-
-    /**
-     * Hides the navigation content view and returns to the full player.
-     * Called when tapping the mini player or pressing back.
-     */
-    private fun hideNavigationContent() {
-        if (isNavigationContentVisible) {
-            isNavigationContentVisible = false
-            Log.d(TAG, "Hiding navigation content, returning to full player")
-
-            // Hide nav content and both mini players
-            binding.navFragmentContainer.visibility = View.GONE
-            binding.miniPlayerTop.visibility = View.GONE
-            binding.miniPlayerBottom.visibility = View.GONE
-
-            // Clear any fragment back stack (detail screens)
-            for (i in 0 until supportFragmentManager.backStackEntryCount) {
-                supportFragmentManager.popBackStackImmediate()
-            }
-
-            // Restore the appropriate view based on connection state
-            when (connectionState) {
-                is AppConnectionState.ServerList -> {
-                    binding.serverListView.visibility = View.VISIBLE
-                    binding.addServerFab.visibility = View.VISIBLE
-                }
-                is AppConnectionState.Connected,
-                is AppConnectionState.Connecting,
-                is AppConnectionState.Reconnecting -> {
-                    binding.nowPlayingView.visibility = View.VISIBLE
-                    // Restore the big player background (blurred art + tint)
-                    restorePlayerBackground()
-                    // Ensure volume slider matches device volume
-                    syncSliderWithDeviceVolume()
-                    updateToolbarForNowPlaying()
-                }
-                is AppConnectionState.Error -> {
-                    binding.serverListView.visibility = View.VISIBLE
-                    binding.addServerFab.visibility = View.VISIBLE
-                }
-            }
-
-            // Clear bottom nav selection
-            binding.bottomNavigation.menu.let { menu ->
-                for (i in 0 until menu.size()) {
-                    menu.getItem(i).isChecked = false
-                }
-            }
-        }
-    }
-
-    // -- Toolbar title management --
-
-    // updateToolbarForNavigation() removed - toolbar is now Compose-based (TopAppBar in AppShell)
-    private fun updateToolbarForNavigation() {
-        // No-op: toolbar is now managed by Compose AppShell
-    }
-
-    /**
-     * Restores the toolbar for the now playing screen.
-     */
-    private fun updateToolbarForNowPlaying() {
-        supportActionBar?.title = getString(R.string.now_playing)
-        supportActionBar?.subtitle = null
-        supportActionBar?.setDisplayHomeAsUpEnabled(false)
-    }
-
-    /**
-     * Sets up the back press handler to return from navigation content to full player.
-     * Uses the modern OnBackPressedCallback approach (onBackPressed is deprecated).
-     */
-    private fun setupBackPressHandler() {
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                // Legacy path: XML-based navigation content
-                if (isNavigationContentVisible) {
-                    if (supportFragmentManager.backStackEntryCount > 0) {
-                        // Pop detail fragment back to tab root (e.g., Album -> Home)
-                        supportFragmentManager.popBackStack()
-                        updateToolbarForNavigation()
-                    } else {
-                        // At tab root -- return to full player
-                        hideNavigationContent()
-                    }
-                } else {
-                    // Default back behavior (exit app or navigate back)
-                    isEnabled = false
-                    onBackPressedDispatcher.onBackPressed()
-                    isEnabled = true
-                }
-            }
-        })
-    }
-
-    // setupSectionedServerAdapter() removed - server list is now Compose-based (ServerListScreen)
-
-    /**
-     * Updates the empty state visibility for the server list.
-     * Only shows empty state when there are no saved AND no filtered discovered servers.
-     */
-    private fun updateServerListEmptyState() {
-        val hasSaved = UnifiedServerRepository.savedServers.value.isNotEmpty()
-        val hasFilteredDiscovered = UnifiedServerRepository.filteredDiscoveredServers.value.isNotEmpty()
-
-        if (!hasSaved && !hasFilteredDiscovered) {
-            binding.emptyServerListView.visibility = View.VISIBLE
-            binding.serverListRecyclerView.visibility = View.GONE
-        } else {
-            binding.emptyServerListView.visibility = View.GONE
-            binding.serverListRecyclerView.visibility = View.VISIBLE
         }
     }
 
@@ -1134,8 +652,6 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // Re-apply full screen mode (picks up changes made in Settings)
         applyFullScreenMode()
-        // Re-apply mini-player position (picks up changes made in Settings)
-        updateMiniPlayerPosition()
         // Re-evaluate keep screen on (picks up setting changes + current playback state)
         updateKeepScreenOn(mediaController?.isPlaying == true)
         // Re-sync UI state with MediaController
@@ -1177,43 +693,10 @@ class MainActivity : AppCompatActivity() {
      * mDNS discovery runs in the background, updating the discovered section.
      */
     private fun showServerListView() {
-        // Reset navigation state -- we're leaving browsing/player for the server list
-        if (isNavigationContentVisible) {
-            isNavigationContentVisible = false
-        }
-
-        // Set toolbar to app name
-        supportActionBar?.title = getString(R.string.app_name)
-        supportActionBar?.subtitle = null
-        supportActionBar?.setDisplayHomeAsUpEnabled(false)
-
-        // Content visibility
-        if (binding.serverListView.visibility != View.VISIBLE) {
-            binding.serverListView.startAnimation(AnimationUtils.loadAnimation(this, R.anim.fade_in))
-        }
-        binding.serverListView.visibility = View.VISIBLE
-        binding.nowPlayingView.visibility = View.GONE
-        binding.navFragmentContainer.visibility = View.GONE
-
-        // No mini player on server list
-        binding.miniPlayerTop.visibility = View.GONE
-        binding.miniPlayerBottom.visibility = View.GONE
-
-        // Show FAB for adding servers
-        binding.addServerFab.visibility = View.VISIBLE
-
-        // Update empty state
-        updateServerListEmptyState()
-
         // Start discovery automatically (runs in background)
         startAutoDiscovery()
 
-        // Re-apply connected server status if still connected (e.g. coming back via "Switch Server")
-        currentConnectedServerId?.let { serverId ->
-        }
-
-        // Update toolbar subtitle to show scanning status
-        supportActionBar?.subtitle = getString(R.string.scanning_ellipsis)
+        toolbarSubtitle = getString(R.string.scanning_ellipsis)
 
         // Check for default server and auto-connect after a brief delay
         checkDefaultServerAutoConnect()
@@ -1252,8 +735,7 @@ class MainActivity : AppCompatActivity() {
         if (defaultServer != null) {
             Log.d(TAG, "Default server found: ${defaultServer.name}, scheduling auto-connect")
 
-            // Update subtitle to show auto-connect status
-            supportActionBar?.subtitle = getString(R.string.auto_connecting_to_default, defaultServer.name)
+            toolbarSubtitle = getString(R.string.auto_connecting_to_default, defaultServer.name)
 
             // Delay to allow UI to render and user to see the server list
             lifecycleScope.launch {
@@ -1342,26 +824,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Shows the now playing view (album art, playback controls).
-     * Called when connected to a server.
+     * Called when connected to a server (the Compose shell shows now playing).
      */
-    private fun showNowPlayingView(serverName: String) {
-        updateToolbarForNowPlaying()
-
-        // Content visibility
-        binding.serverListView.visibility = View.GONE
-        binding.nowPlayingView.visibility = View.VISIBLE
-        binding.navFragmentContainer.visibility = View.GONE
-
-        // No mini player on full player view
-        binding.miniPlayerTop.visibility = View.GONE
-        binding.miniPlayerBottom.visibility = View.GONE
-
-        // Hide FAB when in now playing view
-        binding.addServerFab.visibility = View.GONE
-
-        binding.nowPlayingContent.visibility = View.VISIBLE
-        binding.connectionProgressContainer.visibility = View.GONE
+    private fun showNowPlayingView() {
+        toolbarSubtitle = null
 
         // Stop discovery and pinging while connected (saves battery)
         discoveryManager?.stopDiscovery()
@@ -1369,10 +835,6 @@ class MainActivity : AppCompatActivity() {
 
         // Sync volume slider with current device volume
         syncSliderWithDeviceVolume()
-
-        // Sync play/pause button with current state
-        val isPlaying = mediaController?.isPlaying == true
-        updatePlayPauseButton(isPlaying)
     }
 
     /**
@@ -1393,7 +855,6 @@ class MainActivity : AppCompatActivity() {
                         runOnUiThread {
                             Log.d(TAG, "Server discovered: $name at $address path=$path friendlyName=$friendlyName")
                             UnifiedServerRepository.addDiscoveredServer(friendlyName, address, path)
-                            updateServerListEmptyState()
 
                             // Check if this discovery should trigger auto-connect to default server
                             checkAutoConnectOnDiscovery(address)
@@ -1408,16 +869,14 @@ class MainActivity : AppCompatActivity() {
                             if (address != null) {
                                 UnifiedServerRepository.removeDiscoveredServer(address)
                             }
-                            updateServerListEmptyState()
                         }
                     }
 
                     override fun onDiscoveryStarted() {
                         runOnUiThread {
                             Log.d(TAG, "Discovery started")
-                            // Update toolbar subtitle only if on server list
                             if (connectionState == AppConnectionState.ServerList) {
-                                supportActionBar?.subtitle = getString(R.string.scanning_ellipsis)
+                                toolbarSubtitle = getString(R.string.scanning_ellipsis)
                             }
                         }
                     }
@@ -1425,9 +884,8 @@ class MainActivity : AppCompatActivity() {
                     override fun onDiscoveryStopped() {
                         runOnUiThread {
                             Log.d(TAG, "Discovery stopped")
-                            // Clear toolbar subtitle only if on server list
                             if (connectionState == AppConnectionState.ServerList) {
-                                supportActionBar?.subtitle = null
+                                toolbarSubtitle = null
                             }
                         }
                     }
@@ -1435,7 +893,7 @@ class MainActivity : AppCompatActivity() {
                     override fun onDiscoveryError(error: String) {
                         runOnUiThread {
                             Log.e(TAG, "Discovery error: $error")
-                            supportActionBar?.subtitle = null
+                            toolbarSubtitle = null
                             // Show error snackbar - server list is still usable with saved servers
                             showErrorSnackbar(
                                 message = getString(R.string.error_discovery),
@@ -1573,9 +1031,6 @@ class MainActivity : AppCompatActivity() {
     private inner class MediaControllerListener : MediaController.Listener {
         override fun onDisconnected(controller: MediaController) {
             Log.d(TAG, "MediaController disconnected from service")
-            runOnUiThread {
-                enablePlaybackControls(false)
-            }
         }
 
         /**
@@ -1626,11 +1081,10 @@ class MainActivity : AppCompatActivity() {
 
         if (title.isNotEmpty() || artist.isNotEmpty() || album.isNotEmpty()) {
             Log.d(TAG, "Metadata changed: $title / $artist (artwork: $artworkUrl)")
-            updateMetadata(title, artist, album)
+            viewModel.updateMetadata(title, artist, album)
 
-            // Load artwork from URL if available
             if (artworkUrl.isNotEmpty()) {
-                loadArtworkFromUrl(artworkUrl)
+                viewModel.updateArtwork(ArtworkSource.Url(artworkUrl))
             }
         }
 
@@ -1653,17 +1107,15 @@ class MainActivity : AppCompatActivity() {
         val volume = extras.getInt(PlaybackService.EXTRA_VOLUME, -1)
         if (volume in 0..100) {
             Log.d(TAG, "Server volume update received: $volume%")
-            binding.volumeSlider.value = volume.toFloat()
             // Sync state to ViewModel for Compose UI
             viewModel.updateVolume(volume / 100f)
-            updateVolumeAccessibility(volume)
         }
 
         // Handle group name updates
         val groupName = extras.getString(PlaybackService.EXTRA_GROUP_NAME)
         if (groupName != null) {
             Log.d(TAG, "Group name update received: $groupName")
-            updateGroupName(groupName)
+            viewModel.updateGroupName(groupName)
         }
 
         // Handle reconnect status updates
@@ -1739,8 +1191,6 @@ class MainActivity : AppCompatActivity() {
 
                 // Cancel any auto-reconnect in progress (we're now connected)
                 sendCommandCancelReconnect()
-                reconnectingToServer?.let { server ->
-                }
                 reconnectingToServer = null
 
                 connectionState = AppConnectionState.Connected(serverName, address)
@@ -1749,18 +1199,8 @@ class MainActivity : AppCompatActivity() {
                 viewModel.clearReconnectingState()
                 updateKeepScreenOn(mediaController?.isPlaying == true)
 
-                // Update server list adapters with connected status
-                currentConnectedServerId?.let { serverId ->
-                }
-
-                showNowPlayingView(serverName)
-                enablePlaybackControls(true)
-                hideConnectionLoading()
+                showNowPlayingView()
                 hideReconnectingIndicator()  // Hide any reconnecting indicator
-                invalidateOptionsMenu() // Show "Switch Server" menu option
-
-                // Announce connection for accessibility
-                announceForAccessibility(getString(R.string.accessibility_connected))
             }
             PlaybackService.STATE_RECONNECTING -> {
                 val serverName = extras.getString(PlaybackService.EXTRA_SERVER_NAME, "Unknown Server")
@@ -1805,8 +1245,6 @@ class MainActivity : AppCompatActivity() {
                 viewModel.resetPlaybackState()
                 updateKeepScreenOn(false)
                 showServerListView()
-                enablePlaybackControls(false)
-                invalidateOptionsMenu() // Hide "Switch Server" menu option
 
                 // Handle auto-reconnection based on disconnect reason
                 if (!wasUserInitiated && !wasReconnectExhausted) {
@@ -1833,9 +1271,6 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     // User-initiated or reconnect exhausted - clear statuses
                     reconnectingToServer = null
-
-                    // Announce disconnection for accessibility
-                    announceForAccessibility(getString(R.string.accessibility_disconnected))
                 }
             }
             PlaybackService.STATE_ERROR -> {
@@ -1845,7 +1280,6 @@ class MainActivity : AppCompatActivity() {
                 connectionState = AppConnectionState.Error(errorMessage)
                 // Sync state to ViewModel for Compose UI
                 viewModel.updateConnectionState(connectionState)
-                hideConnectionLoading()
                 showServerListView()
 
                 // Clear unified server adapter statuses
@@ -1870,10 +1304,7 @@ class MainActivity : AppCompatActivity() {
             }
             is ReconnectStatus.Attempting -> {
                 Log.d(TAG, "Auto-reconnect attempt ${status.attempt}/${status.maxAttempts} for server ${status.serverId}")
-                // Update toolbar subtitle
-                supportActionBar?.subtitle = getString(R.string.reconnecting_toolbar_subtitle)
-                // Announce for accessibility
-                announceForAccessibility(getString(R.string.accessibility_reconnecting, status.attempt, status.maxAttempts))
+                toolbarSubtitle = getString(R.string.reconnecting_toolbar_subtitle)
                 // Log the method being tried, if known
                 if (status.method != null) {
                     val methodName = when (status.method) {
@@ -1887,14 +1318,14 @@ class MainActivity : AppCompatActivity() {
             is ReconnectStatus.Succeeded -> {
                 Log.i(TAG, "Auto-reconnect succeeded for server ${status.serverId}")
                 reconnectingToServer = null
-                supportActionBar?.subtitle = null
+                toolbarSubtitle = null
                 hideReconnectingIndicator()
                 // Connection success is also handled by handleConnectionStateChange via STATE_CONNECTED.
             }
             is ReconnectStatus.Failed -> {
                 Log.w(TAG, "Auto-reconnect failed for server ${status.serverId}: ${status.error}")
                 reconnectingToServer = null
-                supportActionBar?.subtitle = null
+                toolbarSubtitle = null
                 hideReconnectingIndicator()
                 // NOTE: We do NOT set userManuallyDisconnected here - if the server
                 // reappears on mDNS later, we still want to auto-connect to it.
@@ -1919,18 +1350,6 @@ class MainActivity : AppCompatActivity() {
                 // Previously this set IDLE on pause, which disabled all controls.
                 viewModel.updatePlaybackState(isPlaying, viewModel.playbackState.value)
 
-                if (isPlaying) {
-                    updatePlaybackState("playing")
-                    enablePlaybackControls(true)
-                    // Announce playback started for accessibility
-                    announceForAccessibility(getString(R.string.accessibility_playback_started))
-                } else {
-                    updatePlaybackState("paused")
-                    // Announce playback paused for accessibility
-                    announceForAccessibility(getString(R.string.accessibility_playback_paused))
-                }
-                // Update play/pause button text and content description based on current state
-                updatePlayPauseButton(isPlaying)
                 updateKeepScreenOn(isPlaying)
             }
         }
@@ -1942,9 +1361,6 @@ class MainActivity : AppCompatActivity() {
                     Player.STATE_IDLE -> {
                         // Sync state to ViewModel for Compose UI
                         viewModel.updatePlaybackState(false, PlaybackState.IDLE)
-                        enablePlaybackControls(false)
-                        hideConnectionLoading()
-                        hideBufferingIndicator()
                         // Only transition to server list if we were connected/connecting
                         // (not during initial startup)
                         val currentState = connectionState
@@ -1954,13 +1370,10 @@ class MainActivity : AppCompatActivity() {
                             viewModel.updateConnectionState(connectionState)
                             showServerListView()
                         }
-                        // Announce disconnection for accessibility
-                        announceForAccessibility(getString(R.string.accessibility_disconnected))
                     }
                     Player.STATE_BUFFERING -> {
                         // Sync state to ViewModel for Compose UI
                         viewModel.updatePlaybackState(false, PlaybackState.BUFFERING)
-                        showBufferingIndicator()
                         // Transition to Connected state and show now playing view
                         val currentState = connectionState
                         if (currentState is AppConnectionState.Connecting) {
@@ -1969,17 +1382,12 @@ class MainActivity : AppCompatActivity() {
                                 currentState.serverAddress
                             )
                             viewModel.updateConnectionState(connectionState)
-                            showNowPlayingView(currentState.serverName)
+                            showNowPlayingView()
                         }
-                        // Announce buffering for accessibility
-                        announceForAccessibility(getString(R.string.accessibility_buffering))
                     }
                     Player.STATE_READY -> {
                         // Sync state to ViewModel for Compose UI
                         viewModel.updatePlaybackState(mediaController?.isPlaying ?: false, PlaybackState.READY)
-                        enablePlaybackControls(true)
-                        hideConnectionLoading()
-                        hideBufferingIndicator()
                         // Only show now playing on initial connection (Connecting -> Connected).
                         // If already Connected, do NOT call showNowPlayingView() --
                         // the user may be browsing tabs or interacting with the mini player.
@@ -1990,18 +1398,12 @@ class MainActivity : AppCompatActivity() {
                                 currentState.serverAddress
                             )
                             viewModel.updateConnectionState(connectionState)
-                            showNowPlayingView(currentState.serverName)
+                            showNowPlayingView()
                         }
-                        // Announce connection for accessibility
-                        announceForAccessibility(getString(R.string.accessibility_connected))
                     }
                     Player.STATE_ENDED -> {
                         // Sync state to ViewModel for Compose UI
                         viewModel.updatePlaybackState(false, PlaybackState.ENDED)
-                        updatePlaybackState("stopped")
-                        hideBufferingIndicator()
-                        // Announce playback stopped for accessibility
-                        announceForAccessibility(getString(R.string.accessibility_playback_stopped))
                     }
                 }
             }
@@ -2013,15 +1415,10 @@ class MainActivity : AppCompatActivity() {
                 val artist = mediaMetadata.artist?.toString() ?: ""
                 val album = mediaMetadata.albumTitle?.toString() ?: ""
                 Log.d(TAG, "Metadata from service: $title / $artist / $album")
-                updateMetadata(title, artist, album)
+                viewModel.updateMetadata(title, artist, album)
 
                 // Load album art from MediaMetadata
                 updateAlbumArt(mediaMetadata)
-
-                // Announce new track for accessibility
-                if (title.isNotEmpty() && artist.isNotEmpty()) {
-                    announceForAccessibility(getString(R.string.accessibility_now_playing, title, artist))
-                }
             }
         }
     }
@@ -2046,20 +1443,11 @@ class MainActivity : AppCompatActivity() {
                     if (connectionState !is AppConnectionState.Connected &&
                         connectionState !is AppConnectionState.Reconnecting) {
                         // Get server name from toolbar subtitle or use default
-                        val serverName = supportActionBar?.subtitle?.toString() ?: "Connected"
+                        val serverName = toolbarSubtitle ?: "Connected"
                         connectionState = AppConnectionState.Connected(serverName, "")
                         viewModel.updateConnectionState(connectionState)
-                        showNowPlayingView(serverName)
-                        invalidateOptionsMenu()
+                        showNowPlayingView()
                     }
-
-                    // Update playback state
-                    if (isPlaying) {
-                        updatePlaybackState("playing")
-                    } else {
-                        updatePlaybackState("paused")
-                    }
-                    enablePlaybackControls(true)
                 } else {
                     // Don't tear down the UI on transient STATE_IDLE during activity resume.
                     // The authoritative disconnect comes from PlayerStateListener.onPlaybackStateChanged(STATE_IDLE),
@@ -2068,24 +1456,20 @@ class MainActivity : AppCompatActivity() {
                         connectionState is AppConnectionState.Reconnecting) {
                         Log.d(TAG, "syncUIWithPlayerState: player reports idle/ended but connectionState=$connectionState -- keeping UI (transient)")
                     } else {
-                        enablePlaybackControls(false)
                         if (connectionState is AppConnectionState.Connecting) {
                             Log.d(TAG, "Player not ready while connecting - resetting to server list")
                             connectionState = AppConnectionState.ServerList
                             viewModel.updateConnectionState(connectionState)
                             showServerListView()
-                            invalidateOptionsMenu()
                         }
                     }
                 }
 
-                // Sync play/pause button icon
-                updatePlayPauseButton(isPlaying)
                 updateKeepScreenOn(isPlaying)
 
                 // Sync metadata and artwork
                 val metadata = controller.mediaMetadata
-                updateMetadata(
+                viewModel.updateMetadata(
                     metadata.title?.toString() ?: "",
                     metadata.artist?.toString() ?: "",
                     metadata.albumTitle?.toString() ?: ""
@@ -2169,12 +1553,10 @@ class MainActivity : AppCompatActivity() {
         if (server.isDefaultServer) {
             // User manually connected to default server - allow future auto-connects
             userManuallyDisconnected = false
-            viewModel.setUserManuallyDisconnected(false)
             Log.d(TAG, "User selected default server - cleared userManuallyDisconnected flag")
         } else if (connectionState is AppConnectionState.Connected) {
             // User switching from one server to another (non-default) - block auto-connect
             userManuallyDisconnected = true
-            viewModel.setUserManuallyDisconnected(true)
             defaultServerPinger?.stop()  // Don't ping after manual switch
             Log.d(TAG, "User switched to non-default server - set userManuallyDisconnected flag")
         }
@@ -2184,18 +1566,14 @@ class MainActivity : AppCompatActivity() {
 
         // Track the server ID for editing while connected
         currentConnectedServerId = server.id
-        // Sync state to ViewModel for Compose UI
-        viewModel.setCurrentConnectedServerId(server.id)
 
         // Update state to connecting
         connectionState = AppConnectionState.Connecting(server.name, server.id)
         viewModel.updateConnectionState(connectionState)
-        showConnectionLoading(server.name)
 
         // Connect using auto-selection
         val selected = connector.connect(server, controller)
         if (selected == null) {
-            hideConnectionLoading()
             connectionState = AppConnectionState.Error("No connection method available")
             showErrorSnackbar(
                 message = getString(R.string.no_connection_available),
@@ -2209,18 +1587,6 @@ class MainActivity : AppCompatActivity() {
         // Show which method was selected
         val methodDesc = ConnectionSelector.getConnectionDescription(selected)
         Log.d(TAG, "Connecting to ${server.name} via $methodDesc")
-    }
-
-    /**
-     * Handles Quick Connect on a discovered unified server.
-     * Offers to save the server after successful connection.
-     */
-    private fun onUnifiedServerQuickConnect(server: UnifiedServer) {
-        // Connect first
-        onUnifiedServerSelected(server)
-
-        // TODO: After successful connection, show "Save this server?" prompt
-        // This can be implemented by observing connection state changes
     }
 
     /**
@@ -2365,7 +1731,6 @@ class MainActivity : AppCompatActivity() {
             result.fold(
                 onSuccess = { message ->
                     Snackbar.make(snackbarView, R.string.favorite_added, Snackbar.LENGTH_SHORT).show()
-                    announceForAccessibility(getString(R.string.favorite_added))
                 },
                 onFailure = { error ->
                     val errorMessage = when {
@@ -2388,10 +1753,7 @@ class MainActivity : AppCompatActivity() {
     private var maLoginDialogShowing = false
 
     private fun observeMaConnectionState() {
-        // Cancel any previous observer to prevent duplicates on config change
-        // (setupUI() is called again in onConfigurationChanged)
-        maConnectionObserverJob?.cancel()
-        maConnectionObserverJob = lifecycleScope.launch {
+        lifecycleScope.launch {
             // Observe loginRequired events (no-token or auth-rejected) for the login dialog.
             launch {
                 MusicAssistant.loginRequired.collect {
@@ -2403,21 +1765,6 @@ class MainActivity : AppCompatActivity() {
 
             MusicAssistant.connectionState.collectLatest { state ->
                 val isMaConnected = state is TransportState.Ready
-
-                // Favorite button visibility
-                binding.favoriteButton.visibility = if (isMaConnected) View.VISIBLE else View.GONE
-
-                // Queue button visibility
-                binding.queueButton.visibility = if (isMaConnected) View.VISIBLE else View.GONE
-
-                // Bottom navigation visibility - only show when MA is connected
-                // LinearLayout stack handles spacing automatically, no margin hacks needed
-                binding.bottomNavigation.visibility = if (isMaConnected) View.VISIBLE else View.GONE
-
-                // If MA disconnects while showing navigation content, return to full player
-                if (!isMaConnected && isNavigationContentVisible) {
-                    hideNavigationContent()
-                }
 
                 // Update ViewModel for Compose UI
                 viewModel.setMaConnected(isMaConnected)
@@ -2439,10 +1786,7 @@ class MainActivity : AppCompatActivity() {
      * single snackbar message covers both cases.
      */
     private fun observeNetworkState() {
-        // Cancel any previous observer to prevent duplicates on config change
-        // (setupUI() is called again in onConfigurationChanged)
-        networkStateObserverJob?.cancel()
-        networkStateObserverJob = lifecycleScope.launch {
+        lifecycleScope.launch {
             var prevConnected: Boolean? = null
             PlaybackService.networkState.collect { state ->
                 // Notify pinger on every emission (matches the unconditional onAvailable /
@@ -2563,7 +1907,6 @@ class MainActivity : AppCompatActivity() {
 
         // User explicitly chose to disconnect - block auto-connect to default server
         userManuallyDisconnected = true
-        viewModel.setUserManuallyDisconnected(true)
         defaultServerPinger?.stop()  // Don't ping after manual disconnect
 
         try {
@@ -2634,7 +1977,7 @@ class MainActivity : AppCompatActivity() {
 
         // Set device volume directly (Spotify-style)
         val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val newVolume = (volume * maxVolume).toInt().coerceIn(0, maxVolume)
+        val newVolume = (volume * maxVolume).roundToInt().coerceIn(0, maxVolume)
         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
 
         // Also notify PlaybackService to sync to server (for multi-client coordination)
@@ -2664,19 +2007,14 @@ class MainActivity : AppCompatActivity() {
     /**
      * Syncs the volume slider with the current device STREAM_MUSIC volume.
      * Called on startup and when returning from background.
-     * Also syncs mini player volume slider if visible.
      */
     private fun syncSliderWithDeviceVolume() {
-        // Safety check - observer callback can fire during lifecycle transitions
-        if (!::binding.isInitialized) return
-
         val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
         val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        // Round to nearest integer - slider has stepSize=1.0 and crashes on decimal values
+        // Whole percent, truncated
         val sliderValue = ((currentVolume.toFloat() / maxVolume) * 100).toInt().toFloat()
-        binding.volumeSlider.value = sliderValue
 
-        // Sync Compose UI (mini player + now playing Compose slider)
+        // Sync Compose UI (now playing Compose slider)
         viewModel.updateVolume(sliderValue / 100f)
 
         Log.d(TAG, "Synced slider with device volume: $currentVolume/$maxVolume ($sliderValue%)")
@@ -2715,89 +2053,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun enablePlaybackControls(enabled: Boolean) {
-        binding.previousButton.isEnabled = enabled
-        binding.playPauseButton.isEnabled = enabled
-        binding.nextButton.isEnabled = enabled
-        binding.switchGroupButton.isEnabled = enabled
-        binding.volumeSlider.isEnabled = enabled
-    }
-
-    /**
-     * Updates the group name display.
-     * Shows the group name TextView if a group name is provided, hides it otherwise.
-     */
-    private fun updateGroupName(groupName: String) {
-        // Sync state to ViewModel for Compose UI
-        viewModel.updateGroupName(groupName)
-
-        if (groupName.isNotEmpty()) {
-            binding.groupNameText.text = getString(R.string.group_label, groupName)
-            binding.groupNameText.visibility = View.VISIBLE
-        } else {
-            binding.groupNameText.visibility = View.GONE
-        }
-    }
-
-    private fun updatePlaybackState(@Suppress("UNUSED_PARAMETER") state: String) {
-        // Toolbar title is now managed by updateToolbarForNowPlaying/updateToolbarForNavigation.
-        // This method is kept for future use (e.g., notification updates).
-    }
-
-    /**
-     * Updates the play/pause button icon and content description based on playing state.
-     * Also updates toolbar title to keep UI in sync.
-     * Shows pause icon when playing, play icon when paused.
-     */
-    private fun updatePlayPauseButton(isPlaying: Boolean) {
-        if (isPlaying) {
-            binding.playPauseButton.setIconResource(R.drawable.ic_pause)
-            binding.playPauseButton.contentDescription = getString(R.string.accessibility_pause_button)
-        } else {
-            binding.playPauseButton.setIconResource(R.drawable.ic_play)
-            binding.playPauseButton.contentDescription = getString(R.string.accessibility_play_button)
-        }
-
-        // Mini player updates automatically via Compose/ViewModel state observation
-    }
-
-    private fun updateMetadata(title: String, artist: String, album: String) {
-        // Sync state to ViewModel for Compose UI
-        viewModel.updateMetadata(title, artist, album)
-
-        // Song title goes in the large text field
-        binding.nowPlayingText.text = if (title.isNotEmpty()) title else getString(R.string.not_playing)
-
-        // Artist and album info in the smaller metadata field
-        val metadata = buildString {
-            if (artist.isNotEmpty()) append(artist)
-            if (album.isNotEmpty()) {
-                if (isNotEmpty()) append(" \u2022 ")  // bullet separator
-                append(album)
-            }
-        }
-        binding.metadataText.text = metadata
-
-        // Update album art content description with current track info
-        val artDescription = if (title.isNotEmpty()) {
-            "Album artwork for $title"
-        } else {
-            getString(R.string.album_art)
-        }
-        binding.albumArtView.contentDescription = artDescription
-
-        // Mini player updates automatically via Compose/ViewModel state observation
-    }
-
     /**
      * Updates album art from MediaMetadata.
      *
      * Tries to load artwork from:
      * 1. artworkData (byte array embedded in metadata)
      * 2. artworkUri (URI reference)
-     *
-     * Uses Coil for efficient image loading with crossfade animation.
-     * Also extracts colors from the artwork to apply to the volume slider.
      */
     private fun updateAlbumArt(mediaMetadata: MediaMetadata) {
         val artworkData = mediaMetadata.artworkData
@@ -2805,452 +2066,14 @@ class MainActivity : AppCompatActivity() {
 
         when {
             artworkData != null && artworkData.isNotEmpty() -> {
-                // Sync state to ViewModel for Compose UI
                 viewModel.updateArtwork(ArtworkSource.ByteArray(artworkData))
-
-                // Load from byte array (binary artwork from protocol)
-                Log.d(TAG, "Loading artwork from byte array: ${artworkData.size} bytes")
-                binding.albumArtView.load(artworkData) {
-                    crossfade(true)
-                    placeholder(R.drawable.placeholder_album)
-                    error(R.drawable.placeholder_album)
-                    transformations(RoundedCornersTransformation(8f))
-                    listener(
-                        onSuccess = { _, result ->
-                            // Extract colors from loaded artwork and update blurred background
-                            (result.drawable as? BitmapDrawable)?.bitmap?.let { bitmap ->
-                                extractAndApplyColors(bitmap)
-                                updateBlurredBackground(bitmap)
-                            }
-                        }
-                    )
-                }
             }
             artworkUri != null -> {
-                // Sync state to ViewModel for Compose UI
                 viewModel.updateArtwork(ArtworkSource.Uri(artworkUri))
-
-                // Load from URI (could be local or remote)
-                Log.d(TAG, "Loading artwork from URI: $artworkUri")
-                binding.albumArtView.load(artworkUri) {
-                    crossfade(true)
-                    placeholder(R.drawable.placeholder_album)
-                    error(R.drawable.placeholder_album)
-                    transformations(RoundedCornersTransformation(8f))
-                    listener(
-                        onSuccess = { _, result ->
-                            // Extract colors from loaded artwork and update blurred background
-                            (result.drawable as? BitmapDrawable)?.bitmap?.let { bitmap ->
-                                extractAndApplyColors(bitmap)
-                                updateBlurredBackground(bitmap)
-                            }
-                        }
-                    )
-                }
             }
             else -> {
-                // Sync state to ViewModel for Compose UI
                 viewModel.clearArtwork()
-
-                // No artwork available, show placeholder and reset colors
-                binding.albumArtView.setImageResource(R.drawable.placeholder_album)
-                resetSliderColors()
-                clearBlurredBackground()
             }
-        }
-    }
-
-    /**
-     * Loads artwork from a URL using Coil.
-     * Called when we receive artwork URL via session extras.
-     * Skipped in low memory mode - shows placeholder instead.
-     */
-    private fun loadArtworkFromUrl(url: String) {
-        // Sync state to ViewModel for Compose UI
-        viewModel.updateArtwork(ArtworkSource.Url(url))
-        // Skip artwork loading in low memory mode
-        if (UserSettings.lowMemoryMode) {
-            binding.albumArtView.setImageResource(R.drawable.placeholder_album)
-            resetSliderColors()
-            clearBlurredBackground()
-            return
-        }
-
-        Log.d(TAG, "Loading artwork from URL: $url")
-        binding.albumArtView.load(url) {
-            crossfade(true)
-            placeholder(R.drawable.placeholder_album)
-            error(R.drawable.placeholder_album)
-            transformations(RoundedCornersTransformation(8f))
-            listener(
-                onSuccess = { _, result ->
-                    // Extract colors from loaded artwork and update blurred background
-                    (result.drawable as? BitmapDrawable)?.bitmap?.let { bitmap ->
-                        extractAndApplyColors(bitmap)
-                        updateBlurredBackground(bitmap)
-                    }
-                }
-            )
-        }
-    }
-
-    /**
-     * Extracts dominant colors from artwork and applies them to UI elements.
-     * Uses the Palette library to analyze the image.
-     * Skipped in low memory mode to save memory.
-     *
-     * Applies colors to:
-     * - Volume slider (vibrant/muted color)
-     * - Background (dark muted color for ambient effect)
-     */
-    private fun extractAndApplyColors(bitmap: Bitmap) {
-        // Skip Palette extraction in low memory mode
-        if (UserSettings.lowMemoryMode) {
-            resetSliderColors()
-            return
-        }
-
-        Palette.from(bitmap).generate { palette ->
-            palette?.let {
-                // Get the vibrant swatch for slider, or fall back to muted, then dominant
-                val accentSwatch = it.vibrantSwatch
-                    ?: it.mutedSwatch
-                    ?: it.dominantSwatch
-
-                accentSwatch?.let { color ->
-                    // Apply extracted color to volume slider
-                    binding.volumeSlider.trackActiveTintList = ColorStateList.valueOf(color.rgb)
-                    binding.volumeSlider.thumbTintList = ColorStateList.valueOf(color.rgb)
-                    Log.d(TAG, "Applied artwork color to volume slider: ${Integer.toHexString(color.rgb)}")
-                }
-
-                // Get dark muted color for background, or darken the dominant color
-                val backgroundSwatch = it.darkMutedSwatch
-                    ?: it.darkVibrantSwatch
-                    ?: it.mutedSwatch
-
-                val backgroundColor = if (backgroundSwatch != null) {
-                    // Darken the color further for a subtle ambient background
-                    darkenColor(backgroundSwatch.rgb, 0.3f)
-                } else if (it.dominantSwatch != null) {
-                    // Fall back to darkened dominant color
-                    darkenColor(it.dominantSwatch!!.rgb, 0.2f)
-                } else {
-                    // Default dark background
-                    ContextCompat.getColor(this, R.color.md_theme_dark_background)
-                }
-
-                // Store and apply background color to entire window (root CoordinatorLayout)
-                lastBackgroundColor = backgroundColor
-                binding.coordinatorLayout.setBackgroundColor(backgroundColor)
-                Log.d(TAG, "Applied background color to window: ${Integer.toHexString(backgroundColor)}")
-            }
-        }
-    }
-
-    /**
-     * Darkens a color by a given factor.
-     * @param color The original color
-     * @param factor How much to darken (0.0 = black, 1.0 = original color)
-     */
-    private fun darkenColor(color: Int, factor: Float): Int {
-        val a = Color.alpha(color)
-        val r = (Color.red(color) * factor).toInt()
-        val g = (Color.green(color) * factor).toInt()
-        val b = (Color.blue(color) * factor).toInt()
-        return Color.argb(a, r, g, b)
-    }
-
-    /**
-     * Resets the volume slider and background colors to default theme colors.
-     * Called when no artwork is available or when disconnected.
-     */
-    private fun resetSliderColors() {
-        val primaryColor = ContextCompat.getColor(this, com.google.android.material.R.color.design_default_color_primary)
-        binding.volumeSlider.trackActiveTintList = ColorStateList.valueOf(primaryColor)
-        binding.volumeSlider.thumbTintList = ColorStateList.valueOf(primaryColor)
-
-        // Reset background to default theme color for entire window
-        val backgroundColor = ContextCompat.getColor(this, R.color.md_theme_dark_background)
-        binding.coordinatorLayout.setBackgroundColor(backgroundColor)
-
-        // Clear the blurred background
-        clearBlurredBackground()
-    }
-
-    /**
-     * Updates the background with a blurred, scaled-up, rotated version of the album art.
-     * Creates an ambient visual effect behind all UI elements.
-     * Skipped in low memory mode to save resources.
-     *
-     * Uses RenderEffect for true Gaussian blur (requires API 31+).
-     * On older devices, this feature is simply disabled.
-     */
-    private fun updateBlurredBackground(bitmap: Bitmap) {
-        if (UserSettings.lowMemoryMode) return
-
-        // RenderEffect blur requires API 31+ (Android 12)
-        if (Build.VERSION.SDK_INT < VERSION_CODES.S) return
-
-        // De-duplicate: skip if this is the same artwork (use generationId as cheap identity check)
-        val artworkId = "${bitmap.generationId}_${bitmap.width}x${bitmap.height}"
-        if (artworkId == lastArtworkSource) {
-            Log.d(TAG, "Skipping duplicate background update for artwork: $artworkId")
-            return
-        }
-        lastArtworkSource = artworkId
-        Log.d(TAG, "Updating blurred background for artwork: $artworkId")
-
-        // Apply rotation and scale to ensure full coverage despite rotation
-        binding.backgroundArtView.rotation = 30f
-        binding.backgroundArtView.scaleX = 1.8f
-        binding.backgroundArtView.scaleY = 1.8f
-
-        // Load the image first
-        binding.backgroundArtView.load(bitmap) {
-            crossfade(500)
-        }
-
-        // Apply Gaussian blur via RenderEffect (API 31+)
-        applyBlurEffect()
-    }
-
-    /**
-     * Applies Gaussian blur effect to the background using RenderEffect.
-     * Blur radius can be adjusted (higher = more blur).
-     */
-    @TargetApi(VERSION_CODES.S)
-    private fun applyBlurEffect() {
-        val blurRadius = 80f  // Adjust blur intensity here (1-150+)
-        val blurEffect = RenderEffect.createBlurEffect(
-            blurRadius, blurRadius,
-            Shader.TileMode.CLAMP
-        )
-        binding.backgroundArtView.setRenderEffect(blurEffect)
-    }
-
-    /**
-     * Clears the blurred background with a fade-out animation.
-     */
-    private fun clearBlurredBackground() {
-        // Skip if feature not available
-        if (Build.VERSION.SDK_INT < VERSION_CODES.S) return
-
-        // Clear tracking so next artwork will update
-        lastArtworkSource = null
-
-        binding.backgroundArtView.animate()
-            .alpha(0f)
-            .setDuration(300)
-            .withEndAction {
-                binding.backgroundArtView.setImageDrawable(null)
-                binding.backgroundArtView.setRenderEffect(null)
-                binding.backgroundArtView.rotation = 0f
-                binding.backgroundArtView.scaleX = 1f
-                binding.backgroundArtView.scaleY = 1f
-                binding.backgroundArtView.alpha = 0.5f // Reset for next use
-            }
-            .start()
-    }
-
-    /**
-     * Clears the player background (blurred art and tint) when navigating to other screens.
-     * The now playing view is hidden, so we don't want its background showing through.
-     */
-    private fun clearPlayerBackground() {
-        // Reset to default dark background
-        val defaultBg = ContextCompat.getColor(this, R.color.md_theme_dark_background)
-        binding.coordinatorLayout.setBackgroundColor(defaultBg)
-
-        // Hide the blurred background art (don't clear it, just hide for quick restore)
-        binding.backgroundArtView.alpha = 0f
-        Log.d(TAG, "Cleared player background for navigation")
-    }
-
-    /**
-     * Restores the player background when returning to the now playing view.
-     * Uses the stored background color and shows the blurred art again.
-     */
-    private fun restorePlayerBackground() {
-        // Restore the tinted background color
-        lastBackgroundColor?.let { color ->
-            binding.coordinatorLayout.setBackgroundColor(color)
-            Log.d(TAG, "Restored background color: ${Integer.toHexString(color)}")
-        }
-
-        // Fade in the blurred background art
-        if (Build.VERSION.SDK_INT >= VERSION_CODES.S) {
-            binding.backgroundArtView.animate()
-                .alpha(0.5f)
-                .setDuration(300)
-                .start()
-        }
-    }
-
-    /**
-     * Formats a duration in milliseconds to MM:SS format.
-     */
-    private fun formatDuration(ms: Long): String {
-        val seconds = (ms / 1000) % 60
-        val minutes = (ms / 1000) / 60
-        return String.format("%d:%02d", minutes, seconds)
-    }
-
-    // ============================================================================
-    // Loading State Management
-    // ============================================================================
-
-    /**
-     * Shows the connection progress indicator.
-     * Called when attempting to connect to a server.
-     * Switches to now playing view and shows the connecting spinner.
-     *
-     * @param serverName The name of the server being connected to
-     */
-    private fun showConnectionLoading(serverName: String) {
-        // Switch to now playing view but show connection progress
-        binding.serverListView.visibility = View.GONE
-        binding.nowPlayingView.visibility = View.VISIBLE
-        binding.connectionProgressContainer.visibility = View.VISIBLE
-        binding.nowPlayingContent.visibility = View.GONE
-        binding.connectionStatusText.text = getString(R.string.connecting_to_server, serverName)
-
-        // Hide FAB while connecting
-        binding.addServerFab.visibility = View.GONE
-
-        // Announce connecting state for accessibility
-        announceForAccessibility(getString(R.string.accessibility_connecting))
-    }
-
-    /**
-     * Hides the connection progress indicator.
-     * Called when connection succeeds or fails.
-     */
-    private fun hideConnectionLoading() {
-        binding.connectionProgressContainer.visibility = View.GONE
-        binding.nowPlayingContent.visibility = View.VISIBLE
-    }
-
-    /**
-     * Shows the buffering indicator overlay on album art.
-     * Called during playback buffering state.
-     */
-    private fun showBufferingIndicator() {
-        binding.bufferingIndicator.visibility = View.VISIBLE
-    }
-
-    /**
-     * Hides the buffering indicator overlay.
-     * Called when buffering completes and playback is ready.
-     */
-    private fun hideBufferingIndicator() {
-        binding.bufferingIndicator.visibility = View.GONE
-    }
-
-
-    // ========================================================================
-    // Menu Handling
-    // ========================================================================
-
-    /**
-     * Inflate options menu. Settings is always visible; other items shown when connected.
-     */
-    override fun onCreateOptionsMenu(menu: Menu?): Boolean {
-        menuInflater.inflate(R.menu.menu_now_playing, menu)
-        return true
-    }
-
-    /**
-     * Update menu items visibility and titles based on connection state.
-     * When connected:
-     *   - "Switch Server" replaces disconnect (takes you back to server list)
-     *   - "Edit Server" replaces add server (edits current server)
-     * When not connected:
-     *   - "Add Server" shows the wizard
-     * Settings is always "App Settings".
-     */
-    override fun onPrepareOptionsMenu(menu: Menu?): Boolean {
-        val isConnected = connectionState is AppConnectionState.Connected
-
-        // Connection info header (only when connected)
-        menu?.findItem(R.id.action_connection_info)?.apply {
-            isVisible = isConnected
-            if (isConnected) {
-                val state = connectionState as AppConnectionState.Connected
-                title = getString(R.string.connected_to, state.serverName)
-            }
-        }
-
-        // Stats (only when connected)
-        menu?.findItem(R.id.action_stats)?.isVisible = isConnected
-
-        // Disconnect/Switch Server (only when connected, title changes)
-        menu?.findItem(R.id.action_disconnect)?.apply {
-            isVisible = isConnected
-            title = getString(R.string.action_switch_server)
-        }
-
-        // Add Server / Edit Server (title changes based on connection)
-        menu?.findItem(R.id.action_add_unified_server)?.apply {
-            title = if (isConnected) {
-                getString(R.string.action_edit_server)
-            } else {
-                getString(R.string.add_server)
-            }
-        }
-
-        // Settings is always "App Settings"
-        menu?.findItem(R.id.action_settings)?.title = getString(R.string.action_app_settings)
-
-        return super.onPrepareOptionsMenu(menu)
-    }
-
-    /**
-     * Handle menu item selection.
-     */
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        return when (item.itemId) {
-            android.R.id.home -> {
-                // Toolbar back button -- pop legacy fragment
-                if (supportFragmentManager.backStackEntryCount > 0) {
-                    supportFragmentManager.popBackStack()
-                    updateToolbarForNavigation()
-                }
-                true
-            }
-            R.id.action_stats -> {
-                // Show Stats for Nerds bottom sheet
-                StatsBottomSheet().show(supportFragmentManager, "stats")
-                true
-            }
-            R.id.action_disconnect -> {
-                // Show confirmation dialog before disconnecting
-                onDisconnectClicked()
-                true
-            }
-            R.id.action_settings -> {
-                // Open Settings activity
-                startActivity(android.content.Intent(this, SettingsActivity::class.java))
-                true
-            }
-            R.id.action_add_unified_server -> {
-                val isConnected = connectionState is AppConnectionState.Connected
-                if (isConnected && currentConnectedServerId != null) {
-                    // Edit the currently connected server
-                    val server = UnifiedServerRepository.getServer(currentConnectedServerId!!)
-                    if (server != null) {
-                        showEditServerWizard(server)
-                    } else {
-                        // Fallback: server not found in repository (discovered server)
-                        showAddServerWizard()
-                    }
-                } else {
-                    // Not connected - show Add Server Wizard
-                    showAddServerWizard()
-                }
-                true
-            }
-            else -> super.onOptionsItemSelected(item)
         }
     }
 
@@ -3352,19 +2175,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Adjusts the volume slider by a delta value.
+     * Adjusts the volume by a delta value.
      * Used for TV remote volume button handling.
      *
      * @param delta The amount to adjust (positive = up, negative = down)
      */
     private fun adjustVolume(delta: Int) {
-        val currentValue = binding.volumeSlider.value.toInt()
+        val currentValue = (viewModel.volume.value * 100).roundToInt()
         val newValue = (currentValue + delta).coerceIn(0, 100)
-        binding.volumeSlider.value = newValue.toFloat()
+        viewModel.updateVolume(newValue / 100f)
         onVolumeChanged(newValue / 100f)
-
-        // Provide feedback
-        updateVolumeAccessibility(newValue)
-        announceForAccessibility("Volume $newValue percent")
     }
 }

@@ -33,6 +33,12 @@ object SendSpinProtocol {
     const val AUDIO_HEADER_SIZE_BYTES = 13
 
     /**
+     * `send_ahead` saturates at this value instead of wrapping. Like `0`, it
+     * reports that no lead was measured.
+     */
+    const val SEND_AHEAD_SATURATED = 4_294_967_295L
+
+    /**
      * Binary message type identifiers.
      */
     object BinaryType {
@@ -114,20 +120,30 @@ object SendSpinProtocol {
     }
 
     /**
-     * Player timing capabilities reported via client/state (spec 2026-06-01,
-     * "player timing capabilities"). Both fields are required for players;
-     * servers use max(required_lead_time_ms, min_buffer_ms) + static_delay_ms
-     * to compute per-player send-ahead, which matters most for live streams.
+     * Player timing parameters reported via client/state (roles/player/v1.md,
+     * "Server Audio Send Constraints"). The server keeps at least
+     * `min_buffer_ms + output_delay_ms` of audio queued, and gives the first
+     * chunk of a stream at least that lead, extended to
+     * `required_lead_time_ms` when the source is buffered.
      *
-     * Values are conservative static defaults for Android: AudioTrack warmup
-     * plus MediaCodec init is typically well under 500 ms, and 500 ms of
-     * jitter buffer comfortably absorbs Wi-Fi variance. The spec allows
-     * runtime (debounced) updates if we later measure these empirically.
-     * For comparison, aiosendspin defaults to 250/250 on desktop.
+     * [REQUIRED_LEAD_TIME_MS] covers the first stream of a connection, when
+     * AudioTrack and the decoder start from cold: on the T901 audio is not
+     * flowing at full rate until about 1.2 s after `stream/start`.
+     * [REQUIRED_LEAD_TIME_WARM_MS] is reported once that stream has started
+     * ("a client MAY lower its reported `required_lead_time_ms` while a stream
+     * is running"): a skip or a new track restarts a pipeline that is already
+     * running. With 500 ms of lead a new track lost up to 63 ms of its start.
+     *
+     * [MIN_BUFFER_MS] is the floor of `min_buffer_ms`: what the player needs
+     * in hand when chunks arrive with no delay at all. It keeps AudioTrack
+     * written up to 300 ms ahead of the DAC (SyncAudioPlayer's pending target
+     * plus tolerance); the other 50 ms is margin for decode and loop timing.
+     * The measured arrival delay is added on top by [MinBufferEstimator].
      */
     object PlayerTiming {
-        const val REQUIRED_LEAD_TIME_MS = 500
-        const val MIN_BUFFER_MS = 500
+        const val REQUIRED_LEAD_TIME_MS = 1500
+        const val REQUIRED_LEAD_TIME_WARM_MS = 650
+        const val MIN_BUFFER_MS = 350
     }
 
     /**

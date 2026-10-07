@@ -9,8 +9,19 @@ import io.mockk.spyk
 import io.mockk.unmockkAll
 import io.mockk.verify
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.security.MessageDigest
+import java.util.Base64
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * Tests for WebSocketTransport lifecycle, specifically verifying the
@@ -97,8 +108,8 @@ class WebSocketTransportTest {
 
     /**
      * Verifies that close() is safe to call before connect() is ever called.
-     * The outgoing channel is null in this state so the Close sentinel trySend
-     * is simply skipped (M-02 fix must not crash on null channel).
+     * There is no channel, job or live connection yet, so nothing is closed
+     * and nothing is reported.
      */
     @Test
     fun `close before connect does not crash`() {
@@ -129,5 +140,125 @@ class WebSocketTransportTest {
         transport.close(1000, "first close")
         transport.close(1001, "second close")
         // No exception means success
+    }
+
+    // ------------------------------------------------------------------
+    // What a locally initiated close reports
+    // ------------------------------------------------------------------
+
+    /** A server that completes one WebSocket upgrade and then says nothing. */
+    private class SilentServer : AutoCloseable {
+        private val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress())
+        private var socket: Socket? = null
+        val port: Int get() = server.localPort
+
+        init {
+            thread(isDaemon = true) {
+                val s = server.accept().also { socket = it }
+                val reader = s.getInputStream().bufferedReader()
+                var key = ""
+                while (true) {
+                    val line = reader.readLine()
+                    if (line.isNullOrEmpty()) break
+                    if (line.startsWith("Sec-WebSocket-Key:", ignoreCase = true)) {
+                        key = line.substringAfter(":").trim()
+                    }
+                }
+                val accept = Base64.getEncoder().encodeToString(
+                    MessageDigest.getInstance("SHA-1")
+                        .digest((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").toByteArray())
+                )
+                s.getOutputStream().apply {
+                    write(
+                        ("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
+                            "Connection: Upgrade\r\nSec-WebSocket-Accept: $accept\r\n\r\n").toByteArray()
+                    )
+                    flush()
+                }
+            }
+        }
+
+        override fun close() {
+            socket?.close()
+            server.close()
+        }
+    }
+
+    /** Connects to [server] and returns the transport with every close or failure it reports. */
+    private fun connectTo(server: SilentServer): Pair<WebSocketTransport, List<String>> {
+        val connected = CountDownLatch(1)
+        val reports = CopyOnWriteArrayList<String>()
+        val transport = WebSocketTransport(address = "127.0.0.1:${server.port}")
+        transport.setListener(object : SendSpinTransport.Listener {
+            override fun onConnected() = connected.countDown()
+            override fun onMessage(text: String) {}
+            override fun onMessage(bytes: ByteArray) {}
+            override fun onClosing(code: Int, reason: String) {}
+            override fun onClosed(code: Int, reason: String) {
+                reports.add("closed $code $reason")
+            }
+            override fun onFailure(error: Throwable, isRecoverable: Boolean) {
+                reports.add("failure $error")
+            }
+        })
+        transport.connect()
+        assertTrue("transport did not connect", connected.await(5, TimeUnit.SECONDS))
+        return transport to reports
+    }
+
+    private fun awaitReport(reports: List<String>) {
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (reports.isEmpty() && System.nanoTime() < deadline) Thread.sleep(10)
+        // Long enough for the cancelled session to add a second report if it were going to.
+        Thread.sleep(300)
+    }
+
+    /**
+     * A close the caller starts used to cancel the session and report nothing,
+     * leaving the state at Connected: whoever closed a dead socket never heard
+     * that the connection had ended.
+     */
+    @Test
+    fun `a local close of a live connection reports onClosed once`() {
+        SilentServer().use { server ->
+            val (transport, reports) = connectTo(server)
+
+            transport.close(1001, "local")
+            transport.close(1001, "again")
+
+            assertEquals(TransportState.Closed, transport.state)
+            awaitReport(reports)
+            assertEquals(listOf("closed 1001 local"), reports)
+            transport.destroy()
+        }
+    }
+
+    @Test
+    fun `closeAfterFlush reports onClosed once`() {
+        SilentServer().use { server ->
+            val (transport, reports) = connectTo(server)
+
+            transport.closeAfterFlush(1000, "goodbye")
+
+            awaitReport(reports)
+            assertEquals(listOf("closed 1000 goodbye"), reports)
+            assertEquals(TransportState.Closed, transport.state)
+            transport.destroy()
+        }
+    }
+
+    @Test
+    fun `a detached listener hears nothing from a local close`() {
+        SilentServer().use { server ->
+            val (transport, reports) = connectTo(server)
+
+            transport.setListener(null)
+            transport.close(1000, "goodbye")
+
+            Thread.sleep(300)
+            assertEquals(emptyList<String>(), reports)
+            assertEquals(TransportState.Closed, transport.state)
+            transport.destroy()
+        }
     }
 }

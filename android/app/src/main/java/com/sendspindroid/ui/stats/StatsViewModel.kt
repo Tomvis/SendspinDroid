@@ -182,7 +182,6 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
             reconnectAttemptsTotal = bundle.getInt("reconnect_attempts_total", 0),
             lastDisconnectCode = if (bundle.containsKey("last_disconnect_code")) bundle.getInt("last_disconnect_code") else null,
             lastDisconnectReason = bundle.getString("last_disconnect_reason", null),
-            timeFilterStability = bundle.getDouble("time_filter_stability", 1.0),
             timeFilterConvergenceMs = bundle.getLong("time_filter_convergence_ms", 0L),
 
             // Connection health (handoff episodes)
@@ -265,13 +264,12 @@ data class StatsState(
 
     // Connection health (issue #128). Exposes keepalive freshness, watchdog
     // state, lifetime reconnect count, last-disconnect details, and
-    // time-filter stability for field triage.
+    // time-filter convergence time for field triage.
     val lastByteReceivedAgoMs: Long = -1L,
     val stallWatchdogArmed: Boolean = false,
     val reconnectAttemptsTotal: Int = 0,
     val lastDisconnectCode: Int? = null,
     val lastDisconnectReason: String? = null,
-    val timeFilterStability: Double = 1.0,
     val timeFilterConvergenceMs: Long = 0L,
 
     // Connection health: newline-delimited handoff-episode summary from the recorder.

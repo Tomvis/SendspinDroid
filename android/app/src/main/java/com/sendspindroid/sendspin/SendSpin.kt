@@ -450,6 +450,9 @@ class SendSpin(
                     FailureReason.HandshakeFailed
                 }
                 _connectionState.value = TransportState.Failed(reason)
+                // Detached first: the close would otherwise report onClosed
+                // and replace the failure reason set above.
+                transport?.setListener(null)
                 transport?.close(1002, "handshake failed")
             }
         }

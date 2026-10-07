@@ -472,6 +472,29 @@ class SendSpinProtocolHandlerTest {
         assertEquals(44100, handler.streamStarts[1].sampleRate)
     }
 
+    @Test
+    fun `required lead time is the cold value until the first stream starts, then the warm one`() {
+        activateRoles("\"${SendSpinProtocol.Roles.PLAYER}\"")
+        val cold = "\"required_lead_time_ms\":${SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS},"
+        val warm = "\"required_lead_time_ms\":${SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_WARM_MS},"
+
+        handler.sentMessages.clear()
+        handler.setExternalSource(true)
+        assertTrue(handler.sentMessages.last().contains(cold))
+
+        // The first stream/start reports the lower value by itself...
+        val streamStart = buildStreamStartJson(codec = "pcm", sampleRate = 48000, channels = 2, bitDepth = 16)
+        handler.sentMessages.clear()
+        handler.handleTextMessageForTest(streamStart)
+        assertEquals(1, handler.sentMessages.size)
+        assertTrue(handler.sentMessages[0].contains(warm))
+
+        // ...and a later one has nothing new to say.
+        handler.sentMessages.clear()
+        handler.handleTextMessageForTest(streamStart)
+        assertTrue(handler.sentMessages.isEmpty())
+    }
+
     // ========== Helpers ==========
 
     private fun buildServerStateJson(

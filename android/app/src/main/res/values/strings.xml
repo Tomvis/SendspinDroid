@@ -1,28 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SendSpin Player</string>
-    <string name="discover_servers">Discover Servers</string>
-    <string name="disconnect">Disconnect</string>
-    <string name="pause">Pause</string>
-    <string name="previous">Previous</string>
-    <string name="next">Next</string>
-    <string name="switch_group">Switch Group</string>
-    <string name="volume">Volume</string>
     <string name="device_volume">Device Volume</string>
     <string name="group_label">Group: %s</string>
-    <string name="not_connected">Not Connected</string>
     <string name="connected">Connected</string>
-    <string name="discovering">Discovering servers...</string>
-    <string name="no_servers_found">No servers found</string>
-    <string name="add_server_manually">Add Server Manually</string>
     <string name="server_address">Server Address</string>
-    <string name="invalid_address">Invalid server address format</string>
     <string name="album_art">Album artwork</string>
     <string name="now_playing">Now Playing</string>
     <string name="not_playing">Not Playing</string>
-    <string name="available_servers">Available Servers</string>
     <string name="connecting">Connecting…</string>
-    <string name="connected_to">Connected to %s</string>
 
     <!-- Accessibility strings -->
     <string name="accessibility_play_button">Play button</string>
@@ -30,43 +16,16 @@
     <string name="accessibility_previous_button">Previous track button</string>
     <string name="accessibility_next_button">Next track button</string>
     <string name="accessibility_switch_group_button">Switch to next playback group</string>
-    <string name="accessibility_open_full_player">Open full player</string>
-    <string name="accessibility_volume_slider">Volume slider</string>
-    <string name="accessibility_volume_percent">Volume %1$d percent</string>
-    <string name="accessibility_progress_slider">Track progress slider</string>
-    <string name="accessibility_server_list">Server list, %1$d servers available</string>
-    <string name="accessibility_connected">Connected to server</string>
-    <string name="accessibility_disconnected">Disconnected from server</string>
-    <string name="accessibility_connecting">Connecting to server</string>
-    <string name="accessibility_buffering">Buffering audio</string>
-    <string name="accessibility_now_playing">Now playing: %1$s by %2$s</string>
-    <string name="accessibility_playback_paused">Playback paused</string>
-    <string name="accessibility_playback_started">Playback started</string>
-    <string name="accessibility_playback_stopped">Playback stopped</string>
-    <string name="accessibility_server_name_input">Server name input field</string>
-    <string name="accessibility_server_address_input">Server address input field</string>
-    <string name="accessibility_discover_servers">Discover servers on network</string>
-    <string name="accessibility_add_manual_server">Add server manually by address</string>
 
     <!-- Error messages -->
-    <string name="error_network">Network error. Check your connection.</string>
-    <string name="error_connection_timeout">Connection timeout. Server not responding.</string>
-    <string name="error_playback">Playback error occurred.</string>
     <string name="error_discovery">Failed to discover servers.</string>
     <string name="error_service_not_connected">Service not connected</string>
-    <string name="error_connection_failed">Failed to connect to server</string>
     <string name="error_discovery_start">Failed to start discovery</string>
-    <string name="error_connection_refused">Server refused connection. Check if SendSpin is running.</string>
-    <string name="error_host_not_found">Server not found. Check the address.</string>
-    <string name="error_network_unreachable">Network unreachable. Check WiFi connection.</string>
-    <string name="error_invalid_response">Invalid server response. May not be a SendSpin server.</string>
-    <string name="error_ssl_handshake">Secure connection failed. Server may not support encryption.</string>
 
     <!-- Snackbar actions -->
     <string name="action_retry">Retry</string>
 
     <!-- Menu actions -->
-    <string name="action_disconnect">Disconnect</string>
     <string name="action_switch_server">Switch Server</string>
     <string name="action_edit_server">Edit Server</string>
     <string name="action_app_settings">App Settings</string>
@@ -74,19 +33,9 @@
 
     <!-- Success messages -->
     <string name="server_added">Server added: %s</string>
-    <string name="connecting_to_server">Connecting to %s…</string>
 
     <!-- Auto-discovery flow -->
-    <string name="searching_for_servers">Searching for servers…</string>
-    <string name="empty_server_list_title">No servers available</string>
-    <string name="empty_server_list_subtitle">Try searching again or add\na server manually</string>
-    <string name="enter_manually">Enter server manually</string>
     <string name="search_again">Search Again</string>
-    <string name="server_found">Found: %s</string>
-    <string name="auto_connecting">Auto-connecting…</string>
-
-    <!-- Notification -->
-    <string name="notification_channel_name">Music Playback</string>
 
     <!-- Onboarding -->
     <string name="onboarding_title">Welcome to SendSpin Player</string>
@@ -95,13 +44,10 @@
 
     <!-- Stats for Nerds -->
     <string name="stats_title">Stats for Nerds</string>
-    <string name="stats_close">Close stats</string>
-    <string name="stats_footer_note">Updates every 500ms • Values color-coded: green (good), yellow (warning), red (bad)</string>
 
     <!-- Stats sections -->
     <string name="stats_section_connection">CONNECTION</string>
     <string name="stats_section_network">NETWORK</string>
-    <string name="stats_section_sync_status">SYNC STATUS</string>
     <string name="stats_section_sync_error">SYNC ERROR</string>
     <string name="stats_section_buffer">BUFFER</string>
     <string name="stats_section_sync_correction">SYNC CORRECTION</string>
@@ -110,37 +56,11 @@
     <string name="stats_section_connection_health">CONNECTION HEALTH</string>
     <string name="stats_no_handoffs">No handoff episodes recorded</string>
 
-    <!-- Stats labels - Connection -->
-    <string name="stats_audio_codec">Codec</string>
-
     <!-- Stats labels - Sync Status -->
-    <string name="stats_playback_state">Playback State</string>
     <string name="stats_sync_error">Sync Error</string>
-
-    <!-- Stats labels - Buffer -->
-    <string name="stats_queued_audio">Queued Audio</string>
-    <string name="stats_chunks_received">Chunks Received</string>
-    <string name="stats_chunks_played">Chunks Played</string>
-    <string name="stats_chunks_dropped">Chunks Dropped</string>
-    <string name="stats_gaps_filled">Gaps Filled</string>
-    <string name="stats_overlaps_trimmed">Overlaps Trimmed</string>
-
-    <!-- Stats labels - Sync Correction -->
-    <string name="stats_correction_mode">Correction Mode</string>
-    <string name="stats_frames_inserted">Frames Inserted</string>
-    <string name="stats_frames_dropped">Frames Dropped</string>
-    <string name="stats_total_corrections">Total Corrections</string>
-
-    <!-- Stats labels - Clock Sync -->
-    <string name="stats_clock_ready">Clock Ready</string>
-    <string name="stats_clock_offset">Clock Offset</string>
-    <string name="stats_clock_error">Clock Error</string>
-    <string name="stats_measurement_count">Measurements</string>
-    <string name="stats_dac_calibration_count">DAC Calibrations</string>
 
     <!-- Menu -->
     <string name="action_stats">Stats for Nerds</string>
-    <string name="action_settings">Settings</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
@@ -160,11 +80,6 @@
     <string name="pref_sync_offset_title">Manual Sync Offset</string>
     <string name="pref_sync_offset_summary">Adjust timing: positive delays playback, negative advances it</string>
     <string name="pref_sync_offset_dialog_title">Sync Offset (ms)</string>
-    <string name="pref_sync_offset_value">Current: %+d ms</string>
-    <string name="pref_sync_offset_invalid">Please enter a valid number</string>
-    <string name="pref_sync_offset_clamped">Value clamped to range %1$d to %2$d ms</string>
-    <string name="sync_offset_decrease">Decrease sync offset by 10ms</string>
-    <string name="sync_offset_increase">Increase sync offset by 10ms</string>
     <string name="pref_codec_title">Preferred Audio Codec</string>
     <string name="pref_codec_unavailable_hint">Not available on this device</string>
 
@@ -178,10 +93,6 @@
     <string name="exit_app_dialog_title">Exit App?</string>
     <string name="exit_app_dialog_message">This will stop playback and close the app.</string>
     <string name="exit_app_dialog_positive">Exit</string>
-
-    <!-- Permission strings -->
-    <string name="permission_bind_playback_service_label">Bind to SendSpin Playback Service</string>
-    <string name="permission_bind_playback_service_description">Allows the app to bind to the SendSpin playback service for audio control. Only apps signed with the same certificate can use this permission.</string>
 
     <!-- Performance -->
     <string name="pref_category_performance">Performance</string>
@@ -245,84 +156,19 @@
     <string name="pref_category_about">About</string>
     <string name="pref_version_title">Version</string>
 
-    <!-- Remote Access -->
-    <string name="remote_access_title">Remote Access</string>
-    <string name="remote_access_description">Connect to your Music Assistant server from anywhere using Remote ID</string>
-    <string name="connection_mode">Connection Mode</string>
-    <string name="connection_mode_local">Local Network</string>
-    <string name="connection_mode_remote">Remote Access</string>
-    <string name="remote_id_placeholder">XXXXXXXXXXXXXXXXXXXXXXXXXX</string>
-    <string name="scan_qr_code">Scan QR Code</string>
-    <string name="enter_remote_id">Enter Remote ID</string>
-    <string name="remote_server_nickname">Nickname</string>
-    <string name="remote_server_nickname_hint">e.g., Home Server</string>
-    <string name="saved_remote_servers">Saved Servers</string>
-    <string name="no_saved_servers">No saved remote servers</string>
-    <string name="connect_remote">Connect Remotely</string>
-    <string name="connecting_remotely">Connecting remotely…</string>
-    <string name="last_connected">Last connected: %s</string>
-
-    <!-- QR Scanner -->
-    <string name="qr_scanner_title">Scan Remote ID</string>
-    <string name="camera_permission_denied">Camera permission denied. Enter Remote ID manually.</string>
-
-    <!-- Accessibility - Remote Access -->
-    <string name="accessibility_scan_qr_button">Scan QR code for Remote ID</string>
-    <string name="accessibility_remote_id_input">Remote ID input field</string>
-    <string name="accessibility_connection_mode_toggle">Toggle between local network and remote access connection modes</string>
-
-    <!-- Proxy Access -->
-    <string name="proxy_access_title">Proxy Access</string>
-    <string name="proxy_access_description">Connect through your reverse proxy using URL and auth token</string>
-    <string name="auth_token">Auth Token</string>
-    <string name="auth_token_hint">Long-lived token from Music Assistant</string>
-    <string name="no_saved_proxy_servers">No saved proxy servers</string>
-    <string name="connect_proxy">Connect via Proxy</string>
-    <string name="connecting_via_proxy">Connecting via proxy…</string>
-    <string name="auth_failed">Authentication failed</string>
-    <string name="proxy_url_invalid">Invalid URL format. Enter a valid server URL.</string>
-
-    <!-- Proxy Access - Login Mode -->
-    <string name="auth_mode_login">Login</string>
-    <string name="auth_mode_token">Token</string>
-    <string name="username">Username</string>
-    <string name="username_hint">Music Assistant username</string>
-    <string name="password">Password</string>
-    <string name="password_hint">Music Assistant password</string>
-    <string name="logging_in">Logging in…</string>
-    <string name="login_failed">Login failed: %s</string>
-    <string name="login_invalid_credentials">Invalid username or password</string>
-    <string name="login_server_error">Server error. Please try again.</string>
-
-    <!-- Accessibility - Proxy Access -->
-    <string name="accessibility_proxy_url_input">Proxy server URL input field</string>
-    <string name="accessibility_auth_token_input">Authentication token input field</string>
-    <string name="accessibility_username_input">Username input field</string>
-    <string name="accessibility_password_input">Password input field</string>
-    <string name="accessibility_auth_mode_tabs">Authentication mode selection: Login or Token</string>
-
     <!-- Unified Server -->
-    <string name="unified_server">Server</string>
     <string name="add_server">Add Server</string>
     <string name="edit_server">Edit Server</string>
     <string name="delete_server">Delete Server</string>
     <string name="save_server">Save Server</string>
     <string name="quick_connect">Quick Connect</string>
-    <string name="save_this_server">Save this server?</string>
-    <string name="save_server_prompt">Would you like to save \"%s\" for quick access later?</string>
     <string name="connection_method_local">Local</string>
     <string name="connection_method_remote">Remote</string>
     <string name="connection_method_proxy">Proxy</string>
-    <string name="connection_auto">Auto-select</string>
     <string name="no_connection_available">No connection method available</string>
-    <string name="connecting_via">Connecting via %s…</string>
 
     <!-- Add Server Wizard -->
     <string name="wizard_title_add_server">Add Server</string>
-    <string name="wizard_step_name">Name</string>
-    <string name="wizard_step_local">Local</string>
-    <string name="wizard_step_remote">Remote</string>
-    <string name="wizard_step_proxy">Proxy</string>
 
     <string name="wizard_name_title">Server Name</string>
     <string name="wizard_name_description">Give your server a friendly name</string>
@@ -330,20 +176,9 @@
     <string name="wizard_name_required">Server name is required</string>
     <string name="wizard_default_server_hint">Automatically connect to this server when found on the network</string>
 
-    <string name="wizard_local_title">Local Connection</string>
-    <string name="wizard_local_description">Connect when on the same WiFi network</string>
     <string name="wizard_local_discovered">Discovered on network</string>
-    <string name="wizard_local_no_servers">No servers found on this network</string>
     <string name="wizard_local_manual_entry">Or enter manually</string>
     <string name="wizard_local_address_hint">192.168.1.100:8927</string>
-    <string name="wizard_local_skip">Skip if you don\'t use local connections</string>
-
-    <string name="wizard_remote_description">Connect from anywhere using Music Assistant Remote ID</string>
-    <string name="wizard_remote_skip">Skip if you don\'t use Remote Access</string>
-
-    <string name="wizard_proxy_title">Proxy Connection</string>
-    <string name="wizard_proxy_description">Connect through your authenticated reverse proxy</string>
-    <string name="wizard_proxy_skip">Skip if you don\'t use a proxy</string>
 
     <string name="wizard_at_least_one_method">Configure at least one connection method</string>
     <string name="wizard_back">Back</string>
@@ -352,12 +187,9 @@
     <string name="wizard_save">Save</string>
 
     <!-- Accessibility - Unified Server -->
-    <string name="accessibility_server_card">Server %1$s, %2$s</string>
     <string name="accessibility_connection_local">Local connection available</string>
-    <string name="accessibility_discovered_server">Discovered server, tap to quick connect</string>
 
     <!-- Default Server -->
-    <string name="default_server">Default</string>
     <string name="set_as_default">Set as default</string>
     <string name="remove_default">Remove default</string>
     <string name="accessibility_default_server">Default server, will connect automatically</string>
@@ -366,9 +198,6 @@
     <string name="saved_servers_section">Saved Servers</string>
     <string name="nearby_servers_section">Nearby Servers</string>
     <string name="scanning_ellipsis">Scanning…</string>
-    <string name="no_servers_yet">No servers yet</string>
-    <string name="no_saved_servers_hint">Add a server using the + button</string>
-    <string name="no_nearby_servers_hint">No servers found on this network</string>
 
     <!-- Welcome / Empty State -->
     <string name="welcome_title">Welcome to SendspinDroid</string>
@@ -384,160 +213,41 @@
 
     <!-- Auto-Reconnection -->
     <string name="reconnecting_progress">Reconnecting (%1$d/%2$d)…</string>
-    <string name="reconnecting_via_method">Trying %s…</string>
-    <string name="reconnecting_failed">Connection lost after %d attempts</string>
-    <string name="reconnecting_cancelled">Reconnection cancelled</string>
     <string name="reconnecting_toolbar_subtitle">Reconnecting…</string>
-    <string name="accessibility_reconnecting">Reconnecting to server, attempt %1$d of %2$d</string>
     <string name="reconnecting_attempt">Reconnecting to %1$s (attempt %2$d)</string>
     <string name="reconnecting_with_buffer">Reconnecting to %1$s (attempt %2$d, %3$ds buffer)</string>
     <string name="connecting_to">Connecting to %s</string>
 
     <!-- Music Assistant Integration -->
-    <string name="wizard_is_music_assistant">This server runs Music Assistant</string>
-    <string name="wizard_is_music_assistant_hint">Enable to access library browsing and player management</string>
-    <string name="wizard_step_ma_login">MA Login</string>
     <string name="wizard_ma_login_title">Music Assistant Login</string>
     <string name="wizard_ma_login_description">Enter your Music Assistant credentials to enable library browsing and player management</string>
     <string name="wizard_ma_test_connection">Test Connection</string>
-    <string name="wizard_ma_port">MA Port</string>
-    <string name="wizard_ma_port_hint">Default: 8095</string>
-    <string name="wizard_ma_connection_success">Connection successful</string>
-    <string name="wizard_ma_connection_failed">Connection failed: %s</string>
-    <string name="wizard_ma_testing">Testing connection…</string>
-    <string name="wizard_ma_requires_local_or_proxy">Music Assistant requires Local or Proxy connection</string>
-    <string name="wizard_ma_skip_no_endpoint">No MA endpoint available - configure Local or Proxy first</string>
-
-    <!-- New Wizard Flow - Welcome -->
-    <string name="wizard_welcome_title">Welcome to SendSpin</string>
-    <string name="wizard_welcome_description">Connect to your SendSpin or Music Assistant server for synchronized audio playback</string>
-    <string name="wizard_setup_server_title">Set up my server</string>
-    <string name="wizard_setup_server_subtitle">Configure a server with local and remote access</string>
-    <string name="wizard_find_servers_title">Find other servers</string>
-    <string name="wizard_find_servers_subtitle">Discover and connect to servers on your network</string>
-    <string name="wizard_setup_server_accessibility">Set up a new server with full configuration</string>
-    <string name="wizard_find_servers_accessibility">Find and connect to servers on the network</string>
 
     <!-- New Wizard Flow - Find Server -->
     <string name="wizard_find_server_title">Find Your Server</string>
     <string name="wizard_find_server_description">Select a discovered server or enter the address manually</string>
-    <string name="wizard_find_server_discovered">Discovered Servers</string>
-    <string name="wizard_find_server_manual">Manual Entry</string>
-    <string name="wizard_find_server_testing">Testing connection...</string>
-    <string name="wizard_find_server_success">Connected successfully</string>
-    <string name="wizard_find_server_failed">Connection failed: %s</string>
-    <string name="wizard_find_server_retry">Try Again</string>
-    <string name="wizard_find_server_skip">Skip local connection</string>
-    <string name="wizard_find_server_skip_hint">You can still connect via Remote ID or Proxy</string>
-
-    <!-- New Wizard Flow - Remote Choice -->
-    <string name="wizard_remote_choice_title">Remote Access</string>
-    <string name="wizard_remote_choice_description">Would you like to add remote access for when you\'re away from home?</string>
-    <string name="wizard_remote_choice_none">Local Connection</string>
-    <string name="wizard_remote_choice_none_desc">Connect directly when on the same network</string>
-    <string name="wizard_remote_choice_remote_id">Remote Access ID</string>
-    <string name="wizard_remote_choice_remote_id_desc">Use Music Assistant Remote Access service</string>
-    <string name="wizard_remote_choice_proxy">Reverse Proxy</string>
-    <string name="wizard_remote_choice_proxy_desc">Connect through your own proxy server</string>
-
-    <!-- New Wizard Flow - Remote Only Warning -->
-    <string name="wizard_remote_only_title">Remote Only Mode</string>
-    <string name="wizard_remote_only_description">Without a local connection, some features may be limited:</string>
-    <string name="wizard_remote_only_warning_1">Higher latency for audio sync</string>
-    <string name="wizard_remote_only_warning_2">You\'ll be prompted to log in after connecting</string>
-    <string name="wizard_remote_only_warning_3">Connection depends on remote service availability</string>
-    <string name="wizard_remote_only_continue">Continue</string>
-    <string name="wizard_remote_only_go_back">Go Back</string>
 
     <!-- New Wizard Flow - Save -->
     <string name="wizard_save_title">Save Server</string>
     <string name="wizard_save_description">Review and save your server configuration</string>
-    <string name="wizard_save_name_label">Server Name</string>
-    <string name="wizard_save_name_hint">Give your server a friendly name</string>
-    <string name="wizard_save_connections">Connection Methods</string>
-    <string name="wizard_save_ma_status">Music Assistant</string>
-    <string name="wizard_save_ma_authenticated">Authenticated</string>
-    <string name="wizard_save_ma_not_configured">Not configured</string>
 
     <!-- New Wizard Flow - Testing -->
     <string name="wizard_testing_title">Testing Connection</string>
     <string name="wizard_testing_local">Connecting to local server...</string>
-    <string name="wizard_testing_proxy">Connecting via proxy...</string>
-    <string name="wizard_testing_try_different">Try Different Address</string>
-    <string name="wizard_testing_skip_local">Skip Local</string>
-
-    <!-- Accessibility - New Wizard -->
-    <string name="accessibility_wizard_discovered_server">Discovered server: %1$s at %2$s</string>
-    <string name="accessibility_wizard_connection_success">Connection test successful</string>
-    <string name="accessibility_wizard_connection_failed">Connection test failed</string>
-    <string name="accessibility_wizard_remote_choice">Remote access method selection</string>
 
     <!-- Accessibility - Music Assistant -->
-    <string name="accessibility_music_assistant_checkbox">Enable Music Assistant features for this server</string>
     <string name="accessibility_ma_username_input">Music Assistant username input field</string>
     <string name="accessibility_ma_password_input">Music Assistant password input field</string>
-    <string name="accessibility_ma_port_input">Music Assistant API port input field</string>
-    <string name="accessibility_ma_test_connection">Test Music Assistant connection</string>
 
     <!-- Favorite Track -->
-    <string name="favorite_track">Favorite</string>
     <string name="accessibility_favorite_track">Add current track to favorites</string>
     <string name="favorite_added">Added to favorites</string>
     <string name="favorite_error">Could not add to favorites</string>
     <string name="favorite_no_track">No track currently playing</string>
 
-    <!-- Playlists -->
-    <string name="playlist_deleted">Playlist deleted</string>
-    <string name="playlist_created">Playlist created</string>
-    <string name="track_added_to_playlist">Added to %s</string>
-    <string name="track_add_failed">Failed to add track</string>
-    <string name="track_removed">Track removed</string>
-
-    <!-- Bulk add to playlist -->
-    <string name="adding_to_playlist">Adding to %s...</string>
-    <string name="added_album_to_playlist">Added %1$s to %2$s</string>
-    <string name="added_tracks_to_playlist">Added %1$d tracks to %2$s</string>
-    <string name="failed_to_add_to_playlist">Failed to add to playlist</string>
-    <string name="fetching_tracks">Fetching tracks...</string>
-
-    <!-- Navigation Placeholders -->
-    <string name="placeholder_coming_soon">Coming soon</string>
-    <string name="mini_player_tap_to_expand">Tap to expand player</string>
-
-    <!-- Home Screen -->
-    <string name="home_loading">Loading...</string>
-    <string name="home_error_load_failed">Failed to load content</string>
-    <string name="home_empty_section">Nothing here yet</string>
-
-    <!-- Library Browser -->
-    <string name="library_loading_more">Loading more...</string>
-    <string name="library_error">Failed to load library</string>
-
-    <!-- Search Screen -->
-    <string name="search_no_results">No results found</string>
-    <string name="search_error">Search failed</string>
-
-    <!-- Accessibility - Search -->
-    <string name="accessibility_search_input">Search input field</string>
-    <string name="accessibility_search_clear">Clear search</string>
-    <string name="accessibility_filter_chip">Filter by %s</string>
-
     <!-- Wizard - Additional Strings -->
-    <string name="wizard_welcome_subtitle">Connect to your SendSpin server for synchronized audio</string>
-    <string name="wizard_setup_my_server">Set Up My Server</string>
-    <string name="wizard_setup_my_server_desc">Configure local and remote access for your server</string>
-    <string name="wizard_find_other_servers">Find Other Servers</string>
-    <string name="wizard_find_other_servers_desc">Discover and quick-connect to servers on your network</string>
     <string name="wizard_test_success">Connection successful</string>
     <string name="wizard_test_failed">Connection failed</string>
-    <string name="wizard_remote_id_option">Remote Access ID</string>
-    <string name="wizard_remote_id_option_desc">Connect via built-in Music Assistant Remote Access service configured in Settings -> Remote Access</string>
-    <string name="wizard_proxy_option">Reverse Proxy</string>
-    <string name="wizard_proxy_option_desc">Connect through your authenticated proxy server</string>
-    <string name="wizard_local_only_option">Local Only</string>
-    <string name="wizard_local_only_option_desc">Only connect when on the same network or when using VPN</string>
-    <string name="wizard_music_assistant_checkbox">Music Assistant Server</string>
-    <string name="wizard_music_assistant_checkbox_desc">Enable to access library browsing and remote access features</string>
     <string name="ma_username">Username</string>
     <string name="ma_password">Password</string>
     <string name="ma_port">API Port</string>
@@ -548,92 +258,10 @@
     <string name="ma_login_dialog_logging_in">Logging in\u2026</string>
     <string name="ma_login_dialog_failed">Login failed: %s</string>
 
-    <!-- Queue Management -->
-    <string name="queue_save_adding_tracks">Adding %1$d tracks\u2026</string>
-    <string name="queue_save_creating">Creating playlist\u2026</string>
-    <string name="queue_save_removing">Removing existing tracks\u2026</string>
-    <string name="queue_save_success">Saved %1$d tracks to %2$s</string>
-    <string name="queue_cleared">Queue cleared</string>
-    <string name="queue_clear_failed">Failed to clear queue</string>
-    <string name="queue_item_removed">Removed from queue</string>
-    <string name="queue_item_remove_failed">Failed to remove item</string>
-    <string name="queue_shuffle_on">Shuffle on</string>
-    <string name="queue_shuffle_off">Shuffle off</string>
-    <string name="queue_repeat_off">Repeat off</string>
-    <string name="queue_repeat_all">Repeat all</string>
-    <string name="queue_repeat_one">Repeat one</string>
-    <string name="queue_view">Queue</string>
-    <string name="added_to_queue">Added to queue</string>
-    <string name="play_next_added">Playing next</string>
-
-    <!-- Accessibility - Queue -->
-    <string name="accessibility_queue_button">View queue</string>
-    <string name="accessibility_queue_item">%1$s by %2$s</string>
-    <string name="accessibility_queue_current_track">Currently playing: %1$s by %2$s</string>
-    <string name="accessibility_queue_drag">Drag to reorder</string>
-
     <!-- Common actions (shared across dialogs/buttons) -->
-    <string name="action_delete">Delete</string>
     <string name="action_menu">Menu</string>
-    <string name="action_up">Up</string>
-    <string name="action_clear">Clear</string>
     <string name="action_yes">Yes</string>
     <string name="action_no">No</string>
-    <string name="unit_ms">ms</string>
-
-    <!-- Accessibility - common -->
-    <string name="accessibility_more_options">More options</string>
-    <string name="accessibility_more_options_for">More options for %s</string>
-    <string name="accessibility_clear_search">Clear search</string>
-    <string name="accessibility_toggle_shuffle">Toggle shuffle</string>
-    <string name="accessibility_cycle_repeat">Cycle repeat mode</string>
-    <string name="accessibility_played">Played</string>
-    <string name="accessibility_in_progress">In progress</string>
-    <string name="accessibility_play">Play</string>
-
-    <!-- Delete playlist dialog -->
-    <string name="delete_playlist_title">Delete Playlist</string>
-
-    <!-- Track count plurals -->
-
-    <!-- Wizard - Client Type Step -->
-    <string name="wizard_client_type_question">What kind of server are we connecting to?</string>
-    <string name="wizard_client_sendspin">Sendspin</string>
-    <string name="wizard_client_sendspin_desc">A spec compliant Sendspin player that can stream music from any Sendspin server. Supports playback, controls and album art on a local network connection.</string>
-    <string name="wizard_client_music_assistant">Music Assistant</string>
-    <string name="wizard_client_music_assistant_desc">Connect to Music Assistant as a client while also creating a Sendspin player in Music Assistant. Connect locally or remotely through Music Assistant remote connection or reverse proxy. All of Sendspin\u2019s features plus Music Assistant native library browsing and controls.</string>
-
-    <!-- Wizard - Network Question Step -->
-    <string name="wizard_network_question_title">Where\u2019s Your Server?</string>
-    <string name="wizard_network_question_subtitle">Are you on the same WiFi network as your Music Assistant server right now?</string>
-    <string name="wizard_network_yes_title">Yes, same network</string>
-    <string name="wizard_network_yes_desc">I\u2019m on the same WiFi or wired network. Let\u2019s find the server automatically.</string>
-    <string name="wizard_network_no_title">No, I\u2019m remote</string>
-    <string name="wizard_network_no_desc">I\u2019m away from home or on mobile data. I\u2019ll connect using a Remote ID or proxy URL.</string>
-
-    <!-- Wizard - Remote Question Step -->
-    <string name="wizard_remote_question_title">Remote Access</string>
-    <string name="wizard_remote_question_subtitle">Want to access your server when you\u2019re away from home?</string>
-    <string name="wizard_remote_yes_title">Yes, set up remote access</string>
-    <string name="wizard_remote_yes_desc">Control your music when you\u2019re not on your home network.</string>
-    <string name="wizard_remote_no_title">No, local only</string>
-    <string name="wizard_remote_no_desc">Only use this server when on the same network.</string>
-
-    <!-- Wizard - Remote Setup Step -->
-    <string name="wizard_connect_remotely">Connect Remotely</string>
-    <string name="wizard_connect_remotely_desc">Enter your Music Assistant Remote ID or reverse proxy details.</string>
-    <string name="wizard_tab_remote_id">Remote ID</string>
-    <string name="wizard_tab_reverse_proxy">Reverse Proxy</string>
-
-    <!-- Wizard - Finish Step -->
-    <string name="wizard_connection_summary">Connection Summary</string>
-
-    <!-- Podcast detail -->
-    <string name="podcast_no_episodes">No episodes found</string>
-    <string name="podcast_sort_newest">Newest</string>
-    <string name="podcast_sort_oldest">Oldest</string>
-    <string name="podcast_sort_name">Name</string>
-    <string name="podcast_sort_duration">Duration</string>
 
     <!-- Stats labels - additional -->
     <string name="stats_server">Server</string>
@@ -647,7 +275,6 @@
     <string name="stats_watchdog_armed">Armed</string>
     <string name="stats_watchdog_idle">Idle</string>
     <string name="stats_last_disconnect">Last Disconnect</string>
-    <string name="stats_stability">Filter Stability</string>
     <string name="stats_convergence_time">Convergence Time</string>
     <string name="stats_type">Type</string>
     <string name="stats_quality">Quality</string>
@@ -685,20 +312,6 @@
     <string name="stats_corrections">Corrections</string>
     <string name="stats_reanchors">Reanchors</string>
 
-    <!-- Toast / error messages - playback -->
-    <string name="error_player_unavailable">Player is not available. Try reconnecting to the server.</string>
-
-    <!-- Save queue operations -->
-    <string name="save_queue_adding_tracks">Adding %d tracks\u2026</string>
-    <string name="save_queue_loading_existing">Loading existing tracks\u2026</string>
-    <string name="save_queue_removing_existing">Removing existing tracks\u2026</string>
-    <string name="save_queue_creating_playlist">Creating playlist\u2026</string>
-    <string name="save_queue_saved">Saved %1$d tracks to %2$s</string>
-    <string name="save_queue_failed_add">Failed to add tracks to playlist</string>
-    <string name="save_queue_failed_load">Failed to load existing tracks</string>
-    <string name="save_queue_failed_remove">Failed to remove existing tracks</string>
-    <string name="save_queue_failed_create">Failed to create playlist</string>
-    <string name="save_queue_failed_load_playlists">Failed to load playlists</string>
     <!-- Admission notice: a connected session that cannot carry playback -->
     <string name="admission_awaiting_approval_title">Waiting for approval</string>
     <string name="admission_awaiting_approval_body">%1$s has not approved this player yet. Approve it on the server, or try starting playback on this player.</string>

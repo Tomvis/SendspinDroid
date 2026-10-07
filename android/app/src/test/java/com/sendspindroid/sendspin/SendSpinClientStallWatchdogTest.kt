@@ -34,15 +34,24 @@ class SendSpinStallWatchdogTest {
     private class FakeTransport : SendSpinTransport {
         var closeCalled = false
         var closeCode: Int = -1
-        override val state = TransportState.Connected
-        override val isConnected = true
+        var closedReports = 0
+        private var listener: SendSpinTransport.Listener? = null
+        override var state = TransportState.Connected
         override fun connect() {}
         override fun send(text: String) = true
         override fun send(bytes: ByteArray) = true
-        override fun setListener(listener: SendSpinTransport.Listener?) {}
+        override fun setListener(listener: SendSpinTransport.Listener?) {
+            this.listener = listener
+        }
+        // As the real transport: a local close of a live connection ends it
+        // and reports onClosed, once.
         override fun close(code: Int, reason: String) {
             closeCalled = true
             closeCode = code
+            if (state != TransportState.Connected) return
+            state = TransportState.Closed
+            closedReports++
+            listener?.onClosed(code, reason)
         }
         override fun destroy() {}
     }
@@ -148,6 +157,22 @@ class SendSpinStallWatchdogTest {
 
         assertTrue("Watchdog should have called transport.close()", fakeTransport.closeCalled)
         assertNotEquals(1000, fakeTransport.closeCode)  // non-1000 triggers reconnect
+    }
+
+    @Test
+    fun `a stalled transport is closed once, not on every watchdog tick`() {
+        val lastByteField = SendSpin::class.java.getDeclaredField("lastByteReceivedAtMs")
+        lastByteField.isAccessible = true
+        (lastByteField.get(client) as AtomicLong).set(System.currentTimeMillis() - 60_000L)
+
+        val checkStall = SendSpin::class.java.getDeclaredMethod("checkStall")
+        checkStall.isAccessible = true
+        checkStall.invoke(client)
+        fakeTransport.closeCalled = false
+        checkStall.invoke(client)  // the next tick sees a closed transport
+
+        assertFalse("a closed transport must not be closed again", fakeTransport.closeCalled)
+        assertEquals(1, fakeTransport.closedReports)
     }
 
     @Test

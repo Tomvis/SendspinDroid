@@ -16,9 +16,9 @@ import org.junit.Test
  * Tests for the decoder setup logic extracted from PlaybackService.onStreamStart.
  *
  * Verifies:
- * - H-10: decoderReady is NOT set to true when both primary and fallback decoders fail
+ * - H-10: decoderReady is NOT set to true when the decoder fails
  * - H-10: decoderReady IS set to true only when a decoder is successfully configured
- * - H-10: Fallback PCM decoder is explicitly configured (not left unconfigured)
+ * - A failed decoder is not replaced by a PCM pass-through
  */
 class DecoderSetupTest {
 
@@ -64,15 +64,8 @@ class DecoderSetupTest {
             audioDecoder?.configure(sampleRate, channels, bitDepth, codecHeader)
             decoderReady = true
         } catch (e: Exception) {
-            try {
-                val fallback = AudioDecoderFactory.create("pcm")
-                fallback.configure(sampleRate, channels, bitDepth)
-                audioDecoder = fallback
-                decoderReady = true
-            } catch (fallbackEx: Exception) {
-                audioDecoder = null
-                // decoderReady stays false
-            }
+            audioDecoder = null
+            // decoderReady stays false
         }
     }
 
@@ -90,12 +83,11 @@ class DecoderSetupTest {
     }
 
     // =========================================================================
-    // H-10: Primary decoder configure() throws -> fallback configured
+    // Decoder configure() throws -> no decoder, and no PCM pass-through
     // =========================================================================
 
     @Test
-    fun setupDecoder_primaryThrows_fallbackConfigured() {
-        // Mock the factory to return a decoder that throws on configure
+    fun setupDecoder_configureThrows_noDecoderAndNoPcmFallback() {
         val failingDecoder = object : AudioDecoder {
             override val isConfigured = false
             override fun configure(sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
@@ -107,42 +99,14 @@ class DecoderSetupTest {
         }
 
         mockkObject(AudioDecoderFactory)
-        // First call (for "flac") returns the failing decoder
-        // Second call (for "pcm") returns a real PCM decoder
         every { AudioDecoderFactory.create("flac") } returns failingDecoder
+        // A real PCM decoder is on offer; it must not be taken.
         every { AudioDecoderFactory.create("pcm") } answers { callOriginal() }
 
         setupDecoder("flac")
 
-        assertTrue("decoderReady should be true (fallback succeeded)", decoderReady)
-        assertNotNull("audioDecoder should be the fallback", audioDecoder)
-        assertTrue("fallback decoder should be configured", audioDecoder!!.isConfigured)
-    }
-
-    // =========================================================================
-    // H-10: Both primary and fallback fail -> decoderReady stays false
-    // =========================================================================
-
-    @Test
-    fun setupDecoder_bothFail_decoderReadyFalse() {
-        val failingDecoder = object : AudioDecoder {
-            override val isConfigured = false
-            override fun configure(sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
-                throw RuntimeException("MediaCodec init failed")
-            }
-            override fun decode(compressedData: ByteArray) = compressedData
-            override fun flush() {}
-            override fun release() {}
-        }
-
-        mockkObject(AudioDecoderFactory)
-        // Both primary and fallback return failing decoders
-        every { AudioDecoderFactory.create(any()) } returns failingDecoder
-
-        setupDecoder("flac")
-
-        assertFalse("decoderReady must be false when both decoders fail", decoderReady)
-        assertNull("audioDecoder must be null when both decoders fail", audioDecoder)
+        assertFalse("decoderReady must be false when the decoder fails", decoderReady)
+        assertNull("audioDecoder must be null when the decoder fails", audioDecoder)
     }
 
     // =========================================================================
@@ -175,32 +139,5 @@ class DecoderSetupTest {
         // which means onAudioChunk would pass raw compressed data as PCM (loud noise)
         assertFalse("decoderReady must NOT be true when all decoders fail", decoderReady)
         assertNull("audioDecoder must be null, not a broken decoder", audioDecoder)
-    }
-
-    // =========================================================================
-    // H-10: Fallback PCM decoder IS configured (not just created)
-    // =========================================================================
-
-    @Test
-    fun setupDecoder_fallback_isExplicitlyConfigured() {
-        // The old code created a PcmDecoder fallback but never called configure() on it.
-        // While PcmDecoder.decode() is a pass-through regardless, isConfigured should be true.
-        val failingDecoder = object : AudioDecoder {
-            override val isConfigured = false
-            override fun configure(sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
-                throw RuntimeException("primary failure")
-            }
-            override fun decode(compressedData: ByteArray) = compressedData
-            override fun flush() {}
-            override fun release() {}
-        }
-
-        mockkObject(AudioDecoderFactory)
-        every { AudioDecoderFactory.create("opus") } returns failingDecoder
-        every { AudioDecoderFactory.create("pcm") } answers { callOriginal() }
-
-        setupDecoder("opus")
-
-        assertTrue("Fallback decoder should be explicitly configured", audioDecoder!!.isConfigured)
     }
 }

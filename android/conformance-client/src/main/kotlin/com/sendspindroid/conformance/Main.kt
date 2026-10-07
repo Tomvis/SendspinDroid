@@ -300,7 +300,7 @@ fun main(argv: Array<String>) {
                         SendSpinProtocol.MessageType.SERVER_TIME -> {
                             val now = System.nanoTime() / 1000
                             MessageParser.parseServerTime(payload, now)?.let { m ->
-                                timeFilter.addMeasurement(m.offset, m.rtt / 2, m.clientReceived, m.rtt)
+                                timeFilter.addMeasurement(m.offset, m.rtt / 2, m.clientReceived)
                             }
                             if (timeRequests < 5) sendTime()
                         }

@@ -27,8 +27,17 @@ open class InMemoryTrustStore(
      * The persistence layer subclasses rather than wraps: a wrapper would have
      * to redeclare all seven members just to add a write, and the one that got
      * forgotten would lose records silently.
+     *
+     * @return false if the change could not be persisted.
      */
-    protected open fun onChanged() {}
+    protected open fun onChanged(): Boolean = true
+
+    /**
+     * [onChanged], with a write that throws counted as a write that failed.
+     * An encrypted store can throw from the write itself; letting that escape
+     * would leave this list changed and the stored one not.
+     */
+    private fun persist(): Boolean = runCatching { onChanged() }.getOrDefault(false)
 
     override fun listRecords(): List<PskRecord> = records.toList()
 
@@ -44,15 +53,22 @@ open class InMemoryTrustStore(
         val record = PskRecord(pskId, psk, serverId, used = false)
         // "The client MUST persist the new record, replacing any record it
         // already holds for the server."
+        val before = records.toList()
         if (serverId != null) records.removeAll { it.serverId == serverId }
         records += record
-        onChanged()
+        if (!persist()) {
+            // Not stored, so not paired: put back what was held, or this
+            // process would authenticate with a record the next one has lost.
+            records.clear()
+            records += before
+            return TrustStore.AddRecordResult.StorageFailed
+        }
         return TrustStore.AddRecordResult.Ok(record)
     }
 
     override fun removeRecord(pskId: String): Boolean {
         val removed = records.removeAll { it.pskId == pskId }
-        if (removed) onChanged()
+        if (removed) persist()
         return removed
     }
 
@@ -61,7 +77,7 @@ open class InMemoryTrustStore(
         if (index < 0) return
         if (records[index].used) return  // idempotent; no needless write
         records[index] = records[index].withUsed(true)
-        onChanged()
+        persist()
     }
 
     override fun candidates(): List<Psk> =

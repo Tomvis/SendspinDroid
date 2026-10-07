@@ -145,6 +145,43 @@ class InMemoryTrustStoreTest {
     }
 
     @Test
+    fun aRecordThatCannotBePersistedIsReportedAndLeavesTheStoreUnchanged() {
+        var persists = true
+        val store = object : InMemoryTrustStore() {
+            override fun onChanged() = persists
+        }
+        store.addRecord(psk(1), "server-a")
+
+        persists = false
+        // Same server: a success would replace the first record.
+        val result = store.addRecord(psk(2), "server-a")
+
+        assertTrue("was $result", result is TrustStore.AddRecordResult.StorageFailed)
+        assertEquals(listOf(PskId.derive(psk(1))), store.listRecords().map { it.pskId })
+    }
+
+    @Test
+    fun aWriteThatThrowsIsAFailedWriteNotACrash() {
+        var throws = false
+        val store = object : InMemoryTrustStore() {
+            override fun onChanged(): Boolean {
+                if (throws) throw IllegalStateException("keystore unavailable")
+                return true
+            }
+        }
+        store.addRecord(psk(1), "server-a")
+
+        throws = true
+        val result = store.addRecord(psk(2), "server-a")
+
+        assertTrue("was $result", result is TrustStore.AddRecordResult.StorageFailed)
+        assertEquals(listOf(PskId.derive(psk(1))), store.listRecords().map { it.pskId })
+        // Removal must still take effect in this process and must not throw.
+        assertTrue(store.removeRecord(PskId.derive(psk(1))))
+        assertTrue(store.listRecords().isEmpty())
+    }
+
+    @Test
     fun candidatesAreSelectableByCategory() {
         val store = InMemoryTrustStore()
         store.addRecord(psk(1), "server-a")

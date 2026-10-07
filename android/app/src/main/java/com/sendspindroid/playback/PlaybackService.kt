@@ -97,6 +97,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.roundToInt
 
 /**
  * Background playback service for SendSpinDroid.
@@ -1128,8 +1129,7 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Decode a single audio chunk. Runs on [decodeDispatcher]; [audioDecoder]
      * is read from the single-owner thread so no TOCTOU local-ref capture is
-     * needed. Chunks for the "pcm" codec pass through when no decoder is
-     * installed (matches the previous onAudioChunk behavior).
+     * needed.
      */
     private suspend fun handleDecodeChunk(t: DecodeTask.Chunk) {
         // Drop chunks belonging to a stream that has since ended or been
@@ -1139,13 +1139,11 @@ class PlaybackService : MediaLibraryService() {
         // stall is what delayed decoder reconfiguration in issue #114.
         if (t.generation != decodeGeneration) return
 
-        val decoder = audioDecoder
+        // No decoder means the stream's codec could not be set up: drop the
+        // chunk. PCM has a decoder of its own, so nothing passes through raw.
+        val decoder = audioDecoder ?: return
         val pcmData: ByteArray = try {
-            when {
-                decoder != null -> decoder.decode(t.audioData)
-                currentCodec == "pcm" -> t.audioData
-                else -> return // compressed codec with no decoder -- drop chunk
-            }
+            decoder.decode(t.audioData)
         } catch (e: Exception) {
             Log.e(TAG, "Decode error, dropping chunk", e)
             return
@@ -1163,9 +1161,9 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Release any prior decoder and create+configure a new one for the new
      * stream. Runs on [decodeDispatcher] so we're the single owner of
-     * [audioDecoder]. Falls back to a PCM pass-through decoder if the
-     * requested codec can't be created, matching the prior main-thread
-     * behavior.
+     * [audioDecoder]. If the decoder cannot be created or configured there is
+     * no decoder and the stream's chunks are dropped: silence, never the
+     * compressed bytes played as PCM.
      */
     private suspend fun handleDecodeStartStream(t: DecodeTask.StartStream) {
         Log.d(
@@ -1185,20 +1183,9 @@ class PlaybackService : MediaLibraryService() {
             Log.i(TAG, "Audio decoder created: ${t.codec}")
             decoderReady = true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create decoder for ${t.codec}, falling back to PCM", e)
-            try {
-                val fallback = AudioDecoderFactory.create("pcm")
-                fallback.configure(t.sampleRate, t.channels, t.bitDepth)
-                audioDecoder = fallback
-                Log.i(TAG, "PCM fallback decoder configured")
-                decoderReady = true
-            } catch (fallbackEx: Exception) {
-                Log.e(TAG, "PCM fallback decoder also failed", fallbackEx)
-                audioDecoder = null
-                // decoderReady stays false -- subsequent chunks will be
-                // rejected at the WS-IO fast-path gate.
-                decoderReady = false
-            }
+            Log.e(TAG, "No decoder for ${t.codec}; dropping this stream's audio", e)
+            // Subsequent chunks are rejected at the WS-IO fast-path gate.
+            decoderReady = false
         }
 
         if (t.keepBuffered) switchOutputFormat(t)
@@ -1497,11 +1484,14 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.d(TAG, "Metadata update: $title / $artist / $album")
 
+                // server/state carries the role's full state, so "" here
+                // means the track has no such field. It is passed on as "",
+                // which withMetadata clears; null would keep the last track's.
                 _playbackState.value = _playbackState.value.withMetadata(
-                    title = title.ifEmpty { null },
-                    artist = artist.ifEmpty { null },
-                    album = album.ifEmpty { null },
-                    artworkUrl = artworkUrl.ifEmpty { null },
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    artworkUrl = artworkUrl,
                     durationMs = durationMs,
                     positionMs = positionMs,
                     playbackSpeed = playbackSpeed
@@ -1734,9 +1724,7 @@ class PlaybackService : MediaLibraryService() {
                 Log.i(TAG, "[cmd-trace] T3 onVolumeChanged.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name} vol=$volume")
                 // Convert from 0-100 to 0.0-1.0 and apply to device volume
                 val volumeFloat = volume / 100f
-                setVolume(volumeFloat)  // Sets device STREAM_MUSIC volume
-                // Update playback state with new volume
-                _playbackState.value = _playbackState.value.copy(volume = volume)
+                setVolume(volumeFloat)  // Sets device STREAM_MUSIC volume and the cached volume
                 // Broadcast all state including volume to UI controllers
                 broadcastSessionExtras()
             }
@@ -1829,6 +1817,9 @@ class PlaybackService : MediaLibraryService() {
             durationMs = update.durationMs ?: current.durationMs,
             positionMs = current.positionMs,
             playbackSpeed = current.playbackSpeed
+        ).copy(
+            // withMetadata stamps the position as received now, and none was.
+            positionUpdatedAt = current.positionUpdatedAt
         )
 
         sendSpinPlayer?.updateMediaItem(
@@ -2240,12 +2231,16 @@ class PlaybackService : MediaLibraryService() {
     fun setVolume(volume: Float) {
         val am = audioManager ?: return
         val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val newVolume = (volume * maxVolume).toInt().coerceIn(0, maxVolume)
+        val newVolume = (volume * maxVolume).roundToInt().coerceIn(0, maxVolume)
 
         Log.d(TAG, "Setting device volume: $newVolume/$maxVolume (normalized: $volume)")
 
         // Update tracking to prevent echo in observer
         lastKnownVolume = newVolume
+
+        // Every session-extras broadcast resends this value to the activity, so
+        // it has to follow each volume set here or the slider snaps back to it.
+        _playbackState.value = _playbackState.value.copy(volume = (volume * 100).roundToInt())
 
         // Set device volume (no flags = silent, no UI popup)
         am.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
@@ -2386,8 +2381,7 @@ class PlaybackService : MediaLibraryService() {
             serverTimelineCursorUs = audioStats.serverTimelineCursorUs,
             scheduledStartLoopTimeUs = audioStats.scheduledStartLoopTimeUs,
             firstServerTimestampUs = audioStats.firstServerTimestampUs,
-            convergenceTimeMs = timeFilter.convergenceTimeMillis,
-            stabilityScore = timeFilter.stability
+            convergenceTimeMs = timeFilter.convergenceTimeMillis
         )
 
         AppLog.Audio.d("Stats: " +
@@ -3150,7 +3144,6 @@ class PlaybackService : MediaLibraryService() {
             bundle.putInt("reconnect_attempts", client.getReconnectAttempts())
             bundle.putBoolean("clock_frozen", timeFilter.isFrozen)
             bundle.putDouble("static_delay_ms", timeFilter.staticDelayMs)
-            bundle.putDouble("user_sync_offset_ms", timeFilter.userSyncOffsetMs)
 
             // Connection health telemetry (issue #128). Keys left absent when
             // the underlying value is null so StatsViewModel can distinguish
@@ -3160,7 +3153,6 @@ class PlaybackService : MediaLibraryService() {
             bundle.putInt("reconnect_attempts_total", client.getReconnectAttemptsTotal())
             client.getLastDisconnectCode()?.let { bundle.putInt("last_disconnect_code", it) }
             client.getLastDisconnectReason()?.let { bundle.putString("last_disconnect_reason", it) }
-            bundle.putDouble("time_filter_stability", timeFilter.stability)
             bundle.putLong("time_filter_convergence_ms", timeFilter.convergenceTimeMillis)
         }
 

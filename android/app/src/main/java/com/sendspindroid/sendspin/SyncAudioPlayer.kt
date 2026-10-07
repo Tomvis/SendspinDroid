@@ -292,8 +292,8 @@ class SyncAudioPlayer(
         private const val BUFFER_SIZE_MULTIPLIER = 4  // Multiplier for minimum buffer size
 
         // Sync error Kalman filter parameters
-        // AudioTimestamp jitter is about +/-0.65ms peak; the process noise lets
-        // the estimate follow time-filter updates within about a second.
+        // AudioTimestamp jitter is about +/-0.65ms peak; the process noise gives
+        // the estimate a time constant of about a second.
         private const val SYNC_ERROR_MEASUREMENT_NOISE_US = 400L
         private const val SYNC_ERROR_PROCESS_STD_DEV = 0.085
 
