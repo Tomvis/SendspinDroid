@@ -833,8 +833,15 @@ abstract class SendSpinProtocolHandler(
      * Send an application protocol message over the encrypted channel.
      */
     protected fun sendProtocolMessage(text: String) {
+        // A message belongs to the channel that was up when it was written.
+        // The send below runs later; if that connection has ended by then and
+        // the next one's channel is installed, the message must not go out on
+        // it - it would reach the new connection before its activation.
+        val channel = wireCodec
         // encodeJson takes the send mutex, so this has to be in a coroutine.
-        getCoroutineScope().launch { sendProtocolMessageAwaiting(text) }
+        getCoroutineScope().launch {
+            if (wireCodec === channel) sendProtocolMessageAwaiting(text)
+        }
     }
 
     /**
