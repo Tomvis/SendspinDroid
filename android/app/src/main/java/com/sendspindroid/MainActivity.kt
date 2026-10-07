@@ -1300,6 +1300,19 @@ class MainActivity : AppCompatActivity() {
             val state = controller.playbackState
 
             runOnUiThread {
+                // PlayerStateListener only hears changes. An Activity recreated
+                // over a service that is already playing gets none, and its new
+                // ViewModel would sit at IDLE with every control disabled.
+                viewModel.updatePlaybackState(
+                    isPlaying,
+                    when (state) {
+                        Player.STATE_BUFFERING -> PlaybackState.BUFFERING
+                        Player.STATE_READY -> PlaybackState.READY
+                        Player.STATE_ENDED -> PlaybackState.ENDED
+                        else -> PlaybackState.IDLE
+                    }
+                )
+
                 // Check if we're actively connected (playing or ready to play)
                 val isConnected = isPlaying || state == Player.STATE_READY || state == Player.STATE_BUFFERING
 
