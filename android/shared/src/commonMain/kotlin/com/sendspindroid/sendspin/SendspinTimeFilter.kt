@@ -610,22 +610,29 @@ class SendspinTimeFilter {
     }
 
     /**
-     * Convert a server timestamp into the client-clock domain. Includes
-     * the user/server sync offset and the spec's output delay, so the result
-     * is the instant on the local monotonic clock at which the audio sink
-     * should render the corresponding samples.
+     * The spec's `compute_client_time`: the instant on the local monotonic
+     * clock at which the server clock reads [serverTimeMicros]. Clock mapping
+     * only, with no playout terms, so it is the one to measure with.
      *
      * Solves `server = client + offset + drift * (client - lastUpdate)` for
-     * the client time, as the reference's `compute_client_time` does.
+     * the client time, as the reference does.
      *
      * Lock-free; safe to call from the audio thread.
      */
-    fun serverToClient(serverTimeMicros: Long): Long {
+    fun computeClientTime(serverTimeMicros: Long): Long {
         val s = snapshot
         val drift = s.effectiveDrift
-        val clientTime = (serverTimeMicros - s.offset + drift * s.lastUpdateTime) / (1.0 + drift)
-        return clientTime.roundToLong() + userSyncOffsetMicros - outputDelayMicros
+        return ((serverTimeMicros - s.offset + drift * s.lastUpdateTime) / (1.0 + drift)).roundToLong()
     }
+
+    /**
+     * When to play audio stamped [serverTimeMicros]: [computeClientTime] plus
+     * the user/server sync offset and minus the spec's output delay, so the
+     * result is the local instant at which the audio sink should render the
+     * corresponding samples.
+     */
+    fun serverToClient(serverTimeMicros: Long): Long =
+        computeClientTime(serverTimeMicros) + userSyncOffsetMicros - outputDelayMicros
 
     /**
      * Inverse of [serverToClient]: the reference's `compute_server_time`

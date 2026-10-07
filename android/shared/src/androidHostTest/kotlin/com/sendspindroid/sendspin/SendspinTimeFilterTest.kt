@@ -215,6 +215,19 @@ class SendspinTimeFilterTest {
     }
 
     @Test
+    fun computeClientTime_hasNoPlayoutTerms() {
+        feedDrifting(1, 300)
+        val serverTime = 303_040_300L
+        val clockOnly = filter.computeClientTime(serverTime)
+
+        filter.setUserSyncOffsetMs(35.0)
+        filter.setOutputDelayMs(120.0)
+
+        assertEquals(clockOnly, filter.computeClientTime(serverTime))
+        assertEquals(clockOnly + 35_000 - 120_000, filter.serverToClient(serverTime))
+    }
+
+    @Test
     fun conversions_ignoreDriftUntilItIsSignificant() {
         // Two measurements give a drift estimate from one finite difference;
         // that is not evidence of drift yet, so the offset is held.
