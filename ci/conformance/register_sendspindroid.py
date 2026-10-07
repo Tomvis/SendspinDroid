@@ -33,7 +33,6 @@ IMPLEMENTATIONS["sendspindroid"] = ImplementationSpec(
         supports_flac=False,
         supports_opus=False,
         supports_discovery=False,
-        supports_request_format=True,
         supports_legacy_unencrypted=False,
         supported_role_families=("player",),
     ),
