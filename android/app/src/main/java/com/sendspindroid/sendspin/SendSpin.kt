@@ -114,6 +114,9 @@ class SendSpin(
         )
         fun onArtwork(imageData: ByteArray)
         fun onArtworkCleared()
+
+        /** The artist image on its own channel; null when the server clears it. */
+        fun onArtistArtwork(imageData: ByteArray?) {}
         fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?)
         fun onStreamClear()
         fun onStreamEnd()
@@ -749,7 +752,9 @@ class SendSpin(
     }
 
     override fun onArtwork(channel: Int, payload: ByteArray) {
-        if (payload.isEmpty()) {
+        if (channel == SendSpinProtocol.Artwork.ARTIST_CHANNEL) {
+            callback.onArtistArtwork(payload.takeIf { it.isNotEmpty() })
+        } else if (payload.isEmpty()) {
             callback.onArtworkCleared()
         } else {
             callback.onArtwork(payload)

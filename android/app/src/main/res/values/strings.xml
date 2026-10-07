@@ -6,6 +6,7 @@
     <string name="connected">Connected</string>
     <string name="server_address">Server Address</string>
     <string name="album_art">Album artwork</string>
+    <string name="artist_photo">Artist photo</string>
     <string name="now_playing">Now Playing</string>
     <string name="not_playing">Not Playing</string>
     <string name="connecting">Connecting…</string>
