@@ -843,7 +843,7 @@ class PlaybackService : MediaLibraryService() {
                         broadcastConnectionState(STATE_DISCONNECTED)
 
                         // Clear playback state on disconnect
-                        _playbackState.value = PlaybackState()
+                        _playbackState.value = _playbackState.value.withConnectionEnded()
                         lastArtworkUrl = null
                         lastTrackTitle = null
                         urlArtwork = null
