@@ -16,17 +16,6 @@
 -dontwarn org.openjsse.**
 
 # ============================================================================
-# Java-WebSocket (server-initiated connections)
-# ============================================================================
--keep class org.java_websocket.** { *; }
--keepclassmembers class * extends org.java_websocket.server.WebSocketServer {
-    <init>(...);
-}
--keepclassmembers class * extends org.java_websocket.client.WebSocketClient {
-    <init>(...);
-}
-
-# ============================================================================
 # Kotlin Coroutines
 # ============================================================================
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
