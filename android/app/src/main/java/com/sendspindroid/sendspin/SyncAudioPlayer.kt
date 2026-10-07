@@ -604,7 +604,10 @@ class SyncAudioPlayer(
     /**
      * Pause playback.
      *
-     * Flushes the AudioTrack hardware buffer so audio stops immediately.
+     * Pausing the AudioTrack stops the audio immediately. What is still in
+     * the track is not flushed here: the playback loop may be in the middle
+     * of a write, and it flushes itself before anything plays again
+     * ([resume] and [clearBuffer] both ask it to start over).
      * The chunk-level queue is preserved for seamless resume.
      */
     fun pause() {
@@ -612,7 +615,6 @@ class SyncAudioPlayer(
             isPaused.set(true)
             pausedAtUs = nowNs() / 1000
             audioSink?.pause()
-            audioSink?.flush()
             AppLog.Audio.d("Playback paused")
         }
     }
@@ -632,14 +634,10 @@ class SyncAudioPlayer(
     fun resume() {
         stateLock.withLock {
             if (!isPaused.get()) {
-                // Even if our flag says not paused, the AudioTrack hardware might still be paused
-                // (e.g., after clearBuffer() was called while paused)
-                if (audioSink?.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                    AppLog.Audio.i("resume() - isPaused is false but AudioTrack is not playing, forcing play")
-                    audioSink?.play()
-                } else {
-                    AppLog.Audio.d("resume() called but not paused - ignoring")
-                }
+                // A clearBuffer() may already have ended the pause. The track
+                // can still be paused then, holding audio from before it: the
+                // playback loop flushes it and sets it playing, not this.
+                AppLog.Audio.d("resume() called but not paused - ignoring")
                 return@withLock
             }
 
@@ -653,16 +651,16 @@ class SyncAudioPlayer(
                 clearQueueAndRequestReset()
             }
 
-            // pause() flushed the track, which restarts its frame position from
-            // zero, and the sync state from before the pause is stale. The
-            // playback loop starts both over.
+            // The track still holds audio from before the pause and the sync
+            // state from then is stale. The playback loop flushes the track,
+            // starts both over and only then sets it playing again, so none
+            // of the old audio is heard.
             resetRequested = true
 
             // Reset grace period to allow sync to stabilize after resume
             playingStateEnteredAtUs = nowUs
 
             isPaused.set(false)
-            audioSink?.play()
             AppLog.Audio.d("Playback resumed after ${pauseDurationUs / 1000}ms pause - sync state reset")
         }
     }
@@ -976,13 +974,9 @@ class SyncAudioPlayer(
             AppLog.Audio.i("[cmd-trace] T4 clearBuffer ts=${nowNs() / 1_000_000} thread=${Thread.currentThread().name}")
 
             // Reset paused state - we're starting a fresh stream (e.g., after seek)
-            // This ensures playback loop will process new chunks even if we were paused
-            val wasPaused = isPaused.getAndSet(false)
-
-            // Ensure AudioTrack hardware matches software state after clearing pause flag
-            if (wasPaused) {
-                audioSink?.play()
-            }
+            // This ensures playback loop will process new chunks even if we were paused.
+            // The loop's reset flushes the track and sets it playing again.
+            isPaused.set(false)
 
             // Note: lastReanchorTimeUs is NOT reset to maintain cooldown across clears
             clearQueueAndRequestReset()
@@ -1017,14 +1011,21 @@ class SyncAudioPlayer(
      *
      * @param serverTimeMicros Server timestamp when this audio should play
      * @param pcmData Raw PCM audio data
+     * @param stillCurrent Whether the chunk still belongs to the current
+     *   stream. Asked with [stateLock] held, the lock a clear takes, so the
+     *   answer cannot go stale before the chunk is queued: a chunk that
+     *   passes is queued before any later clear, which removes it.
      */
-    fun queueChunk(serverTimeMicros: Long, pcmData: ByteArray) {
+    fun queueChunk(serverTimeMicros: Long, pcmData: ByteArray, stillCurrent: () -> Boolean = { true }) {
         if (isReleased.get()) return
-        chunksReceived++
+        stateLock.withLock {
+            if (!stillCurrent()) return
+            chunksReceived++
 
-        // Queued whether or not the clock is synchronised yet: the timestamps
-        // are server time, and start gating waits for the time filter.
-        processChunk(serverTimeMicros, pcmData)
+            // Queued whether or not the clock is synchronised yet: the timestamps
+            // are server time, and start gating waits for the time filter.
+            processChunk(serverTimeMicros, pcmData)
+        }
     }
 
     /**
@@ -1035,7 +1036,7 @@ class SyncAudioPlayer(
      * chunk: it is queued either entirely before a concurrent clear, which
      * then removes it, or entirely after. Whether a chunk still belongs to the
      * current stream is the caller's knowledge (PlaybackService's
-     * decodeGeneration); the player cannot tell.
+     * decodeGeneration), which [queueChunk] asks for under the same lock.
      */
     private fun processChunk(serverTimeMicros: Long, pcmData: ByteArray): Unit = stateLock.withLock {
         // Working copies that may be modified by gap/overlap handling

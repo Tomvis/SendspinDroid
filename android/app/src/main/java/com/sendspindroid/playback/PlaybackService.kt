@@ -1052,16 +1052,21 @@ class PlaybackService : MediaLibraryService() {
             Log.e(TAG, "Decode error, dropping chunk", e)
             return
         }
-        // Checked again: a stream/clear or stream/end that landed while this
-        // chunk was decoding has already cleared the player, and queueing it
-        // now would leave one chunk with the old stream's timestamp at the
-        // head of the queue. The new stream's audio is then discarded as
-        // overlap until it catches up - seconds of silence after a skip.
-        if (t.generation != decodeGeneration) return
         val player = syncAudioPlayer ?: return
+        // Checked again, by the player under the lock its clear takes: a
+        // stream/clear or stream/end that landed while this chunk was
+        // decoding has cleared the player or is about to, and a chunk queued
+        // after that would sit at the head of the queue with the old stream's
+        // timestamp. The new stream's audio is then discarded as overlap
+        // until it catches up - seconds of silence after a skip. The
+        // generation is bumped before the clear is posted, so a chunk that
+        // passes here is queued before the clear and removed by it.
+        //
         // Stamped by the decoder, not with this chunk's time: what comes out
         // can be the previous chunk's audio.
-        for (audio in decoded) player.queueChunk(audio.timestampUs, audio.pcm)
+        for (audio in decoded) {
+            player.queueChunk(audio.timestampUs, audio.pcm) { t.generation == decodeGeneration }
+        }
     }
 
     /**
