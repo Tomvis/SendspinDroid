@@ -234,9 +234,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.0")
 
-    // Compose Runtime LiveData - observeAsState() for LiveData in Compose
-    implementation("androidx.compose.runtime:runtime-livedata")
-
     // LocalBroadcastManager - in-process broadcasts between PlaybackService and Settings
     // (was only reaching the classpath transitively through palette)
     implementation("androidx.localbroadcastmanager:localbroadcastmanager:1.0.0")
@@ -247,20 +244,11 @@ dependencies {
     // Security Crypto - EncryptedSharedPreferences for sensitive data (L-15)
     implementation("androidx.security:security-crypto:1.0.0")
 
-    // SwipeRefreshLayout - Pull-to-refresh for lists
-    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
-
-    // ViewPager2 - Tab swiping for Library browser
-    implementation("androidx.viewpager2:viewpager2:1.1.0")
-
     // Fragment KTX - activityViewModels() and other fragment extensions
     implementation("androidx.fragment:fragment-ktx:1.8.6")
 
     // ViewModel KTX - Kotlin extensions for ViewModel
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.9.0")
-
-    // Java-WebSocket - Lightweight WebSocket server for server-initiated connections
-    implementation("org.java-websocket:Java-WebSocket:1.6.0")
 
     // ZXing core - generates the pairing QR code shown in Settings
     // (PairingQrImage). Encoder only; pure Java, no NDK, so it also runs in

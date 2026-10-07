@@ -108,7 +108,7 @@ SendSpin Player uses the following open-source libraries:
 
 | Library | License | Copyright |
 |---------|---------|-----------|
-| [AndroidX](https://developer.android.com/jetpack/androidx) (Core, AppCompat, Activity, Lifecycle, Media3, Compose, Security, Preference, Fragment, ViewPager2, SwipeRefreshLayout) | Apache 2.0 | The Android Open Source Project |
+| [AndroidX](https://developer.android.com/jetpack/androidx) (Core, AppCompat, Activity, Lifecycle, Media3, Compose, Security, Preference, Fragment) | Apache 2.0 | The Android Open Source Project |
 | [Material Components for Android](https://github.com/material-components/material-components-android) | Apache 2.0 | The Android Open Source Project |
 | [Kotlin, Kotlinx Coroutines & Kotlinx Serialization](https://github.com/Kotlin) | Apache 2.0 | JetBrains s.r.o. and contributors |
 | [Ktor](https://github.com/ktorio/ktor) | Apache 2.0 | JetBrains s.r.o. and contributors |
@@ -116,6 +116,5 @@ SendSpin Player uses the following open-source libraries:
 | [Coil](https://github.com/coil-kt/coil) | Apache 2.0 | Coil Contributors |
 | [Bouncy Castle](https://www.bouncycastle.org/) | MIT | The Legion of the Bouncy Castle Inc. |
 | [ZXing](https://github.com/zxing/zxing) (pairing QR code) | Apache 2.0 | ZXing authors |
-| [Java-WebSocket](https://github.com/TooTallNate/Java-WebSocket) | MIT | Nathan Rajlich |
 
 SendspinDroid IS NOT affiliated with or endorsed by Sendspin, Music Assistant or other Open Home Foundation projects directly, this is a standalone project.
