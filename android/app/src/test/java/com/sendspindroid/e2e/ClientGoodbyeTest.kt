@@ -90,7 +90,8 @@ class ClientGoodbyeTest : E2ETestBase() {
         connectAndHandshake()
         // The socket dropped and came back: a new handshake starts, and no
         // fake server completes it.
-        fakeTransport.afterConnected = {}
+        fakeTransport.simulateClosed(1006, "abnormal")
+        injectTransportAndConnect(installChannel = false)
         fakeTransport.simulateConnected()
         fakeTransport.clearRecordedMessages()
 

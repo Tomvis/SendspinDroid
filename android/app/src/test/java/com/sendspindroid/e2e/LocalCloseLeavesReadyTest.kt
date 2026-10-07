@@ -15,8 +15,6 @@ class LocalCloseLeavesReadyTest : E2ETestBase() {
 
     private fun connectedAndReady() {
         connectAndHandshake()
-        // As in production: the coordinator owns reconnect, so a drop is Idle.
-        client.selfReconnectEnabled = false
         assertEquals(TransportState.Ready, client.connectionState.value)
     }
 

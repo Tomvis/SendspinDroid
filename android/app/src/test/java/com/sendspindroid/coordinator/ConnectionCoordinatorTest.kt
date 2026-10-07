@@ -1,6 +1,5 @@
 package com.sendspindroid.coordinator
 
-import android.content.Context
 import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.model.LocalConnection
 import com.sendspindroid.model.ProxyConnection
@@ -31,7 +30,6 @@ class ConnectionCoordinatorTest {
             sendSpinStateFlow = sendSpin,
             musicAssistantStateFlow = ma,
             scope = TestScope(StandardTestDispatcher(testScheduler)),
-            onDisconnectRequested = {},
             connectAttempt = { _, _ -> false },
             context = mockk(relaxed = true),
         )
@@ -50,22 +48,18 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun `disconnect forwards to onDisconnectRequested lambda`() = runTest {
-        var called = 0
-        val coordinator = ConnectionCoordinator(
-            currentServerFlow = MutableStateFlow(null),
-            sendSpinStateFlow = MutableStateFlow(TransportState.Idle),
-            musicAssistantStateFlow = MutableStateFlow(TransportState.Idle),
-            scope = TestScope(StandardTestDispatcher(testScheduler)),
-            onDisconnectRequested = { called++ },
-            connectAttempt = { _, _ -> false },
-            context = mockk(relaxed = true),
+    fun `connect reports Attempting before it returns`() = runTest {
+        val coordinator = makeCoordinatorForRetryTest(connectAttempt = { _, _ -> false })
+
+        coordinator.connect(makeTestServerWithLocal())
+
+        // Nothing has been scheduled yet: whoever started the loop can rely
+        // on the status straight away.
+        assertEquals(
+            ReconnectStatus.Attempting("test-local", attempt = 1, method = null),
+            coordinator.reconnectStatus.value,
         )
-
-        coordinator.disconnect()
-        coordinator.disconnect()
-
-        assertEquals(2, called)
+        coordinator.cancelReconnect()
     }
 
     @Test
@@ -99,6 +93,138 @@ class ConnectionCoordinatorTest {
         // The priority list is now [LOCAL] alone, so a server offering all
         // three methods must still only ever see LOCAL attempted.
         assertEquals(listOf(ConnectionType.LOCAL), attemptedMethods)
+        // The loop does not end by itself any more.
+        coordinator.cancelReconnect()
+    }
+
+    @Test
+    fun `the wait between attempts grows to a minute and stays there`() = runTest {
+        val attemptTimes = mutableListOf<Long>()
+        val coordinator = makeCoordinatorForRetryTest(
+            connectAttempt = { _, _ ->
+                attemptTimes.add(testScheduler.currentTime)
+                false
+            },
+        )
+
+        coordinator.connect(makeTestServerWithLocal())
+        testScheduler.advanceTimeBy(5 * 60_000L)
+        testScheduler.runCurrent()
+
+        val waits = listOf(attemptTimes.first()) + attemptTimes.zipWithNext { a, b -> b - a }
+        assertEquals(
+            listOf(500L, 1000L, 2000L, 4000L, 8000L, 15000L, 30000L, 60000L, 60000L, 60000L),
+            waits.take(10),
+        )
+        coordinator.cancelReconnect()
+    }
+
+    @Test
+    fun `the loop has no attempt cap`() = runTest {
+        var attempts = 0
+        val coordinator = makeCoordinatorForRetryTest(
+            connectAttempt = { _, _ ->
+                attempts++
+                false
+            },
+        )
+
+        // A server that stays away for a day is still being tried, once a
+        // minute, at the end of it.
+        coordinator.connect(makeTestServerWithLocal())
+        testScheduler.advanceTimeBy(24 * 60 * 60_000L)
+        testScheduler.runCurrent()
+
+        assertTrue("expected about 1440 attempts in a day, got $attempts", attempts > 1400)
+        val status = coordinator.reconnectStatus.value
+        assertTrue("Expected still Attempting but got $status", status is ReconnectStatus.Attempting)
+
+        coordinator.cancelReconnect()
+    }
+
+    @Test
+    fun `an attempt that succeeds after many failures ends the loop`() = runTest {
+        var attempts = 0
+        val coordinator = makeCoordinatorForRetryTest(
+            connectAttempt = { _, _ -> ++attempts == 20 },
+        )
+
+        coordinator.connect(makeTestServerWithLocal())
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(20, attempts)
+        assertEquals(ReconnectStatus.Succeeded("test-local"), coordinator.reconnectStatus.value)
+    }
+
+    @Test
+    fun `retryNow skips the rest of the backoff`() = runTest {
+        val attemptTimes = mutableListOf<Long>()
+        val coordinator = makeCoordinatorForRetryTest(
+            connectAttempt = { _, _ ->
+                attemptTimes.add(testScheduler.currentTime)
+                false
+            },
+        )
+
+        coordinator.connect(makeTestServerWithLocal())
+        // Well into the one-minute waits: the last attempt was at 2:00.5 and
+        // the next is not due until 3:00.5.
+        testScheduler.advanceTimeBy(130_000L)
+        testScheduler.runCurrent()
+        val before = attemptTimes.size
+
+        // The server is seen again on mDNS.
+        coordinator.retryNow()
+        testScheduler.advanceTimeBy(600)
+        testScheduler.runCurrent()
+
+        assertEquals("one attempt, right away", before + 1, attemptTimes.size)
+        assertEquals(130_500L, attemptTimes.last())
+        coordinator.cancelReconnect()
+    }
+
+    @Test
+    fun `retryNow in quick succession retries once`() = runTest {
+        var attempts = 0
+        val coordinator = makeCoordinatorForRetryTest(
+            connectAttempt = { _, _ ->
+                attempts++
+                false
+            },
+        )
+
+        coordinator.connect(makeTestServerWithLocal())
+        testScheduler.advanceTimeBy(130_000L)
+        testScheduler.runCurrent()
+        val before = attempts
+
+        // An mDNS announcement usually arrives more than once.
+        coordinator.retryNow()
+        testScheduler.advanceTimeBy(600)
+        testScheduler.runCurrent()
+        coordinator.retryNow()
+        testScheduler.advanceTimeBy(600)
+        testScheduler.runCurrent()
+
+        assertEquals(before + 1, attempts)
+        coordinator.cancelReconnect()
+    }
+
+    @Test
+    fun `retryNow does nothing when no loop is running`() = runTest {
+        var attempts = 0
+        val coordinator = makeCoordinatorForRetryTest(
+            connectAttempt = { _, _ ->
+                attempts++
+                false
+            },
+        )
+
+        coordinator.retryNow()
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(0, attempts)
+        assertEquals(ReconnectStatus.Idle, coordinator.reconnectStatus.value)
     }
 
     @Test
@@ -119,6 +245,25 @@ class ConnectionCoordinatorTest {
         assertEquals(ReconnectStatus.Idle, coordinator.reconnectStatus.value)
     }
 
+    @Test
+    fun `cancelReconnect from inside an attempt ends the loop`() = runTest {
+        var attempts = 0
+        lateinit var coordinator: ConnectionCoordinator
+        coordinator = makeCoordinatorForRetryTest(
+            connectAttempt = { _, _ ->
+                attempts++
+                coordinator.cancelReconnect()
+                false
+            },
+        )
+
+        coordinator.connect(makeTestServerWithLocal())
+        testScheduler.advanceUntilIdle()
+
+        assertEquals(1, attempts)
+        assertEquals(ReconnectStatus.Idle, coordinator.reconnectStatus.value)
+    }
+
     private fun TestScope.makeCoordinatorForRetryTest(
         connectAttempt: suspend (UnifiedServer, ConnectionType) -> Boolean,
     ): ConnectionCoordinator {
@@ -127,7 +272,6 @@ class ConnectionCoordinatorTest {
             sendSpinStateFlow = MutableStateFlow(TransportState.Idle),
             musicAssistantStateFlow = MutableStateFlow(TransportState.Idle),
             scope = TestScope(StandardTestDispatcher(testScheduler)),
-            onDisconnectRequested = {},
             connectAttempt = connectAttempt,
             context = mockk(relaxed = true),
         )

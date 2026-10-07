@@ -13,11 +13,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Tests that ReconnectingBanner displays the correct attempt count and buffer info.
- *
- * The banner shows:
- * - With buffer: "Reconnecting to {server} (attempt {n}, {s}s buffer)"
- * - Without buffer: "Reconnecting to {server} (attempt {n})"
+ * Tests that ReconnectingBanner displays the server and the attempt count:
+ * "Reconnecting to {server} (attempt {n})".
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -27,34 +24,13 @@ class ReconnectingBannerTest {
     val composeTestRule = createComposeRule()
 
     @Test
-    fun banner_withBuffer_showsAttemptAndBufferSeconds() {
-        composeTestRule.setContent {
-            SendSpinTheme {
-                ReconnectingBanner(
-                    state = ReconnectingState(
-                        serverName = "Living Room",
-                        attempt = 3,
-                        bufferMs = 15000
-                    )
-                )
-            }
-        }
-
-        // String: "Reconnecting to Living Room (attempt 3, 15s buffer)"
-        composeTestRule.onNodeWithText(
-            "Reconnecting to Living Room (attempt 3, 15s buffer)"
-        ).assertIsDisplayed()
-    }
-
-    @Test
-    fun banner_noBuffer_showsAttemptOnly() {
+    fun banner_showsServerAndAttempt() {
         composeTestRule.setContent {
             SendSpinTheme {
                 ReconnectingBanner(
                     state = ReconnectingState(
                         serverName = "Kitchen",
-                        attempt = 1,
-                        bufferMs = 0
+                        attempt = 1
                     )
                 )
             }
@@ -73,15 +49,14 @@ class ReconnectingBannerTest {
                 ReconnectingBanner(
                     state = ReconnectingState(
                         serverName = "Office",
-                        attempt = 10,
-                        bufferMs = 5000
+                        attempt = 10
                     )
                 )
             }
         }
 
         composeTestRule.onNodeWithText(
-            "Reconnecting to Office (attempt 10, 5s buffer)"
+            "Reconnecting to Office (attempt 10)"
         ).assertIsDisplayed()
     }
 }

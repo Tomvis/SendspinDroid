@@ -189,7 +189,7 @@ class ServerStateTest {
         syncClock()
         metadata(future, "Next")
 
-        handler.resetServerStateForTest()
+        handler.resetConnectionStateForTest()
         advance(60)
 
         assertEquals(emptyList<String?>(), titles())

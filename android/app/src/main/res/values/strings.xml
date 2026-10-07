@@ -162,9 +162,6 @@
     <string name="delete_server">Delete Server</string>
     <string name="save_server">Save Server</string>
     <string name="quick_connect">Quick Connect</string>
-    <string name="connection_method_local">Local</string>
-    <string name="connection_method_remote">Remote</string>
-    <string name="connection_method_proxy">Proxy</string>
     <string name="no_connection_available">No connection method available</string>
 
     <!-- Add Server Wizard -->
@@ -209,13 +206,11 @@
     <string name="welcome_no_servers_found">No servers found on this network</string>
     <string name="welcome_quick_connect">Quick Connect</string>
     <string name="welcome_found_on_network">Found on your local network</string>
-    <string name="auto_connecting_to_default">Auto-connecting to %s…</string>
 
     <!-- Auto-Reconnection -->
     <string name="reconnecting_progress">Reconnecting (%1$d/%2$d)…</string>
     <string name="reconnecting_toolbar_subtitle">Reconnecting…</string>
     <string name="reconnecting_attempt">Reconnecting to %1$s (attempt %2$d)</string>
-    <string name="reconnecting_with_buffer">Reconnecting to %1$s (attempt %2$d, %3$ds buffer)</string>
     <string name="connecting_to">Connecting to %s</string>
 
     <!-- Music Assistant Integration -->
@@ -268,8 +263,6 @@
     <string name="stats_address">Address</string>
     <string name="stats_state">State</string>
     <string name="stats_codec">Codec</string>
-    <string name="stats_reconnects">Reconnects</string>
-    <string name="stats_reconnects_total">Reconnects (lifetime)</string>
     <string name="stats_last_byte_received">Last Byte Received</string>
     <string name="stats_stall_watchdog">Stall Watchdog</string>
     <string name="stats_watchdog_armed">Armed</string>
@@ -294,8 +287,6 @@
     <string name="stats_converged">Converged</string>
     <string name="stats_measurements">Measurements</string>
     <string name="stats_last_sync">Last Sync</string>
-    <string name="stats_frozen">Frozen</string>
-    <string name="stats_frozen_reconnecting">Yes (reconnecting)</string>
     <string name="stats_sync_offset">Sync Offset</string>
     <string name="stats_calibrated">Calibrated</string>
     <string name="stats_frames_written">Frames Written</string>

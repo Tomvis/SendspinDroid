@@ -306,8 +306,8 @@ class ArtworkStreamTest {
         handler.handleTextMessageForTest(artworkStart)
         sendImage(future, jpeg)
 
-        // The next connection's hello: the stream of the old one is gone.
-        handler.handleTextMessageForTest("""{"type":"server/hello","payload":{"name":"Dev"}}""")
+        // The connection ends, and its stream with it.
+        handler.resetConnectionStateForTest()
         advance(120)
 
         assertImages()

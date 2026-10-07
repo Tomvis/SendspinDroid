@@ -45,7 +45,6 @@ class SendspinTimeFilter {
         // at their respective sites:
         //   - IQR outlier pre-rejection
         //   - +/-500 ppm hard drift cap
-        //   - freeze/thaw with covariance inflation across reconnects
 
         // Process-noise diffusion coefficients. Upstream defaults: zero offset
         // random walk (offset evolves only through drift*dt), and a tiny drift
@@ -100,7 +99,7 @@ class SendspinTimeFilter {
         private const val TAG = "SendspinTimeFilter"
     }
 
-    // Guards the filter state below (addMeasurement, reset, freeze, thaw).
+    // Guards the filter state below (addMeasurement, reset).
     // Nothing outside the lock reads that state; other threads read [snapshot].
     private val lock = Any()
 
@@ -161,25 +160,6 @@ class SendspinTimeFilter {
     private var convergenceTimeMs: Long = 0L       // Time to reach isConverged
     private var firstMeasurementTimeMs: Long = 0L  // Timestamp of first measurement
     private var hasLoggedConvergence: Boolean = false
-
-    // Frozen state for reconnection - preserves sync across network drops
-    @Volatile private var frozenState: FrozenState? = null
-
-    private data class FrozenState(
-        val offset: Double,
-        val drift: Double,
-        val p00: Double,
-        val p01: Double,
-        val p10: Double,
-        val p11: Double,
-        val measurementCount: Int,
-        val lastUpdateTime: Long,
-        val recentOffsets: DoubleArray,
-        val recentOffsetsIndex: Int,
-        val recentOffsetsCount: Int,
-        val serverName: String?,
-        val serverId: String?
-    )
 
     /**
      * Whether enough measurements have been collected for reliable time conversion.
@@ -299,116 +279,6 @@ class SendspinTimeFilter {
      * Thread-safe: synchronized to prevent concurrent mutation.
      */
     fun reset() = synchronized(lock) {
-        offset = 0.0
-        drift = 0.0
-        p00 = Double.MAX_VALUE
-        p01 = 0.0
-        p10 = 0.0
-        p11 = 0.0
-        lastUpdateTime = 0
-        measurementCount = 0
-        useDrift = false
-        recentOffsetsIndex = 0
-        recentOffsetsCount = 0
-        rejectedCount = 0
-        convergenceTimeMs = 0
-        firstMeasurementTimeMs = 0
-        hasLoggedConvergence = false
-        publish()
-    }
-
-    /**
-     * Whether the filter has frozen state that can be restored.
-     */
-    val isFrozen: Boolean
-        get() = frozenState != null
-
-    /**
-     * Capture a snapshot of the current sync state so [thaw] can restore it
-     * after a reconnect to the same server. No-op if the filter is not yet
-     * [isReady].
-     *
-     * @param serverName Display name of the currently-connected server (from server/hello).
-     * @param serverId   Stable identifier of the currently-connected server (from server/hello).
-     */
-    fun freeze(serverName: String?, serverId: String?) {
-        synchronized(lock) {
-            if (!isReady) return
-
-            frozenState = FrozenState(
-                offset = offset,
-                drift = drift,
-                p00 = p00,
-                p01 = p01,
-                p10 = p10,
-                p11 = p11,
-                measurementCount = measurementCount,
-                lastUpdateTime = lastUpdateTime,
-                recentOffsets = recentOffsets.copyOf(),
-                recentOffsetsIndex = recentOffsetsIndex,
-                recentOffsetsCount = recentOffsetsCount,
-                serverName = serverName,
-                serverId = serverId
-            )
-        }
-    }
-
-    /**
-     * Restore a frozen sync state captured by [freeze] if and only if the
-     * provided identity matches the one captured at freeze-time. On
-     * identity mismatch the frozen snapshot is discarded.
-     *
-     * Call this after a reconnect handshake completes, before resuming time
-     * sync.
-     *
-     * @param serverName Display name of the just-handshook server.
-     * @param serverId   Stable identifier of the just-handshook server.
-     * @return true if state was restored, false if no frozen state existed
-     *         or the identity did not match.
-     */
-    fun thaw(serverName: String?, serverId: String?): Boolean {
-        synchronized(lock) {
-            val frozen = frozenState ?: return false
-
-            if (frozen.serverName != serverName || frozen.serverId != serverId) {
-                frozenState = null
-                return false
-            }
-
-            offset = frozen.offset
-            drift = frozen.drift
-
-            p00 = frozen.p00 * 100.0
-            p01 = frozen.p01 * 10.0
-            p10 = frozen.p10 * 10.0
-            p11 = frozen.p11 * 100.0
-
-            measurementCount = MIN_MEASUREMENTS
-            lastUpdateTime = frozen.lastUpdateTime
-
-            frozen.recentOffsets.copyInto(recentOffsets)
-            recentOffsetsIndex = frozen.recentOffsetsIndex
-            recentOffsetsCount = frozen.recentOffsetsCount
-            rejectedCount = 0
-            useDrift = false
-
-            hasLoggedConvergence = false
-            convergenceTimeMs = 0
-            firstMeasurementTimeMs = Platform.currentTimeMillis()
-            publish()
-
-            frozenState = null
-            return true
-        }
-    }
-
-    /**
-     * Discard frozen state and perform full reset.
-     * Call this when reconnection fails and we need to start fresh.
-     * Thread-safe: synchronized to prevent concurrent mutation.
-     */
-    fun resetAndDiscard() = synchronized(lock) {
-        frozenState = null
         offset = 0.0
         drift = 0.0
         p00 = Double.MAX_VALUE

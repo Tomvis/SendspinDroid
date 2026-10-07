@@ -78,8 +78,15 @@ abstract class SendSpinProtocolHandler(
     private var externalSourceActive: Boolean = false
 
     // Stream active tracking (mirrors CLI _stream_active)
+    @Volatile
     private var _streamActive = false
     private var _currentStreamConfig: StreamConfig? = null
+
+    /**
+     * Whether a player stream is active: from `stream/start` until
+     * `stream/end`. A `stream/clear` does not end it.
+     */
+    protected val isStreamActive: Boolean get() = _streamActive
 
     // Artwork stream (roles/artwork/v1.md). One channel is declared, so only
     // channel 0 is shown. [artworkLock] orders a pending image coming due on
@@ -107,7 +114,8 @@ abstract class SendSpinProtocolHandler(
     protected var timeSyncManager: TimeSyncManager? = null
 
     // Sizes the min_buffer_ms we report from audio chunk arrival delay.
-    private val minBufferEstimator = MinBufferEstimator()
+    @Volatile
+    private var minBufferEstimator = MinBufferEstimator()
 
     // Set once the first stream of this connection has started. Until then
     // the required_lead_time_ms we report has to cover a cold start.
@@ -133,11 +141,6 @@ abstract class SendSpinProtocolHandler(
      * Whether the device is in low-memory mode (smaller buffer target).
      */
     protected abstract fun isLowMemoryMode(): Boolean
-
-    /**
-     * Get the client ID for this connection.
-     */
-    protected abstract fun getClientId(): String
 
     /**
      * Get the device name for this connection.
@@ -306,13 +309,14 @@ abstract class SendSpinProtocolHandler(
      * the scope - so the frames have to be in its hands first. A goodbye
      * queued behind an async encrypt loses that race every time.
      *
-     * Empty when there is nothing to say goodbye to: before `server/hello`
-     * (the [handshakeComplete] gate) or mid re-handshake, when no application
-     * message may be started.
+     * Empty when there is nothing to say goodbye with: before the initial
+     * `server/activate` ("the client MUST NOT send other Sendspin messages
+     * until it receives that activation") or mid re-handshake, when no
+     * application message may be started.
      */
     protected fun encodeGoodbye(reason: GoodbyeReason): List<ByteArray> {
         val codec = wireCodec
-        if (codec == null || !handshakeComplete || rehandshakeInProgress) return emptyList()
+        if (codec == null || !activationSeen || rehandshakeInProgress) return emptyList()
         // Nothing may follow a goodbye under these keys.
         wireCodec = null
         Log.d(tag, "Sending client/goodbye reason=${reason.wire}")
@@ -373,6 +377,12 @@ abstract class SendSpinProtocolHandler(
      * Send player state update (volume/muted/availability).
      */
     protected fun sendPlayerStateUpdate() {
+        // "The client MUST NOT send other Sendspin messages until it receives
+        // that activation." Every client/state goes through here, so this is
+        // the one gate for all of them; accepting the activation sends the
+        // first, with whatever changed in the meantime.
+        if (!activationSeen) return
+
         // The spec's output_delay_ms, NOT our signed staticDelayMs: the
         // latter is the hardware latency we already compensate ourselves, and
         // reporting it would invite the server to compensate it again.
@@ -411,7 +421,7 @@ abstract class SendSpinProtocolHandler(
 
         val arrivalMicros = System.nanoTime() / 1000
         val sentMicros = filter.computeClientTime(chunk.timestampMicros - chunk.sendAheadMicros)
-        if (minBufferEstimator.addChunk(chunk.timestampMicros, sentMicros, arrivalMicros) && handshakeComplete) {
+        if (minBufferEstimator.addChunk(chunk.timestampMicros, sentMicros, arrivalMicros)) {
             sendPlayerStateUpdate()
         }
     }
@@ -420,10 +430,7 @@ abstract class SendSpinProtocolHandler(
      * Public hook for code outside the protocol handler to push a fresh
      * `client/state` to the server.
      */
-    fun sendClientStateSnapshot() {
-        if (!handshakeComplete) return
-        sendPlayerStateUpdate()
-    }
+    fun sendClientStateSnapshot() = sendPlayerStateUpdate()
 
     /**
      * Set sync state and notify server.
@@ -441,9 +448,7 @@ abstract class SendSpinProtocolHandler(
         if (currentSyncState != syncState) {
             currentSyncState = syncState
             Log.d(tag, "Sync state changed to: $syncState")
-            if (handshakeComplete) {
-                sendPlayerStateUpdate()
-            }
+            sendPlayerStateUpdate()
         }
     }
 
@@ -471,7 +476,7 @@ abstract class SendSpinProtocolHandler(
         }
         if (changed) {
             Log.i(tag, "External source ${if (active) "active" else "cleared"}: state=$currentSyncState")
-            if (handshakeComplete) sendPlayerStateUpdate()
+            sendPlayerStateUpdate()
         }
     }
 
@@ -539,6 +544,11 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
+    /** Whether [sendCommand] would send [command] right now; see there for the rule. */
+    fun canSendCommand(command: String): Boolean =
+        SendSpinProtocol.Roles.CONTROLLER in activeRoles &&
+            currentControllerState?.supportedCommands?.contains(command) == true
+
     /**
      * Send a controller command (play, pause, stop, next, previous, volume,
      * mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch,
@@ -563,14 +573,10 @@ abstract class SendSpinProtocolHandler(
         positionMs: Long? = null,
         offsetMs: Long? = null,
     ) {
-        if (SendSpinProtocol.Roles.CONTROLLER !in activeRoles) {
-            Log.w(tag, "Dropping controller command '$command': controller role is not active")
-            return
-        }
         val state = currentControllerState
-        val supported = state?.supportedCommands
-        if (supported == null || command !in supported) {
-            Log.w(tag, "Dropping controller command '$command': not in server supported_commands $supported")
+        if (!canSendCommand(command)) {
+            Log.w(tag, "Dropping controller command '$command': controller role active=" +
+                "${SendSpinProtocol.Roles.CONTROLLER in activeRoles}, server supported_commands=${state?.supportedCommands}")
             return
         }
         var position = positionMs
@@ -610,7 +616,7 @@ abstract class SendSpinProtocolHandler(
         }
         Log.i(tag, "Preferring stream format: $format")
         preferredFormat = format
-        if (handshakeComplete) sendPlayerStateUpdate()
+        sendPlayerStateUpdate()
     }
 
     // ========== Player State Methods ==========
@@ -708,13 +714,53 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Forget the previous connection's channel. Called before every fresh
-     * handshake, so that nothing sent while the new one is in progress can be
-     * encrypted under the old session's keys.
+     * Forget everything that belongs to one connection. Called by the
+     * connection's teardown, whichever way it ended, so that the next
+     * connection starts from the same state as the first.
+     *
+     * What is on display (metadata, artwork) is not touched: that is the
+     * owner's to clear when it reacts to the connection ending.
      */
-    protected fun clearEncryptedChannel() {
+    protected fun resetConnectionState() {
+        // No client/time may follow a connection out of its activation; the
+        // next one starts time sync when it is activated itself.
+        stopTimeSync()
+        handshakeComplete = false
+
+        // Nothing sent from here until the next handshake completes may be
+        // encrypted under this session's keys.
         wireCodec = null
         rehandshakeInProgress = false
+
+        // The pairing flows hear that the socket is gone, which ends their
+        // attempt, its timer and any code on display. The dynamic flow is
+        // dropped with the handshake hash it was bound to.
+        runPairingActions(PairingEvent.ConnectionClosed)
+        runDynamicPairingActions(DynamicPairingEvent.ConnectionClosed)
+        attemptTimeoutJob?.cancel()
+        attemptTimeoutJob = null
+        dynamicAttemptTimeoutJob?.cancel()
+        dynamicAttemptTimeoutJob = null
+        dynamicPairingFlow = null
+        activePairingMethod = null
+        pairingAborted = false
+        pairingIndex = 0
+        unpairHandled = false
+
+        activationSeen = false
+        activeRoles = emptyList()
+        activities = emptySet()
+        advertisedFormats = emptyList()
+        preferredFormat = null
+
+        _streamActive = false
+        _currentStreamConfig = null
+        outputStarted = false
+        minBufferEstimator = MinBufferEstimator()
+        resetArtworkStream()
+        resetServerState()
+        lastPlaybackState = null
+        lastGroupInfo = null
     }
 
     /**
@@ -922,18 +968,9 @@ abstract class SendSpinProtocolHandler(
         }
         Log.i(tag, "server/hello: name=$serverName")
 
+        // Everything else per-connection is already as a new connection needs
+        // it: the previous one's teardown reset it (resetConnectionState).
         handshakeComplete = true
-
-        // Clear cached values so the first post-handshake messages always propagate
-        _streamActive = false
-        _currentStreamConfig = null
-        outputStarted = false
-        resetArtworkStream()
-        resetServerState()
-        lastPlaybackState = null
-        lastGroupInfo = null
-        activationSeen = false
-        activeRoles = emptyList()
 
         // The server's identity is its static key from server/init;
         // server/hello carries only the friendly name.
@@ -1241,7 +1278,7 @@ abstract class SendSpinProtocolHandler(
      */
     protected open fun closeConnectionAfterFlush() {}
 
-    /** One unpair per connection; a repeat is a no-op. */
+    /** One unpair per connection; a repeat is a no-op. Reset with the connection. */
     private var unpairHandled = false
 
     /**
@@ -1307,14 +1344,6 @@ abstract class SendSpinProtocolHandler(
         runPairingActions(PairingEvent.ServerPairFinalize)
         if (activePairingMethod == PairMethod.DYNAMIC_PAIRING_CODE) {
             runDynamicPairingActions(DynamicPairingEvent.ServerPairFinalize)
-        }
-    }
-
-    /** Called by the connection when the socket goes away mid-attempt. */
-    fun onConnectionClosedForPairing() {
-        runPairingActions(PairingEvent.ConnectionClosed)
-        if (activePairingMethod == PairMethod.DYNAMIC_PAIRING_CODE) {
-            runDynamicPairingActions(DynamicPairingEvent.ConnectionClosed)
         }
     }
 
@@ -1664,11 +1693,11 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Forget the `server/state` roles, on a new connection or on leaving one,
-     * so a metadata update still pending cannot come due afterwards. Does not
-     * touch what is on display.
+     * Forget the `server/state` roles when a connection ends, so a metadata
+     * update still pending cannot come due afterwards. Does not touch what is
+     * on display.
      */
-    protected fun resetServerState() {
+    private fun resetServerState() {
         synchronized(metadataLock) { discardPendingMetadata() }
         currentControllerState = null
     }
@@ -1898,11 +1927,11 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Forget the artwork stream, on a new connection or on leaving one, so an
-     * image still pending cannot come due afterwards. Does not touch the image
-     * on display.
+     * Forget the artwork stream, when it or its connection ends, so an image
+     * still pending cannot come due afterwards. Does not touch the image on
+     * display.
      */
-    protected fun resetArtworkStream() = synchronized(artworkLock) {
+    private fun resetArtworkStream() = synchronized(artworkLock) {
         artworkStreamActive = false
         artworkChannelConfig = null
         artworkReceiver.reset()

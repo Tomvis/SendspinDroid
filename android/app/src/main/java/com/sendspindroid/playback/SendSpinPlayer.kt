@@ -169,14 +169,12 @@ class SendSpinPlayer : Player {
             SyncPlaybackState.WAITING_FOR_START -> {
                 updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
             }
-            SyncPlaybackState.PLAYING,
-            SyncPlaybackState.DRAINING -> {
+            SyncPlaybackState.PLAYING -> {
                 // Re-anchor the interpolation timestamp when transitioning to playing,
                 // so getCurrentPosition() doesn't include pause duration in its elapsed calc
                 if (!currentlyPlaying) {
                     anchorElapsedRealtime = SystemClock.elapsedRealtime()
                 }
-                // DRAINING is still actively playing from buffer, so STATE_READY.
                 // Sync playWhenReady to true: audio is physically playing, so the UI
                 // must reflect that. This corrects any stale playWhenReady=false from
                 // a server "stopped" state that arrived before audio actually resumed.
@@ -219,9 +217,7 @@ class SendSpinPlayer : Player {
                 SyncPlaybackState.WAITING_FOR_START -> {
                     updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
                 }
-                SyncPlaybackState.PLAYING,
-                SyncPlaybackState.DRAINING -> {
-                    // DRAINING is still actively playing from buffer, so STATE_READY
+                SyncPlaybackState.PLAYING -> {
                     updatePlaybackStateInternal(Player.STATE_READY, true)
                 }
                 SyncPlaybackState.REANCHORING -> {
@@ -246,10 +242,17 @@ class SendSpinPlayer : Player {
      *
      * @param connected Whether we're connected to a server
      * @param serverName Name of the connected server (if connected)
+     * @param reconnecting Not connected, but the service is working on it.
+     *   Reported as buffering with playWhenReady left as it was, which is what
+     *   it is to anyone watching the session: playback that was running is
+     *   expected back. It also keeps the media session in the foreground.
      */
-    fun updateConnectionState(connected: Boolean, serverName: String? = null) {
+    fun updateConnectionState(connected: Boolean, serverName: String? = null, reconnecting: Boolean = false) {
         if (!connected) {
-            updatePlaybackStateInternal(Player.STATE_IDLE, false)
+            updatePlaybackStateInternal(
+                if (reconnecting) Player.STATE_BUFFERING else Player.STATE_IDLE,
+                false,
+            )
             anchorPositionMs = 0
             anchorElapsedRealtime = 0
             currentDurationMs = 0

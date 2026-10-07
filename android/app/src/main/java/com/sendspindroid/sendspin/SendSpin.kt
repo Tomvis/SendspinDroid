@@ -30,7 +30,6 @@ import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.sendspin.transport.SendSpinTransport
 import com.sendspindroid.sendspin.transport.WebSocketTransport
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -41,7 +40,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
@@ -49,13 +47,7 @@ import com.sendspindroid.sendspin.pairing.PairMethod
 import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import java.net.SocketException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
-import javax.net.ssl.SSLHandshakeException
 
 /**
  * Native Kotlin SendSpin client.
@@ -77,9 +69,11 @@ import javax.net.ssl.SSLHandshakeException
  * This class extends SendSpinProtocolHandler for shared protocol logic
  * and implements client-specific concerns:
  * - WebSocket transport
- * - Connection state machine (Disconnected/Connecting/Connected/Error)
- * - Reconnection with exponential backoff
- * - Time filter freeze/thaw during reconnection
+ * - Connection state machine (Idle/Connecting/Ready/Failed)
+ *
+ * It does not retry. Every connection ends in [endConnection], which reports
+ * it through [connectionState] and [Callback.onDisconnected]; whoever owns
+ * this client decides what happens next.
  */
 class SendSpin(
     private val deviceName: String,
@@ -89,24 +83,9 @@ class SendSpin(
     companion object {
         private const val TAG = "SendSpin"
 
-        // Reconnection configuration
-        // Short initial delay (500ms) to maximize reconnect attempts during buffer drain
-        // Sequence: 500ms, 1s, 2s, 4s, 8s - gives ~5 attempts in first 15 seconds
-        private const val MAX_RECONNECT_ATTEMPTS = 5
-        private const val INITIAL_RECONNECT_DELAY_MS = 500L // 500ms (was 1s)
-        private const val MAX_RECONNECT_DELAY_MS = 10000L // 10 seconds (was 30s)
-        private const val HIGH_POWER_RECONNECT_DELAY_MS = 30_000L // 30s steady-state for high power mode
-
-        // Hard ceiling on reconnect attempts per cycle. At the current schedule
-        // (exp backoff for 5, then 30s each) this caps the total try-window at
-        // about 7m45s. Beyond that we surface the failure to the UI via
-        // onDisconnected(wasReconnectExhausted=true) and stop scheduling attempts.
-        // Reset to 0 on every successful handshake.
-        private const val MAX_TOTAL_RECONNECT_ATTEMPTS = 20
-
         // Stall watchdog: while connected+handshake-complete, if no bytes arrive for
-        // this long, force-close the transport so the existing reconnect path kicks in.
-        // Shorter than Ktor's 30s ping-timeout to beat buffer drain.
+        // this long, force-close the transport so the drop is noticed. Shorter than
+        // Ktor's 30s ping-timeout.
         private const val STALL_TIMEOUT_MS = 7_000L
         private const val STALL_CHECK_INTERVAL_MS = 3_000L
 
@@ -114,8 +93,7 @@ class SendSpin(
         // idle the only regular server->client traffic is server/time responses to our
         // TimeSyncManager bursts. Burst cadence is 500ms-3s once converged, so ~9s is
         // the worst-case natural silence; 20s gives 2x headroom while still catching
-        // server death with headroom for reconnect + resync inside the ~30s audio buffer.
-        // Issue #127.
+        // server death. Issue #127.
         private const val IDLE_STALL_TIMEOUT_MS = 20_000L
     }
 
@@ -123,7 +101,6 @@ class SendSpin(
      * Callback interface for SendSpin events.
      */
     interface Callback {
-        fun onServerDiscovered(name: String, address: String)
         fun onStateChanged(state: String)
         fun onGroupUpdate(groupId: String, groupName: String, playbackState: String)
         fun onMetadataUpdate(
@@ -185,13 +162,23 @@ class SendSpin(
 
         /** The dynamic pairing attempt is gesture-gated; show "Allow pairing". */
         fun onDynamicPairingGestureRequested() {}
+
+        /**
+         * A connection that had got as far as `server/hello` has ended.
+         *
+         * @param reconnect true when nobody asked for it to end (a drop, a
+         *   stall, a protocol failure, the server restarting, the network
+         *   changing under it), so the owner should connect again. False
+         *   when this client chose to leave: a user disconnect, a switch to
+         *   another server, `server/unpair`, a rejected activation.
+         */
+        fun onDisconnected(reconnect: Boolean) {}
     }
 
     // Dedicated single-thread dispatcher for timer-dominated work: stall
-    // watchdog polling, reconnect backoff delays, TimeSyncManager's
-    // periodic scheduler. Isolating this from Dispatchers.IO means timer
-    // latency is bounded by a single thread's scheduling, not by shared
-    // pool contention with blocking IO work.
+    // watchdog polling, TimeSyncManager's periodic scheduler. Isolating this
+    // from Dispatchers.IO means timer latency is bounded by a single thread's
+    // scheduling, not by shared pool contention with blocking IO work.
     //
     // ExecutorCoroutineDispatcher is held as its concrete type so it can
     // be closed() during destroy() -- otherwise the executor thread leaks.
@@ -201,24 +188,8 @@ class SendSpin(
         }.asCoroutineDispatcher()
     private val timerScope = CoroutineScope(SupervisorJob() + timerDispatcher)
 
-    // Dispatchers.IO scope for blocking IO work: immediate reconnect
-    // transport creation, any other work that may block the thread.
-    private val workScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
     private val _connectionState = MutableStateFlow<TransportState>(TransportState.Idle)
     val connectionState: StateFlow<TransportState> = _connectionState.asStateFlow()
-
-    /**
-     * When false, transport drops do not trigger the internal attemptReconnect
-     * loop -- onDisconnected is fired and the external owner (e.g.
-     * ConnectionCoordinator) decides whether to retry.
-     *
-     * Defaults to true so pre-Coordinator callers and wizard test instances
-     * keep their original behavior. ConnectionCoordinator sets this to false
-     * after construction in Phase 2B+, ending the dueling-timer problem.
-     */
-    @Volatile
-    var selfReconnectEnabled: Boolean = true
 
     // Controller (group-level) state: supported_commands, group
     // volume/mute, repeat, shuffle. Null until the server first sends a
@@ -226,17 +197,16 @@ class SendSpin(
     private val _controllerState = MutableStateFlow<ControllerState?>(null)
     val controllerState: StateFlow<ControllerState?> = _controllerState.asStateFlow()
 
-    // Transport abstraction - WebSocket
+    // Transport abstraction - WebSocket. Assigned and cleared under
+    // connectionLock; read from the timer thread.
+    @Volatile
     private var transport: SendSpinTransport? = null
+    private val connectionLock = Any()
 
-    // Connection info (stored for reconnection)
+    // Connection info
     private var serverAddress: String? = null
     private var serverPath: String? = null
     private var serverName: String? = null
-    private var serverId: String? = null
-
-    // Client identity - persisted across app launches
-    private val clientId = UserSettings.getPlayerId()
 
     // Time synchronization (Kalman filter)
     private val timeFilter = SendspinTimeFilter().apply {
@@ -248,28 +218,6 @@ class SendSpin(
         // prevent.
         setOutputDelayMs(UserSettings.getOutputDelayMs().toDouble())
     }
-
-    // Reconnection state
-    private val userInitiatedDisconnect = AtomicBoolean(false)
-
-    /**
-     * Set when the server unpairs us; blocks automatic reconnection only.
-     *
-     * Separate from [userInitiatedDisconnect] because the two answer different
-     * questions and are reported differently to the UI. Cleared when the user
-     * deliberately connects again, which is the only thing that can make
-     * reconnecting sensible: the credential the server dropped is gone, so
-     * every automatic attempt would just be refused.
-     */
-    private val suppressAutoReconnect = AtomicBoolean(false)
-    private val reconnectAttempts = AtomicInteger(0)
-    private val reconnecting = AtomicBoolean(false)
-    private var reconnectJob: Job? = null  // Pending reconnect coroutine - cancelled on disconnect
-
-    // Network awareness for smart reconnection
-    // When network is unavailable, reconnect attempts are paused (not wasted)
-    private val networkAvailable = AtomicBoolean(true)
-    private val waitingForNetwork = AtomicBoolean(false)
 
     // Stall watchdog state. lastByteReceivedAtMs is updated on EVERY text/binary
     // message from the transport. stallWatchdogJob is the polling coroutine.
@@ -283,28 +231,16 @@ class SendSpin(
     @Volatile
     private var stallWatchdogJob: Job? = null
 
-    // True while a server-announced audio stream is active. The stall watchdog
-    // only trips while streaming - during idle (no stream) the server may send
-    // nothing for long periods, which would cause false-positive stalls.
-    private val streamActive = AtomicBoolean(false)
-
     // -- Connection health telemetry (issue #128). All observational: updated on
     // event paths that already touch state (handshake-complete, onClosed,
-    // onFailure, attemptReconnect); read by the stats poll and the structured
-    // [disconnect]/[reconnect-ok] log lines. No hot-path cost.
-    private val reconnectAttemptsTotal = AtomicInteger(0)
+    // onFailure); read by the stats poll and the structured [disconnect] log
+    // line. No hot-path cost.
     @Volatile private var connectedAtMs: Long? = null
-    @Volatile private var lastDisconnectAtMs: Long? = null
     @Volatile private var lastDisconnectCode: Int? = null
     @Volatile private var lastDisconnectReason: String? = null
 
     val isConnected: Boolean
         get() = _connectionState.value is TransportState.Ready
-
-    /**
-     * Get the number of reconnection attempts since last successful connect.
-     */
-    fun getReconnectAttempts(): Int = reconnectAttempts.get()
 
     // -- Connection health accessors (issue #128) --
 
@@ -313,18 +249,12 @@ class SendSpin(
         System.currentTimeMillis() - lastByteReceivedAtMs.get()
 
     /**
-     * True when the stall watchdog would actually evaluate: handshake is
-     * complete, the client isn't mid-reconnect, and the user hasn't asked to
-     * disconnect. Note: this does NOT check `streamActive` -- the watchdog
-     * fires in both streaming (7 s threshold) and idle (20 s threshold) states
-     * per #127, so "armed" means "the watchdog is running and will trip if
-     * the appropriate silence threshold is exceeded."
+     * True when the stall watchdog would actually evaluate: the handshake is
+     * complete. Whether a stream is active only picks the threshold (7 s
+     * streaming, 20 s idle, per #127), so "armed" means "the watchdog is
+     * running and will trip if the appropriate silence threshold is exceeded."
      */
-    fun isStallWatchdogArmed(): Boolean =
-        handshakeComplete && !userInitiatedDisconnect.get() && !reconnecting.get()
-
-    /** Lifetime reconnect attempts (survives across sessions within the process). */
-    fun getReconnectAttemptsTotal(): Int = reconnectAttemptsTotal.get()
+    fun isStallWatchdogArmed(): Boolean = handshakeComplete
 
     /** Most recent close code seen on an abnormal disconnect; null if none. */
     fun getLastDisconnectCode(): Int? = lastDisconnectCode
@@ -351,14 +281,6 @@ class SendSpin(
     internal var handshakeTimeoutMs = SendSpinProtocol.HANDSHAKE_TIMEOUT_MS
 
     private fun startEncryptedHandshake() {
-        // Cleared here rather than on disconnect: every fresh handshake passes
-        // through this point, so a stale category from the previous session can
-        // never survive into the next one and overstate what it is paired with.
-        // The same goes for its channel: nothing sent from here until the new
-        // handshake completes may be encrypted under the old session's keys.
-        matchedPsk = null
-        clearEncryptedChannel()
-
         // The wire client_id for an encrypted session is the base64url public
         // key, NOT the legacy UUID player id - the two are different
         // identifiers and the server rejects a non-43-character value.
@@ -378,7 +300,6 @@ class SendSpin(
         // handshake started on: a stale timer must not fail a later
         // connection, or one the user has already left.
         val socket = transport
-        handshakeTimeoutJob?.cancel()
         handshakeTimeoutJob = timerScope.launch {
             delay(handshakeTimeoutMs)
             if (transport === socket && socket?.isConnected == true) {
@@ -435,7 +356,6 @@ class SendSpin(
                 // The spec allows no application-level error message here, so
                 // this log line is the only diagnostic that will ever exist.
                 Log.e(TAG, "Noise handshake failed: ${event.reason} - ${event.detail}")
-                handshakeDriver = null
                 // A server too old to speak the encrypted handshake is the one
                 // failure the user can fix, so it is reported as itself rather
                 // than as a generic handshake failure. A server/error is the
@@ -449,11 +369,10 @@ class SendSpin(
                 } else {
                     FailureReason.HandshakeFailed
                 }
-                _connectionState.value = TransportState.Failed(reason)
-                // Detached first: the close would otherwise report onClosed
-                // and replace the failure reason set above.
-                transport?.setListener(null)
-                transport?.close(1002, "handshake failed")
+                endConnection(TransportState.Failed(reason), reconnect = true)?.let {
+                    it.close(1002, "handshake failed")
+                    it.destroy()
+                }
             }
         }
     }
@@ -572,13 +491,7 @@ class SendSpin(
 
     override fun onUnpaired(pskId: String, serverId: String?) {
         Log.i(TAG, "Unpaired by $serverId (psk_id=$pskId)")
-
-        // "Server should not auto-reconnect." On a client-initiated topology
-        // that guidance lands on us: reconnecting would just hand the server a
-        // credential it has dropped, once per backoff step, forever.
-        suppressAutoReconnect.set(true)
-
-        callback?.onUnpaired(serverId)
+        callback.onUnpaired(serverId)
     }
 
     /**
@@ -590,17 +503,26 @@ class SendSpin(
      * property of pairing. Closing at the transport level - not
      * `closeConnectionAfterFlush` or a goodbye - is deliberate: those send an
      * application message first, and this path must send nothing at all.
+     *
+     * The transport reports its own close, so the connection ends in
+     * [TransportEventListener.onClosed] like any other drop.
      */
     override fun onProtocolFailure(reason: String) {
         super.onProtocolFailure(reason)
         transport?.close(1002, "protocol failure")
     }
 
+    /**
+     * Reached only after this client has said why it is leaving: the goodbye
+     * for `server/unpair` or a rejected activation, or a `pair/abort` whose
+     * reason closes the connection. So the connection ends here as one we
+     * left, not as a drop to recover from.
+     */
     override fun closeConnectionAfterFlush() {
         // closeAfterFlush, not close: close() cancels the connection job, and
         // the sender coroutine is its child, so a goodbye still sitting in the
         // outgoing channel dies with it.
-        transport?.closeAfterFlush(1000, "goodbye")
+        endConnection(TransportState.Idle, reconnect = false)?.closeAfterFlush(1000, "goodbye")
     }
 
     /**
@@ -724,8 +646,6 @@ class SendSpin(
 
     override fun isLowMemoryMode(): Boolean = UserSettings.lowMemoryMode
 
-    override fun getClientId(): String = clientId
-
     override fun getDeviceName(): String = deviceName
 
     override fun getManufacturer(): String = Build.MANUFACTURER ?: "Unknown"
@@ -747,62 +667,15 @@ class SendSpin(
 
     override fun onHandshakeComplete(serverName: String, serverId: String) {
         this.serverName = serverName
-        this.serverId = serverId
-
-        // Controller state belongs to the previous session; the handler's
-        // copy was reset, so reset the published flow too.
-        _controllerState.value = null
-
-        // Check if this is a reconnection
-        val wasReconnecting = timeFilter.isFrozen || reconnecting.get()
-
-        if (timeFilter.isFrozen) {
-            val thawed = timeFilter.thaw(serverName, serverId)
-            if (thawed) {
-                Log.i(TAG, "Time filter thawed after reconnection - re-syncing with increased covariance")
-            } else {
-                timeFilter.resetAndDiscard()
-                resetSyncStateTracking()
-                Log.i(TAG, "Server identity changed during reconnect; discarded frozen sync state")
-            }
-        }
 
         evaluateAndPublishSyncState()
 
-        // Capture telemetry for the structured [reconnect-ok] line before resetting
-        // current-cycle counters. Issue #128.
-        val attemptsThisCycle = reconnectAttempts.get()
-        val disconnectAtMs = lastDisconnectAtMs
-
-        reconnecting.set(false)
-        reconnectAttempts.set(0)
-        waitingForNetwork.set(false)
         _connectionState.value = TransportState.Ready
 
-        // Mark session start for uptime calculation and clear the disconnect marker.
-        // Issue #128.
+        // Mark session start for uptime calculation. Issue #128.
         connectedAtMs = System.currentTimeMillis()
-        lastDisconnectAtMs = null
 
-        if (wasReconnecting) {
-            // Emit a structured recovery log line so shared on-device logs show
-            // end-to-end reconnect outcomes (disconnect -> handshake complete).
-            // Issue #128.
-            if (disconnectAtMs != null) {
-                val tookSeconds = (System.currentTimeMillis() - disconnectAtMs) / 1000.0
-                AppLog.Network.i(
-                    "[reconnect-ok] took_s=%.1f attempts_this_cycle=%d attempts_total=%d".format(
-                        tookSeconds,
-                        attemptsThisCycle,
-                        reconnectAttemptsTotal.get(),
-                    )
-                )
-            }
-            Log.i(TAG, "Reconnection successful")
-        }
-
-        streamActive.set(false)  // fresh handshake - wait for server to announce stream state
-        startStallWatchdog()  // (re)start watchdog now that we have a live handshake-complete session
+        startStallWatchdog()
     }
 
     override fun onMetadataUpdate(metadata: TrackMetadata) {
@@ -848,7 +721,6 @@ class SendSpin(
     }
 
     override fun onStreamStart(config: StreamConfig) {
-        streamActive.set(true)
         // Reset so we don't false-trip from any stale timestamp accumulated while
         // the stream was inactive (we were not expecting data then).
         lastByteReceivedAtMs.set(System.currentTimeMillis())
@@ -865,12 +737,10 @@ class SendSpin(
     }
 
     override fun onStreamClear() {
-        streamActive.set(false)
         callback.onStreamClear()
     }
 
     override fun onStreamEnd() {
-        streamActive.set(false)
         callback.onStreamEnd()
     }
 
@@ -921,70 +791,15 @@ class SendSpin(
     }
 
     /**
-     * Called when the network changes.
-     * During reconnection, we preserve the frozen sync state to maintain playback continuity.
+     * Called when the network changes: the clock estimate was measured over
+     * the old path, so it is discarded.
      */
     fun onNetworkChanged() {
         if (!isConnected) return
 
-        // If we're actively reconnecting, preserve the frozen sync state
-        // This allows playback to continue from buffer without losing clock sync
-        if (reconnecting.get() || timeFilter.isFrozen) {
-            Log.i(TAG, "Network changed during reconnection - preserving frozen sync state")
-            return
-        }
-
         Log.i(TAG, "Network changed - resetting time filter for re-sync")
         timeFilter.reset()
         callback.onNetworkChanged()
-    }
-
-    /**
-     * Called when network becomes available.
-     * If we're actively reconnecting, cancel any pending backoff and immediately retry.
-     * This minimizes buffer exhaustion by reconnecting as fast as possible.
-     */
-    fun onNetworkAvailable() {
-        if (!reconnecting.get()) return
-
-        Log.i(TAG, "Network available during reconnection - attempting immediate reconnect")
-
-        // Cancel any pending backoff delay
-        reconnectJob?.cancel()
-        reconnectJob = null
-
-        // Reset backoff counter for faster retry if this fails too
-        // (Keep it at least 1 so we don't re-freeze the time filter)
-        reconnectAttempts.set(1)
-
-        // Immediately try to reconnect
-        workScope.launch {
-            if (userInitiatedDisconnect.get() || !reconnecting.get()) {
-                Log.d(TAG, "Reconnection cancelled before immediate retry")
-                return@launch
-            }
-
-            handshakeComplete = false
-            stopTimeSync()
-
-            val savedAddress = serverAddress ?: return@launch
-            val savedPath = serverPath ?: return@launch
-            Log.d(TAG, "Immediate reconnecting to: $savedAddress path=$savedPath")
-            createLocalTransport(savedAddress, savedPath)
-        }
-    }
-
-    /**
-     * Called by PlaybackService when network availability changes.
-     * When network is lost during reconnection, pauses attempts without wasting them.
-     * When network returns, resumes immediately via onNetworkAvailable().
-     */
-    fun setNetworkAvailable(available: Boolean) {
-        networkAvailable.set(available)
-        if (available && waitingForNetwork.getAndSet(false)) {
-            Log.i(TAG, "Network restored - resuming paused reconnection")
-            onNetworkAvailable()
-        }
     }
 
     /**
@@ -1015,54 +830,35 @@ class SendSpin(
      * @param path WebSocket path (from mDNS TXT or default /sendspin)
      */
     fun connectLocal(address: String, path: String = SendSpinProtocol.ENDPOINT_PATH) {
-        if (isConnected) {
+        if (transport != null) {
             // "A client that leaves one server for another MUST send this
-            // reason to the server it is leaving."
+            // reason to the server it is leaving." Nothing is sent when the
+            // connection being replaced had not got as far as an activation.
             val reason = if (address == serverAddress) {
                 GoodbyeReason.RESTART
             } else {
                 GoodbyeReason.ANOTHER_SERVER
             }
-            Log.i(TAG, "Already connected to $serverAddress, leaving it first (${reason.wire})")
-            disconnect(reason)
+            Log.i(TAG, "Leaving $serverAddress first (${reason.wire})")
+            leave(reason, reconnect = false)
         }
 
         val normalizedPath = normalizePath(path)
 
         Log.d(TAG, "Connecting locally to: $address path=$normalizedPath")
-        prepareForConnection()
+        _connectionState.value = TransportState.Connecting
+
+        // The clock estimate belongs to the connection that measured it. It
+        // is discarded here and not in the teardown, so that audio already
+        // handed to the output finishes against the clock it was scheduled
+        // with.
+        timeFilter.reset()
+        resetSyncStateTracking()
 
         serverAddress = address
         serverPath = normalizedPath
 
         createLocalTransport(address, normalizedPath)
-    }
-
-    /**
-     * Common preparation before establishing a connection.
-     */
-    private fun prepareForConnection() {
-        _connectionState.value = TransportState.Connecting
-        handshakeComplete = false
-        timeFilter.reset()
-        resetSyncStateTracking()
-
-        // Cancel any pending reconnect from previous connection attempt
-        reconnectJob?.cancel()
-        reconnectJob = null
-
-        userInitiatedDisconnect.set(false)
-        suppressAutoReconnect.set(false)
-        reconnectAttempts.set(0)
-        reconnecting.set(false)
-        waitingForNetwork.set(false)
-
-        // Clean up any existing transport.
-        // Clear the listener first to prevent stale callbacks (e.g., onOpen from
-        // a previous OkHttp WebSocket) from firing on the new transport's listener.
-        transport?.setListener(null)
-        transport?.destroy()
-        transport = null
     }
 
     /**
@@ -1077,88 +873,91 @@ class SendSpin(
      */
     private fun createLocalTransport(address: String, path: String) {
         val wsTransport = WebSocketTransport(address, path, pingIntervalSeconds = getPingIntervalSeconds())
-        transport = wsTransport
+        synchronized(connectionLock) { transport = wsTransport }
         wsTransport.setListener(TransportEventListener())
         wsTransport.connect()
     }
 
     /**
-     * Disconnect from the current server for reasons that should trigger an
-     * upward auto-reconnect, such as the underlying network transport type
-     * changing (WiFi -> Cellular). Unlike [disconnect], this does NOT set
-     * [userInitiatedDisconnect]. Fires `onDisconnected(wasUserInitiated=false,
-     * wasReconnectExhausted=false)`, which MainActivity's STATE_DISCONNECTED
-     * handler interprets as "start AutoReconnectManager" -- the outer reconnect
-     * loop re-runs `ConnectionSelector` fresh and reconnects for whatever
-     * network we are on now.
-     *
-     * The reason for existing: [disconnect] is a user action (tap 'Switch Server'
-     * etc.) and explicitly suppresses auto-reconnect. We want the opposite here:
-     * the user did nothing wrong, the network changed out from under us, and the
-     * inner reconnect loop would otherwise keep retrying on the network that just
-     * went away. Yield cleanly and let the outer loop reconnect on the new network.
+     * Disconnect because the network changed under the connection (WiFi ->
+     * Cellular). Unlike [disconnect] this is not a user action: the goodbye
+     * says we will be back ("restart": the server should auto-reconnect too),
+     * and the owner of this client reconnects on whatever network we are on
+     * now.
      */
-    fun disconnectForReselection() {
-        stopStallWatchdog()
-        Log.i(TAG, "Disconnecting for reselection (transport-type change)")
-
-        // Cancel any pending reconnect coroutine to prevent races
-        reconnectJob?.cancel()
-        reconnectJob = null
-
-        stopTimeSync()
-        reconnecting.set(false)
-        waitingForNetwork.set(false)
-        // "restart" fits: we will reconnect (after the outer loop re-selects
-        // the transport) and the server should auto-reconnect.
-        closeWithGoodbye(GoodbyeReason.RESTART, "Reselection")
-    }
+    fun disconnectForReselection() = leave(GoodbyeReason.RESTART, reconnect = true)
 
     /**
-     * Disconnect from the current server.
+     * Disconnect from the current server because the user asked to.
      */
-    fun disconnect() = disconnect(GoodbyeReason.USER_REQUEST)
-
-    private fun disconnect(reason: GoodbyeReason) {
-        stopStallWatchdog()
-        Log.d(TAG, "Disconnecting (${reason.wire})")
-        userInitiatedDisconnect.set(true)
-
-        // Cancel any pending reconnect coroutine to prevent race condition
-        reconnectJob?.cancel()
-        reconnectJob = null
-
-        stopTimeSync()
-        reconnecting.set(false)
-        waitingForNetwork.set(false)
-        closeWithGoodbye(reason, "User disconnect")
-    }
+    fun disconnect() = leave(GoodbyeReason.USER_REQUEST, reconnect = false)
 
     /**
-     * Say why we are leaving, then close: the tail of every deliberate
+     * Say why we are leaving, then end the connection: every deliberate
      * disconnect.
      *
-     * The goodbye is encrypted and handed to the transport before this
-     * returns, and the close waits for the transport to flush it. Both
-     * matter: the callers go straight on to open the next connection or to
-     * cancel the coroutine scopes, and a plain close() drops whatever is
-     * still queued.
+     * The goodbye is encrypted before the teardown retires the channel and
+     * handed to the transport before this returns, and the close waits for
+     * the transport to flush it. Both matter: the callers go straight on to
+     * open the next connection or to cancel the coroutine scopes, and a
+     * plain close() drops whatever is still queued.
      */
-    private fun closeWithGoodbye(reason: GoodbyeReason, closeReason: String) {
-        resetArtworkStream()
-        resetServerState()
-        val closing = transport
-        transport = null
-        // Clear the transport listener BEFORE closing to prevent the async onClosed
-        // callback from firing a second onDisconnected after we fire one synchronously below.
-        closing?.setListener(null)
-        if (closing != null) {
-            encodeGoodbye(reason).forEach { closing.send(it) }
-            closing.closeAfterFlush(1000, closeReason)
+    private fun leave(reason: GoodbyeReason, reconnect: Boolean) {
+        Log.d(TAG, "Disconnecting (${reason.wire})")
+        val goodbye = encodeGoodbye(reason)
+        val closing = endConnection(TransportState.Idle, reconnect) ?: return
+        if (goodbye.isEmpty()) {
+            // Nothing to flush: the connection never got as far as an
+            // activation, so there is no one to say goodbye to.
+            closing.close(1000, reason.wire)
+            closing.destroy()
+        } else {
+            goodbye.forEach { closing.send(it) }
+            closing.closeAfterFlush(1000, reason.wire)
         }
-        handshakeComplete = false
-        _connectionState.value = TransportState.Idle
     }
+
+    /**
+     * End the current connection. Every way a connection can end comes
+     * through here: a remote close, a transport failure, the stall watchdog,
+     * a protocol or handshake failure, `server/unpair`, a rejected
+     * activation, a user disconnect, a server switch.
+     *
+     * Nothing of the connection is left for the next one to inherit: time
+     * sync and the handshake timer are stopped, the encrypted channel and
+     * everything the handler learned over it are forgotten, and the pairing
+     * flows are told the socket is gone.
+     *
+     * The transport is detached - so nothing it reports afterwards reaches
+     * this client - and returned for the caller to close the way its case
+     * needs. Null when there was none.
+     *
+     * @param reconnect what [Callback.onDisconnected] is told.
+     */
+    private fun endConnection(newState: TransportState, reconnect: Boolean): SendSpinTransport? =
+        synchronized(connectionLock) {
+            val ended = transport
+            ended?.setListener(null)
+            transport = null
+
+            stopStallWatchdog()
+            handshakeTimeoutJob?.cancel()
+            handshakeTimeoutJob = null
+            handshakeDriver = null
+
+            val wasEstablished = handshakeComplete
+            resetConnectionState()
+            matchedPsk = null
+            sessionFacts = null
+            _controllerState.value = null
+            connectedAtMs = null
+
+            // Before the state changes, so whoever reacts to the new state
+            // can already have been told what to do about it.
+            if (wasEstablished) callback.onDisconnected(reconnect)
+            _connectionState.value = newState
+            ended
+        }
 
     fun play() = sendCommand("play")
     fun pause() = sendCommand("pause")
@@ -1196,24 +995,14 @@ class SendSpin(
      * Clean up resources.
      */
     fun destroy() {
-        stopStallWatchdog()
-        stopTimeSync()
+        // "When the device is powering off or otherwise not coming back ...
+        // clients SHOULD send this reason."
+        leave(GoodbyeReason.SHUTDOWN, reconnect = false)
 
-        // Cancel any pending reconnect coroutine
-        reconnectJob?.cancel()
-        reconnectJob = null
-
-        reconnecting.set(false)
-        // disconnect() sets userInitiatedDisconnect unconditionally; no need
-        // to pre-set it here. "When the device is powering off or otherwise
-        // not coming back ... clients SHOULD send this reason."
-        disconnect(GoodbyeReason.SHUTDOWN)
-
-        // Cancel both scopes before closing the timer dispatcher.
-        // Cancelling the scope cancels all its launched coroutines; closing
-        // the dispatcher shuts down the underlying executor thread.
+        // Cancel the scope before closing the timer dispatcher. Cancelling
+        // the scope cancels all its launched coroutines; closing the
+        // dispatcher shuts down the underlying executor thread.
         timerScope.cancel()
-        workScope.cancel()
         timerDispatcher.close()
     }
 
@@ -1272,7 +1061,7 @@ class SendSpin(
     }
 
     /**
-     * Stop the stall watchdog. Called on disconnect or during reconnect attempts.
+     * Stop the stall watchdog. Called when the connection ends.
      * Serialized against [startStallWatchdog] via [watchdogLock].
      */
     private fun stopStallWatchdog() {
@@ -1284,8 +1073,7 @@ class SendSpin(
 
     /**
      * Check whether the transport has gone silent for too long and force-close it
-     * if so. Only acts when the client is connected, handshake is complete, and we
-     * are not already in a reconnect cycle.
+     * if so. Only acts when the client is connected and the handshake is complete.
      *
      * Uses a two-tier threshold: [STALL_TIMEOUT_MS] while a stream is active (audio
      * frames should arrive continuously), and [IDLE_STALL_TIMEOUT_MS] when idle
@@ -1298,19 +1086,19 @@ class SendSpin(
      * Private for production; reached via reflection from SendSpinClientStallWatchdogTest.
      */
     private fun checkStall() {
-        if (userInitiatedDisconnect.get()) return
-        if (reconnecting.get()) return
         if (!handshakeComplete) return
         val t = transport ?: return
         if (!t.isConnected) return
 
-        val streaming = streamActive.get()
+        // The handler's view, which stream/clear does not end: audio keeps
+        // arriving after a skip, so the short threshold must keep applying.
+        val streaming = isStreamActive
         val threshold = if (streaming) STALL_TIMEOUT_MS else IDLE_STALL_TIMEOUT_MS
         val sinceLastByte = System.currentTimeMillis() - lastByteReceivedAtMs.get()
         if (sinceLastByte > threshold) {
             val mode = if (streaming) "streaming" else "idle"
             Log.w(TAG, "Stall watchdog: no data received in ${sinceLastByte}ms ($mode threshold ${threshold}ms) - forcing transport close")
-            // 1001 "Going Away" is non-1000 so onClosed path triggers reconnection
+            // Reported back through onClosed, which ends the connection.
             t.close(1001, "stall watchdog ($mode)")
         }
     }
@@ -1320,35 +1108,20 @@ class SendSpin(
      * consumable by anyone reading the on-device log file shared via Settings.
      *
      * Invariants (issue #128):
-     *   * Fires on every disconnect path -- normal, abnormal, pre-handshake, or
-     *     user-initiated. The stats screen's "last disconnect" is informational
-     *     regardless of whether reconnect is scheduled.
+     *   * Fires on every close or failure the transport reports -- normal,
+     *     abnormal or pre-handshake.
      *   * Uptime is derived from [connectedAtMs] (null -> "preconnect" when
      *     handshake had not yet completed).
      *   * Logs at INFO so `AppLog.level = WARN or above` suppresses emission
      *     without any formatting cost.
      */
-    private fun recordDisconnectTelemetry(
-        code: Int?,
-        reasonText: String,
-        isNormalClosure: Boolean,
-    ) {
+    private fun recordDisconnectTelemetry(code: Int?, reasonText: String) {
         val now = System.currentTimeMillis()
         val connectedAt = connectedAtMs
 
-        // Persist for the stats screen. Keep the "abnormal" flag for Part B's
-        // reconnect-result correlation: lastDisconnectAtMs only gates the
-        // [reconnect-ok] emission on a subsequent handshake complete, not the
-        // user-facing stats, so only set it on abnormal closures that will
-        // actually trigger a retry cycle.
+        // Persist for the stats screen.
         lastDisconnectCode = code
         lastDisconnectReason = reasonText
-        if (!isNormalClosure && !userInitiatedDisconnect.get()) {
-            lastDisconnectAtMs = now
-        }
-
-        // Session ended for uptime purposes regardless of whether we reconnect.
-        connectedAtMs = null
 
         val codeField = code?.toString() ?: "none"
         val uptimeField = if (connectedAt != null) {
@@ -1358,140 +1131,8 @@ class SendSpin(
         }
         AppLog.Network.i(
             "[disconnect] code=$codeField reason=${reasonText.ifBlank { "unknown" }} " +
-                "uptime_s=$uptimeField " +
-                "attempts_total=${reconnectAttemptsTotal.get()}"
+                "uptime_s=$uptimeField"
         )
-    }
-
-    /**
-     * Attempt reconnection with exponential backoff.
-     *
-     * Exponential backoff for the first 5 attempts (500ms -> 8s), then 30s
-     * steady-state retries forever. Applies in both normal and high-power mode.
-     * If network is unavailable, pauses without consuming an attempt.
-     */
-    private fun attemptReconnect() {
-        if (serverAddress == null) {
-            Log.w(TAG, "Cannot reconnect: no connection info saved")
-            return
-        }
-
-        if (userInitiatedDisconnect.get()) {
-            Log.d(TAG, "Not reconnecting: user-initiated disconnect")
-            return
-        }
-
-        if (suppressAutoReconnect.get()) {
-            Log.i(TAG, "Not reconnecting: this server unpaired us")
-            return
-        }
-
-        // Hard cap (L-5 fix): after MAX_TOTAL_RECONNECT_ATTEMPTS, stop scheduling
-        // attempts and surface failure to the UI. The user can manually reconnect
-        // (which clears reconnectAttempts and restarts the cycle).
-        val prior = reconnectAttempts.get()
-        if (prior >= MAX_TOTAL_RECONNECT_ATTEMPTS) {
-            Log.w(TAG, "Reconnect cap reached ($prior >= $MAX_TOTAL_RECONNECT_ATTEMPTS) - giving up")
-            AppLog.Network.w(
-                "[reconnect-exhausted] cap=$MAX_TOTAL_RECONNECT_ATTEMPTS " +
-                    "attempts_total=${reconnectAttemptsTotal.get()}"
-            )
-            reconnecting.set(false)
-            reconnectJob?.cancel()
-            reconnectJob = null
-            _connectionState.value = TransportState.Failed(FailureReason.Exhausted)
-            return
-        }
-
-        val attempts = reconnectAttempts.incrementAndGet()
-        // Lifetime counter survives across reconnect cycles. Issue #128.
-        reconnectAttemptsTotal.incrementAndGet()
-
-        // On first reconnection attempt, freeze the time filter so a
-        // successful reconnect to the same server can restore sync.
-        if (attempts == 1) {
-            timeFilter.freeze(serverName, serverId)
-            Log.i(TAG, "Time filter frozen for reconnection (had ${timeFilter.measurementCountValue} measurements)")
-        }
-        stopStallWatchdog()  // watchdog restarts on next successful handshake via onHandshakeComplete
-
-        // If network is unavailable, pause without wasting an attempt
-        // setNetworkAvailable(true) will resume via onNetworkAvailable()
-        if (!networkAvailable.get()) {
-            Log.i(TAG, "Network unavailable - pausing reconnection (attempt $attempts saved)")
-            reconnectAttempts.decrementAndGet()
-            waitingForNetwork.set(true)
-            reconnecting.set(true)
-            _connectionState.value = TransportState.Connecting
-            return
-        }
-
-        // Exponential backoff for first 5 attempts, then 30s steady-state forever.
-        // Applies in both normal and high power mode - the user can always disconnect
-        // manually if they're done listening.
-        val delayMs = if (attempts > MAX_RECONNECT_ATTEMPTS) {
-            HIGH_POWER_RECONNECT_DELAY_MS
-        } else {
-            (INITIAL_RECONNECT_DELAY_MS * (1 shl (attempts - 1)))
-                .coerceAtMost(MAX_RECONNECT_DELAY_MS)
-        }
-
-        Log.i(TAG, "Attempting reconnection $attempts in ${delayMs}ms")
-        reconnecting.set(true)
-        _connectionState.value = TransportState.Connecting
-
-        // Store the job so it can be cancelled if user disconnects during the delay
-        reconnectJob = timerScope.launch {
-            delay(delayMs)
-
-            if (userInitiatedDisconnect.get() || !reconnecting.get()) {
-                Log.d(TAG, "Reconnection cancelled")
-                return@launch
-            }
-
-            handshakeComplete = false
-            stopTimeSync()
-
-            // Clean up old transport
-            transport?.destroy()
-            transport = null
-
-            // Transport creation does blocking IO -- switch dispatcher
-            // from the single-thread timer to the IO pool.
-            withContext(Dispatchers.IO) {
-                val address = serverAddress ?: return@withContext
-                val path = serverPath ?: SendSpinProtocol.ENDPOINT_PATH
-                Log.d(TAG, "Reconnecting to: $address path=$path (attempt $attempts)")
-                createLocalTransport(address, path)
-            }
-        }
-    }
-
-    /**
-     * Check if an error is recoverable (should trigger reconnection).
-     */
-    private fun isRecoverableError(t: Throwable): Boolean {
-        val cause = t.cause ?: t
-        val message = t.message?.lowercase() ?: ""
-
-        return when {
-            cause is SocketException -> true
-            cause is java.io.EOFException -> true
-            message.contains("reset") -> true
-            message.contains("abort") -> true
-            message.contains("broken pipe") -> true
-            message.contains("connection closed") -> true
-            cause is SocketTimeoutException -> true
-            cause is UnknownHostException -> false
-            cause is SSLHandshakeException -> false
-            message.contains("refused") -> false
-            else -> {
-                // Default to NOT recoverable. A leaked programming bug (NPE, parser
-                // RuntimeException, etc.) must not trigger endless reconnect loops.
-                Log.d(TAG, "isRecoverableError: unrecognized throwable ${cause::class.simpleName} msg='$message' -> unrecoverable")
-                false
-            }
-        }
     }
 
     /**
@@ -1525,24 +1166,12 @@ class SendSpin(
     // ========== Transport Event Listener ==========
 
     /**
-     * Unified event listener for the WebSocket transport.
+     * Event listener for the WebSocket transport.
      *
-     * ## Reconnect-gate policy (issue #129)
-     *
-     * Both [onClosed] and [onFailure] trigger [attemptReconnect] under the same
-     * core conditions:
-     *   * Not a user-initiated disconnect (`!userInitiatedDisconnect`).
-     *   * Have connection info saved (address).
-     *   * The failure is transient / unexpected (non-1000 close code for
-     *     [onClosed]; `isRecoverable` exception class for [onFailure]).
-     *
-     * Notably, `handshakeComplete` is NOT part of the gate. A server that
-     * accepts the WebSocket upgrade and then closes abnormally before
-     * `server/hello` arrives is retried -- backoff with 30 s steady-state
-     * after 5 attempts handles the "server is broken" case without spinning,
-     * and the existing `!isNormalClosure` / `isRecoverable` filters prevent
-     * reconnect storms on deterministic rejections (code 1000 from an
-     * accept-then-reject server, DNS, SSL, auth failures).
+     * A close or a failure reported here is one this client did not ask for:
+     * [leave] and [closeConnectionAfterFlush] detach the listener before
+     * they close. That includes the closes the stall watchdog and a protocol
+     * failure make themselves, and a server closing with code 1000.
      */
     private inner class TransportEventListener : SendSpinTransport.Listener {
 
@@ -1581,11 +1210,6 @@ class SendSpin(
             onProtocolFailure("cleartext text frame outside the handshake")
         }
 
-        override fun onMessage(text: String) {
-            lastByteReceivedAtMs.set(System.currentTimeMillis())
-            handleTextMessage(text)
-        }
-
         override fun onMessage(bytes: ByteArray) {
             lastByteReceivedAtMs.set(System.currentTimeMillis())
             handleBinaryMessage(bytes)
@@ -1598,48 +1222,24 @@ class SendSpin(
         override fun onClosed(code: Int, reason: String) {
             Log.d(TAG, "Transport closed: $code $reason")
 
-            // Code 1000 = Normal Closure - server intentionally ended the session
-            // This is NOT an error that should trigger reconnection
-            val isNormalClosure = code == 1000
-
             // Record telemetry for the stats screen + emit the structured [disconnect]
-            // log line. Issue #128. Safe for all paths (normal, abnormal,
-            // user-initiated): the stats screen shows "last disconnect" which is
-            // informational regardless of whether we reconnect.
+            // log line. Issue #128.
             recordDisconnectTelemetry(
                 code = code,
                 reasonText = reason.ifEmpty { "code=$code" },
-                isNormalClosure = isNormalClosure,
             )
 
-            val hasConnectionInfo = serverAddress != null
-
-            if (!userInitiatedDisconnect.get() && !isNormalClosure && hasConnectionInfo) {
-                // Abnormal closure (not code 1000) - attempt reconnection. We no
-                // longer gate on handshakeComplete here; see class-level doc for
-                // the unified reconnect-gate policy (#129). Logging keeps the
-                // handshake state so field triage can still distinguish
-                // "pre-handshake drop" from "post-handshake drop".
-                Log.i(TAG, "Abnormal closure (code=$code, handshakeComplete=$handshakeComplete), attempting reconnection")
-                if (selfReconnectEnabled) {
-                    attemptReconnect()
-                } else {
-                    Log.d(TAG, "selfReconnectEnabled=false; not auto-reconnecting after onClosed(code=$code)")
-                    reconnecting.set(false)
-                    _connectionState.value = TransportState.Idle
-                }
-            } else {
-                // Either user-initiated, pre-handshake, or server's normal closure
-                if (isNormalClosure && !userInitiatedDisconnect.get()) {
-                    Log.i(TAG, "Server closed connection normally (code 1000) - session ended")
-                }
-                reconnecting.set(false)
-                _connectionState.value = TransportState.Idle
-            }
+            endConnection(TransportState.Idle, reconnect = true)?.destroy()
         }
 
         override fun onFailure(error: Throwable, isRecoverable: Boolean) {
-            Log.e(TAG, "Transport failure", error)
+            if (handshakeComplete) {
+                Log.e(TAG, "Transport failure", error)
+            } else {
+                // An attempt that did not get through, possibly one of many
+                // while a server is away: the reason is enough.
+                Log.w(TAG, "Connect failed: $error")
+            }
 
             // Record telemetry for the stats screen + emit the structured [disconnect]
             // log line. onFailure has no WebSocket close code -- use `null` code and
@@ -1647,28 +1247,16 @@ class SendSpin(
             recordDisconnectTelemetry(
                 code = null,
                 reasonText = error.message ?: error::class.java.simpleName,
-                isNormalClosure = false,
             )
 
-            val hasConnectionInfo = serverAddress != null
-
-            val shouldReconnect = !userInitiatedDisconnect.get() &&
-                    hasConnectionInfo &&
-                    isRecoverable
-
-            if (shouldReconnect) {
-                Log.i(TAG, "Recoverable error, attempting reconnection: ${error.message}")
-                if (selfReconnectEnabled) {
-                    attemptReconnect()
-                } else {
-                    Log.d(TAG, "selfReconnectEnabled=false; not auto-reconnecting after onFailure(${error.message})")
-                    reconnecting.set(false)
-                    _connectionState.value = TransportState.Idle
-                }
+            // Failed is for an attempt that did not get through. A connection
+            // that was up and broke has simply ended, whatever broke it.
+            val state = if (isRecoverable || handshakeComplete) {
+                TransportState.Idle
             } else {
-                reconnecting.set(false)
-                _connectionState.value = TransportState.Failed(classifyFailureReason(throwable = error))
+                TransportState.Failed(classifyFailureReason(throwable = error))
             }
+            endConnection(state, reconnect = true)?.destroy()
         }
     }
 }

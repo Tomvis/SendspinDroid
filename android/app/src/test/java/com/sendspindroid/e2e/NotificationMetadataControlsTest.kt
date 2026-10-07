@@ -196,17 +196,6 @@ class NotificationMetadataControlsTest : E2ETestBase() {
     }
 
     @Test
-    fun `draining state reports as still playing`() {
-        val mockSync = mockk<SyncAudioPlayer>(relaxed = true)
-        every { mockSync.getPlaybackState() } returns SyncPlaybackState.DRAINING
-        player.setSyncAudioPlayer(mockSync)
-
-        assertTrue("DRAINING should report as playing", player.isPlaying)
-        assertEquals("DRAINING should be STATE_READY",
-            Player.STATE_READY, player.playbackState)
-    }
-
-    @Test
     fun `playWhenReady change from server notifies listeners`() {
         // Server says start playing
         player.updatePlayWhenReadyFromServer(true)

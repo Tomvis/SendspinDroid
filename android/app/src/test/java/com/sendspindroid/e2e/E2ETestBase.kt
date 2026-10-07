@@ -111,6 +111,7 @@ abstract class E2ETestBase {
     protected fun injectTransportAndConnect(
         serverAddress: String? = "192.168.1.100:8927",
         serverPath: String? = "/sendspin",
+        installChannel: Boolean = true,
     ) {
         // Set connection state to Connecting via the existing MutableStateFlow
         val stateFlow: kotlinx.coroutines.flow.MutableStateFlow<TransportState> =
@@ -120,9 +121,6 @@ abstract class E2ETestBase {
         // Set connection info for reconnection
         if (serverAddress != null) setField(client, "serverAddress", serverAddress)
         if (serverPath != null) setField(client, "serverPath", serverPath)
-
-        // Reset disconnect flags
-        setAtomicBoolean(client, "userInitiatedDisconnect", false)
 
         // Set handshakeComplete to false
         setField(client, "handshakeComplete", false,
@@ -141,10 +139,10 @@ abstract class E2ETestBase {
         fakeTransport.setListener(listener)
 
         // No fake server speaks Noise, so the handshake driver never reaches
-        // transport mode here. Install what it would have installed - again
-        // after the client starts its handshake, which clears the channel.
-        client.installEncryptedChannel(PlaintextCrypto)
-        fakeTransport.afterConnected = { client.installEncryptedChannel(PlaintextCrypto) }
+        // transport mode here. Install what it would have installed.
+        fakeTransport.afterConnected = {
+            if (installChannel) client.installEncryptedChannel(PlaintextCrypto)
+        }
     }
 
     /**

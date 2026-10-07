@@ -105,7 +105,7 @@ import kotlin.math.roundToInt
  * Extends MediaLibraryService to provide:
  * - Background audio playback (screen off, app minimized)
  * - System media integration (notifications, lock screen controls)
- * - Audio focus handling (pause for phone calls, etc.)
+ * - Audio focus handling (pause the group for calls, mute for other audio)
  * - Bluetooth/headset button support
  * - Android Auto browse tree support
  *
@@ -135,10 +135,6 @@ class PlaybackService : MediaLibraryService() {
     // thread reads or writes this field.
     private var audioDecoder: AudioDecoder? = null
 
-    // When true, the next state/group message should call exitDraining() AFTER processing.
-    // This ensures the DRAINING check in onStateChanged/onGroupUpdate fires while still
-    // in DRAINING state, before transitioning back to PLAYING.
-    @Volatile private var pendingExitDraining = false
     private var currentCodec: String = "pcm"  // Track current stream codec for stats
 
     // Current server connection info (for MA integration)
@@ -158,6 +154,10 @@ class PlaybackService : MediaLibraryService() {
 
     // mDNS discovery for Android Auto browse tree
     private var browseDiscoveryManager: NsdDiscoveryManager? = null
+
+    // mDNS discovery while the reconnect loop runs: a server that announces
+    // itself again is retried at once instead of at the end of a backoff.
+    private var reconnectDiscoveryManager: NsdDiscoveryManager? = null
 
     /** Bridges a suspend function into a ListenableFuture for MediaLibrarySession callbacks. */
     private fun <T> suspendToFuture(block: suspend () -> T): ListenableFuture<T> {
@@ -257,12 +257,6 @@ class PlaybackService : MediaLibraryService() {
     // Playback state exposed as StateFlow (like Python CLI's AppState)
     private val _playbackState = MutableStateFlow(PlaybackState())
     val playbackState: StateFlow<PlaybackState> = _playbackState.asStateFlow()
-
-    // Tracks whether the most recent disconnect was user-initiated (via COMMAND_DISCONNECT).
-    // Set to true in the COMMAND_DISCONNECT handler; reset to false on each new connect attempt.
-    // Used to populate EXTRA_WAS_USER_INITIATED in broadcastSessionExtras.
-    @Volatile
-    private var lastDisconnectUserInitiated: Boolean = false
 
     // Sync offset state (included in broadcastSessionExtras to avoid bare-bundle overwrites)
     private var lastSyncOffsetMs: Double = 0.0
@@ -382,14 +376,40 @@ class PlaybackService : MediaLibraryService() {
     private var audioFocusRequest: AudioFocusRequest? = null
     private var hasAudioFocus: Boolean = false
 
+    // What another app taking the output has done to us (main thread only).
+    // See AudioInterruptionPolicy.
+    private var interruptionMuted = false   // output muted for a focus loss or output disconnect
+    private var pausedForCall = false       // we sent 'pause' for a call and nobody has changed playback since
+    private var transientFocusLoss: AudioInterruption? = null  // transient loss still in force
+
+    // A call can take focus slightly before the audio mode says it is a call
+    // (and a VoIP app may only switch mode when answered), so while a transient
+    // loss is being handled as plain audio the mode is polled, and the loss is
+    // decided again once the mode says it is a call.
+    private val callModeRecheckRunnable = object : Runnable {
+        override fun run() {
+            val loss = transientFocusLoss ?: return
+            if (AudioInterruptionPolicy.isCallMode(audioManager?.mode ?: AudioManager.MODE_NORMAL)) {
+                handleAudioInterruption(loss)
+            } else {
+                mainHandler.postDelayed(this, CALL_MODE_RECHECK_MS)
+            }
+        }
+    }
+
     // Receiver for ACTION_AUDIO_BECOMING_NOISY: fired when the audio output is
     // rerouting to the built-in speaker because an external output disconnected
     // (wired headphones unplugged, Bluetooth/Android Auto disconnected). We pause
-    // local playback so we don't abruptly blast the phone speaker.
+    // the group so we don't abruptly blast the phone speaker.
     private var becomingNoisyReceiver: BroadcastReceiver? = null
 
     companion object {
         private const val TAG = "PlaybackService"
+
+        // Every focus change, the audio mode at that moment and the action
+        // taken are logged at INFO under this tag: adb logcat -s AudioFocus
+        private const val FOCUS_TAG = "AudioFocus"
+        private const val CALL_MODE_RECHECK_MS = 1000L
 
         // Wake lock refresh strategy:
         // - Use a 30-minute timeout so if release fails (crash, etc.), max battery drain is 30 min
@@ -404,6 +424,12 @@ class PlaybackService : MediaLibraryService() {
         // Timeout for awaiting a terminal connection state in connectViaSelectedConnection.
         private const val CONNECT_TIMEOUT_MS = 15_000L
 
+        // How long the playback locks (CPU, Wi-Fi, audio focus) held when a
+        // connection dropped are kept for the reconnect loop. Long enough for
+        // a server restart or a network blip with the screen off; after it the
+        // loop carries on whenever the device is awake.
+        private const val RECONNECT_LOCK_HOLD_MS = 10 * 60 * 1000L
+
         // How long boot auto-connect waits for mDNS to re-resolve a saved local
         // server's current address before falling back to the stored one (#158).
         private const val MDNS_AUTOCONNECT_TIMEOUT_MS = 5_000L
@@ -413,9 +439,7 @@ class PlaybackService : MediaLibraryService() {
         private const val FORMAT_SWITCH_POLL_MS = 20L
 
         // Custom session commands
-        const val COMMAND_CANCEL_RECONNECT = "com.sendspindroid.CANCEL_RECONNECT"
         const val COMMAND_CONNECT = "com.sendspindroid.CONNECT"
-        const val COMMAND_CONNECT_AUTO = "com.sendspindroid.CONNECT_AUTO"
         const val COMMAND_DISCONNECT = "com.sendspindroid.DISCONNECT"
         const val COMMAND_SET_VOLUME = "com.sendspindroid.SET_VOLUME"
         const val COMMAND_NEXT = "com.sendspindroid.NEXT"
@@ -448,8 +472,6 @@ class PlaybackService : MediaLibraryService() {
         const val EXTRA_CONNECTION_STATE = "connection_state"
         const val EXTRA_SERVER_NAME = "server_name"
         const val EXTRA_ERROR_MESSAGE = "error_message"
-        const val EXTRA_WAS_USER_INITIATED = "was_user_initiated"
-        const val EXTRA_WAS_RECONNECT_EXHAUSTED = "was_reconnect_exhausted"
 
         /**
          * Why a connected session cannot play, as an [AdmissionState] name.
@@ -477,13 +499,8 @@ class PlaybackService : MediaLibraryService() {
         // Session extras keys for group info
         const val EXTRA_GROUP_NAME = "group_name"
 
-        // Session extras keys for reconnect status
-        const val EXTRA_RECONNECT_STATUS = "reconnect_status"
-        const val EXTRA_RECONNECT_SERVER_ID = "reconnect_server_id"
+        // Which attempt the reconnect loop is on (with STATE_RECONNECTING)
         const val EXTRA_RECONNECT_ATTEMPT = "reconnect_attempt"
-        const val EXTRA_RECONNECT_MAX_ATTEMPTS = "reconnect_max_attempts"
-        const val EXTRA_RECONNECT_METHOD = "reconnect_method"
-        const val EXTRA_RECONNECT_ERROR = "reconnect_error"
 
         // Connection state values
         const val STATE_DISCONNECTED = "disconnected"
@@ -491,12 +508,6 @@ class PlaybackService : MediaLibraryService() {
         const val STATE_CONNECTED = "connected"
         const val STATE_RECONNECTING = "reconnecting"
         const val STATE_ERROR = "error"
-
-        // Reconnect status values
-        const val RECONNECT_IDLE = "idle"
-        const val RECONNECT_ATTEMPTING = "attempting"
-        const val RECONNECT_SUCCEEDED = "succeeded"
-        const val RECONNECT_FAILED = "failed"
 
         // Android Auto browse tree media IDs
         // Max artwork bitmap dimension (px) for MediaMetadata / notifications.
@@ -524,12 +535,21 @@ class PlaybackService : MediaLibraryService() {
         // browse on Android Auto from racing discovery and rendering empty.
         private const val BROWSE_DISCOVERY_WAIT_MS = 3_000L
 
+        /**
+         * Whether an mDNS announcement is for [server]: by its friendly name
+         * (which is what a saved server is named after), by the raw service
+         * name, or by the address it was last reached at.
+         */
+        internal fun isSameServer(server: UnifiedServer, name: String, friendlyName: String, address: String): Boolean =
+            friendlyName == server.name || name == server.name || address == server.local?.address
+
         // Exposes the coordinator's network state for in-process observers (e.g. MainActivity).
         // Updated by the service's existing coordinator.networkState collector.
         private val _networkState = MutableStateFlow(NetworkState())
         val networkState: StateFlow<NetworkState> = _networkState.asStateFlow()
 
-        // Exposes the coordinator's reconnect status for in-process observers (e.g. MainActivity).
+        // Exposes the coordinator's reconnect status for in-process observers (e.g. MainActivity),
+        // which show it and never act on it.
         // Updated by the service's existing coordinator.reconnectStatus collector.
         private val _reconnectStatusRelay = MutableStateFlow<ReconnectStatus>(ReconnectStatus.Idle)
         val reconnectStatus: StateFlow<ReconnectStatus> = _reconnectStatusRelay.asStateFlow()
@@ -682,8 +702,10 @@ class PlaybackService : MediaLibraryService() {
             sendSpinStateFlow = sendSpinClient?.connectionState ?: flowOf(TransportState.Idle),
             musicAssistantStateFlow = MusicAssistant.connectionState,
             scope = serviceScope,
-            onDisconnectRequested = { disconnectFromServer() },
-            connectAttempt = { server, method ->
+            connectAttempt = { lost, method ->
+                // Read again for each attempt: mDNS may have found the server
+                // at a new address since the loop started.
+                val server = UnifiedServerRepository.getServer(lost.id) ?: lost
                 // Local is the only connection method left; other ConnectionType
                 // values can no longer be satisfied (no remote/proxy transport).
                 val selected = when (method) {
@@ -697,36 +719,28 @@ class PlaybackService : MediaLibraryService() {
             context = applicationContext,
         )
 
-        // Broadcast reconnect status changes to MediaController consumers via session extras.
+        // Mirrors the Coordinator's NetworkState into the companion flow for
+        // in-process observers (MainActivity).
         serviceScope.launch {
-            coordinator.reconnectStatus.collect {
-                broadcastSessionExtras()
-            }
+            coordinator.networkState.collect { state -> _networkState.value = state }
         }
 
-        // Network-state observer: dispatches the side effects formerly inline in networkCallback.
-        // Observes the Coordinator's NetworkState to call setNetworkAvailable on the client,
-        // and mirrors the state into the companion flow for in-process observers (MainActivity).
+        // Reconnect status: mirrored into the companion flow for in-process
+        // observers (MainActivity) and broadcast to MediaController consumers.
         serviceScope.launch {
-            var prevConnected: Boolean? = null
-            coordinator.networkState.collect { state ->
-                _networkState.value = state
-                val connected = state.isConnected
-                // Only dispatch when the connected flag actually changes to avoid redundant calls.
-                if (connected != prevConnected) {
-                    prevConnected = connected
-                    sendSpinClient?.setNetworkAvailable(connected)
-                    Log.d(TAG, "networkState observer: setNetworkAvailable($connected)")
-                }
-            }
-        }
-
-        // Reconnect-status relay: mirrors the coordinator's reconnect status into the
-        // companion flow for in-process observers (e.g. MainActivity).
-        serviceScope.launch {
+            var wasAttempting = false
             coordinator.reconnectStatus.collect { status ->
                 _reconnectStatusRelay.value = status
                 recordHandoff(status)
+                broadcastSessionExtras()
+                val attempting = status is ReconnectStatus.Attempting
+                if (wasAttempting && !attempting) {
+                    // The loop is over, one way or the other.
+                    stopReconnectDiscovery()
+                    mainHandler.removeCallbacks(reconnectLockRelease)
+                    releaseIfIdle()
+                }
+                wasAttempting = attempting
             }
         }
 
@@ -763,9 +777,7 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
-        // Drives the work formerly in SendSpin.Callback.onConnected /
-        // onDisconnected / onError / onReconnecting / onReconnected. Phase 4 Task 5
-        // removed those callbacks; consumers observe the StateFlow instead.
+        // Reacts to the client's connection state.
         var prevSendSpinState: TransportState = TransportState.Idle
         serviceScope.launch {
             sendSpinClient?.connectionState?.collect { state ->
@@ -773,23 +785,10 @@ class PlaybackService : MediaLibraryService() {
                 if (state !is TransportState.Ready) activeStreamConfig = null
                 when {
                     state is TransportState.Ready && prevSendSpinState !is TransportState.Ready -> {
-                        // PORTED FROM onConnected + onReconnected:
-                        // onReconnected ran first (set pendingExitDraining = true) then
-                        // onConnected ran. We combine them: if previous state was Connecting
-                        // we were reconnecting, so set pendingExitDraining first.
-                        val wasReconnecting = prevSendSpinState is TransportState.Connecting
                         val serverName = sendSpinClient?.getServerName() ?: ""
-                        if (wasReconnecting) {
-                            // Deferred exitDraining so first server/state or group/update
-                            // message is processed while still in DRAINING state.
-                            pendingExitDraining = true
-                        }
                         Log.d(TAG, "Connected to: $serverName")
                         sendSpinPlayer?.updateConnectionState(true, serverName)
                         sendSpinPlayer?.clearError()
-                        // Restore MediaSession metadata / playback state after any reconnect.
-                        // Idempotent: no-op when no overlay is active. Issue #132.
-                        forwardingPlayer?.clearReconnectingOverlay()
 
                         // Refresh browse tree root so "Connect" disappears
                         mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
@@ -821,34 +820,22 @@ class PlaybackService : MediaLibraryService() {
                         notifyMusicAssistantConnected()
                     }
                     state is TransportState.Idle && prevSendSpinState !is TransportState.Idle -> {
-                        // PORTED FROM onDisconnected:
-                        // wasUserInitiated and wasReconnectExhausted are not carried in
-                        // TransportState. With selfReconnectEnabled=false, Exhausted goes
-                        // through Failed(Exhausted) not Idle. Idle means either user-initiated
-                        // disconnect or coordinator-managed drop (non-exhausted). Since
-                        // selfReconnectEnabled=false, DRAINING is never entered via
-                        // onReconnecting so isDraining is always false here.
                         Log.d(TAG, "Disconnected from server")
 
                         // Stop debug logging session
                         stopDebugLogging()
                         AppLog.session.end()
 
-                        // Any active reconnect overlay is no longer meaningful once we've
-                        // transitioned out of Reconnecting into a terminal state. Issue #132.
-                        forwardingPlayer?.clearReconnectingOverlay()
-
-                        // Stop audio playback and release playback locks (CPU/WiFi)
+                        // Stop audio playback
                         syncAudioPlayer?.stop()
                         syncAudioPlayer?.release()
                         syncAudioPlayer = null
                         sendSpinPlayer?.setSyncAudioPlayer(null)
-                        releasePlaybackLocks()
-                        releaseHighPowerLocks()
-                        // Stop the foreground notification since we're fully disconnecting
-                        stopForegroundNotification()
-
-                        sendSpinPlayer?.updateConnectionState(false, null)
+                        sendSpinPlayer?.updateConnectionState(
+                            connected = false,
+                            reconnecting = coordinator.reconnectStatus.value is ReconnectStatus.Attempting,
+                        )
+                        releaseIfIdle()
 
                         // Refresh browse tree root so "Connect" reappears
                         mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
@@ -872,105 +859,24 @@ class PlaybackService : MediaLibraryService() {
                         currentServerId = null
                     }
                     state is TransportState.Failed -> {
-                        if (state.reason is FailureReason.Exhausted) {
-                            // PORTED FROM onDisconnected(wasReconnectExhausted = true):
-                            Log.d(TAG, "Reconnect exhausted - disconnecting with error")
+                        val message = failureReasonToMessage(state.reason)
+                        Log.e(TAG, "SendSpin error: $message")
 
-                            // Stop debug logging session
-                            stopDebugLogging()
-                            AppLog.session.end()
+                        // Show error on Android Auto
+                        sendSpinPlayer?.setError(message)
+                        releaseIfIdle()
 
-                            // Any active reconnect overlay is no longer meaningful.
-                            // Issue #132.
-                            forwardingPlayer?.clearReconnectingOverlay()
-
-                            // Stop audio playback and release all locks
-                            syncAudioPlayer?.stop()
-                            syncAudioPlayer?.release()
-                            syncAudioPlayer = null
-                            sendSpinPlayer?.setSyncAudioPlayer(null)
-                            releasePlaybackLocks()
-                            releaseHighPowerLocks()
-                            stopForegroundNotification()
-
-                            sendSpinPlayer?.updateConnectionState(false, null)
-
-                            // Show error on Android Auto since reconnect attempts were exhausted
-                            sendSpinPlayer?.setError("Connection lost")
-
-                            // Refresh browse tree root so "Connect" reappears
-                            mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
-
-                            // Broadcast disconnection to controllers (MainActivity)
-                            broadcastConnectionState(STATE_DISCONNECTED)
-
-                            // Clear playback state on disconnect
-                            _playbackState.value = PlaybackState()
-                            lastArtworkUrl = null
-                            lastTrackTitle = null
-                            urlArtwork = null
-                            binaryArtwork = null
-                            binaryArtworkGeneration++
-
-                            // Clear lock screen metadata
-                            forwardingPlayer?.clearMetadata()
-
-                            // Notify MusicAssistant of disconnection
-                            MusicAssistant.onServerDisconnected()
-                            currentServerId = null
-                        } else {
-                            // PORTED FROM onError(message):
-                            val message = when (state.reason) {
-                                is FailureReason.AuthRejected -> "Authentication failed -- please log in again"
-                                is FailureReason.HandshakeFailed -> "Could not establish connection"
-                                is FailureReason.TransientNetwork -> "Network error"
-                                is FailureReason.ProtocolError -> "Protocol error"
-                                is FailureReason.Exhausted -> "Connection lost after multiple attempts"
-                                is FailureReason.ServerLacksEncryption ->
-                                    "This server does not support encrypted connections. " +
-                                        "Music Assistant 2.9 or newer is required."
-                            }
-                            Log.e(TAG, "SendSpin error: $message")
-
-                            // Show error on Android Auto
-                            sendSpinPlayer?.setError(message)
-
-                            // Terminal error supersedes any reconnecting overlay. Issue #132.
-                            forwardingPlayer?.clearReconnectingOverlay()
-
-                            // Broadcast error to controllers (MainActivity)
-                            broadcastConnectionState(STATE_ERROR, errorMessage = message)
-                        }
+                        // Broadcast error to controllers (MainActivity)
+                        broadcastConnectionState(STATE_ERROR, errorMessage = message)
                     }
                     state is TransportState.Connecting && prevSendSpinState !is TransportState.Connecting -> {
-                        // From-Idle: initial connect attempt, no UI overlay needed.
-                        // From-Failed: reconnect attempt after a transient failure.
-                        // From-Ready: reselection (network handover) -- DRAINING applies.
-                        if (prevSendSpinState !is TransportState.Ready) {
-                            // Announce the attempt from here, where the transition
-                            // has already happened. The connect* methods used to do
-                            // it on their first line, before anything had left Idle,
-                            // and the publisher reports observed state rather than
-                            // the argument it is handed - so that call announced
-                            // DISCONNECTED at the very moment a connection began.
-                            broadcastConnectionState(STATE_CONNECTING)
-                        } else {
-                            // PORTED FROM onReconnecting (the Ready->Connecting path during
-                            // network handover or stall watchdog):
-                            val serverName = sendSpinClient?.getServerName() ?: ""
-                            Log.i(TAG, "Reconnecting to $serverName - entering DRAINING mode")
-                            // enterDraining() is thread-safe (guarded by stateLock).
-                            syncAudioPlayer?.enterDraining()
-                            pendingExitDraining = false  // Clear any stale flag
-
-                            // Broadcast to UI
-                            broadcastConnectionState(STATE_RECONNECTING, serverName)
-
-                            // Surface the reconnect on the MediaSession so lock screen /
-                            // Android Auto / AVRCP show "Reconnecting to {server}..." and the
-                            // buffering indicator instead of the stale track title. Issue #132.
-                            forwardingPlayer?.setReconnectingOverlay(serverName)
-                        }
+                        // Announce the attempt from here, where the transition
+                        // has already happened. The connect* methods used to do
+                        // it on their first line, before anything had left Idle,
+                        // and the publisher reports observed state rather than
+                        // the argument it is handed - so that call announced
+                        // DISCONNECTED at the very moment a connection began.
+                        broadcastConnectionState(STATE_CONNECTING)
                     }
                 }
                 prevSendSpinState = state
@@ -992,7 +898,7 @@ class PlaybackService : MediaLibraryService() {
         // Initialize AudioManager for device volume control
         initializeVolumeControl()
 
-        // Pause local playback when the audio output device disconnects.
+        // Stop the sound when the audio output device disconnects.
         registerBecomingNoisyReceiver()
     }
 
@@ -1092,7 +998,6 @@ class PlaybackService : MediaLibraryService() {
                 deviceName = playerName,
                 callback = SendSpinClientCallback()
             )
-            sendSpinClient?.selfReconnectEnabled = false
             sendSpinPlayer?.setSendSpinClient(sendSpinClient)
             Log.d(TAG, "SendSpin initialized with name: $playerName")
         } catch (e: Exception) {
@@ -1242,7 +1147,8 @@ class PlaybackService : MediaLibraryService() {
             // Set callback to update SendSpinPlayer when playback state changes
             setStateCallback(SyncAudioPlayerStateCallback())
             // From settings, not _playbackState: that is reset on disconnect.
-            setMuted(com.sendspindroid.UserSettings.getPlayerMuted())
+            setMuted(SyncAudioPlayer.MuteReason.PLAYER, com.sendspindroid.UserSettings.getPlayerMuted())
+            setMuted(SyncAudioPlayer.MuteReason.INTERRUPTION, interruptionMuted)
             initialize()
             start()
         }
@@ -1274,35 +1180,6 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
-        override fun onBufferLow(remainingMs: Long) {
-            Log.w(TAG, "Buffer low during reconnection: ${remainingMs}ms remaining")
-            // Update session extras so UI can show buffer status
-            mainHandler.post {
-                broadcastSessionExtras()
-            }
-        }
-
-        @OptIn(UnstableApi::class)
-        override fun onBufferExhausted() {
-            Log.e(TAG, "Buffer exhausted during reconnection - stopping playback")
-            mainHandler.post {
-                // Stop audio playback and release playback locks
-                syncAudioPlayer?.stop()
-                releasePlaybackLocks()
-
-                // Broadcast state after buffer exhausted
-                broadcastConnectionState(STATE_ERROR, errorMessage = "Connection lost")
-
-                // Clear playback state
-                _playbackState.value = _playbackState.value.copy(
-                    playbackState = PlaybackStateType.STOPPED
-                )
-                sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-
-                // Stop foreground notification since playback failed
-                stopForegroundNotification()
-            }
-        }
     }
 
     /**
@@ -1310,8 +1187,8 @@ class PlaybackService : MediaLibraryService() {
      */
     private inner class SendSpinClientCallback : SendSpin.Callback {
 
-        override fun onServerDiscovered(name: String, address: String) {
-            Log.d(TAG, "Server discovered (ignored in service): $name at $address")
+        override fun onDisconnected(reconnect: Boolean) {
+            mainHandler.post { onConnectionEnded(reconnect) }
         }
 
         override fun onAdmissionStateChanged(state: AdmissionState) {
@@ -1356,24 +1233,16 @@ class PlaybackService : MediaLibraryService() {
             mainHandler.post {
                 Log.d(TAG, "State changed: $state")
                 val newState = PlaybackStateType.fromString(state)
+                noteServerPlaybackState(newState)
 
                 // Handle playback state transitions per SendSpin spec
                 if (newState == PlaybackStateType.STOPPED) {
-                    // Check if we're in DRAINING state (actively playing from buffer during reconnection)
-                    val isDraining = syncAudioPlayer?.getPlaybackState() == SyncPlaybackState.DRAINING
-                    if (isDraining) {
-                        // We're reconnecting with active buffer - request server to resume playback
-                        Log.i(TAG, "Received stop via server/state while DRAINING - sending play command to resume")
-                        sendSpinClient?.play()
-                        // Don't update playWhenReady or clear buffer - keep playing
-                    } else {
-                        // Stop: "reset position to beginning" - clear buffer
-                        Log.d(TAG, "State is stopped - clearing audio buffer and releasing playback locks")
-                        sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-                        syncAudioPlayer?.clearBuffer()
-                        syncAudioPlayer?.pause()
-                        releasePlaybackLocks()
-                    }
+                    // Stop: "reset position to beginning" - clear buffer
+                    Log.d(TAG, "State is stopped - clearing audio buffer and releasing playback locks")
+                    sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
+                    syncAudioPlayer?.clearBuffer()
+                    syncAudioPlayer?.pause()
+                    releasePlaybackLocks()
                 } else if (newState == PlaybackStateType.PAUSED) {
                     // Pause: "maintains current position for later resumption" - keep buffer
                     Log.d(TAG, "State is paused - pausing audio (keeping buffer)")
@@ -1389,9 +1258,6 @@ class PlaybackService : MediaLibraryService() {
                 }
 
                 _playbackState.value = _playbackState.value.copy(playbackState = newState)
-
-                // Complete deferred DRAINING exit after processing state
-                completePendingExitDraining()
             }
         }
 
@@ -1403,27 +1269,18 @@ class PlaybackService : MediaLibraryService() {
                 val currentState = _playbackState.value
                 val isGroupChange = groupId.isNotEmpty() && groupId != currentState.groupId
                 val newPlaybackState = PlaybackStateType.fromString(playbackState)
+                if (playbackState.isNotEmpty()) noteServerPlaybackState(newPlaybackState)
 
                 // Handle playback state transitions per SendSpin spec
                 if (playbackState.isNotEmpty()) {
                     when (newPlaybackState) {
                         PlaybackStateType.STOPPED -> {
-                            // Check if we're in DRAINING state (actively playing from buffer during reconnection)
-                            val isDraining = syncAudioPlayer?.getPlaybackState() == SyncPlaybackState.DRAINING
-
-                            if (isDraining) {
-                                // We're reconnecting with active buffer - request server to resume playback
-                                Log.i(TAG, "Received stop via group/update while DRAINING - sending play command to resume")
-                                sendSpinClient?.play()
-                                // Don't update playWhenReady or clear buffer - keep playing
-                            } else {
-                                // Stop: "reset position to beginning" - clear buffer
-                                Log.d(TAG, "Playback stopped - clearing audio buffer and releasing playback locks")
-                                sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-                                syncAudioPlayer?.clearBuffer()
-                                syncAudioPlayer?.pause()
-                                releasePlaybackLocks()
-                            }
+                            // Stop: "reset position to beginning" - clear buffer
+                            Log.d(TAG, "Playback stopped - clearing audio buffer and releasing playback locks")
+                            sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
+                            syncAudioPlayer?.clearBuffer()
+                            syncAudioPlayer?.pause()
+                            releasePlaybackLocks()
                         }
                         PlaybackStateType.PAUSED -> {
                             // Pause: "maintains current position for later resumption" - keep buffer
@@ -1463,11 +1320,6 @@ class PlaybackService : MediaLibraryService() {
 
                 // Broadcast all state including group name to controllers (MainActivity)
                 broadcastSessionExtras()
-
-                // Complete deferred DRAINING exit after processing group state
-                if (playbackState.isNotEmpty()) {
-                    completePendingExitDraining()
-                }
             }
         }
 
@@ -1622,8 +1474,6 @@ class PlaybackService : MediaLibraryService() {
             // where SyncAudioPlayer + foreground-service + lock bookkeeping
             // live.
             mainHandler.post {
-                // Safety net: if stream/start arrives before state/group, complete deferred exit
-                completePendingExitDraining()
                 currentCodec = codec
 
                 if (sendSpinClient?.getTimeFilter() == null) {
@@ -1735,7 +1585,7 @@ class PlaybackService : MediaLibraryService() {
                 // Mute silences the output and leaves the volume alone: the
                 // two are independent, and a later volume change must not
                 // make a muted player audible.
-                syncAudioPlayer?.setMuted(muted)
+                syncAudioPlayer?.setMuted(SyncAudioPlayer.MuteReason.PLAYER, muted)
                 com.sendspindroid.UserSettings.setPlayerMuted(muted)
                 // Update playback state with new mute status
                 _playbackState.value = _playbackState.value.copy(muted = muted)
@@ -1755,21 +1605,14 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onSyncMuteChanged(muted: Boolean) {
             mainHandler.post {
-                syncAudioPlayer?.setSyncMuted(muted)
+                syncAudioPlayer?.setMuted(SyncAudioPlayer.MuteReason.SYNC, muted)
             }
         }
 
         override fun onNetworkChanged() {
             mainHandler.post {
-                // Only clear buffer if NOT in DRAINING state
-                // During reconnection, keep playing from buffer for continuity
-                val player = syncAudioPlayer
-                if (player != null && player.getPlaybackState() == SyncPlaybackState.DRAINING) {
-                    android.util.Log.i(TAG, "Network changed during reconnection - preserving buffer")
-                } else {
-                    android.util.Log.i(TAG, "Network changed - triggering audio player reanchor")
-                    player?.clearBuffer()
-                }
+                android.util.Log.i(TAG, "Network changed - triggering audio player reanchor")
+                syncAudioPlayer?.clearBuffer()
             }
         }
 
@@ -1966,17 +1809,15 @@ class PlaybackService : MediaLibraryService() {
         // settles a beat after sendSpinClient.connectionState - the flow every
         // collector here reacts to. Deriving the published state from the lagging
         // copy made a broadcast triggered by a client transition announce the
-        // PREVIOUS state. On first connect the previous state is Idle, so the
-        // service announced DISCONNECTED while it was actually connecting;
-        // MainActivity reads a non-user-initiated DISCONNECTED as an unexpected
-        // drop and answers with a second, competing reconnect loop, which then
-        // tore down the connection the first one had just established.
+        // PREVIOUS state.
         val sendSpinState = sendSpinClient?.connectionState?.value ?: sessionState.sendSpin
 
+        // A reconnect in progress outranks what the attempt in flight looks
+        // like: the loop goes through Connecting, Idle and Failed on its way.
         val connectionStateString = when {
+            sendSpinState is TransportState.Ready -> STATE_CONNECTED
             reconnectStatus is ReconnectStatus.Attempting -> STATE_RECONNECTING
             sendSpinState is TransportState.Failed -> STATE_ERROR
-            sendSpinState is TransportState.Ready -> STATE_CONNECTED
             sendSpinState is TransportState.Connecting -> STATE_CONNECTING
             else -> STATE_DISCONNECTED
         }
@@ -1993,13 +1834,7 @@ class PlaybackService : MediaLibraryService() {
         val extras = Bundle().apply {
             // Connection state
             when (connectionStateString) {
-                STATE_DISCONNECTED -> {
-                    putString(EXTRA_CONNECTION_STATE, STATE_DISCONNECTED)
-                    putBoolean(EXTRA_WAS_USER_INITIATED, lastDisconnectUserInitiated)
-                    // wasReconnectExhausted: Exhausted failures go through Failed(Exhausted),
-                    // not Idle, so STATE_DISCONNECTED never corresponds to an exhausted reconnect.
-                    putBoolean(EXTRA_WAS_RECONNECT_EXHAUSTED, false)
-                }
+                STATE_DISCONNECTED -> putString(EXTRA_CONNECTION_STATE, STATE_DISCONNECTED)
                 STATE_CONNECTING -> putString(EXTRA_CONNECTION_STATE, STATE_CONNECTING)
                 STATE_CONNECTED -> {
                     putString(EXTRA_CONNECTION_STATE, STATE_CONNECTED)
@@ -2011,9 +1846,8 @@ class PlaybackService : MediaLibraryService() {
                 STATE_RECONNECTING -> {
                     putString(EXTRA_CONNECTION_STATE, STATE_RECONNECTING)
                     serverName?.let { putString(EXTRA_SERVER_NAME, it) }
-                    // Include buffer info if available
-                    syncAudioPlayer?.getBufferedDurationMs()?.let {
-                        putLong("buffer_remaining_ms", it)
+                    (reconnectStatus as? ReconnectStatus.Attempting)?.let {
+                        putInt(EXTRA_RECONNECT_ATTEMPT, it.attempt)
                     }
                 }
                 STATE_ERROR -> {
@@ -2043,29 +1877,6 @@ class PlaybackService : MediaLibraryService() {
                 putDouble("sync_offset_ms", lastSyncOffsetMs)
                 putString("sync_offset_source", lastSyncOffsetSource)
             }
-
-            // Reconnect status
-            when (reconnectStatus) {
-                is ReconnectStatus.Idle -> {
-                    putString(EXTRA_RECONNECT_STATUS, RECONNECT_IDLE)
-                }
-                is ReconnectStatus.Attempting -> {
-                    putString(EXTRA_RECONNECT_STATUS, RECONNECT_ATTEMPTING)
-                    putString(EXTRA_RECONNECT_SERVER_ID, reconnectStatus.serverId)
-                    putInt(EXTRA_RECONNECT_ATTEMPT, reconnectStatus.attempt)
-                    putInt(EXTRA_RECONNECT_MAX_ATTEMPTS, reconnectStatus.maxAttempts)
-                    putString(EXTRA_RECONNECT_METHOD, reconnectStatus.method?.name)
-                }
-                is ReconnectStatus.Succeeded -> {
-                    putString(EXTRA_RECONNECT_STATUS, RECONNECT_SUCCEEDED)
-                    putString(EXTRA_RECONNECT_SERVER_ID, reconnectStatus.serverId)
-                }
-                is ReconnectStatus.Failed -> {
-                    putString(EXTRA_RECONNECT_STATUS, RECONNECT_FAILED)
-                    putString(EXTRA_RECONNECT_SERVER_ID, reconnectStatus.serverId)
-                    putString(EXTRA_RECONNECT_ERROR, reconnectStatus.error)
-                }
-            }
         }
 
         mediaSession?.setSessionExtras(extras)
@@ -2076,21 +1887,26 @@ class PlaybackService : MediaLibraryService() {
         is FailureReason.HandshakeFailed -> "Could not establish connection"
         is FailureReason.TransientNetwork -> "Network error"
         is FailureReason.ProtocolError -> "Protocol error"
-        is FailureReason.Exhausted -> "Connection lost after multiple attempts"
         is FailureReason.ServerLacksEncryption ->
             "This server does not support encrypted connections. " +
                 "Music Assistant 2.9 or newer is required."
     }
 
     /**
-     * Connects to a SendSpin server.
+     * Connects to a SendSpin server because someone chose it: the user, Android
+     * Auto, boot auto-connect. Takes over from a reconnect loop still trying
+     * for the previous server.
      *
      * @param address Server address in "host:port" format
      * @param path WebSocket path (default: /sendspin)
      */
     fun connectToServer(address: String, path: String = "/sendspin") {
+        coordinator.cancelReconnect()
+        openConnection(address, path)
+    }
+
+    private fun openConnection(address: String, path: String) {
         Log.d(TAG, "Connecting to server: $address path=$path")
-        lastDisconnectUserInitiated = false
 
         // No broadcast here: the coordinator is still Idle at this point, and
         // the publisher reports whatever state the coordinator is in. The
@@ -2150,6 +1966,88 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
+     * An established connection has ended. This is the one place a reconnect
+     * starts: the coordinator's loop, for the server the service was connected
+     * to, unless the client chose to leave (user disconnect, server switch,
+     * server/unpair, rejected activation). No activity needs to be alive.
+     *
+     * Runs before the connection-state collector sees the connection gone, so
+     * that it finds the loop already running and leaves the service in the
+     * foreground.
+     */
+    private fun onConnectionEnded(reconnect: Boolean) {
+        if (isDestroyed) return
+        val server = _currentServerFlow.value
+        if (!reconnect || server == null) {
+            coordinator.cancelReconnect()
+            return
+        }
+        Log.i(TAG, "Connection to ${server.name} lost - reconnecting")
+        startForegroundServiceWithNotification(server.name, reconnecting = true)
+        mainHandler.removeCallbacks(reconnectLockRelease)
+        mainHandler.postDelayed(reconnectLockRelease, RECONNECT_LOCK_HOLD_MS)
+        startReconnectDiscovery(server)
+        coordinator.connect(server)
+    }
+
+    // Playback locks are kept across a drop so the loop can run with the
+    // screen off, but not for as long as a server may stay away. High Power
+    // Mode's own locks are the user's choice and stay.
+    private val reconnectLockRelease = Runnable {
+        if (coordinator.reconnectStatus.value is ReconnectStatus.Attempting) {
+            Log.i(TAG, "Still reconnecting after ${RECONNECT_LOCK_HOLD_MS / 60000}min - releasing playback locks")
+            releasePlaybackLocks()
+        }
+    }
+
+    /**
+     * Give up the foreground and every lock once nothing is connected and
+     * nothing is trying to be. While the reconnect loop runs the service is
+     * still a media playback service with a session to restore, so it keeps
+     * both.
+     */
+    private fun releaseIfIdle() {
+        val state = sendSpinClient?.connectionState?.value
+        if (state is TransportState.Ready || state is TransportState.Connecting) return
+        if (coordinator.reconnectStatus.value is ReconnectStatus.Attempting) return
+        sendSpinPlayer?.updateConnectionState(false)
+        releasePlaybackLocks()
+        releaseHighPowerLocks()
+        stopForegroundNotification()
+    }
+
+    /**
+     * Watch mDNS for [server] while the reconnect loop runs. Seeing it
+     * announce itself retries immediately, and refreshes the saved address
+     * the next attempt reads.
+     */
+    private fun startReconnectDiscovery(server: UnifiedServer) {
+        stopReconnectDiscovery()
+        reconnectDiscoveryManager = NsdDiscoveryManager(this, object : NsdDiscoveryManager.DiscoveryListener {
+            override fun onServerDiscovered(name: String, address: String, path: String, friendlyName: String) {
+                UnifiedServerRepository.addDiscoveredServer(friendlyName, address, path)
+                if (isSameServer(server, name, friendlyName, address)) {
+                    Log.i(TAG, "${server.name} seen on mDNS at $address - retrying now")
+                    coordinator.retryNow()
+                }
+            }
+            override fun onServerLost(name: String) {}
+            override fun onDiscoveryStarted() {}
+            override fun onDiscoveryStopped() {}
+            override fun onDiscoveryError(error: String) {
+                Log.w(TAG, "Reconnect: mDNS discovery error: $error")
+            }
+        }).also { it.startDiscovery() }
+    }
+
+    private fun stopReconnectDiscovery() {
+        // cleanup() (not stopDiscovery()) so the multicast lock is released
+        // even if onDiscoveryStarted never fired.
+        reconnectDiscoveryManager?.cleanup()
+        reconnectDiscoveryManager = null
+    }
+
+    /**
      * Sets the current server ID for MA integration.
      * Call this before connecting when the server ID is known.
      *
@@ -2163,11 +2061,10 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Suspend-friendly connection wrapper used by the service-scoped
-     * AutoReconnectManager. Kicks off connectToServer, then awaits the
-     * SendSpin.connectionState transition to a terminal state.
+     * One attempt of the reconnect loop: opens the connection, then awaits
+     * the SendSpin.connectionState transition out of Connecting.
      *
-     * Returns true on Connected, false on Error or timeout.
+     * Returns true on Ready, false on anything else or on timeout.
      */
     private suspend fun connectViaSelectedConnection(
         server: com.sendspindroid.model.UnifiedServer,
@@ -2179,18 +2076,20 @@ class PlaybackService : MediaLibraryService() {
         // Set the active server first so observers see context immediately.
         setCurrentServer(server.id)
 
-        when (selectedConnection) {
-            is ConnectionSelector.SelectedConnection.Local ->
-                connectToServer(selectedConnection.address, selectedConnection.path)
+        // A connection someone started while the loop was waiting is the one
+        // to wait for, not one to replace.
+        val busy = client.connectionState.value.let {
+            it is TransportState.Connecting || it is TransportState.Ready
+        }
+        if (!busy) {
+            when (selectedConnection) {
+                is ConnectionSelector.SelectedConnection.Local ->
+                    openConnection(selectedConnection.address, selectedConnection.path)
+            }
         }
 
         return withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
-            val terminal = client.connectionState
-                .first {
-                    it is TransportState.Ready ||
-                    it is TransportState.Failed
-                }
-            terminal is TransportState.Ready
+            client.connectionState.first { it !is TransportState.Connecting } is TransportState.Ready
         } ?: run {
             Log.w(TAG, "connectViaSelectedConnection timed out after ${CONNECT_TIMEOUT_MS}ms; cancelling transport")
             disconnectFromServer()
@@ -2261,19 +2160,6 @@ class PlaybackService : MediaLibraryService() {
      * - If the app crashes without releasing, max battery drain is limited to 30 minutes
      * - The refresh mechanism ensures continuous playback isn't interrupted
      */
-    /**
-     * If a deferred DRAINING exit is pending, exit now.
-     * Called after onStateChanged/onGroupUpdate has finished processing so that
-     * the DRAINING check in those handlers fires while still in DRAINING state.
-     */
-    private fun completePendingExitDraining() {
-        if (pendingExitDraining) {
-            pendingExitDraining = false
-            Log.d(TAG, "Completing deferred DRAINING exit")
-            syncAudioPlayer?.exitDraining()
-        }
-    }
-
     @Suppress("DEPRECATION")
     private fun acquirePlaybackLocks() {
         // Request audio focus first - required for Android Auto to route audio to us
@@ -2420,13 +2306,14 @@ class PlaybackService : MediaLibraryService() {
      * @param serverName Optional server name for context-aware notification text.
      *                   If provided, shows "Connected to [serverName]".
      *                   If null, shows "Streaming audio..." (during active playback).
+     * @param reconnecting Shows "Reconnecting to [serverName]..." instead.
      */
-    private fun startForegroundServiceWithNotification(serverName: String? = null) {
+    private fun startForegroundServiceWithNotification(serverName: String? = null, reconnecting: Boolean = false) {
         try {
-            val contentText = if (serverName != null) {
-                "Connected to $serverName"
-            } else {
-                "Streaming audio..."
+            val contentText = when {
+                reconnecting -> "Reconnecting to $serverName..."
+                serverName != null -> "Connected to $serverName"
+                else -> "Streaming audio..."
             }
 
             val notification = NotificationCompat.Builder(this, NotificationHelper.CHANNEL_ID)
@@ -2501,7 +2388,10 @@ class PlaybackService : MediaLibraryService() {
 
             audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(audioAttributes)
-                .setWillPauseWhenDucked(false)
+                // Deliver "can duck" losses to the listener instead of letting
+                // the system duck us: ducking one synced player sounds wrong
+                // next to the others, so it is muted like any other transient loss.
+                .setWillPauseWhenDucked(true)
                 .setOnAudioFocusChangeListener { focusChange ->
                     mainHandler.post {
                         handleAudioFocusChange(focusChange)
@@ -2512,10 +2402,12 @@ class PlaybackService : MediaLibraryService() {
 
         val result = am.requestAudioFocus(audioFocusRequest!!)
         hasAudioFocus = (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
-        Log.d(TAG, "Audio focus requested: ${if (hasAudioFocus) "granted" else "denied"}")
+        Log.i(FOCUS_TAG, "focus requested: ${if (hasAudioFocus) "granted" else "denied"}")
         if (hasAudioFocus) {
-            // We own the output again: clear any 'external_source' report.
+            // We own the output again: clear any 'external_source' report
+            // and any mute left by an interruption.
             sendSpinClient?.setExternalSource(false)
+            setInterruptionMuted(false)
         }
     }
 
@@ -2524,53 +2416,117 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun abandonAudioFocus() {
         if (!hasAudioFocus) return
+        // Abandoning now would lose the focus-gain callback that ends the
+        // interruption (un-mute, resume after a call). The gain abandons instead.
+        if (transientFocusLoss != null) return
 
         audioFocusRequest?.let { request ->
             audioManager?.abandonAudioFocusRequest(request)
-            Log.d(TAG, "Audio focus abandoned")
+            Log.i(FOCUS_TAG, "focus abandoned")
         }
         hasAudioFocus = false
     }
 
     /**
      * Handles audio focus changes from the system.
-     *
-     * On Android Auto, focus loss typically means another app (navigation, phone call)
-     * needs audio. We pause/duck accordingly and resume when focus returns.
      */
     private fun handleAudioFocusChange(focusChange: Int) {
-        when (focusChange) {
-            AudioManager.AUDIOFOCUS_GAIN -> {
-                Log.d(TAG, "Audio focus gained")
-                // Focus returned - resume if we were playing before losing focus
-                syncAudioPlayer?.resume()
+        val event = AudioInterruption.fromFocusChange(focusChange)
+        if (event == null) {
+            Log.i(FOCUS_TAG, "focus change $focusChange ignored")
+            return
+        }
+        handleAudioInterruption(event)
+    }
+
+    /**
+     * Another app wants the output, or has given it back: ask
+     * [AudioInterruptionPolicy] what to do, log it and do it.
+     *
+     * A local interruption never pauses [syncAudioPlayer]. It is either a pause
+     * on the server (which then stops sending, and the server-state handling
+     * stops the player) or a mute, under which audio keeps draining in sync.
+     */
+    private fun handleAudioInterruption(event: AudioInterruption) {
+        val audioMode = audioManager?.mode ?: AudioManager.MODE_NORMAL
+        val serverState = _playbackState.value.playbackState
+        val canSendPause = sendSpinClient?.let { it.isConnected && it.canSendCommand("pause") } == true
+        val action = AudioInterruptionPolicy.decide(event, audioMode, serverState, canSendPause, pausedForCall)
+        Log.i(
+            FOCUS_TAG,
+            "$event mode=${AudioInterruptionPolicy.modeName(audioMode)} server=$serverState " +
+                "canSendPause=$canSendPause pausedForCall=$pausedForCall -> $action"
+        )
+
+        mainHandler.removeCallbacks(callModeRecheckRunnable)
+        if (event != AudioInterruption.BECOMING_NOISY) {
+            transientFocusLoss = event.takeIf { it.isTransientLoss }
+        }
+
+        when (action) {
+            InterruptionAction.PAUSE_ON_SERVER -> {
+                // Muted first: the pause takes a round trip to stop the audio.
+                setInterruptionMuted(true)
+                // Only a call is resumed afterwards, never an output disconnect.
+                pausedForCall = event.isTransientLoss
+                sendSpinClient?.pause()
             }
-            AudioManager.AUDIOFOCUS_LOSS -> {
-                Log.d(TAG, "Audio focus lost permanently")
-                // Another app took focus permanently - pause playback and
-                // report 'external_source' per spec. The server parks this
-                // client in a solo group and ends its streams; pressing play
-                // in our UI re-requests focus, which clears the state.
+            InterruptionAction.RESUME_ON_SERVER -> {
+                pausedForCall = false
+                setInterruptionMuted(false)
+                sendSpinClient?.play()
+            }
+            InterruptionAction.MUTE_LOCALLY -> setInterruptionMuted(true)
+            InterruptionAction.UNMUTE_LOCALLY -> setInterruptionMuted(false)
+            InterruptionAction.BECOME_UNAVAILABLE -> {
+                // Another app took focus permanently: report 'external_source'
+                // per spec. The server parks this client in a solo group and
+                // ends its streams; playing again re-requests focus, which
+                // clears the state and the mute.
                 hasAudioFocus = false
-                syncAudioPlayer?.pause()
+                pausedForCall = false
+                setInterruptionMuted(true)
                 sendSpinClient?.setExternalSource(true)
             }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                Log.d(TAG, "Audio focus lost transiently")
-                // Temporary loss (phone call, navigation announcement) - pause
-                syncAudioPlayer?.pause()
-            }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                Log.d(TAG, "Audio focus lost transiently (can duck)")
-                // Could duck volume here, but for synced playback just let it play
-                // since ducking would desync volume with other clients
-            }
+            InterruptionAction.NONE -> {}
+        }
+
+        if (transientFocusLoss != null && !AudioInterruptionPolicy.isCallMode(audioMode)) {
+            mainHandler.postDelayed(callModeRecheckRunnable, CALL_MODE_RECHECK_MS)
+        }
+        // Focus was kept through the interruption (see abandonAudioFocus);
+        // give it up now if nothing is playing.
+        if (event == AudioInterruption.FOCUS_GAIN &&
+            action != InterruptionAction.RESUME_ON_SERVER &&
+            serverState != PlaybackStateType.PLAYING
+        ) {
+            abandonAudioFocus()
+        }
+    }
+
+    private fun setInterruptionMuted(muted: Boolean) {
+        if (interruptionMuted == muted) return
+        interruptionMuted = muted
+        Log.i(FOCUS_TAG, if (muted) "output muted" else "output un-muted")
+        syncAudioPlayer?.setMuted(SyncAudioPlayer.MuteReason.INTERRUPTION, muted)
+    }
+
+    /**
+     * Called with every playback state the server reports, before it is stored:
+     * forget our pause-for-a-call once someone else has changed playback, so the
+     * end of the call does not resume over their choice.
+     */
+    private fun noteServerPlaybackState(newState: PlaybackStateType) {
+        val previous = _playbackState.value.playbackState
+        if (pausedForCall && AudioInterruptionPolicy.callPauseSuperseded(previous, newState)) {
+            pausedForCall = false
+            Log.i(FOCUS_TAG, "call pause superseded (server $previous -> $newState): will not resume")
         }
     }
 
     /**
-     * Register a receiver for ACTION_AUDIO_BECOMING_NOISY so we pause when the
-     * audio output device disconnects. Idempotent.
+     * Register a receiver for ACTION_AUDIO_BECOMING_NOISY so the sound stops when
+     * the audio output device disconnects. Idempotent.
      */
     private fun registerBecomingNoisyReceiver() {
         if (becomingNoisyReceiver != null) return
@@ -2595,10 +2551,10 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Handles ACTION_AUDIO_BECOMING_NOISY: the audio output is rerouting to the
      * built-in speaker because an external output disconnected (wired headphones
-     * unplugged, Bluetooth/Android Auto disconnected). Pause local playback so we
-     * don't abruptly blast the phone speaker, matching standard media-app
-     * behavior. Pausing is local-only (we do not pause the MA group) so other
-     * grouped speakers keep playing.
+     * unplugged, Bluetooth/Android Auto disconnected). Follow the Android
+     * convention and stop the sound: pause the group and do not resume. If the
+     * pause cannot be sent the output is muted instead, until playback is next
+     * started.
      *
      * ACTION_AUDIO_BECOMING_NOISY is fired once by the system per transition, so
      * it is inherently single-fire -- unlike AudioDeviceCallback.onAudioDevicesRemoved,
@@ -2606,8 +2562,7 @@ class PlaybackService : MediaLibraryService() {
      * would need debouncing.
      */
     private fun handleBecomingNoisy() {
-        Log.i(TAG, "Audio becoming noisy (output disconnected) - pausing local playback")
-        syncAudioPlayer?.pause()
+        handleAudioInterruption(AudioInterruption.BECOMING_NOISY)
     }
 
     /**
@@ -2893,9 +2848,7 @@ class PlaybackService : MediaLibraryService() {
             // commands needed by Android Auto and other MediaBrowserCompat clients.
             val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(SessionCommand(COMMAND_CONNECT, Bundle.EMPTY))
-                .add(SessionCommand(COMMAND_CONNECT_AUTO, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_DISCONNECT, Bundle.EMPTY))
-                .add(SessionCommand(COMMAND_CANCEL_RECONNECT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_SET_VOLUME, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_NEXT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_PREVIOUS, Bundle.EMPTY))
@@ -2949,31 +2902,11 @@ class PlaybackService : MediaLibraryService() {
                 }
 
                 COMMAND_DISCONNECT -> {
-                    lastDisconnectUserInitiated = true
-                    coordinator.disconnect()
-                    Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-                }
-
-                COMMAND_CONNECT_AUTO -> {
-                    val serverId = args.getString(ARG_SERVER_ID)
-                    if (serverId != null) {
-                        val server = UnifiedServerRepository.getServer(serverId)
-                        if (server != null) {
-                            lastDisconnectUserInitiated = false
-                            coordinator.connect(server)
-                            Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-                        } else {
-                            Log.w(TAG, "COMMAND_CONNECT_AUTO: unknown server id $serverId")
-                            Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
-                        }
-                    } else {
-                        Log.w(TAG, "COMMAND_CONNECT_AUTO: missing $ARG_SERVER_ID")
-                        Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
-                    }
-                }
-
-                COMMAND_CANCEL_RECONNECT -> {
+                    // The user is done with this server: stop trying for it,
+                    // and forget it so a drop racing this cannot start again.
                     coordinator.cancelReconnect()
+                    setCurrentServer(null)
+                    disconnectFromServer()
                     Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
 
@@ -3044,7 +2977,6 @@ class PlaybackService : MediaLibraryService() {
         val phase = when (status) {
             is ReconnectStatus.Attempting -> HandoffEpisodeRecorder.Phase.ATTEMPTING
             is ReconnectStatus.Succeeded -> HandoffEpisodeRecorder.Phase.SUCCEEDED
-            is ReconnectStatus.Failed -> HandoffEpisodeRecorder.Phase.FAILED
             ReconnectStatus.Idle -> HandoffEpisodeRecorder.Phase.IDLE
         }
         val method = (status as? ReconnectStatus.Attempting)?.method?.name
@@ -3141,8 +3073,6 @@ class PlaybackService : MediaLibraryService() {
             bundle.putLong("clock_error_us", timeFilter.errorMicros)
             bundle.putInt("measurement_count", timeFilter.measurementCountValue)
             bundle.putLong("last_time_sync_age_ms", client.getLastTimeSyncAgeMs())
-            bundle.putInt("reconnect_attempts", client.getReconnectAttempts())
-            bundle.putBoolean("clock_frozen", timeFilter.isFrozen)
             bundle.putDouble("static_delay_ms", timeFilter.staticDelayMs)
 
             // Connection health telemetry (issue #128). Keys left absent when
@@ -3150,7 +3080,6 @@ class PlaybackService : MediaLibraryService() {
             // "no disconnect yet" from "last disconnect was code=0".
             bundle.putLong("last_byte_received_ago_ms", client.getLastByteReceivedAgoMs())
             bundle.putBoolean("stall_watchdog_armed", client.isStallWatchdogArmed())
-            bundle.putInt("reconnect_attempts_total", client.getReconnectAttemptsTotal())
             client.getLastDisconnectCode()?.let { bundle.putInt("last_disconnect_code", it) }
             client.getLastDisconnectReason()?.let { bundle.putString("last_disconnect_reason", it) }
             bundle.putLong("time_filter_convergence_ms", timeFilter.convergenceTimeMillis)
@@ -3364,6 +3293,10 @@ class PlaybackService : MediaLibraryService() {
 
         Log.i(TAG, "Auto-connect on boot: ${server.name} (${server.id})")
 
+        // The server this service is connected to, which a later drop
+        // reconnects to.
+        setCurrentServer(server.id)
+
         // Show foreground notification immediately (Android requires this within 10s)
         startForegroundServiceWithNotification(server.name)
 
@@ -3448,9 +3381,12 @@ class PlaybackService : MediaLibraryService() {
         val isPlaying = audioPlayerState == com.sendspindroid.sendspin.PlaybackState.PLAYING ||
                         audioPlayerState == com.sendspindroid.sendspin.PlaybackState.WAITING_FOR_START
 
-        // Keep alive if auto-start is enabled and we're connected (even if idle)
-        val autoStartKeepAlive = UserSettings.autoStartOnBoot &&
-            coordinator.sessionState.value.sendSpin is TransportState.Ready
+        // Keep alive if auto-start is enabled and we're connected (even if
+        // idle) or working on getting the connection back
+        val autoStartKeepAlive = UserSettings.autoStartOnBoot && (
+            coordinator.sessionState.value.sendSpin is TransportState.Ready ||
+                coordinator.reconnectStatus.value is ReconnectStatus.Attempting
+            )
 
         Log.d(TAG, "onTaskRemoved (playing=$isPlaying, autoStart=$autoStartKeepAlive, state=$audioPlayerState)")
 
@@ -3491,6 +3427,9 @@ class PlaybackService : MediaLibraryService() {
         LocalBroadcastManager.getInstance(this).unregisterReceiver(preferredCodecReceiver)
         releaseHighPowerLocks()
 
+        // Let the final releasePlaybackLocks() abandon focus even mid-interruption
+        transientFocusLoss = null
+
         // Unregister the becoming-noisy receiver (system broadcast)
         becomingNoisyReceiver?.let {
             runCatching { unregisterReceiver(it) }
@@ -3507,6 +3446,7 @@ class PlaybackService : MediaLibraryService() {
         // Stop browse discovery if running
         browseDiscoveryManager?.cleanup()
         browseDiscoveryManager = null
+        stopReconnectDiscovery()
 
         // Send a final Release through the channel so it runs after any
         // pending decode tasks, then close the channel and wait up to 500 ms

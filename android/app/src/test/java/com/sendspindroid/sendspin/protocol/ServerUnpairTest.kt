@@ -255,7 +255,6 @@ class UnpairTestHandler(
     override fun getTimeFilter(): SendspinTimeFilter = timeFilter
 
     override fun isLowMemoryMode(): Boolean = false
-    override fun getClientId(): String = "test-client"
     override fun getDeviceName(): String = "Test"
     override fun getManufacturer(): String = "Test"
     override fun getSoftwareVersion(): String = "0.0.0"

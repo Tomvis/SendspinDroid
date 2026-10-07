@@ -106,7 +106,7 @@ class SendSpinDisconnectTest {
         // Verify setListener(null) is called BEFORE close()
         verify(ordering = Ordering.ORDERED) {
             mockTransport.setListener(null)
-            mockTransport.closeAfterFlush(1000, "User disconnect")
+            mockTransport.close(1000, "user_request")
         }
     }
 

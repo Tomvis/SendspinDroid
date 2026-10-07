@@ -53,7 +53,6 @@ import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.playback.PlaybackService
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.DefaultServerPinger
 import com.sendspindroid.ui.server.AddServerWizardActivity
@@ -117,11 +116,6 @@ class MainActivity : AppCompatActivity() {
     // Track the currently connected server ID for editing
     private var currentConnectedServerId: String? = null
 
-    // Last subtitle the removed XML toolbar was given. Nothing displays it;
-    // it is kept only because syncUIWithPlayerState() reads it back as the
-    // server name when it has to infer a connection from the player state.
-    private var toolbarSubtitle: String? = null
-
     // NsdManager-based discovery (Android native - more reliable than Go's hashicorp/mdns)
     private var discoveryManager: NsdDiscoveryManager? = null
 
@@ -140,9 +134,6 @@ class MainActivity : AppCompatActivity() {
 
     // Reconnecting indicator - persists while reconnection is in progress
     private var reconnectingSnackbar: Snackbar? = null
-
-    // Server being reconnected to (for tracking during auto-reconnect)
-    private var reconnectingToServer: UnifiedServer? = null
 
     // Default server pinger for auto-connect when mDNS hasn't found the server yet
     private var defaultServerPinger: DefaultServerPinger? = null
@@ -325,13 +316,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Shows an indicator that we're reconnecting to the server.
-     * Playback continues from buffer during this time.
+     * Shows an indicator that the service is reconnecting to the server.
      *
      * @param attempt Current reconnection attempt number
-     * @param bufferMs Remaining audio buffer in milliseconds
      */
-    private fun showReconnectingIndicator(attempt: Int, bufferMs: Long) {
+    private fun showReconnectingIndicator(attempt: Int) {
         // Don't show UI if activity is finishing or destroyed
         if (isFinishing || isDestroyed) {
             return
@@ -340,12 +329,7 @@ class MainActivity : AppCompatActivity() {
         // Dismiss any existing reconnecting snackbar
         reconnectingSnackbar?.dismiss()
 
-        val bufferSec = bufferMs / 1000
-        val message = if (bufferSec > 0) {
-            "Reconnecting (attempt $attempt)... ${bufferSec}s buffer"
-        } else {
-            "Reconnecting (attempt $attempt)..."
-        }
+        val message = "Reconnecting (attempt $attempt)..."
 
         try {
             reconnectingSnackbar = Snackbar.make(
@@ -696,8 +680,6 @@ class MainActivity : AppCompatActivity() {
         // Start discovery automatically (runs in background)
         startAutoDiscovery()
 
-        toolbarSubtitle = getString(R.string.scanning_ellipsis)
-
         // Check for default server and auto-connect after a brief delay
         checkDefaultServerAutoConnect()
 
@@ -734,8 +716,6 @@ class MainActivity : AppCompatActivity() {
         val defaultServer = UnifiedServerRepository.getDefaultServer()
         if (defaultServer != null) {
             Log.d(TAG, "Default server found: ${defaultServer.name}, scheduling auto-connect")
-
-            toolbarSubtitle = getString(R.string.auto_connecting_to_default, defaultServer.name)
 
             // Delay to allow UI to render and user to see the server list
             lifecycleScope.launch {
@@ -789,10 +769,8 @@ class MainActivity : AppCompatActivity() {
      * server matches the default server's local address, and the user hasn't manually
      * disconnected, we automatically connect.
      *
-     * This handles scenarios like:
-     * - Server rebooting and reappearing on mDNS
-     * - Auto-reconnect failing but server coming back later
-     * - App starting while server is temporarily unavailable
+     * This handles the app starting while the server is temporarily
+     * unavailable. A connection that drops later is the service's to restore.
      *
      * @param discoveredAddress The IP address of the newly discovered server
      */
@@ -809,9 +787,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Don't auto-connect if auto-reconnect is in progress
+        // The service is already reconnecting; it retries on mDNS itself
         if (PlaybackService.reconnectStatus.value is ReconnectStatus.Attempting) {
-            Log.d(TAG, "Skipping auto-connect on discovery - auto-reconnect in progress")
+            Log.d(TAG, "Skipping auto-connect on discovery - reconnect in progress")
             return
         }
 
@@ -827,8 +805,6 @@ class MainActivity : AppCompatActivity() {
      * Called when connected to a server (the Compose shell shows now playing).
      */
     private fun showNowPlayingView() {
-        toolbarSubtitle = null
-
         // Stop discovery and pinging while connected (saves battery)
         discoveryManager?.stopDiscovery()
         defaultServerPinger?.stop()
@@ -875,25 +851,18 @@ class MainActivity : AppCompatActivity() {
                     override fun onDiscoveryStarted() {
                         runOnUiThread {
                             Log.d(TAG, "Discovery started")
-                            if (connectionState == AppConnectionState.ServerList) {
-                                toolbarSubtitle = getString(R.string.scanning_ellipsis)
-                            }
                         }
                     }
 
                     override fun onDiscoveryStopped() {
                         runOnUiThread {
                             Log.d(TAG, "Discovery stopped")
-                            if (connectionState == AppConnectionState.ServerList) {
-                                toolbarSubtitle = null
-                            }
                         }
                     }
 
                     override fun onDiscoveryError(error: String) {
                         runOnUiThread {
                             Log.e(TAG, "Discovery error: $error")
-                            toolbarSubtitle = null
                             // Show error snackbar - server list is still usable with saved servers
                             showErrorSnackbar(
                                 message = getString(R.string.error_discovery),
@@ -1117,33 +1086,6 @@ class MainActivity : AppCompatActivity() {
             Log.d(TAG, "Group name update received: $groupName")
             viewModel.updateGroupName(groupName)
         }
-
-        // Handle reconnect status updates
-        val reconnectStatusStr = extras.getString(PlaybackService.EXTRA_RECONNECT_STATUS)
-        if (reconnectStatusStr != null) {
-            val status: ReconnectStatus = when (reconnectStatusStr) {
-                PlaybackService.RECONNECT_IDLE -> ReconnectStatus.Idle
-                PlaybackService.RECONNECT_ATTEMPTING -> ReconnectStatus.Attempting(
-                    serverId = extras.getString(PlaybackService.EXTRA_RECONNECT_SERVER_ID).orEmpty(),
-                    attempt = extras.getInt(PlaybackService.EXTRA_RECONNECT_ATTEMPT, 0),
-                    maxAttempts = extras.getInt(PlaybackService.EXTRA_RECONNECT_MAX_ATTEMPTS, 0),
-                    method = extras.getString(PlaybackService.EXTRA_RECONNECT_METHOD)
-                        ?.let {
-                            try { com.sendspindroid.model.ConnectionType.valueOf(it) }
-                            catch (_: IllegalArgumentException) { null }
-                        },
-                )
-                PlaybackService.RECONNECT_SUCCEEDED -> ReconnectStatus.Succeeded(
-                    serverId = extras.getString(PlaybackService.EXTRA_RECONNECT_SERVER_ID).orEmpty(),
-                )
-                PlaybackService.RECONNECT_FAILED -> ReconnectStatus.Failed(
-                    serverId = extras.getString(PlaybackService.EXTRA_RECONNECT_SERVER_ID).orEmpty(),
-                    error = extras.getString(PlaybackService.EXTRA_RECONNECT_ERROR).orEmpty(),
-                )
-                else -> return
-            }
-            handleReconnectStatusChange(status)
-        }
     }
 
     /**
@@ -1189,10 +1131,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // Cancel any auto-reconnect in progress (we're now connected)
-                sendCommandCancelReconnect()
-                reconnectingToServer = null
-
                 connectionState = AppConnectionState.Connected(serverName, address)
                 // Sync state to ViewModel for Compose UI
                 viewModel.updateConnectionState(connectionState)
@@ -1204,9 +1142,8 @@ class MainActivity : AppCompatActivity() {
             }
             PlaybackService.STATE_RECONNECTING -> {
                 val serverName = extras.getString(PlaybackService.EXTRA_SERVER_NAME, "Unknown Server")
-                val attempt = extras.getInt("reconnect_attempt", 1)
-                val bufferMs = extras.getLong("buffer_remaining_ms", 0)
-                Log.d(TAG, "Reconnecting to: $serverName (attempt $attempt, buffer ${bufferMs}ms)")
+                val attempt = extras.getInt(PlaybackService.EXTRA_RECONNECT_ATTEMPT, 1)
+                Log.d(TAG, "Reconnecting to: $serverName (attempt $attempt)")
 
                 // Preserve server address from previous state.
                 // Fall back to currentConnectedServerId for robustness.
@@ -1223,55 +1160,27 @@ class MainActivity : AppCompatActivity() {
                     serverName = serverName,
                     serverAddress = address,
                     attempt = attempt,
-                    nextRetrySeconds = (1 shl (attempt - 1)).coerceAtMost(30)
+                    nextRetrySeconds = (1 shl (attempt - 1).coerceIn(0, 5)).coerceAtMost(30)
                 )
                 // Sync state to ViewModel for Compose UI
                 viewModel.updateConnectionState(connectionState)
-                viewModel.updateReconnectingState(serverName, attempt, bufferMs)
+                viewModel.updateReconnectingState(serverName, attempt)
 
-                // Show reconnecting indicator without disrupting playback view
-                showReconnectingIndicator(attempt, bufferMs)
-
-                // Keep playback controls enabled - playback continues from buffer
+                // Show reconnecting indicator without leaving the now playing view
+                showReconnectingIndicator(attempt)
             }
             PlaybackService.STATE_DISCONNECTED -> {
-                val wasUserInitiated = extras.getBoolean(PlaybackService.EXTRA_WAS_USER_INITIATED, false)
-                val wasReconnectExhausted = extras.getBoolean(PlaybackService.EXTRA_WAS_RECONNECT_EXHAUSTED, false)
-                Log.d(TAG, "Disconnected from server (userInitiated=$wasUserInitiated, reconnectExhausted=$wasReconnectExhausted)")
+                // Whether to reconnect is the service's decision: had it
+                // wanted to, this would have said RECONNECTING.
+                Log.d(TAG, "Disconnected from server")
 
                 connectionState = AppConnectionState.ServerList
                 // Sync state to ViewModel for Compose UI
                 viewModel.updateConnectionState(connectionState)
                 viewModel.resetPlaybackState()
                 updateKeepScreenOn(false)
+                hideReconnectingIndicator()
                 showServerListView()
-
-                // Handle auto-reconnection based on disconnect reason
-                if (!wasUserInitiated && !wasReconnectExhausted) {
-                    // Unexpected disconnect - start UI-level auto-reconnect
-                    // NOTE: We do NOT set userManuallyDisconnected here - unexpected disconnects
-                    // should still allow mDNS discovery to trigger auto-connect if server reappears.
-                    // The checkAutoConnectOnDiscovery() method already checks isReconnecting().
-                    val serverId = currentConnectedServerId
-                    val server = serverId?.let { UnifiedServerRepository.getServer(it) }
-                        ?: reconnectingToServer
-
-                    if (server != null) {
-                        Log.i(TAG, "Starting UI-level auto-reconnect for server: ${server.name}")
-                        reconnectingToServer = server
-                        currentConnectedServerId = server.id
-
-                        // Update adapter to show reconnecting status
-
-                        // Start auto-reconnect via Coordinator
-                        sendCommandConnectAuto(server.id)
-                    } else {
-                        Log.w(TAG, "Cannot start auto-reconnect: no server info available")
-                    }
-                } else {
-                    // User-initiated or reconnect exhausted - clear statuses
-                    reconnectingToServer = null
-                }
             }
             PlaybackService.STATE_ERROR -> {
                 val errorMessage = extras.getString(PlaybackService.EXTRA_ERROR_MESSAGE, "Unknown error")
@@ -1286,51 +1195,6 @@ class MainActivity : AppCompatActivity() {
 
                 showErrorSnackbar(
                     message = errorMessage,
-                    errorType = ErrorType.CONNECTION
-                )
-            }
-        }
-    }
-
-    /**
-     * Handles reconnect status changes broadcast from PlaybackService via session extras.
-     * Drives the reconnect UI (toolbar subtitle, snackbar, etc.).
-     * Must be called on the main thread.
-     */
-    private fun handleReconnectStatusChange(status: ReconnectStatus) {
-        when (status) {
-            ReconnectStatus.Idle -> {
-                // No-op: the UI clears reconnect overlays via the Connected/Disconnected path.
-            }
-            is ReconnectStatus.Attempting -> {
-                Log.d(TAG, "Auto-reconnect attempt ${status.attempt}/${status.maxAttempts} for server ${status.serverId}")
-                toolbarSubtitle = getString(R.string.reconnecting_toolbar_subtitle)
-                // Log the method being tried, if known
-                if (status.method != null) {
-                    val methodName = when (status.method) {
-                        ConnectionType.LOCAL -> getString(R.string.connection_method_local)
-                        ConnectionType.REMOTE -> getString(R.string.connection_method_remote)
-                        ConnectionType.PROXY -> getString(R.string.connection_method_proxy)
-                    }
-                    Log.d(TAG, "Auto-reconnect trying $methodName for server ${status.serverId}")
-                }
-            }
-            is ReconnectStatus.Succeeded -> {
-                Log.i(TAG, "Auto-reconnect succeeded for server ${status.serverId}")
-                reconnectingToServer = null
-                toolbarSubtitle = null
-                hideReconnectingIndicator()
-                // Connection success is also handled by handleConnectionStateChange via STATE_CONNECTED.
-            }
-            is ReconnectStatus.Failed -> {
-                Log.w(TAG, "Auto-reconnect failed for server ${status.serverId}: ${status.error}")
-                reconnectingToServer = null
-                toolbarSubtitle = null
-                hideReconnectingIndicator()
-                // NOTE: We do NOT set userManuallyDisconnected here - if the server
-                // reappears on mDNS later, we still want to auto-connect to it.
-                showErrorSnackbar(
-                    message = status.error,
                     errorType = ErrorType.CONNECTION
                 )
             }
@@ -1362,10 +1226,12 @@ class MainActivity : AppCompatActivity() {
                         // Sync state to ViewModel for Compose UI
                         viewModel.updatePlaybackState(false, PlaybackState.IDLE)
                         // Only transition to server list if we were connected/connecting
-                        // (not during initial startup)
+                        // (not during initial startup), and not while the service is
+                        // reconnecting: the player goes idle on a drop too.
                         val currentState = connectionState
-                        if (currentState is AppConnectionState.Connected ||
-                            currentState is AppConnectionState.Connecting) {
+                        if ((currentState is AppConnectionState.Connected ||
+                            currentState is AppConnectionState.Connecting) &&
+                            PlaybackService.reconnectStatus.value !is ReconnectStatus.Attempting) {
                             connectionState = AppConnectionState.ServerList
                             viewModel.updateConnectionState(connectionState)
                             showServerListView()
@@ -1439,11 +1305,12 @@ class MainActivity : AppCompatActivity() {
 
                 if (isConnected) {
                     // Restore connection state if needed (e.g., after activity recreation)
-                    // Don't overwrite Reconnecting state - it's still valid while playing from buffer
+                    // Don't overwrite Reconnecting state - the service is still trying
                     if (connectionState !is AppConnectionState.Connected &&
                         connectionState !is AppConnectionState.Reconnecting) {
-                        // Get server name from toolbar subtitle or use default
-                        val serverName = toolbarSubtitle ?: "Connected"
+                        // The service publishes the server it is connected to
+                        val serverName = controller.sessionExtras
+                            .getString(PlaybackService.EXTRA_SERVER_NAME) ?: "Connected"
                         connectionState = AppConnectionState.Connected(serverName, "")
                         viewModel.updateConnectionState(connectionState)
                         showNowPlayingView()
@@ -1537,15 +1404,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Cancel any ongoing auto-reconnect if user taps a different server
+        // The service is already working on this server; connecting to
+        // another one makes it stop.
         val reconnectingId = (PlaybackService.reconnectStatus.value as? ReconnectStatus.Attempting)?.serverId
-        if (reconnectingId != null && reconnectingId != server.id) {
-            Log.i(TAG, "User selected different server - cancelling auto-reconnect for $reconnectingId")
-            sendCommandCancelReconnect()
-            reconnectingToServer = null
-        } else if (reconnectingId == server.id) {
-            // User tapped the server we're reconnecting to - let auto-reconnect continue
-            Log.d(TAG, "User tapped reconnecting server - auto-reconnect continues")
+        if (reconnectingId == server.id) {
+            Log.d(TAG, "User tapped reconnecting server - reconnect continues")
             return
         }
 
@@ -1987,21 +1850,6 @@ class MainActivity : AppCompatActivity() {
         }
         val command = SessionCommand(PlaybackService.COMMAND_SET_VOLUME, Bundle.EMPTY)
         controller.sendCustomCommand(command, args)
-    }
-
-    private fun sendCommandConnectAuto(serverId: String) {
-        val controller = mediaController ?: return
-        val args = Bundle().apply {
-            putString(PlaybackService.ARG_SERVER_ID, serverId)
-        }
-        val command = SessionCommand(PlaybackService.COMMAND_CONNECT_AUTO, Bundle.EMPTY)
-        controller.sendCustomCommand(command, args)
-    }
-
-    private fun sendCommandCancelReconnect() {
-        val controller = mediaController ?: return
-        val command = SessionCommand(PlaybackService.COMMAND_CANCEL_RECONNECT, Bundle.EMPTY)
-        controller.sendCustomCommand(command, Bundle.EMPTY)
     }
 
     /**

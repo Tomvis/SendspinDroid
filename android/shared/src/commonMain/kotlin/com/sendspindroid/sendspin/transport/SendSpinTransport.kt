@@ -91,13 +91,9 @@ interface SendSpinTransport {
         fun onConnected()
 
         /**
-         * Called when the transport receives a text message.
-         */
-        fun onMessage(text: String)
-
-        /**
          * Called when the transport receives a text message, with the frame's
-         * exact bytes as they arrived.
+         * exact bytes as they arrived. Only the cleartext handshake travels
+         * in text frames.
          *
          * The Noise prologue is "the concatenation of the exact bytes of
          * `client/init` followed by the exact bytes of `server/init`, as
@@ -107,13 +103,8 @@ interface SendSpinTransport {
          * re-encoding: it round-trips through Ktor's UTF-8 decoder and back,
          * which is lossy for malformed input and is not the same operation the
          * spec describes.
-         *
-         * Only the handshake driver needs [rawUtf8]; everything else can keep
-         * using the String. Defaults to [onMessage] so a transport that cannot
-         * supply raw bytes keeps working unchanged - it simply cannot carry the
-         * spec handshake.
          */
-        fun onMessage(text: String, rawUtf8: ByteArray) = onMessage(text)
+        fun onMessage(text: String, rawUtf8: ByteArray)
 
         /**
          * Called when the transport receives binary data.

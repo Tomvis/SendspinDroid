@@ -185,8 +185,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     // Reconnection Updates
     // ========================================================================
 
-    fun updateReconnectingState(serverName: String, attempt: Int, bufferMs: Long) {
-        _reconnectingState.value = ReconnectingState(serverName, attempt, bufferMs)
+    fun updateReconnectingState(serverName: String, attempt: Int) {
+        _reconnectingState.value = ReconnectingState(serverName, attempt)
     }
 
     fun clearReconnectingState() {

@@ -115,6 +115,7 @@ class SendSpinProtocolHandlerTest {
 
     @Test
     fun `setExternalSource true reports available false`() {
+        activateRoles("\"player@v1\"")
         handler.sentMessages.clear()
         handler.setExternalSource(true)
 
@@ -147,6 +148,7 @@ class SendSpinProtocolHandlerTest {
 
     @Test
     fun `setExternalSource is idempotent`() {
+        activateRoles("\"player@v1\"")
         handler.sentMessages.clear()
         handler.setExternalSource(true)
         handler.setExternalSource(true)
@@ -195,9 +197,11 @@ class SendSpinProtocolHandlerTest {
                 "volume":60,"muted":false,"repeat":"off","shuffle":false"""
         )
 
+        assertFalse(handler.canSendCommand("shuffle"))
         handler.sendCommand("shuffle")
         assertEquals("Unsupported command must be dropped", 0, sentCommands().size)
 
+        assertTrue(handler.canSendCommand("play"))
         handler.sendCommand("play")
         assertEquals(1, sentCommands().size)
         assertTrue(sentCommands()[0].contains("\"command\":\"play\""))
@@ -206,6 +210,7 @@ class SendSpinProtocolHandlerTest {
     @Test
     fun `sendCommand sends nothing before a controller state has arrived`() {
         activateRoles("\"player@v1\",\"controller@v1\"")
+        assertFalse(handler.canSendCommand("play"))
         handler.sendCommand("play")
         assertEquals(0, sentCommands().size)
     }
@@ -215,6 +220,7 @@ class SendSpinProtocolHandlerTest {
         // "Only valid from clients whose `controller` role is active."
         activateRoles("\"player@v1\"")
         controllerState(""""supported_commands":["play","pause"]""")
+        assertFalse(handler.canSendCommand("play"))
         handler.sendCommand("play")
         assertEquals(0, sentCommands().size)
     }
@@ -582,7 +588,7 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     fun lastMuteDecision(): Boolean = muteEvents.lastOrNull() ?: false
     fun evaluateAndPublishSyncStateForTest() = evaluateAndPublishSyncState()
     fun sendGoodbyeForTest(reason: GoodbyeReason) = encodeGoodbye(reason).forEach { sendBinaryFrame(it) }
-    fun resetServerStateForTest() = resetServerState()
+    fun resetConnectionStateForTest() = resetConnectionState()
     fun resetSyncStateTrackingForTest() = resetSyncStateTracking()
 
     fun handleTextMessageForTest(text: String) {
@@ -644,7 +650,6 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     override fun isLowMemoryMode(): Boolean = lowMemoryMode
 
-    override fun getClientId(): String = "test-client-id"
 
     override fun getDeviceName(): String = "Test Device"
 

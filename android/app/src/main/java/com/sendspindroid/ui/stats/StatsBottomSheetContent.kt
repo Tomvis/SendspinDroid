@@ -79,10 +79,6 @@ fun StatsContent(
         StatRow(stringResource(R.string.stats_address), state.serverAddress ?: "--")
         StatRow(stringResource(R.string.stats_state), state.connectionState, getStatusColor(getConnectionStatus(state.connectionState)))
         StatRow(stringResource(R.string.stats_codec), state.audioCodec)
-        StatRow(stringResource(R.string.stats_reconnects), state.reconnectAttempts.toString(), getStatusColor(state.reconnectAttempts == 0))
-        if (state.reconnectAttemptsTotal > 0) {
-            StatRow(stringResource(R.string.stats_reconnects_total), state.reconnectAttemptsTotal.toString())
-        }
         if (state.lastByteReceivedAgoMs >= 0) {
             StatRow(
                 stringResource(R.string.stats_last_byte_received),
@@ -171,9 +167,6 @@ fun StatsContent(
             StatRow(stringResource(R.string.stats_last_sync), String.format("%.1fs ago", state.lastTimeSyncAgeMs / 1000.0),
                 getLastSyncColor(state.lastTimeSyncAgeMs))
         }
-
-        StatRow(stringResource(R.string.stats_frozen), if (state.clockFrozen) stringResource(R.string.stats_frozen_reconnecting) else stringResource(R.string.action_no),
-            if (state.clockFrozen) ColorWarning else null)
 
         if (state.staticDelayMs != 0.0) {
             StatRow(stringResource(R.string.stats_sync_offset), String.format("%+.0f ms", state.staticDelayMs))
