@@ -238,8 +238,7 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var decoderReady = false
 
-    // Identifies the stream a chunk belongs to, mirroring
-    // SyncAudioPlayer.streamGeneration one layer down. onAudioChunk snapshots
+    // Identifies the stream a chunk belongs to. onAudioChunk snapshots
     // it on WS-IO at enqueue time and the decode worker re-checks it before
     // decoding, so chunks from a superseded stream are discarded no matter how
     // long they sat on the main dispatch queue or in decodeChannel. Ordering

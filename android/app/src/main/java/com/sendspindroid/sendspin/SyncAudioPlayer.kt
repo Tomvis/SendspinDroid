@@ -332,7 +332,10 @@ class SyncAudioPlayer(
     private var scope: CoroutineScope? = null
     private var playbackJob: Job? = null
 
-    // Lock for thread-safe state transitions
+    // Guards the chunk queue with its sample count, the gap/overlap cursor,
+    // the playback state and resetRequested, which the decode thread, the main
+    // thread and the audio thread all touch. Everything else that changes
+    // during playback belongs to the audio thread alone.
     private val stateLock = ReentrantLock()
 
     // Flag to track if release() has been called
@@ -343,11 +346,11 @@ class SyncAudioPlayer(
     private val isPlaying = AtomicBoolean(false)
     private val isPaused = AtomicBoolean(false)
 
-    // Flush coordination: set by clearBuffer()/enterIdle() on the main thread,
-    // checked and cleared by the playback loop before writes.  This avoids
-    // flushing AudioTrack while the playback loop is mid-write, which causes
-    // clicks/pops and incorrect frame accounting.
-    private val isFlushPending = AtomicBoolean(false)
+    // Raised by clearQueueAndRequestReset() and resume(); the playback loop
+    // answers it with resetPlayback() before it touches the track or the queue
+    // again. The track is flushed and the sync state reset there, on the
+    // thread that writes and measures.
+    @Volatile private var resetRequested = false
     @Volatile private var pausedAtUs: Long = 0L  // Timestamp when pause() was called, for long-pause detection
 
     // Playback state machine (from Python reference)
@@ -378,7 +381,6 @@ class SyncAudioPlayer(
 
     // Sync tracking
     private var lastChunkServerTime = 0L
-    @Volatile private var streamGeneration = 0  // Incremented on stream/clear to invalidate old chunks
 
     // Sync error tracking
     private val totalFramesWritten = AtomicLong(0)  // Total frames written to AudioTrack
@@ -659,26 +661,13 @@ class SyncAudioPlayer(
             if (pauseDurationUs > LONG_PAUSE_THRESHOLD_US) {
                 AppLog.Audio.d("Long pause detected (${pauseDurationUs / 1000}ms) - clearing stale buffer")
                 // Clear buffer and let it refill from server
-                chunkQueue.clear()
-                totalQueuedSamples.set(0)
-                setPlaybackState(PlaybackState.INITIALIZING)
-                expectedNextTimestampUs = null
+                clearQueueAndRequestReset()
             }
 
             // pause() flushed the track, which restarts its frame position from
-            // zero. Have the playback loop flush again and restart its own frame
-            // count with it, on the thread that does the writes.
-            isFlushPending.set(true)
-
-            // Reset sync error filter - pre-pause state is no longer relevant
-            syncErrorFilter.reset()
-            syncErrorUs = 0L
-            startTimeCalibrated = false        // Force recalibration after resume
-
-            // Reset correction schedule - start fresh
-            insertEveryNFrames = 0
-            dropEveryNFrames = 0
-            snapDropFrames = 0
+            // zero, and the sync state from before the pause is stale. The
+            // playback loop starts both over.
+            resetRequested = true
 
             // Reset grace period to allow sync to stabilize after resume
             playingStateEnteredAtUs = nowUs
@@ -755,12 +744,8 @@ class SyncAudioPlayer(
         // Phase 3: Re-acquire lock for AudioTrack and state cleanup
         stateLock.withLock {
             // Now safe to manipulate AudioTrack - playback loop has stopped
-            isFlushPending.set(false)  // Clear any pending flush since we flush directly below
             audioSink?.stop()
             audioSink?.flush()
-            totalFramesWritten.set(0)
-            chunkQueue.clear()
-            totalQueuedSamples.set(0)
 
             // Clear pending chunks buffer
             synchronized(pendingChunks) {
@@ -768,14 +753,8 @@ class SyncAudioPlayer(
                 hasPendingChunks = false
             }
 
-            // Reset playback state machine
-            setPlaybackState(PlaybackState.INITIALIZING)
-            scheduledStartLoopTimeUs = null
-            firstServerTimestampUs = null
-
-            // Reset DAC timestamp stability tracking
-            consecutiveValidTimestamps = 0
-            dacTimestampsStable = false
+            // A loop started again resets before anything else
+            clearQueueAndRequestReset()
 
             AppLog.Audio.i("Playback stopped")
         }
@@ -792,76 +771,89 @@ class SyncAudioPlayer(
      */
     fun enterIdle() {
         stateLock.withLock {
-            // Mirrors clearBuffer(): invalidate any queueChunk() invocations
-            // that are still in flight on the WebSocket IO thread. Without
-            // this, a chunk whose queueChunk() captured the pre-idle
-            // generation can re-populate the queue after the clears below
-            // run, leaving stale audio in the pipeline after stream/end.
-            streamGeneration++
+            AppLog.Audio.i("[cmd-trace] T4 enterIdle ts=${nowNs() / 1_000_000} thread=${Thread.currentThread().name}")
 
-            AppLog.Audio.i("[cmd-trace] T4 enterIdle ts=${nowNs() / 1_000_000} thread=${Thread.currentThread().name} gen=$streamGeneration")
-
-            // Clear all audio buffers
-            chunkQueue.clear()
-            totalQueuedSamples.set(0)
             synchronized(pendingChunks) {
                 pendingChunks.clear()
                 hasPendingChunks = false
             }
 
-            lastChunkServerTime = 0L
-
-            // Reset playback state machine to INITIALIZING (silence-writing state)
-            setPlaybackState(PlaybackState.INITIALIZING)
-            scheduledStartLoopTimeUs = null
-            firstServerTimestampUs = null
-
-            // Reset sync error tracking
-            totalFramesWritten.set(0)
-            serverTimelineCursor = 0L
-            serverTimelineCursorRemainder = 0L
-            playbackStartTimeUs = 0L
-            startTimeCalibrated = false
-            samplesReadSinceStart = 0L
-            syncErrorUs = 0L
-            syncErrorFilter.reset()
-            playingStateEnteredAtUs = 0L
-
-            // Reset DAC timestamp stability tracking so it re-warms
-            consecutiveValidTimestamps = 0
-            dacTimestampsStable = false
-            lastDacPacingLogTimeUs = 0L
-
-            // Reset sample insert/drop correction state
-            insertEveryNFrames = 0
-            dropEveryNFrames = 0
-            snapDropFrames = 0
-
-            // Reset gap/overlap tracking
-            expectedNextTimestampUs = null
-
-            // Signal the playback loop to flush AudioTrack before its next write.
-            // We must NOT flush here because the playback loop may be mid-write()
-            // on the coroutine thread (H-11).
-            if (audioSink != null && isPlaying.get()) {
-                isFlushPending.set(true)
-            } else {
-                val track = audioSink
-                if (track != null) {
-                    try {
-                        track.flush()
-                    } catch (e: IllegalStateException) {
-                        AppLog.Audio.w("Failed to flush AudioTrack during enterIdle", e)
-                    }
-                }
-            }
-
             // NOTE: Do NOT stop AudioTrack or cancel playback loop.
             // The loop will continue in INITIALIZING state, writing silence
             // to keep DAC timestamps warm.
+            clearQueueAndRequestReset()
 
             AppLog.Audio.i("Entered idle mode - continuing silence for DAC keepalive")
         }
+    }
+
+    /**
+     * Drop all queued audio and have the playback loop start over.
+     *
+     * Safe from any thread: it touches only what [stateLock] guards and
+     * raises [resetRequested]. The flush and the reset of everything the
+     * audio thread owns are [resetPlayback], on that thread.
+     */
+    private fun clearQueueAndRequestReset() {
+        stateLock.withLock {
+            // Raised before the queue is emptied, so the loop never takes an
+            // emptied queue for an underrun.
+            resetRequested = true
+
+            chunkQueue.clear()
+            totalQueuedSamples.set(0)
+
+            // Reset gap/overlap tracking
+            expectedNextTimestampUs = null
+            lastChunkServerTime = 0L
+
+            // Reset playback state machine
+            setPlaybackState(PlaybackState.INITIALIZING)
+            scheduledStartLoopTimeUs = null
+            firstServerTimestampUs = null
+            playingStateEnteredAtUs = 0L  // Reset grace period
+        }
+    }
+
+    /**
+     * Flush the track and start everything measured from it over.
+     *
+     * Audio thread only, called from the playback loop when [resetRequested]
+     * is set: a flush here cannot land in the middle of a write, and nothing
+     * is reset while the loop is using it.
+     */
+    private fun resetPlayback() {
+        val track = audioSink
+        if (track != null) {
+            try {
+                track.pause()
+                track.flush()
+                track.play()
+            } catch (e: IllegalStateException) {
+                AppLog.Audio.w("Failed to flush AudioTrack", e)
+            }
+        }
+        // The flush restarts the track's frame position from zero
+        totalFramesWritten.set(0)
+
+        // Reset DAC timestamp stability tracking so it re-warms
+        consecutiveValidTimestamps = 0
+        dacTimestampsStable = false
+        lastDacPacingLogTimeUs = 0L
+
+        // Reset sync error tracking
+        serverTimelineCursor = 0L
+        serverTimelineCursorRemainder = 0L
+        playbackStartTimeUs = 0L
+        startTimeCalibrated = false
+        samplesReadSinceStart = 0L
+        syncErrorUs = 0L
+        syncErrorFilter.reset()
+
+        // Reset sample insert/drop correction state
+        insertEveryNFrames = 0
+        dropEveryNFrames = 0
+        snapDropFrames = 0
     }
 
     /**
@@ -970,7 +962,6 @@ class SyncAudioPlayer(
 
         // Phase 3: Re-acquire lock for final resource cleanup
         stateLock.withLock {
-            isFlushPending.set(false)  // Clear any pending flush since we're releasing
             // Release AudioTrack
             try {
                 audioSink?.stop()
@@ -997,8 +988,8 @@ class SyncAudioPlayer(
     /**
      * Clear the audio buffer (called on stream/clear or seek).
      *
-     * This method is thread-safe. It pauses the playback loop during the clear
-     * to prevent concurrent access issues.
+     * This method is thread-safe: it empties the queue and leaves the flush
+     * and the reset of the sync state to the playback loop.
      */
     fun clearBuffer() {
         if (isReleased.get()) {
@@ -1007,17 +998,11 @@ class SyncAudioPlayer(
         }
 
         stateLock.withLock {
-            streamGeneration++
-
-            AppLog.Audio.i("[cmd-trace] T4 clearBuffer ts=${nowNs() / 1_000_000} thread=${Thread.currentThread().name} gen=$streamGeneration")
+            AppLog.Audio.i("[cmd-trace] T4 clearBuffer ts=${nowNs() / 1_000_000} thread=${Thread.currentThread().name}")
 
             // Reset paused state - we're starting a fresh stream (e.g., after seek)
             // This ensures playback loop will process new chunks even if we were paused
             val wasPaused = isPaused.getAndSet(false)
-
-            // Clear the chunk queue (thread-safe operation)
-            chunkQueue.clear()
-            totalQueuedSamples.set(0)
 
             // Clear pending chunks buffer
             synchronized(pendingChunks) {
@@ -1025,62 +1010,15 @@ class SyncAudioPlayer(
                 hasPendingChunks = false
             }
 
-            // Signal the playback loop to flush AudioTrack before its next write.
-            // We must NOT flush here because the playback loop may be mid-write()
-            // on the coroutine thread -- concurrent pause()/flush() causes clicks/pops
-            // and incorrect frame accounting (H-11).
-            if (audioSink != null && isPlaying.get()) {
-                isFlushPending.set(true)
-            } else {
-                // Not playing -- safe to flush directly (no concurrent writes)
-                val track = audioSink
-                if (track != null) {
-                    try {
-                        track.flush()
-                    } catch (e: IllegalStateException) {
-                        AppLog.Audio.w("Failed to flush AudioTrack during clearBuffer", e)
-                    }
-                }
-            }
-
             // Ensure AudioTrack hardware matches software state after clearing pause flag
             if (wasPaused) {
                 audioSink?.play()
             }
 
-            lastChunkServerTime = 0L
-
-            // Reset playback state machine
-            setPlaybackState(PlaybackState.INITIALIZING)
-            scheduledStartLoopTimeUs = null
-            firstServerTimestampUs = null
             // Note: lastReanchorTimeUs is NOT reset to maintain cooldown across clears
+            clearQueueAndRequestReset()
 
-            // Reset sync error tracking (decoupled architecture)
-            totalFramesWritten.set(0)
-            serverTimelineCursor = 0L
-            serverTimelineCursorRemainder = 0L
-            playbackStartTimeUs = 0L
-            startTimeCalibrated = false
-            samplesReadSinceStart = 0L
-            syncErrorUs = 0L
-            syncErrorFilter.reset()
-            playingStateEnteredAtUs = 0L  // Reset grace period
-
-            // Reset DAC timestamp stability tracking
-            consecutiveValidTimestamps = 0
-            dacTimestampsStable = false
-            lastDacPacingLogTimeUs = 0L
-
-            // Reset sample insert/drop correction state
-            insertEveryNFrames = 0
-            dropEveryNFrames = 0
-            snapDropFrames = 0
-
-            // Reset gap/overlap tracking
-            expectedNextTimestampUs = null
-
-            AppLog.Audio.d("Buffer cleared, generation=$streamGeneration, state=$playbackState")
+            AppLog.Audio.d("Buffer cleared, state=$playbackState")
         }
     }
 
@@ -1180,14 +1118,13 @@ class SyncAudioPlayer(
      * Process a single audio chunk (internal implementation).
      * Handles gap/overlap detection and state machine transitions.
      *
-     * Called from the WebSocket thread. Captures streamGeneration at entry
-     * and rechecks before state transitions to avoid racing with clearBuffer()/stop().
+     * Called from the decode thread, with [stateLock] held for the whole
+     * chunk: it is queued either entirely before a concurrent clear, which
+     * then removes it, or entirely after. Whether a chunk still belongs to the
+     * current stream is the caller's knowledge (PlaybackService's
+     * decodeGeneration); the player cannot tell.
      */
-    private fun processChunk(serverTimeMicros: Long, pcmData: ByteArray) {
-        // Snapshot generation to detect concurrent clearBuffer()/stop() calls.
-        // If generation changes mid-processing, this chunk belongs to a stale stream.
-        val gen = streamGeneration
-
+    private fun processChunk(serverTimeMicros: Long, pcmData: ByteArray): Unit = stateLock.withLock {
         // Working copies that may be modified by gap/overlap handling
         var workingServerTimeMicros = serverTimeMicros
         var workingPcmData = pcmData
@@ -1293,59 +1230,48 @@ class SyncAudioPlayer(
         //   INITIALIZING -> WAITING_FOR_START (first chunk establishes timing)
         //   REANCHORING  -> WAITING_FOR_START (recovery from large sync error)
         //
-        // Held under stateLock to avoid racing with clearBuffer()/stop() which
-        // reset the state machine on the main thread. The generation check
-        // ensures we don't apply stale chunk timing after a stream reset.
-        //
         // See PlaybackState enum for the complete state diagram.
         // ====================================================================
-        stateLock.withLock {
-            // If clearBuffer()/stop() ran since we entered processChunk(),
-            // this chunk belongs to a stale stream -- skip the transition.
-            if (streamGeneration != gen) return
-
-            when (playbackState) {
-                PlaybackState.INITIALIZING -> {
-                    // TRANSITION: INITIALIZING -> WAITING_FOR_START
-                    // Trigger: First audio chunk received while time sync is ready
-                    // Action: Record the first chunk's server timestamp as anchor point,
-                    //         compute scheduled client-time start, begin buffer filling
-                    firstServerTimestampUs = workingServerTimeMicros
-                    scheduledStartLoopTimeUs = clientPlayTime
-                    setPlaybackState(PlaybackState.WAITING_FOR_START)
-                    AppLog.Audio.i("First chunk received: serverTime=${workingServerTimeMicros/1000}ms, " +
-                            "scheduled start at ${clientPlayTime/1000}ms, transitioning to WAITING_FOR_START")
+        when (playbackState) {
+            PlaybackState.INITIALIZING -> {
+                // TRANSITION: INITIALIZING -> WAITING_FOR_START
+                // Trigger: First audio chunk received while time sync is ready
+                // Action: Record the first chunk's server timestamp as anchor point,
+                //         compute scheduled client-time start, begin buffer filling
+                firstServerTimestampUs = workingServerTimeMicros
+                scheduledStartLoopTimeUs = clientPlayTime
+                setPlaybackState(PlaybackState.WAITING_FOR_START)
+                AppLog.Audio.i("First chunk received: serverTime=${workingServerTimeMicros/1000}ms, " +
+                        "scheduled start at ${clientPlayTime/1000}ms, transitioning to WAITING_FOR_START")
+            }
+            PlaybackState.WAITING_FOR_START -> {
+                // NO TRANSITION - Still in WAITING_FOR_START
+                // Action: Update scheduled start time as time sync improves.
+                // The time filter's offset estimate improves with more samples,
+                // so we recompute the client play time using the original server timestamp.
+                // This ensures the scheduled start aligns with the corrected time sync.
+                val firstTs = firstServerTimestampUs
+                if (firstTs != null) {
+                    scheduledStartLoopTimeUs = timeFilter.serverToClient(firstTs)
                 }
-                PlaybackState.WAITING_FOR_START -> {
-                    // NO TRANSITION - Still in WAITING_FOR_START
-                    // Action: Update scheduled start time as time sync improves.
-                    // The time filter's offset estimate improves with more samples,
-                    // so we recompute the client play time using the original server timestamp.
-                    // This ensures the scheduled start aligns with the corrected time sync.
-                    val firstTs = firstServerTimestampUs
-                    if (firstTs != null) {
-                        scheduledStartLoopTimeUs = timeFilter.serverToClient(firstTs)
-                    }
-                    // Actual transition to PLAYING happens in playback loop's handleStartGating()
-                    // when buffer >= 200ms AND scheduled start time is reached.
-                }
-                PlaybackState.REANCHORING -> {
-                    // TRANSITION: REANCHORING -> WAITING_FOR_START
-                    // Trigger: New chunk arrives after reanchor cleared all buffers
-                    // Action: Treat this as the new "first" chunk, establish new timing anchor.
-                    // This completes the reanchor recovery - we have fresh timing reference.
-                    firstServerTimestampUs = workingServerTimeMicros
-                    scheduledStartLoopTimeUs = clientPlayTime
-                    setPlaybackState(PlaybackState.WAITING_FOR_START)
-                    AppLog.Sync.i("Reanchoring: new first chunk at serverTime=${workingServerTimeMicros/1000}ms")
-                }
-                PlaybackState.PLAYING -> {
-                    // NO TRANSITION - Normal chunk processing: chunks added to
-                    // queue for playback.
-                }
+                // Actual transition to PLAYING happens in playback loop's handleStartGating()
+                // when buffer >= 200ms AND scheduled start time is reached.
+            }
+            PlaybackState.REANCHORING -> {
+                // TRANSITION: REANCHORING -> WAITING_FOR_START
+                // Trigger: New chunk arrives after reanchor cleared all buffers
+                // Action: Treat this as the new "first" chunk, establish new timing anchor.
+                // This completes the reanchor recovery - we have fresh timing reference.
+                firstServerTimestampUs = workingServerTimeMicros
+                scheduledStartLoopTimeUs = clientPlayTime
+                setPlaybackState(PlaybackState.WAITING_FOR_START)
+                AppLog.Sync.i("Reanchoring: new first chunk at serverTime=${workingServerTimeMicros/1000}ms")
+            }
+            PlaybackState.PLAYING -> {
+                // NO TRANSITION - Normal chunk processing: chunks added to
+                // queue for playback.
             }
         }
-
     }
 
     // ========================================================================
@@ -1381,7 +1307,10 @@ class SyncAudioPlayer(
      *
      * @return true if we should continue waiting, false if ready to play
      */
-    private fun handleStartGating(): Boolean {
+    private fun handleStartGating(): Boolean = stateLock.withLock {
+        // A clear landed during this iteration: reset before starting anything
+        if (resetRequested) return true
+
         val track = audioSink
         if (track != null && dacTimestampsStable) {
             return handleStartGatingDacAware(track)
@@ -1686,67 +1615,19 @@ class SyncAudioPlayer(
             return false
         }
 
-        // Try to acquire the lock without blocking - if we can't, skip this reanchor attempt
-        if (!stateLock.tryLock()) {
-            return false
-        }
+        AppLog.Sync.w("Triggering reanchor: clearing buffers and resetting state")
 
-        try {
-            AppLog.Sync.w("Triggering reanchor: clearing buffers and resetting state")
-
-            lastReanchorTimeUs = nowMicros
+        lastReanchorTimeUs = nowMicros
+        stateLock.withLock {
             setPlaybackState(PlaybackState.REANCHORING)
-
-            // Clear audio state but keep AudioTrack playing
-            chunkQueue.clear()
-            totalQueuedSamples.set(0)
-
-            // Safely flush the AudioTrack
-            val track = audioSink
-            if (track != null) {
-                try {
-                    track.pause()
-                    track.flush()
-                    track.play()
-                } catch (e: IllegalStateException) {
-                    AppLog.Sync.w("Failed to flush AudioTrack during reanchor", e)
-                }
-            }
-
-            // Reset start gating state
-            scheduledStartLoopTimeUs = null
-            firstServerTimestampUs = null
-
-            // Reset sync tracking (simplified)
-            lastChunkServerTime = 0L
-            insertEveryNFrames = 0
-            dropEveryNFrames = 0
-            snapDropFrames = 0
-
-            // Reset sync error state (decoupled architecture)
-            totalFramesWritten.set(0)
-            serverTimelineCursor = 0L
-            serverTimelineCursorRemainder = 0L
-            playbackStartTimeUs = 0L
-            startTimeCalibrated = false
-            samplesReadSinceStart = 0L
-            syncErrorUs = 0L
-            syncErrorFilter.reset()
-            playingStateEnteredAtUs = 0L  // Reset grace period
-
-            // Reset DAC timestamp stability tracking
-            consecutiveValidTimestamps = 0
-            dacTimestampsStable = false
-
-            // Transition to INITIALIZING to wait for new chunks
-            setPlaybackState(PlaybackState.INITIALIZING)
-            syncCorrections++
-            reanchorCount++
-
-            return true
-        } finally {
-            stateLock.unlock()
+            // Back to INITIALIZING to wait for new chunks; the loop resets
+            // on its next iteration
+            clearQueueAndRequestReset()
         }
+        syncCorrections++
+        reanchorCount++
+
+        return true
     }
 
     /**
@@ -1790,26 +1671,11 @@ class SyncAudioPlayer(
     private fun playbackLoopStep(): Long {
         if (isPaused.get()) return STATE_POLL_DELAY_MS
 
-        // Handle deferred flush from clearBuffer()/enterIdle().
-        // Performed here (on the playback thread) rather than on the
-        // main thread to avoid flushing mid-write (H-11).
-        if (isFlushPending.compareAndSet(true, false)) {
-            val track = audioSink
-            if (track != null) {
-                try {
-                    track.pause()
-                    track.flush()
-                    track.play()
-                } catch (e: IllegalStateException) {
-                    AppLog.Audio.w("Failed to flush AudioTrack (deferred)", e)
-                }
-            }
-            // The flush restarts the track's frame position from zero.
-            // Restart our count here, on the thread that writes, so a
-            // write that raced the clear cannot leave the two apart.
-            totalFramesWritten.set(0)
-            consecutiveValidTimestamps = 0
-            dacTimestampsStable = false
+        if (resetRequested) {
+            // Taken under the lock, so only once the clear that raised it
+            // has finished.
+            stateLock.withLock { resetRequested = false }
+            resetPlayback()
         }
 
         // State machine for synchronized playback
@@ -1864,8 +1730,9 @@ class SyncAudioPlayer(
         }
 
         // PLAYING state: process chunks with sync correction
-        val chunk = chunkQueue.peek()
-        if (chunk == null) {
+        if (chunkQueue.isEmpty()) {
+            // Emptied by a clear, not run dry: the reset comes next
+            if (resetRequested) return 0
             // No chunks available - buffer underrun
             bufferUnderrunCount++
             // The track may stall now. Start the sync error estimate over
@@ -1906,6 +1773,13 @@ class SyncAudioPlayer(
                 return 0
             }
         }
+
+        // Take the head in one step. Nothing is taken once a clear has asked
+        // for a reset, so audio queued after it waits for start gating.
+        val chunk = stateLock.withLock {
+            if (resetRequested) null
+            else chunkQueue.poll()?.also { totalQueuedSamples.addAndGet(-it.sampleCount.toLong()) }
+        } ?: return 0
 
         // Normal playback: update correction schedule and write chunk
         playChunkWithCorrection(chunk)
@@ -1992,9 +1866,6 @@ class SyncAudioPlayer(
      * the soft drop/duplicate correction.
      */
     private fun playChunkWithCorrection(chunk: AudioChunk) {
-        chunkQueue.poll() // Remove from queue
-        totalQueuedSamples.addAndGet(-chunk.sampleCount.toLong())
-
         val track = audioSink ?: return
 
         // Track samples consumed for sync error calculation
