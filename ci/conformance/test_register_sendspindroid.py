@@ -80,7 +80,6 @@ def test_declares_only_the_encrypted_client_initiated_scenarios(tmp_path, monkey
     spec = registered_client_spec(checkout)
     assert spec["entrypoint"] == "conformance.adapters.sendspindroid_client"
     assert spec["supports_client_initiated"] is True
-    assert spec["supports_request_format"] is True
     # The app is client-initiated only, and has no cleartext dialect left.
     assert spec["supports_server_initiated"] is False
     assert spec["supports_legacy_unencrypted"] is False

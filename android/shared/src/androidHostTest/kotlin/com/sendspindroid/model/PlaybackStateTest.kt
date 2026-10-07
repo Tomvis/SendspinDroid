@@ -119,6 +119,25 @@ class PlaybackStateTest {
         assertEquals(PlaybackStateType.PAUSED, PlaybackStateType.fromString("Paused"))
     }
 
+    // --- withConnectionEnded ---
+
+    @Test
+    fun withConnectionEnded_keepsTheDeviceVolume() {
+        val state = PlaybackState(volume = 26)
+        assertEquals(26, state.withConnectionEnded().volume)
+    }
+
+    @Test
+    fun withConnectionEnded_clearsWhatTheServerSupplied() {
+        val state = PlaybackState(
+            groupId = "g1", groupName = "Kitchen", playbackState = PlaybackStateType.PLAYING,
+            title = "Song", artist = "Artist", album = "Album", artworkUrl = "https://art.jpg",
+            durationMs = 180000, positionMs = 5000, positionUpdatedAt = 10_000L,
+            volume = 26, muted = true
+        )
+        assertEquals(PlaybackState(volume = 26), state.withConnectionEnded())
+    }
+
     // --- withMetadata ---
 
     @Test

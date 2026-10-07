@@ -453,7 +453,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun requestLargestDisplayMode() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-        val display = display ?: return
+        // Best-effort: a context with no display throws here (Robolectric does).
+        val display = runCatching { display }.getOrNull() ?: return
         val modes = display.supportedModes
         if (modes.isEmpty()) return
         val current = display.mode
@@ -1390,6 +1391,19 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 // Fork: seed the raw play-intent (see onPlayWhenReadyChanged).
                 viewModel.updatePlayWhenReady(playWhenReady)
+                // PlayerStateListener only hears changes. An Activity recreated
+                // over a service that is already playing gets none, and its new
+                // ViewModel would sit at IDLE with every control disabled.
+                viewModel.updatePlaybackState(
+                    isPlaying,
+                    when (state) {
+                        Player.STATE_BUFFERING -> PlaybackState.BUFFERING
+                        Player.STATE_READY -> PlaybackState.READY
+                        Player.STATE_ENDED -> PlaybackState.ENDED
+                        else -> PlaybackState.IDLE
+                    }
+                )
+
                 // Check if we're actively connected (playing or ready to play)
                 val isConnected = isPlaying || state == Player.STATE_READY || state == Player.STATE_BUFFERING
 
