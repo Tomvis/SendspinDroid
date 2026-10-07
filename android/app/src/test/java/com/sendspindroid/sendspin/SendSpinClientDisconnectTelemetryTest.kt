@@ -32,12 +32,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * State being tracked on every disconnect event:
  *  - lastDisconnectCode / lastDisconnectReason
- *  - lastDisconnectAtMs (only for abnormal, non-user-initiated)
  *  - connectedAtMs cleared
  *
- * Plus: reconnectAttemptsTotal increments per attempt, and the
- * isStallWatchdogArmed() accessor is gated on handshake + not-reconnecting
- * + not-user-initiated.
+ * Plus: the isStallWatchdogArmed() accessor is gated on handshake +
+ * not-user-initiated.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendSpinDisconnectTelemetryTest {
@@ -108,28 +106,19 @@ class SendSpinDisconnectTelemetryTest {
     // =========================================================================
 
     @Test
-    fun `onClosed abnormal populates lastDisconnectCode, reason, and lastDisconnectAtMs`() {
+    fun `onClosed abnormal populates lastDisconnectCode and reason`() {
         setHandshakeComplete(true)
         val listener = buildTransportListener()
 
-        val before = System.currentTimeMillis()
         listener.onClosed(code = 1006, reason = "ping-timeout")
 
         assertEquals(Integer.valueOf(1006), client.getLastDisconnectCode())
         assertEquals("ping-timeout", client.getLastDisconnectReason())
-        val disconnectAt = getField("lastDisconnectAtMs") as Long?
-        assertNotNull("lastDisconnectAtMs should be set on abnormal close", disconnectAt)
-        assertTrue(
-            "lastDisconnectAtMs should be set to a recent timestamp",
-            disconnectAt!! >= before && disconnectAt <= System.currentTimeMillis(),
-        )
         assertNull("connectedAtMs should be cleared after disconnect", client.getConnectedAtMs())
     }
 
     @Test
-    fun `onClosed normal-closure still records code 1000 but does not set lastDisconnectAtMs`() {
-        // Normal closure isn't a retryable error, so lastDisconnectAtMs stays null
-        // (it's the "for a [reconnect-ok] correlation" marker).
+    fun `onClosed normal-closure still records code 1000`() {
         setHandshakeComplete(true)
         val listener = buildTransportListener()
 
@@ -137,14 +126,10 @@ class SendSpinDisconnectTelemetryTest {
 
         assertEquals(Integer.valueOf(1000), client.getLastDisconnectCode())
         assertEquals("server shutdown", client.getLastDisconnectReason())
-        assertNull(
-            "lastDisconnectAtMs should NOT be set on normal closure",
-            getField("lastDisconnectAtMs"),
-        )
     }
 
     @Test
-    fun `onFailure populates code=null, reason=error message, and lastDisconnectAtMs`() {
+    fun `onFailure populates code=null and reason=error message`() {
         setHandshakeComplete(true)
         val listener = buildTransportListener()
 
@@ -153,7 +138,6 @@ class SendSpinDisconnectTelemetryTest {
 
         assertNull("code should be null for onFailure", client.getLastDisconnectCode())
         assertEquals("connection reset", client.getLastDisconnectReason())
-        assertNotNull("lastDisconnectAtMs should be set on recoverable failure", getField("lastDisconnectAtMs"))
     }
 
     @Test
@@ -168,26 +152,6 @@ class SendSpinDisconnectTelemetryTest {
     }
 
     // =========================================================================
-    // Lifetime reconnect counter
-    // =========================================================================
-
-    @Test
-    fun `reconnectAttemptsTotal increments on each attemptReconnect call`() {
-        setHandshakeComplete(true)
-        assertEquals(0, client.getReconnectAttemptsTotal())
-
-        // Triggering attemptReconnect directly via reflection bypasses the listener
-        // so we can assert the counter in isolation.
-        val m = SendSpin::class.java.getDeclaredMethod("attemptReconnect")
-        m.isAccessible = true
-        m.invoke(client)
-        m.invoke(client)
-        m.invoke(client)
-
-        assertEquals(3, client.getReconnectAttemptsTotal())
-    }
-
-    // =========================================================================
     // isStallWatchdogArmed accessor
     // =========================================================================
 
@@ -198,18 +162,9 @@ class SendSpinDisconnectTelemetryTest {
     }
 
     @Test
-    fun `isStallWatchdogArmed is true when handshake complete and not reconnecting or user-initiated`() {
+    fun `isStallWatchdogArmed is true when handshake complete and not user-initiated`() {
         setHandshakeComplete(true)
         assertTrue(client.isStallWatchdogArmed())
-    }
-
-    @Test
-    fun `isStallWatchdogArmed is false while reconnecting`() {
-        setHandshakeComplete(true)
-        val reconnectingField = SendSpin::class.java.getDeclaredField("reconnecting")
-        reconnectingField.isAccessible = true
-        (reconnectingField.get(client) as AtomicBoolean).set(true)
-        assertFalse(client.isStallWatchdogArmed())
     }
 
     @Test

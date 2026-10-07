@@ -644,7 +644,6 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     override fun isLowMemoryMode(): Boolean = lowMemoryMode
 
-    override fun getClientId(): String = "test-client-id"
 
     override fun getDeviceName(): String = "Test Device"
 

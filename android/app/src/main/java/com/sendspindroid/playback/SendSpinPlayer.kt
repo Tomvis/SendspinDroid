@@ -169,14 +169,12 @@ class SendSpinPlayer : Player {
             SyncPlaybackState.WAITING_FOR_START -> {
                 updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
             }
-            SyncPlaybackState.PLAYING,
-            SyncPlaybackState.DRAINING -> {
+            SyncPlaybackState.PLAYING -> {
                 // Re-anchor the interpolation timestamp when transitioning to playing,
                 // so getCurrentPosition() doesn't include pause duration in its elapsed calc
                 if (!currentlyPlaying) {
                     anchorElapsedRealtime = SystemClock.elapsedRealtime()
                 }
-                // DRAINING is still actively playing from buffer, so STATE_READY.
                 // Sync playWhenReady to true: audio is physically playing, so the UI
                 // must reflect that. This corrects any stale playWhenReady=false from
                 // a server "stopped" state that arrived before audio actually resumed.
@@ -219,9 +217,7 @@ class SendSpinPlayer : Player {
                 SyncPlaybackState.WAITING_FOR_START -> {
                     updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
                 }
-                SyncPlaybackState.PLAYING,
-                SyncPlaybackState.DRAINING -> {
-                    // DRAINING is still actively playing from buffer, so STATE_READY
+                SyncPlaybackState.PLAYING -> {
                     updatePlaybackStateInternal(Player.STATE_READY, true)
                 }
                 SyncPlaybackState.REANCHORING -> {

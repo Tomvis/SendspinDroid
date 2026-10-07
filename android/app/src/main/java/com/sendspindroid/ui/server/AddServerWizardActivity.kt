@@ -62,7 +62,6 @@ class AddServerWizardActivity : FragmentActivity() {
     // No-op callback for transient SendSpin instances used in wizard connection tests.
     // All methods are intentionally empty — the wizard only cares about connectionState.
     private val noopSendSpinCallback = object : SendSpin.Callback {
-        override fun onServerDiscovered(name: String, address: String) {}
         override fun onStateChanged(state: String) {}
         override fun onGroupUpdate(groupId: String, groupName: String, playbackState: String) {}
         override fun onMetadataUpdate(
@@ -320,7 +319,6 @@ class AddServerWizardActivity : FragmentActivity() {
             deviceName = android.os.Build.MODEL,
             callback = noopSendSpinCallback,
         )
-        transient.selfReconnectEnabled = false
         transient.connect(SendSpinEndpoint.Local(address))
         return try {
             val terminal = withTimeoutOrNull(TEST_TIMEOUT_MS) {

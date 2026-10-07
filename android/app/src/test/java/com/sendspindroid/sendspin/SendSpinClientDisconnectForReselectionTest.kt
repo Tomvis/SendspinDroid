@@ -126,18 +126,6 @@ class SendSpinDisconnectForReselectionTest {
     }
 
     @Test
-    fun `disconnectForReselection cancels in-flight reconnect coroutine`() {
-        val reconnectingField = SendSpin::class.java.getDeclaredField("reconnecting")
-        reconnectingField.isAccessible = true
-        (reconnectingField.get(client) as AtomicBoolean).set(true)
-
-        client.disconnectForReselection()
-
-        assertFalse("Reconnecting flag should be cleared",
-            (reconnectingField.get(client) as AtomicBoolean).get())
-    }
-
-    @Test
     fun `disconnectForReselection does not set userInitiatedDisconnect`() {
         client.disconnectForReselection()
 

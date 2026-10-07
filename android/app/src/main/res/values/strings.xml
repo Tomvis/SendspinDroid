@@ -268,8 +268,6 @@
     <string name="stats_address">Address</string>
     <string name="stats_state">State</string>
     <string name="stats_codec">Codec</string>
-    <string name="stats_reconnects">Reconnects</string>
-    <string name="stats_reconnects_total">Reconnects (lifetime)</string>
     <string name="stats_last_byte_received">Last Byte Received</string>
     <string name="stats_stall_watchdog">Stall Watchdog</string>
     <string name="stats_watchdog_armed">Armed</string>
@@ -294,8 +292,6 @@
     <string name="stats_converged">Converged</string>
     <string name="stats_measurements">Measurements</string>
     <string name="stats_last_sync">Last Sync</string>
-    <string name="stats_frozen">Frozen</string>
-    <string name="stats_frozen_reconnecting">Yes (reconnecting)</string>
     <string name="stats_sync_offset">Sync Offset</string>
     <string name="stats_calibrated">Calibrated</string>
     <string name="stats_frames_written">Frames Written</string>

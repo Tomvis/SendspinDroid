@@ -135,11 +135,6 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun isLowMemoryMode(): Boolean
 
     /**
-     * Get the client ID for this connection.
-     */
-    protected abstract fun getClientId(): String
-
-    /**
      * Get the device name for this connection.
      */
     protected abstract fun getDeviceName(): String

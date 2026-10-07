@@ -190,31 +190,11 @@ class SendSpinStallWatchdogTest {
     }
 
     @Test
-    fun `checkStall does not close during active reconnection`() {
-        val lastByteField = SendSpin::class.java.getDeclaredField("lastByteReceivedAtMs")
-        lastByteField.isAccessible = true
-        val atomicLong = lastByteField.get(client) as AtomicLong
-        atomicLong.set(System.currentTimeMillis() - 60_000L)
-
-        val reconnectingField = SendSpin::class.java.getDeclaredField("reconnecting")
-        reconnectingField.isAccessible = true
-        val reconnecting = reconnectingField.get(client) as AtomicBoolean
-        reconnecting.set(true)
-
-        val checkStall = SendSpin::class.java.getDeclaredMethod("checkStall")
-        checkStall.isAccessible = true
-        checkStall.invoke(client)
-
-        assertFalse("Watchdog should NOT close during reconnection", fakeTransport.closeCalled)
-    }
-
-    @Test
     fun `watchdog restarts after onHandshakeComplete so a second stall is detected`() {
-        // Simulate the post-reconnect state: stop the watchdog (as attemptReconnect does),
-        // then fire onHandshakeComplete and verify the watchdog job is active again.
+        // Simulate the state after a drop: stop the watchdog, then fire
+        // onHandshakeComplete and verify the watchdog job is active again.
 
-        // Force-start the watchdog (as if from a prior connect), then stop it (as if from
-        // attemptReconnect at line 776).
+        // Force-start the watchdog (as if from a prior connect), then stop it.
         val startWatchdog = SendSpin::class.java.getDeclaredMethod("startStallWatchdog")
         startWatchdog.isAccessible = true
         startWatchdog.invoke(client)

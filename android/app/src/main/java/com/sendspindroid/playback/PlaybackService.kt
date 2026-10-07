@@ -135,10 +135,6 @@ class PlaybackService : MediaLibraryService() {
     // thread reads or writes this field.
     private var audioDecoder: AudioDecoder? = null
 
-    // When true, the next state/group message should call exitDraining() AFTER processing.
-    // This ensures the DRAINING check in onStateChanged/onGroupUpdate fires while still
-    // in DRAINING state, before transitioning back to PLAYING.
-    @Volatile private var pendingExitDraining = false
     private var currentCodec: String = "pcm"  // Track current stream codec for stats
 
     // Current server connection info (for MA integration)
@@ -704,21 +700,10 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
-        // Network-state observer: dispatches the side effects formerly inline in networkCallback.
-        // Observes the Coordinator's NetworkState to call setNetworkAvailable on the client,
-        // and mirrors the state into the companion flow for in-process observers (MainActivity).
+        // Mirrors the Coordinator's NetworkState into the companion flow for
+        // in-process observers (MainActivity).
         serviceScope.launch {
-            var prevConnected: Boolean? = null
-            coordinator.networkState.collect { state ->
-                _networkState.value = state
-                val connected = state.isConnected
-                // Only dispatch when the connected flag actually changes to avoid redundant calls.
-                if (connected != prevConnected) {
-                    prevConnected = connected
-                    sendSpinClient?.setNetworkAvailable(connected)
-                    Log.d(TAG, "networkState observer: setNetworkAvailable($connected)")
-                }
-            }
+            coordinator.networkState.collect { state -> _networkState.value = state }
         }
 
         // Reconnect-status relay: mirrors the coordinator's reconnect status into the
@@ -763,9 +748,7 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
-        // Drives the work formerly in SendSpin.Callback.onConnected /
-        // onDisconnected / onError / onReconnecting / onReconnected. Phase 4 Task 5
-        // removed those callbacks; consumers observe the StateFlow instead.
+        // Reacts to the client's connection state.
         var prevSendSpinState: TransportState = TransportState.Idle
         serviceScope.launch {
             sendSpinClient?.connectionState?.collect { state ->
@@ -773,23 +756,10 @@ class PlaybackService : MediaLibraryService() {
                 if (state !is TransportState.Ready) activeStreamConfig = null
                 when {
                     state is TransportState.Ready && prevSendSpinState !is TransportState.Ready -> {
-                        // PORTED FROM onConnected + onReconnected:
-                        // onReconnected ran first (set pendingExitDraining = true) then
-                        // onConnected ran. We combine them: if previous state was Connecting
-                        // we were reconnecting, so set pendingExitDraining first.
-                        val wasReconnecting = prevSendSpinState is TransportState.Connecting
                         val serverName = sendSpinClient?.getServerName() ?: ""
-                        if (wasReconnecting) {
-                            // Deferred exitDraining so first server/state or group/update
-                            // message is processed while still in DRAINING state.
-                            pendingExitDraining = true
-                        }
                         Log.d(TAG, "Connected to: $serverName")
                         sendSpinPlayer?.updateConnectionState(true, serverName)
                         sendSpinPlayer?.clearError()
-                        // Restore MediaSession metadata / playback state after any reconnect.
-                        // Idempotent: no-op when no overlay is active. Issue #132.
-                        forwardingPlayer?.clearReconnectingOverlay()
 
                         // Refresh browse tree root so "Connect" disappears
                         mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
@@ -821,22 +791,11 @@ class PlaybackService : MediaLibraryService() {
                         notifyMusicAssistantConnected()
                     }
                     state is TransportState.Idle && prevSendSpinState !is TransportState.Idle -> {
-                        // PORTED FROM onDisconnected:
-                        // wasUserInitiated and wasReconnectExhausted are not carried in
-                        // TransportState. With selfReconnectEnabled=false, Exhausted goes
-                        // through Failed(Exhausted) not Idle. Idle means either user-initiated
-                        // disconnect or coordinator-managed drop (non-exhausted). Since
-                        // selfReconnectEnabled=false, DRAINING is never entered via
-                        // onReconnecting so isDraining is always false here.
                         Log.d(TAG, "Disconnected from server")
 
                         // Stop debug logging session
                         stopDebugLogging()
                         AppLog.session.end()
-
-                        // Any active reconnect overlay is no longer meaningful once we've
-                        // transitioned out of Reconnecting into a terminal state. Issue #132.
-                        forwardingPlayer?.clearReconnectingOverlay()
 
                         // Stop audio playback and release playback locks (CPU/WiFi)
                         syncAudioPlayer?.stop()
@@ -872,105 +831,23 @@ class PlaybackService : MediaLibraryService() {
                         currentServerId = null
                     }
                     state is TransportState.Failed -> {
-                        if (state.reason is FailureReason.Exhausted) {
-                            // PORTED FROM onDisconnected(wasReconnectExhausted = true):
-                            Log.d(TAG, "Reconnect exhausted - disconnecting with error")
+                        val message = failureReasonToMessage(state.reason)
+                        Log.e(TAG, "SendSpin error: $message")
 
-                            // Stop debug logging session
-                            stopDebugLogging()
-                            AppLog.session.end()
+                        // Show error on Android Auto
+                        sendSpinPlayer?.setError(message)
 
-                            // Any active reconnect overlay is no longer meaningful.
-                            // Issue #132.
-                            forwardingPlayer?.clearReconnectingOverlay()
-
-                            // Stop audio playback and release all locks
-                            syncAudioPlayer?.stop()
-                            syncAudioPlayer?.release()
-                            syncAudioPlayer = null
-                            sendSpinPlayer?.setSyncAudioPlayer(null)
-                            releasePlaybackLocks()
-                            releaseHighPowerLocks()
-                            stopForegroundNotification()
-
-                            sendSpinPlayer?.updateConnectionState(false, null)
-
-                            // Show error on Android Auto since reconnect attempts were exhausted
-                            sendSpinPlayer?.setError("Connection lost")
-
-                            // Refresh browse tree root so "Connect" reappears
-                            mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
-
-                            // Broadcast disconnection to controllers (MainActivity)
-                            broadcastConnectionState(STATE_DISCONNECTED)
-
-                            // Clear playback state on disconnect
-                            _playbackState.value = PlaybackState()
-                            lastArtworkUrl = null
-                            lastTrackTitle = null
-                            urlArtwork = null
-                            binaryArtwork = null
-                            binaryArtworkGeneration++
-
-                            // Clear lock screen metadata
-                            forwardingPlayer?.clearMetadata()
-
-                            // Notify MusicAssistant of disconnection
-                            MusicAssistant.onServerDisconnected()
-                            currentServerId = null
-                        } else {
-                            // PORTED FROM onError(message):
-                            val message = when (state.reason) {
-                                is FailureReason.AuthRejected -> "Authentication failed -- please log in again"
-                                is FailureReason.HandshakeFailed -> "Could not establish connection"
-                                is FailureReason.TransientNetwork -> "Network error"
-                                is FailureReason.ProtocolError -> "Protocol error"
-                                is FailureReason.Exhausted -> "Connection lost after multiple attempts"
-                                is FailureReason.ServerLacksEncryption ->
-                                    "This server does not support encrypted connections. " +
-                                        "Music Assistant 2.9 or newer is required."
-                            }
-                            Log.e(TAG, "SendSpin error: $message")
-
-                            // Show error on Android Auto
-                            sendSpinPlayer?.setError(message)
-
-                            // Terminal error supersedes any reconnecting overlay. Issue #132.
-                            forwardingPlayer?.clearReconnectingOverlay()
-
-                            // Broadcast error to controllers (MainActivity)
-                            broadcastConnectionState(STATE_ERROR, errorMessage = message)
-                        }
+                        // Broadcast error to controllers (MainActivity)
+                        broadcastConnectionState(STATE_ERROR, errorMessage = message)
                     }
                     state is TransportState.Connecting && prevSendSpinState !is TransportState.Connecting -> {
-                        // From-Idle: initial connect attempt, no UI overlay needed.
-                        // From-Failed: reconnect attempt after a transient failure.
-                        // From-Ready: reselection (network handover) -- DRAINING applies.
-                        if (prevSendSpinState !is TransportState.Ready) {
-                            // Announce the attempt from here, where the transition
-                            // has already happened. The connect* methods used to do
-                            // it on their first line, before anything had left Idle,
-                            // and the publisher reports observed state rather than
-                            // the argument it is handed - so that call announced
-                            // DISCONNECTED at the very moment a connection began.
-                            broadcastConnectionState(STATE_CONNECTING)
-                        } else {
-                            // PORTED FROM onReconnecting (the Ready->Connecting path during
-                            // network handover or stall watchdog):
-                            val serverName = sendSpinClient?.getServerName() ?: ""
-                            Log.i(TAG, "Reconnecting to $serverName - entering DRAINING mode")
-                            // enterDraining() is thread-safe (guarded by stateLock).
-                            syncAudioPlayer?.enterDraining()
-                            pendingExitDraining = false  // Clear any stale flag
-
-                            // Broadcast to UI
-                            broadcastConnectionState(STATE_RECONNECTING, serverName)
-
-                            // Surface the reconnect on the MediaSession so lock screen /
-                            // Android Auto / AVRCP show "Reconnecting to {server}..." and the
-                            // buffering indicator instead of the stale track title. Issue #132.
-                            forwardingPlayer?.setReconnectingOverlay(serverName)
-                        }
+                        // Announce the attempt from here, where the transition
+                        // has already happened. The connect* methods used to do
+                        // it on their first line, before anything had left Idle,
+                        // and the publisher reports observed state rather than
+                        // the argument it is handed - so that call announced
+                        // DISCONNECTED at the very moment a connection began.
+                        broadcastConnectionState(STATE_CONNECTING)
                     }
                 }
                 prevSendSpinState = state
@@ -1092,7 +969,6 @@ class PlaybackService : MediaLibraryService() {
                 deviceName = playerName,
                 callback = SendSpinClientCallback()
             )
-            sendSpinClient?.selfReconnectEnabled = false
             sendSpinPlayer?.setSendSpinClient(sendSpinClient)
             Log.d(TAG, "SendSpin initialized with name: $playerName")
         } catch (e: Exception) {
@@ -1274,45 +1150,12 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
-        override fun onBufferLow(remainingMs: Long) {
-            Log.w(TAG, "Buffer low during reconnection: ${remainingMs}ms remaining")
-            // Update session extras so UI can show buffer status
-            mainHandler.post {
-                broadcastSessionExtras()
-            }
-        }
-
-        @OptIn(UnstableApi::class)
-        override fun onBufferExhausted() {
-            Log.e(TAG, "Buffer exhausted during reconnection - stopping playback")
-            mainHandler.post {
-                // Stop audio playback and release playback locks
-                syncAudioPlayer?.stop()
-                releasePlaybackLocks()
-
-                // Broadcast state after buffer exhausted
-                broadcastConnectionState(STATE_ERROR, errorMessage = "Connection lost")
-
-                // Clear playback state
-                _playbackState.value = _playbackState.value.copy(
-                    playbackState = PlaybackStateType.STOPPED
-                )
-                sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-
-                // Stop foreground notification since playback failed
-                stopForegroundNotification()
-            }
-        }
     }
 
     /**
      * Callback for SendSpin events.
      */
     private inner class SendSpinClientCallback : SendSpin.Callback {
-
-        override fun onServerDiscovered(name: String, address: String) {
-            Log.d(TAG, "Server discovered (ignored in service): $name at $address")
-        }
 
         override fun onAdmissionStateChanged(state: AdmissionState) {
             mainHandler.post {
@@ -1359,21 +1202,12 @@ class PlaybackService : MediaLibraryService() {
 
                 // Handle playback state transitions per SendSpin spec
                 if (newState == PlaybackStateType.STOPPED) {
-                    // Check if we're in DRAINING state (actively playing from buffer during reconnection)
-                    val isDraining = syncAudioPlayer?.getPlaybackState() == SyncPlaybackState.DRAINING
-                    if (isDraining) {
-                        // We're reconnecting with active buffer - request server to resume playback
-                        Log.i(TAG, "Received stop via server/state while DRAINING - sending play command to resume")
-                        sendSpinClient?.play()
-                        // Don't update playWhenReady or clear buffer - keep playing
-                    } else {
-                        // Stop: "reset position to beginning" - clear buffer
-                        Log.d(TAG, "State is stopped - clearing audio buffer and releasing playback locks")
-                        sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-                        syncAudioPlayer?.clearBuffer()
-                        syncAudioPlayer?.pause()
-                        releasePlaybackLocks()
-                    }
+                    // Stop: "reset position to beginning" - clear buffer
+                    Log.d(TAG, "State is stopped - clearing audio buffer and releasing playback locks")
+                    sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
+                    syncAudioPlayer?.clearBuffer()
+                    syncAudioPlayer?.pause()
+                    releasePlaybackLocks()
                 } else if (newState == PlaybackStateType.PAUSED) {
                     // Pause: "maintains current position for later resumption" - keep buffer
                     Log.d(TAG, "State is paused - pausing audio (keeping buffer)")
@@ -1389,9 +1223,6 @@ class PlaybackService : MediaLibraryService() {
                 }
 
                 _playbackState.value = _playbackState.value.copy(playbackState = newState)
-
-                // Complete deferred DRAINING exit after processing state
-                completePendingExitDraining()
             }
         }
 
@@ -1408,22 +1239,12 @@ class PlaybackService : MediaLibraryService() {
                 if (playbackState.isNotEmpty()) {
                     when (newPlaybackState) {
                         PlaybackStateType.STOPPED -> {
-                            // Check if we're in DRAINING state (actively playing from buffer during reconnection)
-                            val isDraining = syncAudioPlayer?.getPlaybackState() == SyncPlaybackState.DRAINING
-
-                            if (isDraining) {
-                                // We're reconnecting with active buffer - request server to resume playback
-                                Log.i(TAG, "Received stop via group/update while DRAINING - sending play command to resume")
-                                sendSpinClient?.play()
-                                // Don't update playWhenReady or clear buffer - keep playing
-                            } else {
-                                // Stop: "reset position to beginning" - clear buffer
-                                Log.d(TAG, "Playback stopped - clearing audio buffer and releasing playback locks")
-                                sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-                                syncAudioPlayer?.clearBuffer()
-                                syncAudioPlayer?.pause()
-                                releasePlaybackLocks()
-                            }
+                            // Stop: "reset position to beginning" - clear buffer
+                            Log.d(TAG, "Playback stopped - clearing audio buffer and releasing playback locks")
+                            sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
+                            syncAudioPlayer?.clearBuffer()
+                            syncAudioPlayer?.pause()
+                            releasePlaybackLocks()
                         }
                         PlaybackStateType.PAUSED -> {
                             // Pause: "maintains current position for later resumption" - keep buffer
@@ -1463,11 +1284,6 @@ class PlaybackService : MediaLibraryService() {
 
                 // Broadcast all state including group name to controllers (MainActivity)
                 broadcastSessionExtras()
-
-                // Complete deferred DRAINING exit after processing group state
-                if (playbackState.isNotEmpty()) {
-                    completePendingExitDraining()
-                }
             }
         }
 
@@ -1622,8 +1438,6 @@ class PlaybackService : MediaLibraryService() {
             // where SyncAudioPlayer + foreground-service + lock bookkeeping
             // live.
             mainHandler.post {
-                // Safety net: if stream/start arrives before state/group, complete deferred exit
-                completePendingExitDraining()
                 currentCodec = codec
 
                 if (sendSpinClient?.getTimeFilter() == null) {
@@ -1761,15 +1575,8 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onNetworkChanged() {
             mainHandler.post {
-                // Only clear buffer if NOT in DRAINING state
-                // During reconnection, keep playing from buffer for continuity
-                val player = syncAudioPlayer
-                if (player != null && player.getPlaybackState() == SyncPlaybackState.DRAINING) {
-                    android.util.Log.i(TAG, "Network changed during reconnection - preserving buffer")
-                } else {
-                    android.util.Log.i(TAG, "Network changed - triggering audio player reanchor")
-                    player?.clearBuffer()
-                }
+                android.util.Log.i(TAG, "Network changed - triggering audio player reanchor")
+                syncAudioPlayer?.clearBuffer()
             }
         }
 
@@ -2011,10 +1818,6 @@ class PlaybackService : MediaLibraryService() {
                 STATE_RECONNECTING -> {
                     putString(EXTRA_CONNECTION_STATE, STATE_RECONNECTING)
                     serverName?.let { putString(EXTRA_SERVER_NAME, it) }
-                    // Include buffer info if available
-                    syncAudioPlayer?.getBufferedDurationMs()?.let {
-                        putLong("buffer_remaining_ms", it)
-                    }
                 }
                 STATE_ERROR -> {
                     putString(EXTRA_CONNECTION_STATE, STATE_ERROR)
@@ -2076,7 +1879,6 @@ class PlaybackService : MediaLibraryService() {
         is FailureReason.HandshakeFailed -> "Could not establish connection"
         is FailureReason.TransientNetwork -> "Network error"
         is FailureReason.ProtocolError -> "Protocol error"
-        is FailureReason.Exhausted -> "Connection lost after multiple attempts"
         is FailureReason.ServerLacksEncryption ->
             "This server does not support encrypted connections. " +
                 "Music Assistant 2.9 or newer is required."
@@ -2261,19 +2063,6 @@ class PlaybackService : MediaLibraryService() {
      * - If the app crashes without releasing, max battery drain is limited to 30 minutes
      * - The refresh mechanism ensures continuous playback isn't interrupted
      */
-    /**
-     * If a deferred DRAINING exit is pending, exit now.
-     * Called after onStateChanged/onGroupUpdate has finished processing so that
-     * the DRAINING check in those handlers fires while still in DRAINING state.
-     */
-    private fun completePendingExitDraining() {
-        if (pendingExitDraining) {
-            pendingExitDraining = false
-            Log.d(TAG, "Completing deferred DRAINING exit")
-            syncAudioPlayer?.exitDraining()
-        }
-    }
-
     @Suppress("DEPRECATION")
     private fun acquirePlaybackLocks() {
         // Request audio focus first - required for Android Auto to route audio to us
@@ -3141,8 +2930,6 @@ class PlaybackService : MediaLibraryService() {
             bundle.putLong("clock_error_us", timeFilter.errorMicros)
             bundle.putInt("measurement_count", timeFilter.measurementCountValue)
             bundle.putLong("last_time_sync_age_ms", client.getLastTimeSyncAgeMs())
-            bundle.putInt("reconnect_attempts", client.getReconnectAttempts())
-            bundle.putBoolean("clock_frozen", timeFilter.isFrozen)
             bundle.putDouble("static_delay_ms", timeFilter.staticDelayMs)
 
             // Connection health telemetry (issue #128). Keys left absent when
@@ -3150,7 +2937,6 @@ class PlaybackService : MediaLibraryService() {
             // "no disconnect yet" from "last disconnect was code=0".
             bundle.putLong("last_byte_received_ago_ms", client.getLastByteReceivedAgoMs())
             bundle.putBoolean("stall_watchdog_armed", client.isStallWatchdogArmed())
-            bundle.putInt("reconnect_attempts_total", client.getReconnectAttemptsTotal())
             client.getLastDisconnectCode()?.let { bundle.putInt("last_disconnect_code", it) }
             client.getLastDisconnectReason()?.let { bundle.putString("last_disconnect_reason", it) }
             bundle.putLong("time_filter_convergence_ms", timeFilter.convergenceTimeMillis)

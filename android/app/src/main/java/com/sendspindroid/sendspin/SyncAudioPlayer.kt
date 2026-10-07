@@ -38,44 +38,28 @@ import kotlin.math.abs
  *
  * ## State Diagram
  * ```
- *                              ┌─────────────────────────────────────────────────┐
- *                              │                                                 │
- *                              ▼                                                 │
- *                      ┌──────────────┐                                          │
- *          ┌──────────►│ INITIALIZING │◄──────────────────────────────┐          │
- *          │           └──────┬───────┘                               │          │
- *          │                  │ first chunk received                  │          │
- *          │                  │ (queueChunk)                          │          │
- *          │                  ▼                                       │          │
- *          │      ┌───────────────────────┐                           │          │
- *          │      │  WAITING_FOR_START    │◄──────┐                   │          │
- *          │      │  (buffer filling)     │       │                   │          │
- *          │      └───────────┬───────────┘       │                   │          │
- *          │                  │ buffer >= 200ms   │                   │          │
- *          │                  │ AND scheduled     │ reanchor chunk    │          │
- *          │                  │ start time        │ received          │          │
- *          │                  │ reached           │                   │          │
- *          │                  ▼                   │                   │          │
- *          │           ┌──────────────┐     ┌─────┴──────┐            │          │
- *          │           │   PLAYING    │────►│ REANCHORING│────────────┘          │
- *          │           │              │     └────────────┘                       │
- *          │           └──────┬───────┘      large sync error                    │
- *          │                  │              (> 500ms)                           │
- *          │                  │                                                  │
- *          │                  │ connection lost                                  │
- *          │                  │ (enterDraining)                                  │
- *          │                  ▼                                                  │
- *          │           ┌──────────────┐                                          │
- *          │           │   DRAINING   │──────────────────────────────────────────┘
- *          │           │              │  buffer exhausted
- *          │           └──────┬───────┘
- *          │                  │ reconnected (exitDraining)
- *          │                  │ OR new chunks arrive
- *          │                  ▼
- *          │           ┌──────────────┐
- *          └───────────┤   PLAYING    │
- *            stop()    └──────────────┘
- *            clearBuffer()
+ *                      +--------------+
+ *          +---------->| INITIALIZING |<------------------------------+
+ *          |           +------+-------+                               |
+ *          |                  | first chunk received                  |
+ *          |                  | (queueChunk)                          |
+ *          |                  v                                       |
+ *          |      +-----------------------+                           |
+ *          |      |  WAITING_FOR_START    |<------+                   |
+ *          |      |  (buffer filling)     |       |                   |
+ *          |      +-----------+-----------+       |                   |
+ *          |                  | buffer >= 200ms   |                   |
+ *          |                  | AND scheduled     | reanchor chunk    |
+ *          |                  | start time        | received          |
+ *          |                  | reached           |                   |
+ *          |                  v                   |                   |
+ *          |           +--------------+     +-----+------+            |
+ *          |           |   PLAYING    |---->| REANCHORING|------------+
+ *          |           |              |     +------------+
+ *          |           +--------------+      large sync error
+ *          |                                 (> 500ms)
+ *          |
+ *          +--- stop() / clearBuffer() from any state
  * ```
  *
  * ## State Transition Table
@@ -87,11 +71,8 @@ import kotlin.math.abs
  * │ WAITING_FOR_START   │ PLAYING             │ Buffer >= 200ms AND scheduled start time       │
  * │                     │                     │ reached (handleStartGating)                    │
  * │ PLAYING             │ REANCHORING         │ Sync error > 500ms (triggerReanchor)           │
- * │ PLAYING             │ DRAINING            │ Connection lost (enterDraining called)         │
  * │ REANCHORING         │ INITIALIZING        │ After clearing buffers (triggerReanchor)       │
  * │ REANCHORING         │ WAITING_FOR_START   │ New chunk received during reanchor             │
- * │ DRAINING            │ PLAYING             │ Reconnected (exitDraining called)              │
- * │ DRAINING            │ INITIALIZING        │ Buffer exhausted during drain                  │
  * │ Any State           │ INITIALIZING        │ stop() or clearBuffer() called                 │
  * └─────────────────────┴─────────────────────┴─────────────────────────────────────────────────┘
  * ```
@@ -121,13 +102,6 @@ import kotlin.math.abs
  * Clears all buffers and resets timing state to recover from severe desync.
  * Has a 5-second cooldown to prevent thrashing. Transitions to INITIALIZING
  * immediately, then to WAITING_FOR_START when new chunk arrives.
- *
- * ### DRAINING
- * Connection lost but buffer contains audio. Continues playing from buffer while
- * reconnection is attempted. Monitors buffer level and notifies via callback:
- * - onBufferLow() when < 1 second remains
- * - onBufferExhausted() when buffer runs out
- * New chunks can still be queued (seamlessly spliced via gap/overlap handling).
  */
 /**
  * Default production [AudioSink] factory for [SyncAudioPlayer].
@@ -200,10 +174,7 @@ enum class PlaybackState {
     PLAYING,
 
     /** Large sync error exceeded threshold. Resetting timing state to recover. */
-    REANCHORING,
-
-    /** Connection lost. Playing from buffer only while reconnecting. */
-    DRAINING
+    REANCHORING
 }
 
 /**
@@ -214,20 +185,6 @@ interface SyncAudioPlayerCallback {
      * Called when the playback state changes.
      */
     fun onPlaybackStateChanged(state: PlaybackState)
-
-    /**
-     * Called when buffer is running low during DRAINING state.
-     * This is a warning that playback may stop soon if reconnection doesn't succeed.
-     *
-     * @param remainingMs Remaining buffer duration in milliseconds
-     */
-    fun onBufferLow(remainingMs: Long) {}
-
-    /**
-     * Called when buffer has been exhausted during DRAINING state.
-     * Playback will stop - the connection was lost and buffer ran out.
-     */
-    fun onBufferExhausted() {}
 }
 
 /**
@@ -285,9 +242,6 @@ class SyncAudioPlayer(
         // Startup grace period - no corrections until timing stabilizes (Windows SDK: 500ms)
         private const val STARTUP_GRACE_PERIOD_US = 500_000L    // 500ms grace period
 
-        // Reconnect stabilization period - no corrections after reconnect while Kalman re-converges
-        private const val RECONNECT_STABILIZATION_US = 2_000_000L  // 2 seconds
-
         // Buffer configuration
         private const val BUFFER_SIZE_MULTIPLIER = 4  // Multiplier for minimum buffer size
 
@@ -311,17 +265,12 @@ class SyncAudioPlayer(
         private const val TIMESTAMP_STABLE_READS = 3         // consecutive valid getTimestamp() reads
         private const val REANCHOR_COOLDOWN_US = 5_000_000L // 5 second cooldown between reanchors
 
-        // Buffer exhaustion thresholds for DRAINING state
-        private const val BUFFER_WARNING_MS = 1000L   // Warn when buffer drops below 1 second
-        private const val BUFFER_CRITICAL_MS = 200L   // Critical warning at 200ms
-        private const val BUFFER_WARNING_INTERVAL_US = 500_000L  // Rate limit warnings to 500ms
-
         // Silence keepalive: write silence when pending-to-DAC drops below this threshold
         private const val SILENCE_KEEPALIVE_THRESHOLD_US = 200_000L  // 200ms
 
         // Playback loop timing (milliseconds)
         private const val STATE_POLL_DELAY_MS = 10L   // Polling interval during state transitions
-        private const val BUFFER_EMPTY_DELAY_MS = 5L  // Short delay when buffer is empty/draining
+        private const val BUFFER_EMPTY_DELAY_MS = 5L  // Short delay when buffer is empty
 
         // Gap/overlap detection
         private const val GAP_THRESHOLD_US = 10_000L  // 10ms minimum gap before filling with silence
@@ -420,12 +369,7 @@ class SyncAudioPlayer(
     @Volatile private var alignmentWaitStartedAtUs: Long = 0L
     @Volatile private var alignmentWaitLastLoggedUs: Long = 0L
 
-    // DRAINING state tracking - for seamless reconnection
-    private var drainingStartTimeUs: Long = 0            // When we entered DRAINING state
-    private var lastBufferWarningTimeUs: Long = 0        // Rate limiting for buffer warnings
     private var lastDacPacingLogTimeUs: Long = 0         // Rate limiting for DAC pacing diagnostics
-    private var stateBeforeDraining: PlaybackState? = null  // State to restore if exitDraining during non-PLAYING
-    private var reconnectedAtUs: Long = 0L               // When exitDraining() was called (for stabilization)
 
     // Chunk queue
     private val chunkQueue = ConcurrentLinkedQueue<AudioChunk>()
@@ -1397,14 +1341,9 @@ class SyncAudioPlayer(
                     setPlaybackState(PlaybackState.WAITING_FOR_START)
                     AppLog.Sync.i("Reanchoring: new first chunk at serverTime=${workingServerTimeMicros/1000}ms")
                 }
-                PlaybackState.PLAYING,
-                PlaybackState.DRAINING -> {
-                    // NO TRANSITION - Normal chunk processing
-                    // PLAYING: Standard operation, chunks added to queue for playback.
-                    // DRAINING: Reconnected! New chunks arrive and are seamlessly spliced
-                    //           into the existing buffer via gap/overlap handling above.
-                    //           The exitDraining() call (from SendSpin) will
-                    //           transition back to PLAYING once stream is stable.
+                PlaybackState.PLAYING -> {
+                    // NO TRANSITION - Normal chunk processing: chunks added to
+                    // queue for playback.
                 }
             }
         }
@@ -1913,47 +1852,15 @@ class SyncAudioPlayer(
                         continue
                     }
 
-                    PlaybackState.DRAINING -> {
-                        // Connection lost - playing from buffer only
-                        // Monitor buffer level and notify if running low
-                        val bufferedMs = getBufferedDurationMs()
-
-                        if (bufferedMs <= 0) {
-                            // Buffer exhausted - notify and stop
-                            AppLog.Audio.e("Buffer exhausted during DRAINING - stopping playback")
-                            stateCallback?.onBufferExhausted()
-                            setPlaybackState(PlaybackState.INITIALIZING)
-                            delay(STATE_POLL_DELAY_MS)
-                            continue
-                        }
-
-                        // Rate-limited buffer warnings
-                        if (bufferedMs < BUFFER_WARNING_MS) {
-                            val nowUs = nowNs() / 1000
-                            if (nowUs - lastBufferWarningTimeUs > BUFFER_WARNING_INTERVAL_US) {
-                                lastBufferWarningTimeUs = nowUs
-                                stateCallback?.onBufferLow(bufferedMs)
-                                AppLog.Audio.w("Buffer low during DRAINING: ${bufferedMs}ms remaining")
-                            }
-                        }
-
-                        // Continue playing from buffer (fall through to chunk processing)
-                    }
-
                     PlaybackState.PLAYING -> {
                         // Normal playback - handled below
                     }
                 }
 
-                // PLAYING/DRAINING state: process chunks with sync correction
+                // PLAYING state: process chunks with sync correction
                 val chunk = chunkQueue.peek()
                 if (chunk == null) {
                     // No chunks available - buffer underrun
-                    if (playbackState == PlaybackState.DRAINING) {
-                        // In DRAINING, empty queue means we're exhausted (already handled above)
-                        delay(BUFFER_EMPTY_DELAY_MS)
-                        continue
-                    }
                     bufferUnderrunCount++
                     // The track may stall now. Start the sync error estimate over
                     // and hold corrections until it has settled on fresh readings.
@@ -2070,13 +1977,12 @@ class SyncAudioPlayer(
 
     /**
      * Corrections (soft or one-shot) are held back until a sync error has been
-     * measured, and while timing is still settling after a start, an underrun
-     * or a reconnect.
+     * measured, and while timing is still settling after a start or an
+     * underrun.
      */
     private fun correctionsAllowed(nowUs: Long): Boolean {
         if (!startTimeCalibrated) return false
         if (playingStateEnteredAtUs > 0 && nowUs - playingStateEnteredAtUs < STARTUP_GRACE_PERIOD_US) return false
-        if (reconnectedAtUs > 0 && nowUs - reconnectedAtUs < RECONNECT_STABILIZATION_US) return false
         return true
     }
 
@@ -2344,83 +2250,9 @@ class SyncAudioPlayer(
 
     /**
      * Get current buffered duration in milliseconds.
-     * Useful for monitoring buffer status during DRAINING state.
      */
     fun getBufferedDurationMs(): Long {
         return (totalQueuedSamples.get() * 1000) / sampleRate
-    }
-
-    /**
-     * Get the expected next timestamp in server time.
-     * This is where the next audio chunk should start to maintain continuity.
-     * Used for seamless stream handoff during reconnection.
-     *
-     * @return Expected next server timestamp in microseconds, or null if not set
-     */
-    fun getExpectedNextTimestampUs(): Long? = expectedNextTimestampUs
-
-    /**
-     * Enter draining mode - continue playing from buffer while disconnected.
-     * Called when connection is lost but reconnection is being attempted.
-     *
-     * In DRAINING state:
-     * - Playback continues from existing buffer
-     * - Buffer exhaustion is monitored and reported
-     * - No new chunks are expected until exitDraining() is called
-     *
-     * @return true if successfully entered draining, false if not applicable
-     */
-    fun enterDraining(): Boolean {
-        if (isReleased.get()) {
-            AppLog.Audio.w("Cannot enter DRAINING - player has been released")
-            return false
-        }
-        stateLock.withLock {
-            // Only enter draining if we're currently playing or have buffer
-            if (playbackState != PlaybackState.PLAYING && playbackState != PlaybackState.WAITING_FOR_START) {
-                AppLog.Audio.w("Cannot enter DRAINING from state $playbackState")
-                return false
-            }
-
-            stateBeforeDraining = playbackState
-            drainingStartTimeUs = nowNs() / 1000
-            lastBufferWarningTimeUs = 0L
-            setPlaybackState(PlaybackState.DRAINING)
-
-            val bufferedMs = getBufferedDurationMs()
-            AppLog.Audio.i("Entering DRAINING state - buffer: ${bufferedMs}ms")
-            return true
-        }
-    }
-
-    /**
-     * Exit draining mode - new stream is available.
-     * Called after successful reconnection when new audio stream starts.
-     *
-     * The existing buffer will continue to be played, and new chunks will be
-     * appended. The gap/overlap handling in queueChunk() will handle any
-     * discontinuity at the splice point.
-     *
-     * @return true if successfully exited draining, false if not in draining state
-     */
-    fun exitDraining(): Boolean {
-        stateLock.withLock {
-            if (playbackState != PlaybackState.DRAINING) {
-                AppLog.Audio.w("Cannot exit DRAINING - current state is $playbackState")
-                return false
-            }
-
-            val drainingDurationMs = (nowNs() / 1000 - drainingStartTimeUs) / 1000
-            AppLog.Audio.i("Exiting DRAINING state after ${drainingDurationMs}ms - resuming normal playback")
-
-            // Mark reconnection time for stabilization period (skip sync corrections while Kalman re-converges)
-            reconnectedAtUs = nowNs() / 1000
-
-            // Transition back to PLAYING (the normal state for active playback)
-            setPlaybackState(PlaybackState.PLAYING)
-            stateBeforeDraining = null
-            return true
-        }
     }
 
     /**
