@@ -1,6 +1,7 @@
 package com.sendspindroid
 
 import com.sendspindroid.model.*
+import com.sendspindroid.network.ConnectionSelector
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -33,8 +34,7 @@ class UnifiedServerRepositorySerializationTest {
                 username = "testuser"
             ),
             isDiscovered = false,
-            isDefaultServer = true,
-            isMusicAssistant = true
+            isDefaultServer = true
         )
 
         val servers = listOf(server)
@@ -77,7 +77,6 @@ class UnifiedServerRepositorySerializationTest {
 
         // Boolean fields
         assertEquals(server.isDefaultServer, restored.isDefaultServer)
-        assertEquals(server.isMusicAssistant, restored.isMusicAssistant)
         assertFalse("Restored server should not be discovered", restored.isDiscovered)
     }
 
@@ -91,8 +90,7 @@ class UnifiedServerRepositorySerializationTest {
             local = null,
             remote = null,
             proxy = null,
-            isDefaultServer = false,
-            isMusicAssistant = false
+            isDefaultServer = false
         )
 
         val serialized = invokeSerialize(listOf(server))
@@ -107,7 +105,6 @@ class UnifiedServerRepositorySerializationTest {
         assertNull(restored.remote)
         assertNull(restored.proxy)
         assertFalse(restored.isDefaultServer)
-        assertFalse(restored.isMusicAssistant)
     }
 
     @Test
@@ -124,8 +121,7 @@ class UnifiedServerRepositorySerializationTest {
             ),
             UnifiedServer(
                 id = "srv-3", name = "Server C",
-                proxy = ProxyConnection("https://proxy.test", "token123"),
-                isMusicAssistant = true
+                proxy = ProxyConnection("https://proxy.test", "token123")
             )
         )
 
@@ -140,7 +136,6 @@ class UnifiedServerRepositorySerializationTest {
         assertNotNull(parsed[1].remote)
         assertNotNull(parsed[2].proxy)
         assertTrue(parsed[1].isDefaultServer)
-        assertTrue(parsed[2].isMusicAssistant)
     }
 
     @Test
@@ -190,6 +185,54 @@ class UnifiedServerRepositorySerializationTest {
 
         assertEquals("192.168.1.10:8927", parsed.single().local?.address)
         assertEquals("/sendspin", parsed.single().local?.path)
+    }
+
+    @Test
+    fun `a record saved as Music Assistant loads and connects as a local Sendspin server`() {
+        // Nine fields as older versions wrote them; the ninth is the
+        // isMusicAssistant flag, set.
+        val record = "ma-1;;Home;;1700000000000;;AUTO;;192.168.1.10:8927::/sendspin;;;;;;1;;1"
+        assertEquals(9, record.split(";;").size)
+
+        val server = invokeParse(record).single()
+
+        assertEquals("ma-1", server.id)
+        assertEquals("Home", server.name)
+        assertEquals(1700000000000L, server.lastConnectedMs)
+        assertTrue(server.isDefaultServer)
+        assertEquals(listOf(ConnectionType.LOCAL), server.configuredMethods)
+        assertEquals(
+            ConnectionSelector.SelectedConnection.Local("192.168.1.10:8927", "/sendspin"),
+            ConnectionSelector.selectConnection(server)
+        )
+
+        // Saving it again keeps the record at nine fields, the last one cleared.
+        assertEquals(
+            "ma-1;;Home;;1700000000000;;AUTO;;192.168.1.10:8927::/sendspin;;;;;;1;;0",
+            invokeSerialize(listOf(server))
+        )
+    }
+
+    @Test
+    fun `a Music Assistant record with remote and proxy fields keeps them`() {
+        val record = "ma-2;;Office;;0;;AUTO;;10.0.0.5:8927::/sendspin;;REMOTEID;;" +
+            "https://proxy.test::token::admin;;0;;1"
+
+        val server = invokeParse(record).single()
+
+        assertEquals("REMOTEID", server.remote?.remoteId)
+        assertEquals("https://proxy.test", server.proxy?.url)
+        assertEquals("token", server.proxy?.authToken)
+        assertEquals("admin", server.proxy?.username)
+        assertEquals(
+            ConnectionSelector.SelectedConnection.Local("10.0.0.5:8927", "/sendspin"),
+            ConnectionSelector.selectConnection(server)
+        )
+        assertEquals(
+            "ma-2;;Office;;0;;AUTO;;10.0.0.5:8927::/sendspin;;REMOTEID;;" +
+                "https://proxy.test::token::admin;;0;;0",
+            invokeSerialize(listOf(server))
+        )
     }
 
     // ========== Helpers ==========

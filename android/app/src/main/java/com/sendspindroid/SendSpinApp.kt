@@ -1,6 +1,7 @@
 package com.sendspindroid
 
 import android.app.Application
+import android.content.Context
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.request.CachePolicy
@@ -9,9 +10,26 @@ import com.sendspindroid.diagnostics.Telemetry
 import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.CrashHandler
 
+/**
+ * Preferences file of the removed Music Assistant API client. It held that
+ * client's access tokens (one per saved server), its API port and its selected
+ * player ids. Nothing reads any of them any more.
+ */
+internal const val LEGACY_MA_PREFS_FILE = "ma_settings"
+
+/**
+ * Deletes [LEGACY_MA_PREFS_FILE] so its tokens do not stay on the device.
+ * Runs on every start rather than once: deleting a file that is not there is
+ * a no-op, and Auto Backup can restore the file onto a new install.
+ */
+internal fun deleteLegacyMusicAssistantPrefs(context: Context) {
+    context.deleteSharedPreferences(LEGACY_MA_PREFS_FILE)
+}
+
 class SendSpinApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
+        deleteLegacyMusicAssistantPrefs(this)
         // Initialize logging and install crash capture as early as possible, so
         // startup-path issues are captured and an unexpected exit can be reported
         // on the next launch. Runs the one-time log-level migration too.
