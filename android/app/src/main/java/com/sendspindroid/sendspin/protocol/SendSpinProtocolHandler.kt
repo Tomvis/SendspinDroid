@@ -88,14 +88,16 @@ abstract class SendSpinProtocolHandler(
      */
     protected val isStreamActive: Boolean get() = _streamActive
 
-    // Artwork stream (roles/artwork/v1.md). One channel is declared, so only
-    // channel 0 is shown. [artworkLock] orders a pending image coming due on
-    // the timer scope against the receive thread replacing or discarding it.
+    // Artwork stream (roles/artwork/v1.md). Two channels are declared, album
+    // and artist, each with its own configuration and pending image; a
+    // channel beyond those is not shown. [artworkLock] orders a pending image
+    // coming due on the timer scope against the receive thread replacing or
+    // discarding it.
     private val artworkLock = Any()
     private val artworkReceiver = ArtworkReceiver()
     private var artworkStreamActive = false
-    private var artworkChannelConfig: JsonElement? = null
-    private var pendingArtwork: Job? = null
+    private val artworkChannelConfig = arrayOfNulls<JsonElement>(SendSpinProtocol.Artwork.CHANNEL_COUNT)
+    private val pendingArtwork = arrayOfNulls<Job>(SendSpinProtocol.Artwork.CHANNEL_COUNT)
 
     // Last received values for change detection (avoids unnecessary UI recomposition)
     private var lastPlaybackState: String? = null
@@ -1843,7 +1845,7 @@ abstract class SendSpinProtocolHandler(
         Log.i(tag, "Artwork stream ended - clearing artwork")
         synchronized(artworkLock) {
             resetArtworkStream()
-            onArtwork(0, ByteArray(0))
+            for (channel in pendingArtwork.indices) onArtwork(channel, ByteArray(0))
         }
     }
 
@@ -1920,13 +1922,16 @@ abstract class SendSpinProtocolHandler(
     // ========== Artwork (roles/artwork/v1.md) ==========
 
     private fun handleArtworkStreamStart(artwork: JsonObject) {
-        val config = (artwork["channels"] as? JsonArray)?.getOrNull(0)
+        val channels = artwork["channels"] as? JsonArray
         synchronized(artworkLock) {
             artworkStreamActive = true
-            // "A stream/start that changes a channel's configuration likewise
-            // discards that channel's pending image."
-            if (config != artworkChannelConfig) discardPendingArtwork()
-            artworkChannelConfig = config
+            for (channel in artworkChannelConfig.indices) {
+                val config = channels?.getOrNull(channel)
+                // "A stream/start that changes a channel's configuration
+                // likewise discards that channel's pending image."
+                if (config != artworkChannelConfig[channel]) discardPendingArtwork(channel)
+                artworkChannelConfig[channel] = config
+            }
         }
     }
 
@@ -1937,14 +1942,16 @@ abstract class SendSpinProtocolHandler(
      */
     private fun resetArtworkStream() = synchronized(artworkLock) {
         artworkStreamActive = false
-        artworkChannelConfig = null
         artworkReceiver.reset()
-        discardPendingArtwork()
+        for (channel in pendingArtwork.indices) {
+            artworkChannelConfig[channel] = null
+            discardPendingArtwork(channel)
+        }
     }
 
-    private fun discardPendingArtwork() {
-        pendingArtwork?.cancel()
-        pendingArtwork = null
+    private fun discardPendingArtwork(channel: Int) {
+        pendingArtwork[channel]?.cancel()
+        pendingArtwork[channel] = null
     }
 
     private fun handleArtworkMessage(type: Int, body: ByteArray) {
@@ -1964,9 +1971,13 @@ abstract class SendSpinProtocolHandler(
             is ArtworkReceiver.Result.None -> {}
             is ArtworkReceiver.Result.ProtocolError -> onProtocolFailure(result.reason)
             is ArtworkReceiver.Result.Discard ->
-                if (result.channel == 0) synchronized(artworkLock) { discardPendingArtwork() }
+                if (result.channel in pendingArtwork.indices) {
+                    synchronized(artworkLock) { discardPendingArtwork(result.channel) }
+                }
             is ArtworkReceiver.Result.Image ->
-                if (result.channel == 0) scheduleArtwork(result.timestampMicros, result.data)
+                if (result.channel in pendingArtwork.indices) {
+                    scheduleArtwork(result.channel, result.timestampMicros, result.data)
+                }
         }
     }
 
@@ -1978,23 +1989,23 @@ abstract class SendSpinProtocolHandler(
      * translate with, so the image is shown at once, which the spec allows
      * ("or show it early").
      */
-    private fun scheduleArtwork(timestampMicros: Long, image: ByteArray) = synchronized(artworkLock) {
-        discardPendingArtwork()
+    private fun scheduleArtwork(channel: Int, timestampMicros: Long, image: ByteArray) = synchronized(artworkLock) {
+        discardPendingArtwork(channel)
         val filter = getTimeFilter()
         val delayMicros = filter.serverToClient(timestampMicros) - System.nanoTime() / 1000
         if (!filter.isReady || delayMicros <= 0) {
-            onArtwork(0, image)
+            onArtwork(channel, image)
             return@synchronized
         }
-        Log.d(tag, "Artwork (${image.size} bytes) pending for ${delayMicros / 1000}ms")
-        pendingArtwork = getCoroutineScope().launch {
+        Log.d(tag, "Artwork channel $channel (${image.size} bytes) pending for ${delayMicros / 1000}ms")
+        pendingArtwork[channel] = getCoroutineScope().launch {
             delay(delayMicros / 1000)
             // A cancel takes the same lock, so an image discarded while this
             // was waiting for it is no longer active here.
             synchronized(artworkLock) {
                 if (isActive) {
-                    pendingArtwork = null
-                    onArtwork(0, image)
+                    pendingArtwork[channel] = null
+                    onArtwork(channel, image)
                 }
             }
         }

@@ -228,20 +228,26 @@ class MessageBuilderTest {
     }
 
     @Test
-    fun buildPlayerState_declaresOneAlbumArtworkChannelWithRc1KeyNames() {
+    fun buildPlayerState_declaresAlbumAndArtistArtworkChannelsWithRc1KeyNames() {
         // roles/artwork/v1.md: channels are configured here, not in
         // client/hello, with `width`/`height` (not media_width/media_height).
         val payload = Json.parseToJsonElement(
             MessageBuilder.buildPlayerState(50, false, available = true, artworkRoleActive = true)
         ).jsonObject["payload"]!!.jsonObject
         val channels = payload["artwork"]!!.jsonObject["channels"]!!.jsonArray
-        assertEquals(1, channels.size)
+        assertEquals(2, channels.size)
         val channel = channels[0].jsonObject
         assertEquals(setOf("source", "format", "width", "height"), channel.keys)
         assertEquals("album", channel["source"]?.jsonPrimitive?.content)
         assertEquals("jpeg", channel["format"]?.jsonPrimitive?.content)
         assertEquals(500, channel["width"]?.jsonPrimitive?.int)
         assertEquals(500, channel["height"]?.jsonPrimitive?.int)
+        val artist = channels[1].jsonObject
+        assertEquals(setOf("source", "format", "width", "height"), artist.keys)
+        assertEquals("artist", artist["source"]?.jsonPrimitive?.content)
+        assertEquals("jpeg", artist["format"]?.jsonPrimitive?.content)
+        assertEquals(500, artist["width"]?.jsonPrimitive?.int)
+        assertEquals(500, artist["height"]?.jsonPrimitive?.int)
     }
 
     @Test
@@ -253,7 +259,8 @@ class MessageBuilderTest {
                 """"muted":false,"output_delay_ms":120,"required_lead_time_ms":1500,""" +
                 """"min_buffer_ms":350,"supported_commands":["volume","mute","set_output_delay"],""" +
                 """"format":{"codec":"pcm","sample_rate":48000,"channels":2,"bit_depth":16}},""" +
-                """"artwork":{"channels":[{"source":"album","format":"jpeg","width":500,"height":500}]}}}""",
+                """"artwork":{"channels":[{"source":"album","format":"jpeg","width":500,"height":500},""" +
+                """{"source":"artist","format":"jpeg","width":500,"height":500}]}}}""",
             MessageBuilder.buildPlayerState(
                 80, false, available = true, outputDelayMs = 120.0,
                 format = MessageBuilder.FormatEntry("pcm", 48000, 2, 16),

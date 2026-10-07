@@ -91,6 +91,13 @@ object SendSpinProtocol {
      */
     object Artwork {
         const val REQUEST_SIZE = 500  // Requested artwork width/height in pixels
+
+        // The artist image is shown in the same card as the album art.
+        const val ARTIST_REQUEST_SIZE = 500
+
+        const val ALBUM_CHANNEL = 0
+        const val ARTIST_CHANNEL = 1
+        const val CHANNEL_COUNT = 2
     }
 
     /**

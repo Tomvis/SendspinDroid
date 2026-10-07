@@ -329,8 +329,9 @@ object MessageBuilder {
                     })
                     if (format != null) put("format", formatObject(format))
                 })
-                // roles/artwork/v1.md: one channel, album art, at the size the
-                // UI renders. The array is positional from channel 0.
+                // roles/artwork/v1.md: album art on channel 0 and the artist
+                // image on channel 1, both at the size the UI renders. The
+                // array is positional from channel 0.
                 if (artworkRoleActive) put("artwork", buildJsonObject {
                     put("channels", buildJsonArray {
                         add(buildJsonObject {
@@ -338,6 +339,12 @@ object MessageBuilder {
                             put("format", "jpeg")
                             put("width", SendSpinProtocol.Artwork.REQUEST_SIZE)
                             put("height", SendSpinProtocol.Artwork.REQUEST_SIZE)
+                        })
+                        add(buildJsonObject {
+                            put("source", "artist")
+                            put("format", "jpeg")
+                            put("width", SendSpinProtocol.Artwork.ARTIST_REQUEST_SIZE)
+                            put("height", SendSpinProtocol.Artwork.ARTIST_REQUEST_SIZE)
                         })
                     })
                 })

@@ -403,6 +403,13 @@ class PlaybackService : MediaLibraryService() {
     private var becomingNoisyReceiver: BroadcastReceiver? = null
 
     companion object {
+        // The artist image the server sends on its own artwork channel, for
+        // the second page of the album art card. In-process: it is a few
+        // tens of kilobytes that only the activity wants, not session
+        // metadata.
+        private val _artistArtwork = MutableStateFlow<ByteArray?>(null)
+        val artistArtwork: StateFlow<ByteArray?> = _artistArtwork.asStateFlow()
+
         private const val TAG = "PlaybackService"
 
         // Every focus change, the audio mode at that moment and the action
@@ -844,6 +851,7 @@ class PlaybackService : MediaLibraryService() {
 
                         // Clear playback state on disconnect
                         _playbackState.value = _playbackState.value.withConnectionEnded()
+                        _artistArtwork.value = null
                         lastArtworkUrl = null
                         lastTrackTitle = null
                         urlArtwork = null
@@ -1426,6 +1434,12 @@ class PlaybackService : MediaLibraryService() {
                     )
                 }
             }
+        }
+
+        override fun onArtistArtwork(imageData: ByteArray?) {
+            if (com.sendspindroid.UserSettings.lowMemoryMode) return
+            Log.d(TAG, "Artist image: ${imageData?.size ?: 0} bytes")
+            _artistArtwork.value = imageData
         }
 
         override fun onArtworkCleared() {
