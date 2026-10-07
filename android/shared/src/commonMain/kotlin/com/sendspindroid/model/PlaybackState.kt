@@ -96,6 +96,14 @@ data class PlaybackState(
         playbackSpeed = 1000
     )
 
+    /**
+     * The state once a connection has ended. Everything the server supplied is
+     * gone; the volume is the device's own and outlives the connection. Every
+     * session-extras broadcast resends it, so resetting it to the default would
+     * put the Device Volume slider at 100% while a reconnect is under way.
+     */
+    fun withConnectionEnded(): PlaybackState = PlaybackState(volume = volume)
+
     fun withGroupUpdate(
         groupId: String?,
         groupName: String?,
