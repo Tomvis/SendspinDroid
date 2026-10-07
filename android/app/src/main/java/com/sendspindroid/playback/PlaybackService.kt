@@ -2006,6 +2006,35 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
+    private fun isConnectedOrReconnecting(): Boolean {
+        val state = sendSpinClient?.connectionState?.value
+        return state is TransportState.Ready || state is TransportState.Connecting ||
+            coordinator.reconnectStatus.value is ReconnectStatus.Attempting
+    }
+
+    /**
+     * Media3 takes the service out of the foreground on every notification
+     * update while nothing is playing, and removes the notification when
+     * there is nothing to show. A connected player that is idle or paused
+     * would then be an ordinary background app: its network is cut within
+     * seconds of the activity leaving the screen and the server loses the
+     * player. The foreground is held for as long as there is a connection.
+     */
+    @OptIn(UnstableApi::class)
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        val hold = isConnectedOrReconnecting()
+        super.onUpdateNotification(session, startInForegroundRequired || hold)
+        // With nothing to show, Media3 has just removed the notification and
+        // the foreground with it. Otherwise its media notification holds it.
+        val player = session.player
+        if (hold && (player.currentTimeline.isEmpty || player.playbackState == Player.STATE_IDLE)) {
+            startForegroundServiceWithNotification(
+                _currentServerFlow.value?.name,
+                reconnecting = coordinator.reconnectStatus.value is ReconnectStatus.Attempting,
+            )
+        }
+    }
+
     /**
      * Give up the foreground and every lock once nothing is connected and
      * nothing is trying to be. While the reconnect loop runs the service is
@@ -2013,9 +2042,7 @@ class PlaybackService : MediaLibraryService() {
      * both.
      */
     private fun releaseIfIdle() {
-        val state = sendSpinClient?.connectionState?.value
-        if (state is TransportState.Ready || state is TransportState.Connecting) return
-        if (coordinator.reconnectStatus.value is ReconnectStatus.Attempting) return
+        if (isConnectedOrReconnecting()) return
         sendSpinPlayer?.updateConnectionState(false)
         releasePlaybackLocks()
         releaseHighPowerLocks()
@@ -2315,6 +2342,10 @@ class PlaybackService : MediaLibraryService() {
      * @param reconnecting Shows "Reconnecting to [serverName]..." instead.
      */
     private fun startForegroundServiceWithNotification(serverName: String? = null, reconnecting: Boolean = false) {
+        // Started as well as bound: a service that is only bound is destroyed
+        // when the activity lets go of its controller, foreground or not.
+        // Refused from the background, where it is already started.
+        runCatching { startService(Intent(this, PlaybackService::class.java)) }
         try {
             val contentText = when {
                 reconnecting -> "Reconnecting to $serverName..."
@@ -2646,6 +2677,8 @@ class PlaybackService : MediaLibraryService() {
     private fun stopForegroundNotification() {
         try {
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+            // Bound clients, if any, keep it alive from here.
+            stopSelf()
             Log.d(TAG, "Foreground notification removed")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop foreground service", e)
