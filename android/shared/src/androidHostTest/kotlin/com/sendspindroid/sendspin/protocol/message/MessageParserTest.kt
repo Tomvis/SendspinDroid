@@ -188,6 +188,25 @@ class MessageParserTest {
     }
 
     @Test
+    fun parseServerState_trackfieldsServerFrame_parsesSplitTrackFields() {
+        // Fork contract (HW-81): a server/state frame exactly as aiosendspin
+        // 10.0.0+trackfields serializes Metadata.snapshot_update(). If the wheel and
+        // this parser drift apart, the TV screen silently loses "X of Y".
+        val frame = kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"payload":{"metadata":{"timestamp":5,"title":"T","artist":"A","album_artist":"AA","album":"Al","year":2001,"album_track":3,"queue_track":7,"total_tracks":12,"progress":{"track_progress":1000,"track_duration":200000,"playback_speed":1000}}},"type":"server/state"}"""
+        ) as JsonObject
+
+        val (metadata, _) = MessageParser.parseServerState(frame["payload"] as JsonObject)
+
+        assertEquals(3, metadata!!.albumTrack)
+        assertEquals(7, metadata.queueTrack)
+        assertEquals(12, metadata.totalTracks)
+        assertNull(metadata.track)
+        assertEquals("AA", metadata.albumArtist)
+        assertEquals(200000L, metadata.progress!!.trackDuration)
+    }
+
+    @Test
     fun parseServerState_nullPayload_returnsNulls() {
         val result = MessageParser.parseServerState(null)
         assertNull(result.metadata)
