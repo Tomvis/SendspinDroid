@@ -163,6 +163,35 @@ class UnifiedServerRepositorySerializationTest {
         assertNull(parsed[0].proxy!!.username)
     }
 
+    @Test
+    fun `an IPv6 address survives round-trip`() {
+        // "::" is both how IPv6 abbreviates zeros and the separator between
+        // the address and the path.
+        for (address in listOf("[fd00::1]:8927", "[::1]:8927", "[2001:db8::8a2e:370:7334]:8927", "fd00::1")) {
+            val server = UnifiedServer(
+                id = "discovered-$address",
+                name = "IPv6 Server",
+                lastConnectedMs = 0L,
+                connectionPreference = ConnectionPreference.AUTO,
+                local = LocalConnection(address = address, path = "/sendspin"),
+            )
+
+            val restored = invokeParse(invokeSerialize(listOf(server))).single()
+
+            assertEquals(address, restored.local?.address)
+            assertEquals("/sendspin", restored.local?.path)
+            assertEquals("discovered-$address", restored.id)
+        }
+    }
+
+    @Test
+    fun `records written before the IPv6 fix still read the same`() {
+        val parsed = invokeParse("id-1;;Living Room;;0;;AUTO;;192.168.1.10:8927::/sendspin;;;;;;1;;1")
+
+        assertEquals("192.168.1.10:8927", parsed.single().local?.address)
+        assertEquals("/sendspin", parsed.single().local?.path)
+    }
+
     // ========== Helpers ==========
 
     private fun invokeSerialize(servers: List<UnifiedServer>): String {

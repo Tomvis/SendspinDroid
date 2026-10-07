@@ -463,10 +463,11 @@ object UnifiedServerRepository {
 
                 // Parse local connection
                 val local = fields[4].takeIf { it.isNotEmpty() }?.let { localStr ->
-                    val parts = localStr.split(SUBFIELD_SEPARATOR, limit = 2)
+                    // Split at the last separator: an IPv6 address can
+                    // contain "::" itself ("[fd00::1]:8927"), the path cannot.
                     LocalConnection(
-                        address = parts[0],
-                        path = parts.getOrElse(1) { "/sendspin" }
+                        address = localStr.substringBeforeLast(SUBFIELD_SEPARATOR),
+                        path = localStr.substringAfterLast(SUBFIELD_SEPARATOR, "/sendspin")
                     )
                 }
 
