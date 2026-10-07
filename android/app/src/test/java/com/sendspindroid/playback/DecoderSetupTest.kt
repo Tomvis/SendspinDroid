@@ -2,6 +2,7 @@ package com.sendspindroid.playback
 
 import android.util.Log
 import com.sendspindroid.sendspin.decoder.AudioDecoder
+import com.sendspindroid.sendspin.decoder.DecodedAudio
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import io.mockk.every
 import io.mockk.mockkObject
@@ -93,7 +94,8 @@ class DecoderSetupTest {
             override fun configure(sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
                 throw RuntimeException("MediaCodec init failed")
             }
-            override fun decode(compressedData: ByteArray) = compressedData
+            override fun decode(compressedData: ByteArray, timestampUs: Long) =
+                listOf(DecodedAudio(timestampUs, compressedData))
             override fun flush() {}
             override fun release() {}
         }
@@ -124,7 +126,8 @@ class DecoderSetupTest {
             override fun configure(sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
                 throw RuntimeException("failure")
             }
-            override fun decode(compressedData: ByteArray) = compressedData
+            override fun decode(compressedData: ByteArray, timestampUs: Long) =
+                listOf(DecodedAudio(timestampUs, compressedData))
             override fun flush() {}
             override fun release() {}
         }

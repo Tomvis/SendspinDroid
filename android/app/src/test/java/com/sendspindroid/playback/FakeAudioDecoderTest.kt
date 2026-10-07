@@ -28,7 +28,7 @@ class FakeAudioDecoderTest {
     fun `contiguous sequence decodes cleanly`() {
         val d = newConfigured()
         for (i in 0L..9L) {
-            val out = d.decode(makeChunk(i))
+            val out = d.decode(makeChunk(i), 0L).single().pcm
             assertNotNull("decode($i) returned null", out)
             assertEquals(
                 "output bytes wrong for seq $i",
@@ -52,11 +52,11 @@ class FakeAudioDecoderTest {
     @Test
     fun `missing chunk causes error on next decode`() {
         val d = newConfigured()
-        d.decode(makeChunk(0L))
-        d.decode(makeChunk(1L))
+        d.decode(makeChunk(0L), 0L)
+        d.decode(makeChunk(1L), 0L)
 
         try {
-            d.decode(makeChunk(3L))
+            d.decode(makeChunk(3L), 0L)
             fail("expected IllegalStateException for non-contiguous input (skipped seq 2)")
         } catch (e: IllegalStateException) {
             assertTrue(
@@ -84,12 +84,12 @@ class FakeAudioDecoderTest {
     @Test
     fun `subsequent decode after error also throws`() {
         val d = newConfigured()
-        d.decode(makeChunk(0L))
-        d.decode(makeChunk(1L))
+        d.decode(makeChunk(0L), 0L)
+        d.decode(makeChunk(1L), 0L)
 
         // First non-contiguous decode flips the fake into ERROR state.
         try {
-            d.decode(makeChunk(3L))
+            d.decode(makeChunk(3L), 0L)
             fail("expected first non-contiguous decode to throw")
         } catch (e: IllegalStateException) {
             // expected
@@ -98,7 +98,7 @@ class FakeAudioDecoderTest {
         // Even a "correct looking" follow-up must throw because the decoder
         // is now stuck in ERROR state until flush().
         try {
-            d.decode(makeChunk(4L))
+            d.decode(makeChunk(4L), 0L)
             fail("expected ERROR-state decode to throw")
         } catch (e: IllegalStateException) {
             assertTrue(
@@ -111,12 +111,12 @@ class FakeAudioDecoderTest {
     @Test
     fun `flush resets error state and sequence tracking`() {
         val d = newConfigured()
-        d.decode(makeChunk(0L))
-        d.decode(makeChunk(1L))
+        d.decode(makeChunk(0L), 0L)
+        d.decode(makeChunk(1L), 0L)
 
         // Drive into ERROR state.
         try {
-            d.decode(makeChunk(3L))
+            d.decode(makeChunk(3L), 0L)
             fail("expected non-contiguous decode to throw")
         } catch (e: IllegalStateException) {
             // expected
@@ -126,7 +126,7 @@ class FakeAudioDecoderTest {
         assertEquals("flush should be counted once", 1, d.flushCalls.get())
 
         // After flush, expected seq resets to 0 and ERROR state clears.
-        val out = d.decode(makeChunk(0L))
+        val out = d.decode(makeChunk(0L), 0L).single().pcm
         assertEquals(
             "flush should allow a fresh seq-0 decode",
             0L,
@@ -153,9 +153,9 @@ class FakeAudioDecoderTest {
     @Test
     fun `configure resets sequence tracking`() {
         val d = newConfigured()
-        d.decode(makeChunk(0L))
-        d.decode(makeChunk(1L))
-        d.decode(makeChunk(2L))
+        d.decode(makeChunk(0L), 0L)
+        d.decode(makeChunk(1L), 0L)
+        d.decode(makeChunk(2L), 0L)
 
         // Reconfigure mid-stream: sequence tracking and observed history reset.
         d.configure(sampleRate = 48000, channels = 2, bitDepth = 16, codecHeader = null)
@@ -165,7 +165,7 @@ class FakeAudioDecoderTest {
             d.observedSequences
         )
 
-        val out = d.decode(makeChunk(0L))
+        val out = d.decode(makeChunk(0L), 0L).single().pcm
         assertEquals(
             "post-configure decode of seq 0 should succeed",
             0L,

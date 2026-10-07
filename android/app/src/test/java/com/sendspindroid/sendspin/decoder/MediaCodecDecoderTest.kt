@@ -99,7 +99,7 @@ class MediaCodecDecoderTest {
         every { mockCodec.dequeueOutputBuffer(any(), any()) } returns MediaCodec.INFO_TRY_AGAIN_LATER
 
         val input = ByteArray(100) { 0x42 }
-        decoder.decode(input)
+        decoder.decode(input, 0L)
 
         verify(exactly = 1) { mockCodec.queueInputBuffer(0, 0, 100, 0, 0) }
     }
@@ -114,7 +114,7 @@ class MediaCodecDecoderTest {
         every { mockCodec.dequeueOutputBuffer(any(), any()) } returns MediaCodec.INFO_TRY_AGAIN_LATER
 
         val input = ByteArray(50)
-        decoder.decode(input)
+        decoder.decode(input, 0L)
 
         // Input was submitted on the second attempt
         verify(exactly = 1) { mockCodec.queueInputBuffer(0, 0, 50, 0, 0) }
@@ -129,7 +129,7 @@ class MediaCodecDecoderTest {
         every { mockCodec.dequeueOutputBuffer(any(), any()) } returns MediaCodec.INFO_TRY_AGAIN_LATER
 
         val input = ByteArray(200)
-        decoder.decode(input)
+        decoder.decode(input, 0L)
 
         // Should have tried MAX_INPUT_RETRIES + 1 = 4 times
         verify(exactly = 4) { mockCodec.dequeueInputBuffer(any()) }
@@ -163,7 +163,7 @@ class MediaCodecDecoderTest {
         every { mockCodec.getOutputBuffer(0) } returns outBuffer
 
         val input = ByteArray(100)
-        val result = decoder.decode(input)
+        val result = decoder.decode(input, 0L)
 
         // Input was eventually submitted
         verify(exactly = 1) { mockCodec.queueInputBuffer(0, 0, 100, 0, 0) }
@@ -191,7 +191,7 @@ class MediaCodecDecoderTest {
         every { mockCodec.dequeueOutputBuffer(any(), any()) } returns MediaCodec.INFO_TRY_AGAIN_LATER
 
         decoder.flush()
-        decoder.decode(ByteArray(50))
+        decoder.decode(ByteArray(50), 0L)
 
         verify(ordering = Ordering.ORDERED) {
             mockCodec.flush()
@@ -248,10 +248,10 @@ class MediaCodecDecoderTest {
         every { mockCodec.outputFormat } returns mockFormat
 
         val input = ByteArray(100)
-        val result = decoder.decode(input)
+        val result = decoder.decode(input, 0L)
 
         // Both output buffers should have been collected (480 + 480 = 960 bytes)
-        assertEquals(960, result.size)
+        assertEquals(960, result.sumOf { it.pcm.size })
 
         // Both buffers were released
         verify { mockCodec.releaseOutputBuffer(0, false) }
@@ -272,7 +272,7 @@ class MediaCodecDecoderTest {
         val mockFormat = mockk<MediaFormat>()
         every { mockCodec.outputFormat } returns mockFormat
 
-        decoder.decode(ByteArray(100))
+        decoder.decode(ByteArray(100), 0L)
 
         verify { Log.d(any(), match { it.contains("Output format changed") }) }
     }
@@ -302,10 +302,10 @@ class MediaCodecDecoderTest {
         }
         every { mockCodec.getOutputBuffer(0) } returns buf0
 
-        val result = decoder.decode(ByteArray(100))
+        val result = decoder.decode(ByteArray(100), 0L)
 
         // The buffer after BUFFERS_CHANGED was collected
-        assertEquals(480, result.size)
+        assertEquals(480, result.sumOf { it.pcm.size })
         verify { mockCodec.releaseOutputBuffer(0, false) }
     }
 
@@ -319,7 +319,7 @@ class MediaCodecDecoderTest {
         // mediaCodec is null (not injected)
 
         try {
-            unconfigured.decode(ByteArray(100))
+            unconfigured.decode(ByteArray(100), 0L)
             fail("Expected IllegalStateException")
         } catch (e: IllegalStateException) {
             assertTrue(e.message!!.contains("not configured"))
@@ -327,12 +327,82 @@ class MediaCodecDecoderTest {
     }
 
     @Test
-    fun decode_emptyOutput_returnsEmptyByteArray() {
+    fun decode_emptyOutput_returnsNothing() {
         every { mockCodec.dequeueInputBuffer(any()) } returns 0
         every { mockCodec.getInputBuffer(0) } returns ByteBuffer.allocate(1024)
         every { mockCodec.dequeueOutputBuffer(any(), any()) } returns MediaCodec.INFO_TRY_AGAIN_LATER
 
-        val result = decoder.decode(ByteArray(100))
+        val result = decoder.decode(ByteArray(100), 0L)
         assertEquals(0, result.size)
+    }
+
+    // =========================================================================
+    // Output is stamped by the decoder, not by the chunk being submitted
+    // =========================================================================
+
+    @Test
+    fun decode_passesTheChunkTimestampToTheCodec() {
+        every { mockCodec.dequeueInputBuffer(any()) } returns 0
+        every { mockCodec.getInputBuffer(0) } returns ByteBuffer.allocate(1024)
+        every { mockCodec.dequeueOutputBuffer(any(), any()) } returns MediaCodec.INFO_TRY_AGAIN_LATER
+
+        decoder.decode(ByteArray(100), 1_234_567L)
+
+        verify(exactly = 1) { mockCodec.queueInputBuffer(0, 0, 100, 1_234_567L, 0) }
+    }
+
+    @Test
+    fun decode_lateOutputKeepsTheTimestampOfTheChunkItCameFrom() {
+        // What a real decoder does when its first output is not ready in time:
+        // nothing from the first call, then both chunks from the second.
+        every { mockCodec.dequeueInputBuffer(any()) } returns 0
+        every { mockCodec.getInputBuffer(0) } returns ByteBuffer.allocate(1024)
+        every { mockCodec.getOutputBuffer(any()) } answers { testBuffer(480) }
+
+        every { mockCodec.dequeueOutputBuffer(any(), any()) } returns MediaCodec.INFO_TRY_AGAIN_LATER
+        assertTrue(decoder.decode(ByteArray(100), 1_000_000L).isEmpty())
+
+        val ready = listOf(0 to 1_000_000L, 1 to 1_096_000L).iterator()
+        every { mockCodec.dequeueOutputBuffer(any(), any()) } answers {
+            if (ready.hasNext()) {
+                val (index, pts) = ready.next()
+                val info = firstArg<MediaCodec.BufferInfo>()
+                info.offset = 0
+                info.size = 480
+                info.presentationTimeUs = pts
+                index
+            } else {
+                MediaCodec.INFO_TRY_AGAIN_LATER
+            }
+        }
+        val out = decoder.decode(ByteArray(100), 1_096_000L)
+
+        assertEquals(listOf(1_000_000L, 1_096_000L), out.map { it.timestampUs })
+    }
+
+    @Test
+    fun decode_stopsWaitingOnceThereIsOutput() {
+        every { mockCodec.dequeueInputBuffer(any()) } returns 0
+        every { mockCodec.getInputBuffer(0) } returns ByteBuffer.allocate(1024)
+        every { mockCodec.getOutputBuffer(0) } answers { testBuffer(480) }
+        val timeouts = mutableListOf<Long>()
+        var calls = 0
+        every { mockCodec.dequeueOutputBuffer(any(), any()) } answers {
+            timeouts += secondArg<Long>()
+            if (calls++ == 0) {
+                val info = firstArg<MediaCodec.BufferInfo>()
+                info.offset = 0
+                info.size = 480
+                0
+            } else {
+                MediaCodec.INFO_TRY_AGAIN_LATER
+            }
+        }
+
+        decoder.decode(ByteArray(100), 0L)
+
+        // Waits for the first buffer, then only polls.
+        assertTrue("first wait was ${timeouts[0]}", timeouts[0] > 0L)
+        assertEquals(0L, timeouts[1])
     }
 }

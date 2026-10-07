@@ -1047,8 +1047,8 @@ class PlaybackService : MediaLibraryService() {
         // No decoder means the stream's codec could not be set up: drop the
         // chunk. PCM has a decoder of its own, so nothing passes through raw.
         val decoder = audioDecoder ?: return
-        val pcmData: ByteArray = try {
-            decoder.decode(t.audioData)
+        val decoded = try {
+            decoder.decode(t.audioData, t.serverTimeMicros)
         } catch (e: Exception) {
             Log.e(TAG, "Decode error, dropping chunk", e)
             return
@@ -1060,7 +1060,9 @@ class PlaybackService : MediaLibraryService() {
         // overlap until it catches up - seconds of silence after a skip.
         if (t.generation != decodeGeneration) return
         val player = syncAudioPlayer ?: return
-        player.queueChunk(t.serverTimeMicros, pcmData)
+        // Stamped by the decoder, not with this chunk's time: what comes out
+        // can be the previous chunk's audio.
+        for (audio in decoded) player.queueChunk(audio.timestampUs, audio.pcm)
     }
 
     /**

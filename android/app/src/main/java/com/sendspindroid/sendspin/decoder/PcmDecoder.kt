@@ -24,9 +24,9 @@ class PcmDecoder : AudioDecoder {
         _isConfigured = true
     }
 
-    override fun decode(compressedData: ByteArray): ByteArray {
+    override fun decode(compressedData: ByteArray, timestampUs: Long): List<DecodedAudio> {
         // PCM is already decoded - pass through unchanged
-        return compressedData
+        return listOf(DecodedAudio(timestampUs, compressedData))
     }
 
     override fun flush() {

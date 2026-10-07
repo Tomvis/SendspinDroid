@@ -6,6 +6,8 @@ package com.sendspindroid.sendspin.decoder
  * Implementations handle specific codecs (PCM pass-through, FLAC, OPUS)
  * and are created via [AudioDecoderFactory].
  */
+class DecodedAudio(val timestampUs: Long, val pcm: ByteArray)
+
 interface AudioDecoder {
 
     /**
@@ -26,11 +28,17 @@ interface AudioDecoder {
     /**
      * Decode a compressed audio chunk to PCM.
      *
+     * A decoder may hold a chunk back and return it from a later call, so the
+     * result is whatever PCM is ready, each piece with the timestamp of the
+     * chunk it came from - which is not always the chunk passed in. It can be
+     * empty, or hold more than one piece.
+     *
      * @param compressedData The compressed audio data from the server
-     * @return Decoded PCM data (16-bit signed, little-endian, interleaved stereo)
+     * @param timestampUs Server time at which this chunk's first sample plays
+     * @return Decoded PCM (signed, little-endian, interleaved) with its timestamps
      * @throws IllegalStateException if decoder is not configured
      */
-    fun decode(compressedData: ByteArray): ByteArray
+    fun decode(compressedData: ByteArray, timestampUs: Long): List<DecodedAudio>
 
     /**
      * Flush the decoder state.
