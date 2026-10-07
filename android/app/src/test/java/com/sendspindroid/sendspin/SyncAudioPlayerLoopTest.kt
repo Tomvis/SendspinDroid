@@ -190,6 +190,38 @@ class SyncAudioPlayerLoopTest {
         assertEquals("an emptied queue is not an underrun", 0L, player.getStats().bufferUnderrunCount)
     }
 
+    // ========================================================================
+    // Write pacing
+    // ========================================================================
+
+    /** Frames written to the simulated track and not yet played. */
+    private fun pendingFrames(): Long = framesInTrack() - head
+
+    @Test
+    fun `writes stay paced after a resume from a short pause`() {
+        queueStream(nowUs + 400_000L, count = 400, tag = 1)
+        tickUntilPlaying()
+        repeat(20) { tick() }
+
+        // Short enough that the queued audio is still worth playing.
+        player.pause()
+        now.addAndGet(100_000_000L)
+        player.resume()
+
+        // pause() flushed 250 ms of written audio, so what is queued is now
+        // early and the one-shot resync pads it with silence. Let that pass.
+        repeat(100) { tick() }
+
+        // Target depth 250 ms, tolerance 50 ms, and the chunk that crosses it.
+        val limit = (300 + 20) * sampleRate / 1000L
+        repeat(200) {
+            tick()
+            assertTrue("${pendingFrames()} frames pending in the track", pendingFrames() <= limit)
+        }
+        assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
+        assertTrue("audio kept playing", pendingFrames() > 0)
+    }
+
     /** FakeAudioSink that also hands each loop iteration the tags it wrote. */
     private class TagSink(val fake: FakeAudioSink = FakeAudioSink()) : AudioSink by fake {
         val tags = ArrayList<Int>()

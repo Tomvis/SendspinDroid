@@ -362,7 +362,7 @@ class SyncAudioPlayer(
 
     // DAC timestamp stability tracking for start gating
     private var consecutiveValidTimestamps = 0       // counts consecutive valid getTimestamp() reads
-    private var dacTimestampsStable = false           // true once TIMESTAMP_STABLE_READS reached
+    private var dacTimestampsStable = false           // true once TIMESTAMP_STABLE_READS reached; start gating only
 
     // DAC-aware alignment wait: rate-limit the per-iteration "waiting for alignment"
     // log so a 2-12s wait emits ~3-13 lines instead of 200-1200. Entry log fires once
@@ -470,7 +470,7 @@ class SyncAudioPlayer(
     // Bytes per sample (e.g., 2 channels * 2 bytes = 4 bytes per sample frame)
     private val bytesPerFrame = channels * (bitDepth / 8)
 
-    // Pre-allocated silence buffer for DAC pre-calibration and keepalive (10ms at sample rate).
+    // Pre-allocated silence buffer for the keepalive (10ms at sample rate).
     // Avoids allocating a new ByteArray on every iteration of the hot audio loop (~100 alloc/sec).
     private val silenceFrameCount = sampleRate / 100  // 10ms of silence
     private val silenceBuffer = ByteArray(silenceFrameCount * bytesPerFrame)
@@ -1529,71 +1529,38 @@ class SyncAudioPlayer(
     }
 
     /**
-     * Pre-calibrate DAC timing by writing silence during WAITING_FOR_START.
+     * Keep the track fed with silence while nothing is playing, and note when
+     * its timestamps have become usable for start gating.
      *
-     * This gets the DAC timestamps going before real audio arrives, making
-     * sync error calculations reliable from the first measurement.
-     *
-     * Android's AudioTimestamp API requires ~21k frames (~443ms at 48kHz) to be
-     * played before returning valid data. By actively writing silence during
-     * the wait period, we can establish DAC calibration BEFORE real playback
-     * begins, avoiding the large initial sync error (~848ms) that would otherwise
-     * occur while waiting for calibration.
-     */
-    private fun preCalibrateDacTiming() {
-        val track = audioSink ?: return
-
-        // Write pre-allocated silence (10ms = 480 frames at 48kHz)
-        val silenceBytes = silenceBuffer.size
-        val written = track.write(silenceBuffer, 0, silenceBytes)
-        if (written <= 0) return
-
-        // CRITICAL: Track silence frames so sync error calculation is accurate
-        // Without this, totalFramesWritten excludes pre-cal silence but framePosition
-        // includes it, causing a mismatch that shows up as ~200ms initial sync error
-        val framesWritten = written / bytesPerFrame
-        totalFramesWritten.addAndGet(framesWritten.toLong())
-
-        // Try to get DAC timestamp for stability tracking
-        val ts = track.getTimestamp()
-        if (ts != null) {
-            // Only count usable timestamps (DAC has started, track is running)
-            if (dacTimeOfNextWriteUs(track) != null) {
-                // Track consecutive valid reads for DAC-aware start gating
-                consecutiveValidTimestamps++
-                if (consecutiveValidTimestamps >= TIMESTAMP_STABLE_READS && !dacTimestampsStable) {
-                    dacTimestampsStable = true
-                    AppLog.Sync.i("DAC timestamps stable after $consecutiveValidTimestamps consecutive reads")
-                }
-            } else {
-                // Invalid framePosition resets stability counter
-                consecutiveValidTimestamps = 0
-            }
-        } else {
-            // getTimestamp() failed - reset stability counter
-            consecutiveValidTimestamps = 0
-        }
-    }
-
-    /**
-     * Reduced-rate silence writer for keeping DAC timestamps warm once stable.
-     *
-     * Unlike preCalibrateDacTiming() which writes every loop iteration (10ms),
-     * this only writes when the pending-to-DAC buffer drops below a threshold.
-     * This saves CPU during long idle periods while keeping AudioTimestamp valid.
+     * A track left to underrun stalls with its timestamps frozen, so silence
+     * is written whenever the pending-to-DAC depth is below a threshold. The
+     * silence goes through [writeSilence] like everything else written, so
+     * the frame count stays in step with the track's frame position.
      */
     private fun writeSilenceKeepAlive() {
         val track = audioSink ?: return
 
         val pendingUs = getPendingToDacUs(track)
-        if (pendingUs > SILENCE_KEEPALIVE_THRESHOLD_US) return
+        if (pendingUs <= SILENCE_KEEPALIVE_THRESHOLD_US) {
+            // Top the buffer back up to the threshold plus one 10ms block. A fixed
+            // 10ms per loop iteration is slightly less than real time, so the track
+            // would drain and sit in permanent underrun. Without a timestamp
+            // (pendingUs == 0) the depth is unknown, so write the one block only.
+            val deficitUs = if (pendingUs > 0) SILENCE_KEEPALIVE_THRESHOLD_US - pendingUs else 0L
+            writeSilence(track, (deficitUs * sampleRate) / 1_000_000 + silenceFrameCount)
+        }
 
-        // Top the buffer back up to the threshold plus one 10ms block. A fixed
-        // 10ms per loop iteration is slightly less than real time, so the track
-        // would drain and sit in permanent underrun. Without a timestamp
-        // (pendingUs == 0) the depth is unknown, so write the one block only.
-        val deficitUs = if (pendingUs > 0) SILENCE_KEEPALIVE_THRESHOLD_US - pendingUs else 0L
-        writeSilence(track, (deficitUs * sampleRate) / 1_000_000 + silenceFrameCount)
+        // Start gating waits for consecutive usable reads (DAC has started,
+        // track is running)
+        if (dacTimeOfNextWriteUs(track) != null) {
+            consecutiveValidTimestamps++
+            if (consecutiveValidTimestamps >= TIMESTAMP_STABLE_READS && !dacTimestampsStable) {
+                dacTimestampsStable = true
+                AppLog.Sync.i("DAC timestamps stable after $consecutiveValidTimestamps consecutive reads")
+            }
+        } else {
+            consecutiveValidTimestamps = 0
+        }
     }
 
     /**
@@ -1682,12 +1649,8 @@ class SyncAudioPlayer(
         when (playbackState) {
             PlaybackState.INITIALIZING -> {
                 // Write silence to keep DAC timestamps warm while waiting
-                // for first chunk. Once stable, reduced-rate keepalive.
-                if (!dacTimestampsStable) {
-                    preCalibrateDacTiming()
-                } else {
-                    writeSilenceKeepAlive()
-                }
+                // for first chunk.
+                writeSilenceKeepAlive()
                 return STATE_POLL_DELAY_MS
             }
 
@@ -1695,7 +1658,7 @@ class SyncAudioPlayer(
                 // Check if we have enough buffer before starting
                 // Duration check alone is sufficient -- the old chunk count gate
                 // (MIN_CHUNKS_BEFORE_START=16) added unnecessary delay and is now
-                // replaced by DAC timestamp stability tracking in preCalibrateDacTiming()
+                // replaced by DAC timestamp stability tracking in writeSilenceKeepAlive()
                 val bufferedMs = (totalQueuedSamples.get() * 1000) / sampleRate
                 if (bufferedMs < MIN_BUFFER_BEFORE_START_MS || handleStartGating()) {
                     // Still waiting for buffer or for the scheduled start.
@@ -1703,11 +1666,7 @@ class SyncAudioPlayer(
                     // left to underrun stalls with its timestamps frozen,
                     // and a start aligned against those is off by however
                     // long it sat idle.
-                    if (!dacTimestampsStable) {
-                        preCalibrateDacTiming()
-                    } else {
-                        writeSilenceKeepAlive()
-                    }
+                    writeSilenceKeepAlive()
                     return STATE_POLL_DELAY_MS
                 }
                 // handleStartGating() transitioned us to PLAYING
@@ -1716,11 +1675,7 @@ class SyncAudioPlayer(
             PlaybackState.REANCHORING -> {
                 // Write silence to keep DAC timestamps warm while waiting
                 // for new chunks after reanchor
-                if (!dacTimestampsStable) {
-                    preCalibrateDacTiming()
-                } else {
-                    writeSilenceKeepAlive()
-                }
+                writeSilenceKeepAlive()
                 return STATE_POLL_DELAY_MS
             }
 
@@ -1748,21 +1703,25 @@ class SyncAudioPlayer(
         // AudioTrack ring buffer at a target depth. This replaces the old
         // effectiveLead scheduling which drifted due to Kalman offset changes
         // between chunk-queue time and chunk-play time.
-        val pendingToDacUs = if (audioSink != null && dacTimestampsStable)
-            getPendingToDacUs(audioSink!!) else 0L
+        //
+        // The depth is read straight from the track; it is 0 while there is
+        // no timestamp. Pacing must not wait on dacTimestampsStable: that is
+        // only set before a start, so it is false for the rest of the stream
+        // after a resume, and the track would fill its whole buffer.
+        val pendingToDacUs = audioSink?.let { getPendingToDacUs(it) } ?: 0L
 
         // Rate-limited DAC pacing diagnostics. The watchdog shares this
         // cadence so stuck-state warnings come out on the same log tick.
         val nowMicros = nowNs() / 1000
         checkStuckState()
-        if (dacTimestampsStable && nowMicros - lastDacPacingLogTimeUs > DAC_PACING_LOG_INTERVAL_US) {
+        if (nowMicros - lastDacPacingLogTimeUs > DAC_PACING_LOG_INTERVAL_US) {
             lastDacPacingLogTimeUs = nowMicros
             AppLog.Sync.d("DAC pacing: pending=${pendingToDacUs/1000}ms, syncErr=${syncErrorUs}us, " +
                 "smoothed=${syncErrorFilter.offsetMicros}us, dropped=$framesDropped, inserted=$framesInserted")
         }
 
         // Pause writing when the AudioTrack buffer is sufficiently full
-        if (dacTimestampsStable && pendingToDacUs > TARGET_PENDING_US + PENDING_TOL_US) {
+        if (pendingToDacUs > TARGET_PENDING_US + PENDING_TOL_US) {
             return STATE_POLL_DELAY_MS
         }
 
