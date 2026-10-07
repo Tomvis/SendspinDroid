@@ -24,15 +24,12 @@ import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.CrashHandler
 import android.app.UiModeManager
 import android.view.KeyEvent
-import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.EditText
 import android.widget.FrameLayout
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -57,10 +54,7 @@ import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.DefaultServerPinger
 import com.sendspindroid.ui.server.AddServerWizardActivity
 import com.sendspindroid.ui.server.UnifiedServerConnector
-import com.sendspindroid.coordinator.TransportState
-import com.sendspindroid.musicassistant.MusicAssistant
 import androidx.activity.viewModels
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -465,9 +459,6 @@ class MainActivity : AppCompatActivity() {
         // Setup unified server support (connector, observers)
         setupUnifiedServers()
 
-        // Observe MA connection state to show/hide MA-dependent UI elements
-        observeMaConnectionState()
-
         // Observe network state from PlaybackService/Coordinator for pinger callbacks
         // and network-loss snackbars (replaces the deleted ConnectivityManager.NetworkCallback).
         observeNetworkState()
@@ -569,7 +560,6 @@ class MainActivity : AppCompatActivity() {
                         onPlayPauseClick = { onPlayPauseClicked() },
                         onNextClick = { onNextClicked() },
                         onSwitchGroupClick = { onSwitchGroupClicked() },
-                        onFavoriteClick = { onFavoriteClicked() },
                         onAllowPairingClick = { onAllowPairingClicked() },
                         onVolumeChange = { volume ->
                             onVolumeChanged(volume)
@@ -1596,61 +1586,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Handles favorite button click.
-     * Adds the currently playing track to Music Assistant favorites.
-     */
-    private fun onFavoriteClicked() {
-        Log.d(TAG, "Favorite clicked")
-
-        lifecycleScope.launch {
-            val result = MusicAssistant.favoriteCurrentTrack()
-            result.fold(
-                onSuccess = { message ->
-                    Snackbar.make(snackbarView, R.string.favorite_added, Snackbar.LENGTH_SHORT).show()
-                },
-                onFailure = { error ->
-                    val errorMessage = when {
-                        error.message?.contains("No track") == true -> R.string.favorite_no_track
-                        else -> R.string.favorite_error
-                    }
-                    Snackbar.make(snackbarView, errorMessage, Snackbar.LENGTH_SHORT).show()
-                    Log.e(TAG, "Favorite failed: ${error.message}")
-                }
-            )
-        }
-    }
-
-    /**
-     * Observes Music Assistant connection state to show/hide MA-dependent UI elements.
-     * - Favorite button: only visible when connected to MA
-     * - Queue button: only visible when connected to MA
-     * - Bottom navigation: only visible when connected to MA (Home/Search/Library need MA API)
-     */
-    private var maLoginDialogShowing = false
-
-    private fun observeMaConnectionState() {
-        lifecycleScope.launch {
-            // Observe loginRequired events (no-token or auth-rejected) for the login dialog.
-            launch {
-                MusicAssistant.loginRequired.collect {
-                    if (!maLoginDialogShowing) {
-                        showMaLoginDialog()
-                    }
-                }
-            }
-
-            MusicAssistant.connectionState.collectLatest { state ->
-                val isMaConnected = state is TransportState.Ready
-
-                // Update ViewModel for Compose UI
-                viewModel.setMaConnected(isMaConnected)
-
-                Log.d(TAG, "MA connection state changed: $state, MA-dependent UI visible: $isMaConnected")
-            }
-        }
-    }
-
-    /**
      * Observes PlaybackService.networkState (mirrored from ConnectionCoordinator) to:
      * - Notify DefaultServerPinger of every network change so it can trigger an immediate ping.
      * - Show a "Network connection lost" snackbar when the network goes away while the user
@@ -1683,73 +1618,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 prevConnected = connected
-            }
-        }
-    }
-
-    /**
-     * Show a login dialog for Music Assistant authentication.
-     *
-     * Displayed when the app detects an MA server but has no stored token
-     * (e.g., first connection via Remote ID, or after token expiry).
-     */
-    private fun showMaLoginDialog() {
-        if (maLoginDialogShowing) return
-        maLoginDialogShowing = true
-
-        val dialogView = LayoutInflater.from(this).inflate(
-            R.layout.dialog_ma_login, null
-        )
-        val usernameInput = dialogView.findViewById<EditText>(R.id.ma_login_username)
-        val passwordInput = dialogView.findViewById<EditText>(R.id.ma_login_password)
-
-        val dialog = MaterialAlertDialogBuilder(this)
-            .setTitle(R.string.ma_login_dialog_title)
-            .setMessage(R.string.ma_login_dialog_message)
-            .setView(dialogView)
-            .setPositiveButton(R.string.ma_login_dialog_login, null) // Set below to prevent auto-dismiss
-            .setNegativeButton(R.string.ma_login_dialog_skip) { d, _ ->
-                d.dismiss()
-            }
-            .setOnDismissListener {
-                maLoginDialogShowing = false
-            }
-            .create()
-
-        dialog.show()
-
-        // Override positive button to handle async login without dismissing
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            val username = usernameInput.text.toString().trim()
-            val password = passwordInput.text.toString().trim()
-
-            if (username.isBlank() || password.isBlank()) {
-                usernameInput.error = if (username.isBlank()) "Required" else null
-                passwordInput.error = if (password.isBlank()) "Required" else null
-                return@setOnClickListener
-            }
-
-            // Disable inputs during login
-            usernameInput.isEnabled = false
-            passwordInput.isEnabled = false
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = false
-            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = false
-            dialog.setMessage(getString(R.string.ma_login_dialog_logging_in))
-
-            lifecycleScope.launch {
-                val result = MusicAssistant.login(username, password)
-                if (result.isSuccess) {
-                    dialog.dismiss()
-                } else {
-                    // Re-enable inputs for retry
-                    usernameInput.isEnabled = true
-                    passwordInput.isEnabled = true
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = true
-                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = true
-
-                    val errorMsg = "Invalid username or password"
-                    dialog.setMessage(getString(R.string.ma_login_dialog_failed, errorMsg))
-                }
             }
         }
     }

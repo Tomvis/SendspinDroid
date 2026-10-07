@@ -73,7 +73,6 @@ fun NowPlayingScreen(
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     onOpenPairingClick: () -> Unit,
     onAllowPairingClick: () -> Unit,
@@ -87,7 +86,6 @@ fun NowPlayingScreen(
     val artworkSource by viewModel.artworkSource.collectAsStateWithLifecycle()
     val volume by viewModel.volume.collectAsStateWithLifecycle()
     val reconnectingState by viewModel.reconnectingState.collectAsStateWithLifecycle()
-    val isMaConnected by viewModel.isMaConnected.collectAsStateWithLifecycle()
     val playerColors by viewModel.playerColors.collectAsStateWithLifecycle()
     val positionMs by viewModel.positionMs.collectAsStateWithLifecycle()
     val durationMs by viewModel.durationMs.collectAsStateWithLifecycle()
@@ -157,19 +155,17 @@ fun NowPlayingScreen(
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
                     accentColor = accentColor,
-                    isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
                     onPreviousClick = onPreviousClick,
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
-                    onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick
+                    onSwitchGroupClick = onSwitchGroupClick
                 )
             }
-            // TV with MA connected: cinematic layout
-            formFactor == FormFactor.TV && isMaConnected -> {
+            // TV: cinematic layout
+            formFactor == FormFactor.TV -> {
                 NowPlayingTv(
                     metadata = metadata,
                     groupName = groupName,
@@ -178,38 +174,13 @@ fun NowPlayingScreen(
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
                     accentColor = accentColor,
-                    isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
                     onPreviousClick = onPreviousClick,
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
-                    onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick
-                )
-            }
-            // TV without MA: landscape layout
-            formFactor == FormFactor.TV -> {
-                NowPlayingLandscape(
-                    metadata = metadata,
-                    groupName = groupName,
-                    artworkSource = artworkSource,
-                    isBuffering = isBuffering,
-                    isPlaying = isPlaying,
-                    controlsEnabled = controlsEnabled,
-                    volume = volume,
-                    accentColor = accentColor,
-                    isMaConnected = isMaConnected,
-                    positionMs = positionMs,
-                    durationMs = durationMs,
-                    positionUpdatedAt = positionUpdatedAt,
-                    onPreviousClick = onPreviousClick,
-                    onPlayPauseClick = onPlayPauseClick,
-                    onNextClick = onNextClick,
-                    onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick,
-                    onVolumeChange = onVolumeChange
+                    onSwitchGroupClick = onSwitchGroupClick
                 )
             }
             isLandscape -> {
@@ -222,7 +193,6 @@ fun NowPlayingScreen(
                     controlsEnabled = controlsEnabled,
                     volume = volume,
                     accentColor = accentColor,
-                    isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
@@ -230,7 +200,6 @@ fun NowPlayingScreen(
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
                     onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange
                 )
             }
@@ -244,7 +213,6 @@ fun NowPlayingScreen(
                     controlsEnabled = controlsEnabled,
                     volume = volume,
                     accentColor = accentColor,
-                    isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
@@ -252,7 +220,6 @@ fun NowPlayingScreen(
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
                     onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange
                 )
             }
@@ -283,7 +250,6 @@ private fun NowPlayingPortrait(
     controlsEnabled: Boolean,
     volume: Float,
     accentColor: Color?,
-    isMaConnected: Boolean,
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
@@ -291,7 +257,6 @@ private fun NowPlayingPortrait(
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -388,9 +353,6 @@ private fun NowPlayingPortrait(
             showSecondaryRow = true,
             isSwitchGroupEnabled = controlsEnabled,
             onSwitchGroupClick = onSwitchGroupClick,
-            showFavorite = isMaConnected,
-            isFavorite = false, // TODO: Track favorite state
-            onFavoriteClick = onFavoriteClick,
             playButtonSize = AdaptiveDefaults.playButtonSize(formFactor),
             controlButtonSize = AdaptiveDefaults.controlButtonSize(formFactor)
         )
@@ -422,7 +384,6 @@ private fun NowPlayingLandscape(
     controlsEnabled: Boolean,
     volume: Float,
     accentColor: Color?,
-    isMaConnected: Boolean,
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
@@ -430,7 +391,6 @@ private fun NowPlayingLandscape(
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -530,9 +490,6 @@ private fun NowPlayingLandscape(
                 onNextClick = onNextClick,
                 isSwitchGroupEnabled = controlsEnabled,
                 onSwitchGroupClick = onSwitchGroupClick,
-                showFavorite = isMaConnected,
-                isFavorite = false,
-                onFavoriteClick = onFavoriteClick,
                 playButtonSize = AdaptiveDefaults.playButtonSize(formFactor),
                 controlButtonSize = AdaptiveDefaults.controlButtonSize(formFactor)
             )
@@ -564,7 +521,6 @@ private fun NowPlayingTv(
     isPlaying: Boolean,
     controlsEnabled: Boolean,
     accentColor: Color?,
-    isMaConnected: Boolean,
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
@@ -572,7 +528,6 @@ private fun NowPlayingTv(
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val formFactor = LocalFormFactor.current
@@ -682,15 +637,12 @@ private fun NowPlayingTv(
                     buttonGap = 24.dp,
                     playFocusRequester = playFocusRequester,
                     isSwitchGroupEnabled = controlsEnabled,
-                    onSwitchGroupClick = onSwitchGroupClick,
-                    showFavorite = isMaConnected,
-                    isFavorite = false,
-                    onFavoriteClick = onFavoriteClick
+                    onSwitchGroupClick = onSwitchGroupClick
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Secondary Controls Row: Switch Group, Favorite
+                // Secondary Controls Row: Switch Group
                 val secondarySize = AdaptiveDefaults.secondaryButtonSize(formFactor)
                 Row(
                     horizontalArrangement = Arrangement.Center,
@@ -709,27 +661,6 @@ private fun NowPlayingTv(
                             contentDescription = stringResource(R.string.accessibility_switch_group_button),
                             modifier = Modifier.size(24.dp)
                         )
-                    }
-
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    // Favorite
-                    if (isMaConnected) {
-                        FilledTonalIconButton(
-                            onClick = onFavoriteClick,
-                            modifier = Modifier
-                                .size(secondarySize)
-                                .tvFocusable()
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_favorite_border),
-                                contentDescription = stringResource(R.string.accessibility_favorite_track),
-                                modifier = Modifier.size(24.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(12.dp))
                     }
                 }
             }
@@ -772,14 +703,12 @@ private fun NowPlayingPortraitPreview() {
             controlsEnabled = true,
             volume = 0.75f,
             accentColor = null,
-            isMaConnected = true,
             positionMs = 45000,
             durationMs = 354000,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }
@@ -802,14 +731,12 @@ private fun NowPlayingLandscapePreview() {
             controlsEnabled = true,
             volume = 0.5f,
             accentColor = null,
-            isMaConnected = false,
             positionMs = 120000,
             durationMs = 482000,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }
@@ -828,14 +755,12 @@ private fun NowPlayingBufferingPreview() {
             controlsEnabled = false,
             volume = 0.75f,
             accentColor = null,
-            isMaConnected = false,
             positionMs = 0,
             durationMs = 0,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }
@@ -862,14 +787,12 @@ private fun NowPlayingAllDevicesPortraitPreview() {
             controlsEnabled = true,
             volume = 0.75f,
             accentColor = null,
-            isMaConnected = true,
             positionMs = 45000,
             durationMs = 354000,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }
@@ -888,14 +811,12 @@ private fun NowPlayingAllDevicesLandscapePreview() {
             controlsEnabled = true,
             volume = 0.75f,
             accentColor = null,
-            isMaConnected = true,
             positionMs = 45000,
             durationMs = 354000,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }

@@ -43,7 +43,7 @@ import com.sendspindroid.ui.main.components.TvTrackProgressBar
  * Vertical layout optimized for glanceable car use:
  * - Large album art at top
  * - Track info + visual progress bar with time labels
- * - Single row of 5 oversized controls: shuffle, prev, play, next, favorite
+ * - Single row of 4 oversized controls: shuffle, prev, play, next
  */
 @Composable
 fun NowPlayingHeadUnit(
@@ -54,7 +54,6 @@ fun NowPlayingHeadUnit(
     isPlaying: Boolean,
     controlsEnabled: Boolean,
     accentColor: Color?,
-    isMaConnected: Boolean,
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
@@ -62,7 +61,6 @@ fun NowPlayingHeadUnit(
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val formFactor = FormFactor.HEADUNIT
@@ -145,17 +143,15 @@ fun NowPlayingHeadUnit(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Playback Controls -- single row: shuffle, prev, PLAY, next, favorite
+        // Playback Controls -- single row: shuffle, prev, PLAY, next
         HeadUnitControls(
             isPlaying = isPlaying,
             controlsEnabled = controlsEnabled,
-            isMaConnected = isMaConnected,
             accentColor = accentColor,
             onSwitchGroupClick = onSwitchGroupClick,
             onPreviousClick = onPreviousClick,
             onPlayPauseClick = onPlayPauseClick,
-            onNextClick = onNextClick,
-            onFavoriteClick = onFavoriteClick
+            onNextClick = onNextClick
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -163,20 +159,18 @@ fun NowPlayingHeadUnit(
 }
 
 /**
- * Head unit control row: shuffle - prev - PLAY - next - favorite
+ * Head unit control row: shuffle - prev - PLAY - next
  * All in a single row with oversized touch targets.
  */
 @Composable
 private fun HeadUnitControls(
     isPlaying: Boolean,
     controlsEnabled: Boolean,
-    isMaConnected: Boolean,
     accentColor: Color?,
     onSwitchGroupClick: () -> Unit,
     onPreviousClick: () -> Unit,
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val playSize = 80.dp
@@ -258,24 +252,6 @@ private fun HeadUnitControls(
                 modifier = Modifier.size(transportIconSize),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
-        }
-
-        Spacer(modifier = Modifier.width(10.dp))
-
-        // Favorite
-        if (isMaConnected) {
-            IconButton(
-                onClick = onFavoriteClick,
-                enabled = controlsEnabled,
-                modifier = Modifier.size(secondarySize)
-            ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_favorite_border),
-                    contentDescription = stringResource(R.string.accessibility_favorite_track),
-                    modifier = Modifier.size(secondaryIconSize),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
         }
     }
 }

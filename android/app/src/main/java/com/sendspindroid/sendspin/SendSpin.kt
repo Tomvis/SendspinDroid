@@ -1147,10 +1147,6 @@ class SendSpin(
      * - AuthRejected: only on 401/403 from a fully-handshaked transport.
      * - HandshakeFailed: SSL/DNS errors, "connection refused".
      * - TransientNetwork: everything else (network flakes, timeouts, generic IO).
-     *
-     * Phase 5 (the WiFi->Cell login fix) depends on AuthRejected being
-     * correctly identified -- a stored MA token is cleared only when this
-     * classifier returns AuthRejected.
      */
     private fun classifyFailureReason(
         throwable: Throwable? = null,
