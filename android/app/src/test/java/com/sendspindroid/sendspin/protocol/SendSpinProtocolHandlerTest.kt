@@ -115,6 +115,7 @@ class SendSpinProtocolHandlerTest {
 
     @Test
     fun `setExternalSource true reports available false`() {
+        activateRoles("\"player@v1\"")
         handler.sentMessages.clear()
         handler.setExternalSource(true)
 
@@ -147,6 +148,7 @@ class SendSpinProtocolHandlerTest {
 
     @Test
     fun `setExternalSource is idempotent`() {
+        activateRoles("\"player@v1\"")
         handler.sentMessages.clear()
         handler.setExternalSource(true)
         handler.setExternalSource(true)
@@ -582,7 +584,7 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     fun lastMuteDecision(): Boolean = muteEvents.lastOrNull() ?: false
     fun evaluateAndPublishSyncStateForTest() = evaluateAndPublishSyncState()
     fun sendGoodbyeForTest(reason: GoodbyeReason) = encodeGoodbye(reason).forEach { sendBinaryFrame(it) }
-    fun resetServerStateForTest() = resetServerState()
+    fun resetConnectionStateForTest() = resetConnectionState()
     fun resetSyncStateTrackingForTest() = resetSyncStateTracking()
 
     fun handleTextMessageForTest(text: String) {

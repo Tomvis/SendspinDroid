@@ -24,8 +24,6 @@ import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 import java.net.SocketException
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Verifies the connection-health telemetry introduced by issue #128.
@@ -34,8 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *  - lastDisconnectCode / lastDisconnectReason
  *  - connectedAtMs cleared
  *
- * Plus: the isStallWatchdogArmed() accessor is gated on handshake +
- * not-user-initiated.
+ * Plus: the isStallWatchdogArmed() accessor is gated on the handshake.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendSpinDisconnectTelemetryTest {
@@ -162,17 +159,15 @@ class SendSpinDisconnectTelemetryTest {
     }
 
     @Test
-    fun `isStallWatchdogArmed is true when handshake complete and not user-initiated`() {
+    fun `isStallWatchdogArmed is true when handshake complete`() {
         setHandshakeComplete(true)
         assertTrue(client.isStallWatchdogArmed())
     }
 
     @Test
-    fun `isStallWatchdogArmed is false after user-initiated disconnect`() {
+    fun `isStallWatchdogArmed is false after a disconnect`() {
         setHandshakeComplete(true)
-        val userField = SendSpin::class.java.getDeclaredField("userInitiatedDisconnect")
-        userField.isAccessible = true
-        (userField.get(client) as AtomicBoolean).set(true)
+        client.disconnect()
         assertFalse(client.isStallWatchdogArmed())
     }
 

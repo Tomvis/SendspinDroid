@@ -191,7 +191,7 @@ class WebSocketTransportTest {
         val transport = WebSocketTransport(address = "127.0.0.1:${server.port}")
         transport.setListener(object : SendSpinTransport.Listener {
             override fun onConnected() = connected.countDown()
-            override fun onMessage(text: String) {}
+            override fun onMessage(text: String, rawUtf8: ByteArray) {}
             override fun onMessage(bytes: ByteArray) {}
             override fun onClosing(code: Int, reason: String) {}
             override fun onClosed(code: Int, reason: String) {
