@@ -8,7 +8,6 @@ SendSpin Player is a synchronized audio player that connects to SendSpin servers
 <li>Android Auto support with playback controls and server selection</li>
 <li>Android TV support with D-pad navigation</li>
 <li>Automatic server discovery via mDNS/Zeroconf on your local network</li>
-<li>Remote access via WebRTC for connections outside your home network</li>
 <li>Adaptive UI that scales across phones, tablets, and TVs</li>
 </ul>
 
@@ -18,7 +17,7 @@ SendSpin Player connects to a SendSpin server over WebSocket to receive audio st
 
 <b>Requirements</b>
 
-A SendSpin server or Music Assistant instance on your local network (or accessible via WebRTC for remote connections).
+A SendSpin server or Music Assistant instance (2.11 or newer) on your local network.
 
 <b>Open Source</b>
 
