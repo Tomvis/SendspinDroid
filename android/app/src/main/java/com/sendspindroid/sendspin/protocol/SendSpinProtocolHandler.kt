@@ -544,6 +544,11 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
+    /** Whether [sendCommand] would send [command] right now; see there for the rule. */
+    fun canSendCommand(command: String): Boolean =
+        SendSpinProtocol.Roles.CONTROLLER in activeRoles &&
+            currentControllerState?.supportedCommands?.contains(command) == true
+
     /**
      * Send a controller command (play, pause, stop, next, previous, volume,
      * mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch,
@@ -568,14 +573,10 @@ abstract class SendSpinProtocolHandler(
         positionMs: Long? = null,
         offsetMs: Long? = null,
     ) {
-        if (SendSpinProtocol.Roles.CONTROLLER !in activeRoles) {
-            Log.w(tag, "Dropping controller command '$command': controller role is not active")
-            return
-        }
         val state = currentControllerState
-        val supported = state?.supportedCommands
-        if (supported == null || command !in supported) {
-            Log.w(tag, "Dropping controller command '$command': not in server supported_commands $supported")
+        if (!canSendCommand(command)) {
+            Log.w(tag, "Dropping controller command '$command': controller role active=" +
+                "${SendSpinProtocol.Roles.CONTROLLER in activeRoles}, server supported_commands=${state?.supportedCommands}")
             return
         }
         var position = positionMs

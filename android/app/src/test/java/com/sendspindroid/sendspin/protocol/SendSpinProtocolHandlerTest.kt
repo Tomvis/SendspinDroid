@@ -197,9 +197,11 @@ class SendSpinProtocolHandlerTest {
                 "volume":60,"muted":false,"repeat":"off","shuffle":false"""
         )
 
+        assertFalse(handler.canSendCommand("shuffle"))
         handler.sendCommand("shuffle")
         assertEquals("Unsupported command must be dropped", 0, sentCommands().size)
 
+        assertTrue(handler.canSendCommand("play"))
         handler.sendCommand("play")
         assertEquals(1, sentCommands().size)
         assertTrue(sentCommands()[0].contains("\"command\":\"play\""))
@@ -208,6 +210,7 @@ class SendSpinProtocolHandlerTest {
     @Test
     fun `sendCommand sends nothing before a controller state has arrived`() {
         activateRoles("\"player@v1\",\"controller@v1\"")
+        assertFalse(handler.canSendCommand("play"))
         handler.sendCommand("play")
         assertEquals(0, sentCommands().size)
     }
@@ -217,6 +220,7 @@ class SendSpinProtocolHandlerTest {
         // "Only valid from clients whose `controller` role is active."
         activateRoles("\"player@v1\"")
         controllerState(""""supported_commands":["play","pause"]""")
+        assertFalse(handler.canSendCommand("play"))
         handler.sendCommand("play")
         assertEquals(0, sentCommands().size)
     }

@@ -406,8 +406,8 @@ class SyncAudioPlayer(
     private var samplesReadSinceStart = 0L        // Total samples consumed since playback started
     @Volatile private var syncErrorUs = 0L        // Current sync error (for display)
 
-    @Volatile private var syncMuted: Boolean = false
-    @Volatile private var muted: Boolean = false
+    // Why the output is silenced; audible only when empty. Written on the main thread.
+    @Volatile private var muteReasons: Set<MuteReason> = emptySet()
 
     // 2D Kalman filter for sync error smoothing (tracks offset + drift)
     // Based on Python reference implementation for optimal noise filtering
@@ -528,7 +528,7 @@ class SyncAudioPlayer(
 
         try {
             audioSink = sinkFactory(sampleRate, channels, bitDepth, bufferSize)
-            if (muted) audioSink?.setVolume(0f)
+            if (muteReasons.isNotEmpty()) audioSink?.setVolume(0f)
 
             AppLog.Audio.i("AudioTrack initialized: ${sampleRate}Hz, ${channels}ch, ${bitDepth}bit, buffer=${bufferSize}bytes")
         } catch (e: Exception) {
@@ -706,30 +706,28 @@ class SyncAudioPlayer(
         AppLog.Audio.d("setVolume called (ignored - using device volume): $volume")
     }
 
-    /**
-     * Apply the player's `muted` state. Mute is AudioTrack gain, not device
-     * volume, so the two stay independent: "a volume change ... MUST NOT
-     * clear the mute state". Audio keeps draining in sync while muted.
-     */
-    fun setMuted(muted: Boolean) {
-        this.muted = muted
-        audioSink?.setVolume(if (muted) 0f else 1f)
-        AppLog.Audio.i("Mute=$muted")
+    /** Why the output is muted. The reasons are independent; any one silences it. */
+    enum class MuteReason {
+        /** The player's `muted` state (server or user); the only one reported in client/state. */
+        PLAYER,
+        /** The client is reporting `state="error"` and must mute until it is back in sync. */
+        SYNC,
+        /** Another app has the audio output (focus loss or output disconnect). */
+        INTERRUPTION,
     }
 
     /**
-     * Silence audio output without disturbing buffer drain rate or DAC
-     * timing. Used by the protocol layer when reporting `state="error"`
-     * to the server: per Sendspin spec, the client must mute its output
-     * and continue buffering until it can resume synchronized playback.
+     * Mute or un-mute the output for one [reason]. Mute is AudioTrack gain, not
+     * device volume, so the two stay independent: "a volume change ... MUST NOT
+     * clear the mute state". It takes effect immediately and audio keeps
+     * draining in sync while muted, so un-muting is exactly in time.
      *
-     * Calling with `false` resumes pass-through audio on the next chunk.
-     * Idempotent.
+     * Main thread only.
      */
-    fun setSyncMuted(muted: Boolean) {
-        if (syncMuted == muted) return
-        syncMuted = muted
-        AppLog.Audio.i("Sync mute=$muted")
+    fun setMuted(reason: MuteReason, muted: Boolean) {
+        muteReasons = if (muted) muteReasons + reason else muteReasons - reason
+        audioSink?.setVolume(if (muteReasons.isEmpty()) 1f else 0f)
+        AppLog.Audio.i("Mute $reason=$muted, muted by $muteReasons")
     }
 
     /**
@@ -1995,10 +1993,6 @@ class SyncAudioPlayer(
         totalQueuedSamples.addAndGet(-chunk.sampleCount.toLong())
 
         val track = audioSink ?: return
-
-        if (syncMuted && chunk.pcmData.isNotEmpty()) {
-            chunk.pcmData.fill(0)
-        }
 
         // Track samples consumed for sync error calculation
         samplesReadSinceStart += chunk.sampleCount
