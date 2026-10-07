@@ -1,19 +1,16 @@
 package com.sendspindroid.sendspin.crypto
 
 /**
- * A persisted long-term PSK record.
- *
- * `management.md#records`: "Each record holds a [Sendspin PSK]; every record
- * carries `user` [trust level]", and "Across all record operations, a record is
- * identified by its `psk_id`."
+ * A persisted pairing record (`pairing.md#pairing-records`): "the new long-term
+ * PSK persisted together with the server's `server_id`".
  *
  * This is [Psk] plus the two things that only matter once a record is stored:
  * it is serialisable, and it remembers whether a server has ever authenticated
- * with it ([used], reported by `management/list-records`).
+ * with it ([used]).
  *
- * @param serverId the stored-pubkey binding (audit decision D4). Null means a
- *   shared-PSK record, which this phase never creates but 2.7 and 3.3 must not
- *   destroy if one appears.
+ * @param serverId the server the record pairs with. Nullable only because
+ *   installs that predate 1.0.0-rc1 may still hold an unbound record; nothing
+ *   creates one any more.
  */
 class PskRecord(
     val pskId: String,
@@ -76,8 +73,7 @@ interface TrustStore {
 
         /**
          * The `psk_id` is already claimed - by a record, by the Sentinel, or by
-         * the client's own Pairing PSK. Named after the spec's
-         * `already_exists`, which 3.3 reports verbatim.
+         * the client's own Pairing PSK.
          */
         object AlreadyExists : AddRecordResult
 
@@ -93,8 +89,9 @@ interface TrustStore {
     fun findByPskId(pskId: String): PskRecord?
 
     /**
-     * Add a record, rejecting any `psk_id` already claimed in the shared
-     * namespace. Never overwrites: a collision is an error, not a merge.
+     * Add a record, replacing any record already held for [serverId] and
+     * rejecting any `psk_id` already claimed: a collision is an error, not a
+     * merge.
      */
     fun addRecord(psk: ByteArray, serverId: String?): AddRecordResult
 
@@ -105,11 +102,9 @@ interface TrustStore {
     fun markUsed(pskId: String)
 
     /**
-     * Every PSK a handshake may match: the records, the Sentinel, and (once 2.2
-     * lands) the Pairing PSK.
+     * The records and the Sentinel. [PskCandidates] adds the Pairing PSK.
      *
-     * Feeds [PskCandidateSet.of] directly. Because [addRecord] enforces the
-     * namespace on the write path, that call is not expected to fail.
+     * Feeds [PskCandidateSet] directly.
      */
     fun candidates(): List<Psk>
 

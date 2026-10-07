@@ -123,7 +123,6 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
             serverAddress = bundle.getString("server_address", null),
             connectionState = bundle.getString("connection_state", "Unknown"),
             audioCodec = bundle.getString("audio_codec", "--"),
-            reconnectAttempts = bundle.getInt("reconnect_attempts", 0),
 
             // Network
             networkType = bundle.getString("network_type", "UNKNOWN"),
@@ -148,7 +147,6 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
             clockConverged = bundle.getBoolean("clock_converged", false),
             measurementCount = bundle.getInt("measurement_count", 0),
             lastTimeSyncAgeMs = bundle.getLong("last_time_sync_age_ms", -1L),
-            clockFrozen = bundle.getBoolean("clock_frozen", false),
             staticDelayMs = bundle.getDouble("static_delay_ms", 0.0),
 
             // DAC / Audio
@@ -179,10 +177,8 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
             // Connection health (issue #128)
             lastByteReceivedAgoMs = bundle.getLong("last_byte_received_ago_ms", -1L),
             stallWatchdogArmed = bundle.getBoolean("stall_watchdog_armed", false),
-            reconnectAttemptsTotal = bundle.getInt("reconnect_attempts_total", 0),
             lastDisconnectCode = if (bundle.containsKey("last_disconnect_code")) bundle.getInt("last_disconnect_code") else null,
             lastDisconnectReason = bundle.getString("last_disconnect_reason", null),
-            timeFilterStability = bundle.getDouble("time_filter_stability", 1.0),
             timeFilterConvergenceMs = bundle.getLong("time_filter_convergence_ms", 0L),
 
             // Connection health (handoff episodes)
@@ -210,7 +206,6 @@ data class StatsState(
     val serverAddress: String? = null,
     val connectionState: String = "Unknown",
     val audioCodec: String = "--",
-    val reconnectAttempts: Int = 0,
 
     // Network
     val networkType: String = "UNKNOWN",
@@ -235,7 +230,6 @@ data class StatsState(
     val clockConverged: Boolean = false,
     val measurementCount: Int = 0,
     val lastTimeSyncAgeMs: Long = -1L,
-    val clockFrozen: Boolean = false,
     val staticDelayMs: Double = 0.0,
 
     // DAC / Audio
@@ -264,14 +258,12 @@ data class StatsState(
     val reanchorCount: Long = 0L,
 
     // Connection health (issue #128). Exposes keepalive freshness, watchdog
-    // state, lifetime reconnect count, last-disconnect details, and
-    // time-filter stability for field triage.
+    // state, last-disconnect details, and
+    // time-filter convergence time for field triage.
     val lastByteReceivedAgoMs: Long = -1L,
     val stallWatchdogArmed: Boolean = false,
-    val reconnectAttemptsTotal: Int = 0,
     val lastDisconnectCode: Int? = null,
     val lastDisconnectReason: String? = null,
-    val timeFilterStability: Double = 1.0,
     val timeFilterConvergenceMs: Long = 0L,
 
     // Connection health: newline-delimited handoff-episode summary from the recorder.
@@ -356,7 +348,7 @@ fun getConnectionStatus(state: String): ThresholdStatus {
 fun getPlaybackStatus(state: String): ThresholdStatus {
     return when (state) {
         "PLAYING" -> ThresholdStatus.GOOD
-        "WAITING_FOR_START", "INITIALIZING", "DRAINING" -> ThresholdStatus.WARNING
+        "WAITING_FOR_START", "INITIALIZING" -> ThresholdStatus.WARNING
         "REANCHORING" -> ThresholdStatus.BAD
         else -> ThresholdStatus.WARNING
     }

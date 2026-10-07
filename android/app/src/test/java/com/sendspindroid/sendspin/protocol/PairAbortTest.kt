@@ -132,7 +132,7 @@ class PairAbortTest {
         handler.scope.runCurrent()
         handler.clearEvents()
 
-        handler.handleTextMessageForTest(abort(PairAbortReason.PIN_MISMATCH))
+        handler.handleTextMessageForTest(abort(PairAbortReason.PAIRING_CODE_MISMATCH))
         handler.scope.runCurrent()
 
         assertEquals(emptyList<String>(), handler.events)
@@ -280,19 +280,21 @@ class AbortTestHandler(
         events.add("close")
     }
 
-    override fun sendTextMessage(text: String) {
+    init {
+        installEncryptedChannel(PlaintextCrypto)
+    }
+
+    override fun sendBinaryFrame(bytes: ByteArray) {
+        val text = bytes.jsonFrameText() ?: return
         sent.add(text)
         events.add("send:" + Json.parseToJsonElement(text).jsonObject["type"]?.jsonPrimitive?.content)
     }
-
-    override fun sendBinaryFrame(bytes: ByteArray) = Unit
 
     override fun getCoroutineScope(): CoroutineScope = scope
 
     override fun getTimeFilter(): SendspinTimeFilter = timeFilter
 
     override fun isLowMemoryMode(): Boolean = false
-    override fun getClientId(): String = "test-client"
     override fun getDeviceName(): String = "Test"
     override fun getManufacturer(): String = "Test"
     override fun getSoftwareVersion(): String = "0.0.0"

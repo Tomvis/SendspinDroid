@@ -22,12 +22,11 @@ import kotlinx.coroutines.sync.withLock
  *
  *     [type:1][body...]
  *
- * with `type == 0` meaning the body is a UTF-8 JSON message, and the audio,
- * artwork and visualizer types keeping their existing
- * `[8-byte big-endian timestamp][payload]` body layout.
+ * with `type == 0` meaning the body is a UTF-8 JSON message and every other
+ * type a role's binary message.
  *
- * This is the only place that byte is added or stripped. Fragmentation (item
- * 1.5) plugs in here too, which is why [encodeJson] and [encode] return a list.
+ * This is the only place that byte is added or stripped. Fragmentation plugs
+ * in here too, which is why [encodeJson] and [encode] return a list.
  */
 class NoiseWireCodec(
     crypto: NoiseCrypto,
@@ -50,8 +49,8 @@ class NoiseWireCodec(
      *
      * Two things depend on strict ordering: the AEAD nonce counter (frames must
      * be encrypted in the order they hit the socket, or the peer's counter
-     * desynchronises) and, once 1.5 lands, the rule that only one fragmented
-     * message may be in flight per direction.
+     * desynchronises) and the rule that only one fragmented message may be in
+     * flight per direction.
      */
     private val sendMutex = Mutex()
 
@@ -62,13 +61,13 @@ class NoiseWireCodec(
     /**
      * Encrypt one typed message.
      *
-     * @return the frames to put on the wire, in order. More than one only once
-     *   fragmentation lands; today an oversized payload is rejected instead.
+     * @return the frames to put on the wire, in order. More than one only when
+     *   the payload had to be fragmented.
      */
     suspend fun encode(type: Int, payload: ByteArray): List<ByteArray> {
         require(type in 0..255) { "binary message type is a uint8, got $type" }
         // FragmentWriter returns one frame when the payload fits and a
-        // fragment-more/.../fragment-end sequence when it does not. The mutex is
+        // first/.../last fragment sequence when it does not. The mutex is
         // held across the whole list, which is what enforces "a sender must
         // finish a fragmented message before sending any other frame in that
         // direction" - a second sender interleaving here would corrupt both
@@ -166,7 +165,7 @@ class NoiseWireCodec(
         /** A JSON message body; hand to the existing text dispatcher. */
         data class Json(val text: String) : Decoded
 
-        /** Audio (4), artwork (8-11), visualizer (16-20), or an unknown type. */
+        /** Audio (4), or a type this client does not implement. */
         data class Typed(val type: Int, val body: ByteArray) : Decoded {
             override fun equals(other: Any?): Boolean =
                 this === other ||
@@ -177,7 +176,7 @@ class NoiseWireCodec(
 
         /**
          * A fragment was consumed and the message is still incomplete. Nothing
-         * to dispatch; wait for the next frame.
+         * to dispatch; wait for the last fragment.
          */
         object Buffered : Decoded
 

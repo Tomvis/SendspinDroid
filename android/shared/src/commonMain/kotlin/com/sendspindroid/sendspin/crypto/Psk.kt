@@ -4,35 +4,36 @@ package com.sendspindroid.sendspin.crypto
  * Which kind of secret a PSK is.
  *
  * The category is not cosmetic: it decides what the server is allowed to do
- * once the handshake matches it. Per `messaging.md#server--client-serveractivate`,
- * a long-term Sendspin PSK admits `['pairing']` or any subset of
- * `{'playback', 'management'}`; a Pairing PSK admits only `['pairing']`; and the
- * Sentinel admits `[]`, `['pairing']`, or `['playback']` (the last only with
- * unpaired access enabled).
+ * once the handshake matches it (`messaging.md#server--client-serveractivate`),
+ * and the server declares which one it is using in Noise message 1 as
+ * `psk_category`, so a match binds both sides to the same category.
  *
- * The spec is explicit that the three share ONE `psk_id` namespace, "so a
- * `psk_id` must be unique across them. Two categories sharing one would make a
- * single wire `psk_id` map to two trust levels." [PskCandidateSet] enforces it.
+ * @param wire the `psk_category` code. "The codes share one length, so the
+ *   encrypted payload's length is independent of the category."
  */
-enum class PskCategory {
-    /** A per-(client, server) secret established by pairing. Trust level `user`. */
-    LONG_TERM,
+enum class PskCategory(val wire: String) {
+    /** A per-(client, server) secret established by pairing. */
+    LONG_TERM("lt"),
 
     /** The client's own long-lived pairing secret, distributed as a pairing token. */
-    PAIRING,
+    PAIRING("pr"),
 
     /** The published constant used before any pairing record exists. */
-    SENTINEL,
+    SENTINEL("sn");
+
+    companion object {
+        fun fromWire(value: String): PskCategory? = entries.firstOrNull { it.wire == value }
+    }
 }
 
 /**
  * A 32-byte pre-shared key, tagged with its category and its derived `psk_id`.
  *
- * @param serverId the stored-pubkey binding. Non-null only for [PskCategory.LONG_TERM]
- *   records created under the stored-pubkey model, where the client "verifies
- *   that the matched PSK's stored `server_id` equals the one in `server/init`"
- *   (`connection.md#pre-shared-key`). Null means no binding: the Sentinel, the
- *   Pairing PSK, and shared-PSK records.
+ * @param serverId the stored-pubkey binding of a [PskCategory.LONG_TERM]
+ *   record, where the client "verifies that the matched PSK's stored
+ *   `server_id` equals the one in `server/init`"
+ *   (`connection.md#pre-shared-key`). Null means no binding: the Sentinel and
+ *   the Pairing PSK.
  */
 class Psk(
     bytes: ByteArray,

@@ -106,21 +106,8 @@ sealed class ArtworkSource {
  */
 data class ReconnectingState(
     val serverName: String,
-    val attempt: Int,
-    val bufferMs: Long
-) {
-    val bufferSeconds: Long get() = bufferMs / 1000
-}
-
-/**
- * Server status for display in server list.
- */
-sealed class ServerStatus {
-    object Online : ServerStatus()
-    object Offline : ServerStatus()
-    data class Connecting(val progress: Float = 0f) : ServerStatus()
-    data class Reconnecting(val attempt: Int, val nextRetrySeconds: Int) : ServerStatus()
-}
+    val attempt: Int
+)
 
 /**
  * Player colors extracted from album artwork.

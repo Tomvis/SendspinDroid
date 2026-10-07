@@ -65,13 +65,30 @@ class InMemoryTrustStoreTest {
     }
 
     @Test
-    fun twoDifferentPsksMayShareAServerId() {
-        // Re-pairing with the same server produces a second record; the
-        // namespace rule is about psk_id, not server_id.
+    fun aNewRecordReplacesTheOneHeldForTheSameServer() {
+        // "The client MUST persist the new record, replacing any record it
+        // already holds for the server."
         val store = InMemoryTrustStore()
         assertTrue(store.addRecord(psk(1), "server-a") is TrustStore.AddRecordResult.Ok)
+        assertTrue(store.addRecord(psk(3), "server-b") is TrustStore.AddRecordResult.Ok)
         assertTrue(store.addRecord(psk(2), "server-a") is TrustStore.AddRecordResult.Ok)
-        assertEquals(2, store.listRecords().size)
+
+        assertEquals(
+            setOf(PskId.derive(psk(2)) to "server-a", PskId.derive(psk(3)) to "server-b"),
+            store.listRecords().map { it.pskId to it.serverId }.toSet(),
+        )
+        assertNull(store.findByPskId(PskId.derive(psk(1))))
+    }
+
+    @Test
+    fun aRejectedRecordLeavesTheServersExistingRecordInPlace() {
+        val store = InMemoryTrustStore()
+        store.addRecord(psk(1), "server-a")
+
+        assertTrue(store.addRecord(SentinelPsk.bytes, "server-a") is TrustStore.AddRecordResult.AlreadyExists)
+        assertTrue(store.addRecord(ByteArray(16), "server-a") is TrustStore.AddRecordResult.Invalid)
+
+        assertEquals(listOf(PskId.derive(psk(1))), store.listRecords().map { it.pskId })
     }
 
     @Test
@@ -128,12 +145,51 @@ class InMemoryTrustStoreTest {
     }
 
     @Test
-    fun candidatesFormAValidCandidateSet() {
-        // The namespace guarantee the store makes must be strong enough that
-        // PskCandidateSet.of never rejects what the store produces.
+    fun aRecordThatCannotBePersistedIsReportedAndLeavesTheStoreUnchanged() {
+        var persists = true
+        val store = object : InMemoryTrustStore() {
+            override fun onChanged() = persists
+        }
+        store.addRecord(psk(1), "server-a")
+
+        persists = false
+        // Same server: a success would replace the first record.
+        val result = store.addRecord(psk(2), "server-a")
+
+        assertTrue("was $result", result is TrustStore.AddRecordResult.StorageFailed)
+        assertEquals(listOf(PskId.derive(psk(1))), store.listRecords().map { it.pskId })
+    }
+
+    @Test
+    fun aWriteThatThrowsIsAFailedWriteNotACrash() {
+        var throws = false
+        val store = object : InMemoryTrustStore() {
+            override fun onChanged(): Boolean {
+                if (throws) throw IllegalStateException("keystore unavailable")
+                return true
+            }
+        }
+        store.addRecord(psk(1), "server-a")
+
+        throws = true
+        val result = store.addRecord(psk(2), "server-a")
+
+        assertTrue("was $result", result is TrustStore.AddRecordResult.StorageFailed)
+        assertEquals(listOf(PskId.derive(psk(1))), store.listRecords().map { it.pskId })
+        // Removal must still take effect in this process and must not throw.
+        assertTrue(store.removeRecord(PskId.derive(psk(1))))
+        assertTrue(store.listRecords().isEmpty())
+    }
+
+    @Test
+    fun candidatesAreSelectableByCategory() {
         val store = InMemoryTrustStore()
         store.addRecord(psk(1), "server-a")
         store.addRecord(psk(2), "server-b")
-        assertTrue(PskCandidateSet.of(store.candidates()).isSuccess)
+        val set = PskCandidateSet(store.candidates())
+        assertTrue(
+            set.select(PskId.derive(psk(2)), PskCategory.LONG_TERM, "server-b")
+                is PskCandidateSet.Selection.Matched
+        )
     }
 }

@@ -1,34 +1,35 @@
 package com.sendspindroid.sendspin
 
-import com.sendspindroid.sendspin.latency.StaticDelaySource
 import com.sendspindroid.shared.log.Log
 import com.sendspindroid.shared.platform.Platform
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
+import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
 /**
- * Two-state Kalman filter that estimates server-clock offset (and an
- * internal drift state) from NTP-style 4-timestamp measurements.
+ * Two-state Kalman filter that estimates the server-clock offset and the
+ * drift between the two clocks from NTP-style 4-timestamp measurements.
  *
- * ## Public conversion contract
+ * ## Conversions
  *
- * [serverToClient] and [clientToServer] convert by **offset only**; drift
- * is intentionally not applied. This is a deliberate divergence from
- * the upstream `Sendspin/time-filter` reference (which applies a
- * significance-gated drift term in its conversions).
+ * [serverToClient] and [clientToServer] apply the offset and, once the
+ * drift estimate is statistically significant, the drift accumulated since
+ * the last measurement:
  *
- * On Android, hardware DAC clock control is not exposed to userspace, so
- * a drift-applied conversion would produce a predicted server-time the
- * audio renderer cannot achieve, leaving the sample-insert/drop loop to
- * chase a sustained sync error. The same pattern is used by Spotify
- * Connect, Roon RAAT, Snapcast, the AirPlay shairport-sync DAC-clock
- * fallback path, and the Python `sendspin-cli` reference player.
+ *     server = client + offset + drift * (client - lastUpdate)
  *
- * Drift compensation lives downstream in `SyncAudioPlayer`'s
- * sample-insert/drop loop, with `SyncErrorFilter` smoothing the
- * measured DAC-vs-expected-server-time error. Do not "fix" the
- * conversions to apply drift without revisiting that architecture.
+ * This is the conversion of the upstream `Sendspin/time-filter` reference
+ * and of aiosendspin's `compute_server_time` / `compute_client_time`. The
+ * mapping follows the estimated clock rate between measurements, so the
+ * playback reference does not hold still and then step at each update.
+ *
+ * The conversions run on the audio thread while measurements arrive on the
+ * network thread. Everything a reader needs is published as one immutable
+ * [Snapshot], so offset, drift and update time always belong together.
+ *
+ * This is the drift between the device's monotonic clock and the server
+ * clock. The DAC has its own clock; `SyncAudioPlayer` measures what is
+ * left against AudioTrack timestamps and corrects it by sample insert/drop.
  *
  * ## Reference
  *
@@ -44,8 +45,6 @@ class SendspinTimeFilter {
         // at their respective sites:
         //   - IQR outlier pre-rejection
         //   - +/-500 ppm hard drift cap
-        //   - freeze/thaw with covariance inflation across reconnects
-        //   - drift omitted from public conversions (see class KDoc)
 
         // Process-noise diffusion coefficients. Upstream defaults: zero offset
         // random walk (offset evolves only through drift*dt), and a tiny drift
@@ -73,9 +72,9 @@ class SendspinTimeFilter {
         private const val FORGETTING_VARIANCE_FACTOR = FORGETTING_FACTOR * FORGETTING_FACTOR
         private const val MIN_SAMPLES_FOR_FORGETTING = 100
 
-        // Drift-significance gate. Drift is only used in internal prediction
-        // when drift^2 > DRIFT_SIGNIFICANCE_THRESHOLD^2 * drift_covariance,
-        // i.e., when the estimate is at least k sigma from zero.
+        // Drift-significance gate. The conversions only apply drift when
+        // drift^2 > DRIFT_SIGNIFICANCE_THRESHOLD^2 * drift_covariance, i.e.,
+        // when the estimate is at least k sigma from zero.
         private const val DRIFT_SIGNIFICANCE_THRESHOLD = 2.0
         private const val DRIFT_SIGNIFICANCE_THRESHOLD_SQUARED =
             DRIFT_SIGNIFICANCE_THRESHOLD * DRIFT_SIGNIFICANCE_THRESHOLD
@@ -100,23 +99,12 @@ class SendspinTimeFilter {
         private const val TAG = "SendspinTimeFilter"
     }
 
-    // Lock for protecting filter state mutations (addMeasurement, reset, freeze, thaw).
-    // Hot-path readers (serverToClient, clientToServer) use @Volatile fields instead of
-    // locking to avoid blocking the audio thread.
+    // Guards the filter state below (addMeasurement, reset).
+    // Nothing outside the lock reads that state; other threads read [snapshot].
     private val lock = Any()
 
     // State vector: [offset, drift]
-    // offset is stored as AtomicLong (bit-cast from Double via toRawBits /
-    // fromBits) so reads on 32-bit JVMs are atomic. The covariance matrix
-    // (p00, p01, p10, p11) is still guarded by [lock] on writes. Readers
-    // on the audio thread (serverToClient, clientToServer) read offset
-    // lock-free via the Double property accessor below.
-    private val offsetBits = AtomicLong(0L)
-
-    private var offset: Double
-        get() = Double.fromBits(offsetBits.get())
-        set(value) { offsetBits.set(value.toRawBits()) }
-
+    private var offset: Double = 0.0
     private var drift: Double = 0.0
 
     // Covariance matrix (2x2)
@@ -125,15 +113,35 @@ class SendspinTimeFilter {
     private var p10: Double = 0.0               // drift-offset covariance
     private var p11: Double = 0.0               // drift variance
 
-    // Timing state. lastUpdateTime is @Volatile because [lastUpdateTimeUs]
-    // is read lock-free from non-filter threads (e.g. SendSpinClient.
-    // getLastTimeSyncAgeMs); without it, a 64-bit Long load is not
-    // guaranteed atomic on 32-bit JVMs and visibility is not guaranteed
-    // anywhere.
-    @Volatile private var lastUpdateTime: Long = 0
+    // Client time of the last accepted measurement
+    private var lastUpdateTime: Long = 0
     private var measurementCount: Int = 0
 
     private var useDrift: Boolean = false
+
+    /**
+     * The filter state as other threads see it. Immutable, and replaced as a
+     * whole by [publish] after every change, so a reader that takes the
+     * reference once works with values from the same update.
+     */
+    private class Snapshot(
+        val offset: Double = 0.0,
+        val drift: Double = 0.0,
+        val useDrift: Boolean = false,
+        val lastUpdateTime: Long = 0,
+        val offsetVariance: Double = Double.MAX_VALUE,
+        val measurementCount: Int = 0
+    ) {
+        /** The drift the conversions apply: zero until the estimate is significant. */
+        val effectiveDrift: Double get() = if (useDrift) drift else 0.0
+    }
+
+    @Volatile private var snapshot = Snapshot()
+
+    /** Publish the current filter state. Call with [lock] held, after every change. */
+    private fun publish() {
+        snapshot = Snapshot(offset, drift, useDrift, lastUpdateTime, p00, measurementCount)
+    }
 
     // Outlier pre-rejection: tracks recent accepted offset measurements
     private val recentOffsets = DoubleArray(OUTLIER_WINDOW_SIZE)
@@ -141,54 +149,27 @@ class SendspinTimeFilter {
     private var recentOffsetsCount = 0
     private var rejectedCount = 0  // Consecutive rejections (for forced acceptance)
 
-    // Baseline time for relative calculations - prevents drift accumulation over long periods
-    // Set when first measurement is received, used as reference point for time conversions
-    private var baselineClientTime: Long = 0
-
-    // Static delay = auto-measured output latency + user sync offset
-    // + server-pushed sync offset. Each source is tracked separately so
-    // auto-measurement, user corrections, and server-pushed corrections
-    // (from client/sync_offset) don't clobber each other. [staticDelayMs]
-    // returns the sum.
-    // @Volatile fields: read by audio thread (serverToClient), written from
-    // UI/main or estimator threads.
-    @Volatile private var autoMeasuredDelayMicros: Long = 0
+    // Static delay: the sync offset set by the user's slider or pushed by the
+    // server. Output latency up to the DAC is not part of it - the player
+    // schedules against AudioTrack timestamps, which already include it.
+    // @Volatile: read by the audio thread (serverToClient), written from
+    // UI/main threads.
     @Volatile private var userSyncOffsetMicros: Long = 0
+    // Fork: the server's client/sync_offset is kept apart from the user's
+    // slider so neither clobbers the other; they add.
     @Volatile private var serverSyncOffsetMicros: Long = 0
-    @Volatile var staticDelaySource: StaticDelaySource = StaticDelaySource.NONE
-        private set
 
     // Convergence tracking
     private var convergenceTimeMs: Long = 0L       // Time to reach isConverged
     private var firstMeasurementTimeMs: Long = 0L  // Timestamp of first measurement
     private var hasLoggedConvergence: Boolean = false
 
-    // Frozen state for reconnection - preserves sync across network drops
-    @Volatile private var frozenState: FrozenState? = null
-
-    private data class FrozenState(
-        val offset: Double,
-        val drift: Double,
-        val p00: Double,
-        val p01: Double,
-        val p10: Double,
-        val p11: Double,
-        val measurementCount: Int,
-        val baselineClientTime: Long,
-        val lastUpdateTime: Long,
-        val recentOffsets: DoubleArray,
-        val recentOffsetsIndex: Int,
-        val recentOffsetsCount: Int,
-        val serverName: String?,
-        val serverId: String?
-    )
-
     /**
      * Whether enough measurements have been collected for reliable time conversion.
      * This is the minimum threshold - playback can start, but may need corrections.
      */
     val isReady: Boolean
-        get() = measurementCount >= MIN_MEASUREMENTS && p00.isFinite()
+        get() = snapshot.let { it.measurementCount >= MIN_MEASUREMENTS && it.offsetVariance.isFinite() }
 
     /**
      * Whether the filter has converged to a high-quality sync. Stricter
@@ -198,79 +179,85 @@ class SendspinTimeFilter {
      * be minimal.
      */
     val isConverged: Boolean
-        get() {
-            if (measurementCount < MIN_MEASUREMENTS_FOR_CONVERGENCE || !p00.isFinite()) return false
-            return errorMicros < MAX_ERROR_FOR_CONVERGENCE_US
-        }
+        get() = snapshot.measurementCount >= MIN_MEASUREMENTS_FOR_CONVERGENCE &&
+            errorMicros < MAX_ERROR_FOR_CONVERGENCE_US
 
     /**
      * Current estimated offset in microseconds.
      */
     val offsetMicros: Long
-        get() = offset.toLong()
+        get() = snapshot.offset.toLong()
 
     /**
      * Estimated error (standard deviation) in microseconds.
      */
     val errorMicros: Long
-        get() = if (p00.isFinite() && p00 >= 0) sqrt(p00).toLong() else Long.MAX_VALUE
+        get() = snapshot.offsetVariance.let { if (it.isFinite() && it >= 0) sqrt(it).toLong() else Long.MAX_VALUE }
 
     /**
      * Number of measurements collected so far.
      */
     val measurementCountValue: Int
-        get() = measurementCount
+        get() = snapshot.measurementCount
 
     /**
      * Current drift in parts per million (ppm).
      * Positive = server clock running faster than client.
      */
     val driftPpm: Double
-        get() = drift * 1_000_000.0
+        get() = snapshot.drift * 1_000_000.0
 
     /**
      * Time of last measurement update in microseconds (client time).
      */
     val lastUpdateTimeUs: Long
-        get() = lastUpdateTime
+        get() = snapshot.lastUpdateTime
 
     /**
-     * Effective static delay in milliseconds. Sum of the auto-measured
-     * hardware latency, the user's manual sync-offset correction, and any
-     * server-pushed sync offset. All three components may be written
-     * independently by their respective setters.
+     * Static delay in milliseconds: the user's or server's sync-offset
+     * correction.
      *
      * Positive = delay playback (plays later), Negative = advance (plays earlier).
      */
     val staticDelayMs: Double
-        get() = (autoMeasuredDelayMicros + userSyncOffsetMicros + serverSyncOffsetMicros) / 1000.0
+        get() = syncOffsetMicros / 1000.0
 
-    /**
-     * Raw auto-measured component (milliseconds).
-     */
-    val autoMeasuredDelayMs: Double
-        get() = autoMeasuredDelayMicros / 1000.0
+    private val syncOffsetMicros: Long
+        get() = userSyncOffsetMicros + serverSyncOffsetMicros
 
-    /**
-     * Raw user sync-offset component (milliseconds).
-     */
-    val userSyncOffsetMs: Double
-        get() = userSyncOffsetMicros / 1000.0
-
-    /**
-     * Raw server-pushed sync-offset component (milliseconds).
-     */
+    /** Raw server-pushed sync-offset component (milliseconds). */
     val serverSyncOffsetMs: Double
         get() = serverSyncOffsetMicros / 1000.0
 
     /**
-     * Write the auto-measured hardware output latency. Called by
-     * [OutputLatencyEstimator] when measurement converges (source=AUTO)
-     * or times out (source=NONE).
+     * The spec's `output_delay_ms`: delay BEYOND the audio port, such as an
+     * external amplifier or powered speaker.
+     *
+     * Deliberately separate from [staticDelayMs], the signed sync offset.
+     * roles/player/v1.md is explicit that output delay "does not cover
+     * processing delays before the port (DAC latency, audio buffers), which
+     * the client compensates itself" - the player does that by scheduling
+     * against AudioTrack timestamps.
+     *
+     * Non-negative by spec ("Negative values are not supported") and clamped
+     * to 0-5000, unlike the signed [staticDelayMs].
      */
-    fun setAutoMeasuredDelayMicros(micros: Long, source: StaticDelaySource) {
-        autoMeasuredDelayMicros = micros
-        staticDelaySource = source
+    @Volatile
+    private var outputDelayMicros: Long = 0
+
+    /** Output delay in milliseconds, 0-5000. */
+    val outputDelayMs: Double
+        get() = outputDelayMicros / 1000.0
+
+    /**
+     * Set the beyond-the-port output delay, clamped to the spec's 0-5000 ms.
+     *
+     * Sign: audio that takes [ms] longer to reach the listener must LEAVE the
+     * port that much earlier, so this SUBTRACTS from the client-side play
+     * time. That is the opposite direction to [staticDelayMs], which adds.
+     */
+    fun setOutputDelayMs(ms: Double) {
+        outputDelayMicros = (ms.coerceIn(0.0, 5000.0) * 1000).toLong()
     }
 
     /**
@@ -279,19 +266,14 @@ class SendspinTimeFilter {
      */
     fun setUserSyncOffsetMs(ms: Double) {
         userSyncOffsetMicros = (ms * 1000).toLong()
-        staticDelaySource = StaticDelaySource.USER
     }
 
     /**
      * Write a server-pushed sync-offset (from `client/sync_offset`).
-     *
-     * Stored separately from [setUserSyncOffsetMs] so the two do not clobber
-     * each other -- both are corrections on top of the measured hardware
-     * latency and they stack additively in [staticDelayMs].
+     * Stored apart from the user slider; both add in [staticDelayMs].
      */
     fun setServerSyncOffsetMs(ms: Double) {
         serverSyncOffsetMicros = (ms * 1000).toLong()
-        staticDelaySource = StaticDelaySource.SERVER
     }
 
     /**
@@ -302,155 +284,12 @@ class SendspinTimeFilter {
         get() = convergenceTimeMs
 
     /**
-     * Filter stability score. Always 1.0 with the upstream-aligned model
-     * (fixed Q + adaptive forgetting); retained for binary compatibility
-     * with stats UI bindings that bundled this value.
-     */
-    val stability: Double
-        get() = 1.0
-
-    /**
      * Reset the filter to initial state.
      * Thread-safe: synchronized to prevent concurrent mutation.
      */
     fun reset() = synchronized(lock) {
-        offset = 0.0
-        drift = 0.0
-        p00 = Double.MAX_VALUE
-        p01 = 0.0
-        p10 = 0.0
-        p11 = 0.0
-        lastUpdateTime = 0
-        measurementCount = 0
-        baselineClientTime = 0
-        useDrift = false
-        recentOffsetsIndex = 0
-        recentOffsetsCount = 0
-        rejectedCount = 0
-        convergenceTimeMs = 0
-        firstMeasurementTimeMs = 0
-        hasLoggedConvergence = false
-    }
-
-    /**
-     * Whether the filter has frozen state that can be restored.
-     */
-    val isFrozen: Boolean
-        get() = frozenState != null
-
-    /**
-     * Capture a snapshot of the current sync state so [thaw] can restore it
-     * after a reconnect to the same server. No-op if the filter is not yet
-     * [isReady].
-     *
-     * @param serverName Display name of the currently-connected server (from server/hello).
-     * @param serverId   Stable identifier of the currently-connected server (from server/hello).
-     */
-    fun freeze(serverName: String?, serverId: String?) {
-        synchronized(lock) {
-            if (!isReady) return
-
-            frozenState = FrozenState(
-                offset = offset,
-                drift = drift,
-                p00 = p00,
-                p01 = p01,
-                p10 = p10,
-                p11 = p11,
-                measurementCount = measurementCount,
-                baselineClientTime = baselineClientTime,
-                lastUpdateTime = lastUpdateTime,
-                recentOffsets = recentOffsets.copyOf(),
-                recentOffsetsIndex = recentOffsetsIndex,
-                recentOffsetsCount = recentOffsetsCount,
-                serverName = serverName,
-                serverId = serverId
-            )
-        }
-    }
-
-    /**
-     * Restore a frozen sync state captured by [freeze] if and only if the
-     * provided identity matches the one captured at freeze-time. On
-     * identity mismatch the frozen snapshot is discarded.
-     *
-     * Call this after a reconnect handshake completes, before resuming time
-     * sync.
-     *
-     * @param serverName Display name of the just-handshook server.
-     * @param serverId   Stable identifier of the just-handshook server.
-     * @return true if state was restored, false if no frozen state existed
-     *         or the identity did not match.
-     */
-    fun thaw(serverName: String?, serverId: String?): Boolean {
-        synchronized(lock) {
-            val frozen = frozenState ?: return false
-
-            // Identity must match to thaw, else discard the snapshot. When both
-            // sides advertise a non-empty serverId that id is the authority;
-            // when neither side has one (the parser maps an absent server_id to
-            // ""), fall back to serverName equality so reconnecting to the SAME
-            // id-less server still thaws seamlessly instead of forcing a resync
-            // glitch on every reconnect. Only refuse outright when exactly one
-            // side has an id (identity genuinely ambiguous). Two distinct id-less
-            // servers are still separated by the serverName check below.
-            val frozenHasId = !frozen.serverId.isNullOrEmpty()
-            val incomingHasId = !serverId.isNullOrEmpty()
-            if (frozenHasId != incomingHasId) {
-                frozenState = null
-                return false
-            }
-            if (incomingHasId && frozen.serverId != serverId) {
-                frozenState = null
-                return false
-            }
-            if (frozen.serverName != serverName) {
-                frozenState = null
-                return false
-            }
-
-            offset = frozen.offset
-            drift = frozen.drift
-
-            p00 = frozen.p00 * 100.0
-            p01 = frozen.p01 * 10.0
-            p10 = frozen.p10 * 10.0
-            p11 = frozen.p11 * 100.0
-
-            measurementCount = MIN_MEASUREMENTS
-            baselineClientTime = frozen.baselineClientTime
-            lastUpdateTime = frozen.lastUpdateTime
-
-            frozen.recentOffsets.copyInto(recentOffsets)
-            recentOffsetsIndex = frozen.recentOffsetsIndex
-            recentOffsetsCount = frozen.recentOffsetsCount
-            rejectedCount = 0
-            useDrift = false
-
-            hasLoggedConvergence = false
-            convergenceTimeMs = 0
-            firstMeasurementTimeMs = Platform.currentTimeMillis()
-
-            frozenState = null
-            return true
-        }
-    }
-
-    /**
-     * Discard frozen state and perform full reset.
-     * Call this when reconnection fails and we need to start fresh.
-     * Thread-safe: synchronized to prevent concurrent mutation.
-     */
-    fun resetAndDiscard() = synchronized(lock) {
-        frozenState = null
-        // The server-pushed sync offset belongs to the session being discarded.
-        // Both callers of this method start a NEW server session (fresh connect,
-        // or a reconnect whose server identity changed), and the new server may
-        // never push a client/sync_offset -- in which case the previous server's
-        // correction would silently keep skewing serverToClient() forever. The
-        // user offset is a device-level preference and deliberately survives;
-        // the auto-measured hardware latency is a property of this device's
-        // output path and survives too.
+        // The server's offset belongs to the session being reset; the next
+        // server may never push one. The user's offset is a device setting.
         serverSyncOffsetMicros = 0
         offset = 0.0
         drift = 0.0
@@ -460,7 +299,6 @@ class SendspinTimeFilter {
         p11 = 0.0
         lastUpdateTime = 0
         measurementCount = 0
-        baselineClientTime = 0
         useDrift = false
         recentOffsetsIndex = 0
         recentOffsetsCount = 0
@@ -468,6 +306,7 @@ class SendspinTimeFilter {
         convergenceTimeMs = 0
         firstMeasurementTimeMs = 0
         hasLoggedConvergence = false
+        publish()
     }
 
     /**
@@ -482,14 +321,12 @@ class SendspinTimeFilter {
      * @param measurementOffset The measured offset in microseconds
      * @param maxError The maximum error (uncertainty) in microseconds
      * @param clientTimeMicros The client timestamp when measurement was taken
-     * @param rtt Optional round-trip time in microseconds (ignored, kept for API compatibility)
      * @return true if measurement was accepted, false if rejected as outlier
      */
     fun addMeasurement(
         measurementOffset: Long,
         maxError: Long,
-        clientTimeMicros: Long,
-        rtt: Long = 0L
+        clientTimeMicros: Long
     ): Boolean = synchronized(lock) {
         if (measurementCount > 0 && clientTimeMicros <= lastUpdateTime) {
             return false
@@ -509,7 +346,6 @@ class SendspinTimeFilter {
                 offset = measurement
                 p00 = measurementVariance
                 lastUpdateTime = clientTimeMicros
-                baselineClientTime = clientTimeMicros
                 measurementCount = 1
                 recordAcceptedOffset(measurement)
             }
@@ -532,10 +368,10 @@ class SendspinTimeFilter {
 
                 kalmanUpdate(measurement, maxErrorD, clientTimeMicros)
                 recordAcceptedOffset(measurement)
-
-                checkConvergence()
             }
         }
+        publish()
+        checkConvergence()
         return true
     }
 
@@ -602,15 +438,16 @@ class SendspinTimeFilter {
 
     private fun kalmanUpdate(measurement: Double, maxError: Double, clientTimeMicros: Long) {
         val dt = (clientTimeMicros - lastUpdateTime).toDouble()
-        if (dt <= 0) return
         val dtSquared = dt * dt
         val updateStdDev = maxError * MAX_ERROR_SCALE
         val measurementVariance = updateStdDev * updateStdDev
 
         // Predict: x = F * x, P = F * P * F^T + Q with F = [[1, dt], [0, 1]]
         // and Q = diag(PROCESS_VARIANCE, DRIFT_PROCESS_VARIANCE) * dt.
-        val effectiveDrift = if (useDrift) drift else 0.0
-        val offsetPredicted = offset + effectiveDrift * dt
+        // The prediction always uses the drift estimate, significant or not:
+        // the gain below is computed for that model, and it is the innovation
+        // against it that corrects a wrong drift.
+        val offsetPredicted = offset + drift * dt
 
         var p00New = p00 + 2 * p01 * dt + p11 * dtSquared + PROCESS_VARIANCE * dt
         var p01New = p01 + p11 * dt
@@ -636,7 +473,6 @@ class SendspinTimeFilter {
         // Update: K = P * H^T * S^-1, x = x + K * y, P = (I - K * H) * P
         // with H = [1, 0] and S = P[0,0] + R.
         val s = p00New + measurementVariance
-        if (s <= 0) return
 
         val k0 = p00New / s
         val k1 = p10New / s
@@ -653,34 +489,42 @@ class SendspinTimeFilter {
 
         lastUpdateTime = clientTimeMicros
         measurementCount++
-
-        if (measurementCount == MIN_MEASUREMENTS) {
-            Log.i(TAG, "Time sync ready: offset=${offset.toLong()}us, error=${errorMicros}us, " +
-                    "drift=${String.format("%.3f", driftPpm)}ppm (after $measurementCount measurements)")
-        }
     }
 
     /**
-     * Convert a server timestamp into the client-clock domain. Includes
-     * the auto-measured output-latency and user/server sync-offset
-     * components so the result is the wall-clock instant at which the
-     * audio sink should render the corresponding samples.
+     * The spec's `compute_client_time`: the instant on the local monotonic
+     * clock at which the server clock reads [serverTimeMicros]. Clock mapping
+     * only, with no playout terms, so it is the one to measure with.
      *
-     * Offset-only — see the class docstring for why drift is not applied.
+     * Solves `server = client + offset + drift * (client - lastUpdate)` for
+     * the client time, as the reference does.
      *
      * Lock-free; safe to call from the audio thread.
      */
-    fun serverToClient(serverTimeMicros: Long): Long {
-        val baseResult = serverTimeMicros - offset.toLong()
-        return baseResult + autoMeasuredDelayMicros + userSyncOffsetMicros + serverSyncOffsetMicros
+    fun computeClientTime(serverTimeMicros: Long): Long {
+        val s = snapshot
+        val drift = s.effectiveDrift
+        return ((serverTimeMicros - s.offset + drift * s.lastUpdateTime) / (1.0 + drift)).roundToLong()
     }
 
     /**
-     * Inverse of [serverToClient]. Offset-only — see the class docstring
-     * for why drift is not applied. Lock-free.
+     * When to play audio stamped [serverTimeMicros]: [computeClientTime] plus
+     * the user/server sync offset and minus the spec's output delay, so the
+     * result is the local instant at which the audio sink should render the
+     * corresponding samples.
+     */
+    fun serverToClient(serverTimeMicros: Long): Long =
+        computeClientTime(serverTimeMicros) + syncOffsetMicros - outputDelayMicros
+
+    /**
+     * Inverse of [serverToClient]: the reference's `compute_server_time`
+     * applied to the client time with the playout terms taken back out.
+     * Lock-free.
      */
     fun clientToServer(clientTimeMicros: Long): Long {
-        return clientTimeMicros + offset.toLong() -
-                autoMeasuredDelayMicros - userSyncOffsetMicros - serverSyncOffsetMicros
+        val s = snapshot
+        val clientTime = clientTimeMicros - syncOffsetMicros + outputDelayMicros
+        val offsetNow = s.offset + s.effectiveDrift * (clientTime - s.lastUpdateTime)
+        return clientTime + offsetNow.roundToLong()
     }
 }

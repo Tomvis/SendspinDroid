@@ -15,7 +15,9 @@ import kotlin.test.assertTrue
  * The three that matter most and are easiest to get wrong:
  *  - client/pair-confirm and client/pair-finalize go out TOGETHER, with no
  *    server response awaited in between.
- *  - a server_kc mismatch is an in-band pair/abort, but a bad commitment,
+ *  - a server_kc mismatch is an in-band pair/abort, after which the code is
+ *    no longer shown and in-flight pairing messages are discarded silently;
+ *    but a bad commitment,
  *    a low-order share or a malformed field is a PROTOCOL ERROR that closes
  *    the socket silently -- telling an unauthenticated peer which check it
  *    failed is the leak this distinction prevents.
@@ -81,15 +83,96 @@ class DynamicPairingCodeFlowTest {
         assertEquals(1, store.value)
     }
 
-    @Test
-    fun `a server_kc mismatch aborts in band`() {
+    /** A flow whose attempt has just ended in a `server_kc` mismatch. */
+    private fun mismatched(): Pair<DynamicPairingCodeFlow, List<DynamicPairingAction>> {
         val f = flow()
         f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 1))
         f.onEvent(DynamicPairingEvent.ServerPairInit(ByteArray(32) { 5 }))
         f.onEvent(DynamicPairingEvent.ServerPairAuth(VALID_SHARE))
-        val actions = f.onEvent(DynamicPairingEvent.ServerPairConfirm(ByteArray(64)))
-        val abort = actions.filterIsInstance<DynamicPairingAction.SendPairAbort>().single()
-        assertEquals("pairing_code_mismatch", abort.reason)
+        return f to f.onEvent(DynamicPairingEvent.ServerPairConfirm(ByteArray(64)))
+    }
+
+    @Test
+    fun `a server_kc mismatch aborts in band and stops showing the code`() {
+        val (_, actions) = mismatched()
+        // Single round: pair/abort, not client/pair-retry. StopEmittingCode is
+        // also what cancels the attempt timer.
+        assertEquals(
+            listOf(
+                DynamicPairingAction.SendPairAbort("pairing_code_mismatch"),
+                DynamicPairingAction.StopEmittingCode,
+            ),
+            actions,
+        )
+    }
+
+    @Test
+    fun `pairing messages in flight after our abort are discarded silently`() {
+        // "A client that has aborted an attempt likewise silently discards
+        // pairing messages received before the next server/activate."
+        val (f, _) = mismatched()
+        val inFlight = listOf(
+            DynamicPairingEvent.ServerPairInit(ByteArray(32)),
+            DynamicPairingEvent.ServerPairAuth(VALID_SHARE),
+            DynamicPairingEvent.ServerPairConfirm(ByteArray(64)),
+            DynamicPairingEvent.ServerPairFinalize,
+            // The attempt timer, were it still running, has nothing to abort.
+            DynamicPairingEvent.AttemptTimeout,
+        )
+        for (event in inFlight) {
+            assertEquals(emptyList<DynamicPairingAction>(), f.onEvent(event), "$event")
+        }
+    }
+
+    @Test
+    fun `the next activation after an abort starts a fresh attempt`() {
+        val (f, _) = mismatched()
+        val actions = f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 2))
+        assertEquals(2, actions.filterIsInstance<DynamicPairingAction.SendPairInit>().single().pairingIndex)
+        val emitted = f.onEvent(DynamicPairingEvent.ServerPairInit(ByteArray(32) { 6 }))
+        assertTrue(emitted.single() is DynamicPairingAction.EmitPairingCode)
+    }
+
+    @Test
+    fun `a local cancel aborts with user_cancelled`() {
+        val f = flow()
+        f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 1))
+        f.onEvent(DynamicPairingEvent.ServerPairInit(ByteArray(32) { 5 }))
+        assertEquals(
+            listOf(
+                DynamicPairingAction.SendPairAbort("user_cancelled"),
+                DynamicPairingAction.StopEmittingCode,
+            ),
+            f.onEvent(DynamicPairingEvent.UserCancelled),
+        )
+        // And only once: there is no attempt left to cancel.
+        assertEquals(emptyList<DynamicPairingAction>(), f.onEvent(DynamicPairingEvent.UserCancelled))
+    }
+
+    @Test
+    fun `a cancel while gesture-gated aborts the unstarted attempt`() {
+        // pair/abort "aborts a pairing attempt, started or not".
+        val f = flow(failures = 5)
+        f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 1))
+        val actions = f.onEvent(DynamicPairingEvent.UserCancelled)
+        assertEquals("user_cancelled", actions.filterIsInstance<DynamicPairingAction.SendPairAbort>().single().reason)
+    }
+
+    @Test
+    fun `a cancel with no attempt sends nothing`() {
+        assertEquals(emptyList<DynamicPairingAction>(), flow().onEvent(DynamicPairingEvent.UserCancelled))
+    }
+
+    @Test
+    fun `a received abort ends the attempt without an answer`() {
+        val f = flow()
+        f.onEvent(DynamicPairingEvent.PairingActivation(pairingIndex = 1))
+        f.onEvent(DynamicPairingEvent.ServerPairInit(ByteArray(32) { 5 }))
+        assertEquals(
+            listOf<DynamicPairingAction>(DynamicPairingAction.StopEmittingCode),
+            f.onEvent(DynamicPairingEvent.PairAbortReceived("user_cancelled")),
+        )
+        assertEquals(emptyList<DynamicPairingAction>(), f.onEvent(DynamicPairingEvent.ServerPairAuth(VALID_SHARE)))
     }
 
     @Test
@@ -121,6 +204,7 @@ class DynamicPairingCodeFlowTest {
             "attempt_timeout",
             actions.filterIsInstance<DynamicPairingAction.SendPairAbort>().single().reason
         )
+        assertTrue(actions.any { it is DynamicPairingAction.StopEmittingCode })
     }
 
     @Test
@@ -142,15 +226,22 @@ class DynamicPairingCodeFlowTest {
     }
 
     @Test
-    fun `the first attempt's sid uses pairing_index 1, unshifted`() {
-        // aiosendspin's `_pairing_index` counter (client/connection.py,
-        // server/connection.py) starts at 0 and is incremented BEFORE use, so
-        // by the time `_pake_sid` (noise/pairing.py) runs for the first
-        // attempt on a connection, pairing_index is already 1. The flow must
-        // NOT re-base the value it is handed on `PairingActivation`.
+    fun `the sid is label, h, pairing_index and round 1`() {
+        // The sid ci/conformance/cpace_oracle.py prints, which that script
+        // holds to aiosendspin's own `_pake_sid(h, 1, 1)`: handshake hash
+        // 0x00..0x1f, pairing_index 1, round 1. CPaceResponderTest pins the
+        // CPace outputs for this same sid.
         val h = ByteArray(32) { it.toByte() }
-        val expected = "sendspin-pair-pake-v1".encodeToByteArray() + h + byteArrayOf(0, 0, 0, 1)
-        assertContentEquals(expected, DynamicPairingCodeFlow.sidFor(h, pairingIndex = 1))
+        assertEquals(
+            "73656e647370696e2d706169722d70616b652d763100010203040506070809" +
+                "0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000100000001",
+            DynamicPairingCodeFlow.sidFor(h, pairingIndex = 1).hex(),
+        )
+        // pairing_index is used as given, big-endian, and the round stays 1.
+        assertEquals(
+            "0000010200000001",
+            DynamicPairingCodeFlow.sidFor(h, pairingIndex = 258).hex().takeLast(16),
+        )
     }
 
     @Test
@@ -276,6 +367,9 @@ class DynamicPairingCodeFlowTest {
         val unwrappedPsk = aeadOpen(NoiseCipherSuite.CHACHA_POLY.aead, wrapKey, ByteArray(12), ByteArray(0), wrappedPsk)
         assertContentEquals(unwrappedPsk, persisted.psk)
     }
+
+    private fun ByteArray.hex(): String =
+        joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
 
     private companion object {
         /** A valid, non-low-order share; reuse the B.1.10 u6 vector. */

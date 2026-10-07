@@ -25,6 +25,7 @@ import android.os.SystemClock
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.SyncAudioPlayer
 import com.sendspindroid.sendspin.PlaybackState as SyncPlaybackState
+import com.sendspindroid.sendspin.protocol.ControllerState
 
 /**
  * Custom Player implementation for MediaSession that bridges to SendSpin.
@@ -85,6 +86,10 @@ class SendSpinPlayer : Player {
     // Timeline for position reporting
     private var currentTimeline: Timeline = Timeline.EMPTY
 
+    // Latest controller state from the server. Null until one arrives, and
+    // nothing the server carries out is offered until then.
+    private var controllerState: ControllerState? = null
+
     // ========================================================================
     // Configuration Methods
     // ========================================================================
@@ -105,6 +110,41 @@ class SendSpinPlayer : Player {
         syncAudioPlayer = player
         updateStateFromPlayer()
     }
+
+    /**
+     * Applies the server's controller state: which commands the session
+     * offers, and the repeat and shuffle modes it reports.
+     * Called by PlaybackService whenever the state changes (null = none).
+     */
+    fun updateControllerState(state: ControllerState?) {
+        val oldCommands = availableCommands
+        val oldRepeatMode = repeatMode
+        val oldShuffle = shuffleModeEnabled
+        val wasSeekable = isCurrentMediaItemSeekable
+
+        controllerState = state
+
+        val item = currentMediaItem
+        if (item != null && isCurrentMediaItemSeekable != wasSeekable) {
+            currentTimeline = SingleItemTimeline(item, currentDurationMs, isCurrentMediaItemSeekable)
+            listeners.forEach {
+                it.onTimelineChanged(currentTimeline, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE)
+            }
+        }
+        if (repeatMode != oldRepeatMode) {
+            listeners.forEach { it.onRepeatModeChanged(repeatMode) }
+        }
+        if (shuffleModeEnabled != oldShuffle) {
+            listeners.forEach { it.onShuffleModeEnabledChanged(shuffleModeEnabled) }
+        }
+        val newCommands = availableCommands
+        if (newCommands != oldCommands) {
+            listeners.forEach { it.onAvailableCommandsChanged(newCommands) }
+        }
+    }
+
+    private fun supports(command: String): Boolean =
+        controllerState?.supportedCommands?.contains(command) == true
 
     /**
      * Updates internal state based on SyncAudioPlayer state.
@@ -129,14 +169,12 @@ class SendSpinPlayer : Player {
             SyncPlaybackState.WAITING_FOR_START -> {
                 updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
             }
-            SyncPlaybackState.PLAYING,
-            SyncPlaybackState.DRAINING -> {
+            SyncPlaybackState.PLAYING -> {
                 // Re-anchor the interpolation timestamp when transitioning to playing,
                 // so getCurrentPosition() doesn't include pause duration in its elapsed calc
                 if (!currentlyPlaying) {
                     anchorElapsedRealtime = SystemClock.elapsedRealtime()
                 }
-                // DRAINING is still actively playing from buffer, so STATE_READY.
                 // Sync playWhenReady to true: audio is physically playing, so the UI
                 // must reflect that. This corrects any stale playWhenReady=false from
                 // a server "stopped" state that arrived before audio actually resumed.
@@ -185,9 +223,7 @@ class SendSpinPlayer : Player {
                 SyncPlaybackState.WAITING_FOR_START -> {
                     updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
                 }
-                SyncPlaybackState.PLAYING,
-                SyncPlaybackState.DRAINING -> {
-                    // DRAINING is still actively playing from buffer, so STATE_READY
+                SyncPlaybackState.PLAYING -> {
                     updatePlaybackStateInternal(Player.STATE_READY, true)
                 }
                 SyncPlaybackState.REANCHORING -> {
@@ -212,17 +248,21 @@ class SendSpinPlayer : Player {
      *
      * @param connected Whether we're connected to a server
      * @param serverName Name of the connected server (if connected)
+     * @param reconnecting Not connected, but the service is working on it.
+     *   Reported as buffering with playWhenReady left as it was, which is what
+     *   it is to anyone watching the session: playback that was running is
+     *   expected back. It also keeps the media session in the foreground.
      */
-    fun updateConnectionState(connected: Boolean, serverName: String? = null) {
+    fun updateConnectionState(connected: Boolean, serverName: String? = null, reconnecting: Boolean = false) {
         if (!connected) {
-            // Fire listener callbacks in Media3's conventional order:
+            // Fork: fire listener callbacks in Media3's conventional order
             //   onPlayWhenReadyChanged -> onPlaybackStateChanged -> onTimelineChanged
             //     -> onMediaItemTransition -> onIsPlayingChanged
-            // so that controllers (Android Auto, AVRCP, lock screen) never see
-            // an intermediate state where STATE_IDLE has been reported but the
-            // timeline / current item still reference the prior session.
-            val playWhenReadyChanged = playWhenReady
-            playWhenReady = false
+            // so controllers (Android Auto, AVRCP, lock screen) never see
+            // STATE_IDLE while the timeline still references the prior session.
+            // While reconnecting, playWhenReady is left as it was (upstream).
+            val playWhenReadyChanged = !reconnecting && playWhenReady
+            if (!reconnecting) playWhenReady = false
             anchorPositionMs = 0
             anchorElapsedRealtime = 0
             currentDurationMs = 0
@@ -238,7 +278,10 @@ class SendSpinPlayer : Player {
                 it.onTimelineChanged(currentTimeline, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE)
                 it.onMediaItemTransition(null, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
             }
-            updatePlaybackStateInternal(Player.STATE_IDLE, false)
+            updatePlaybackStateInternal(
+                if (reconnecting) Player.STATE_BUFFERING else Player.STATE_IDLE,
+                false,
+            )
         } else if (syncAudioPlayer == null) {
             // Connected but no audio yet
             updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
@@ -285,7 +328,7 @@ class SendSpinPlayer : Player {
             currentDurationMs = durationMs
         }
         currentMediaItem = newItem
-        currentTimeline = SingleItemTimeline(newItem, currentDurationMs)
+        currentTimeline = SingleItemTimeline(newItem, currentDurationMs, isCurrentMediaItemSeekable)
 
         // Notify listeners of timeline change
         listeners.forEach { listener ->
@@ -467,8 +510,9 @@ class SendSpinPlayer : Player {
     }
 
     override fun seekTo(positionMs: Long) {
-        // SendSpin doesn't support arbitrary seek positions
-        // This is a no-op for now
+        // TIME_UNSET means "the default position", not a position to send.
+        if (positionMs == C.TIME_UNSET) return
+        sendSpinClient?.seek(positionMs)
     }
 
     override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
@@ -484,11 +528,11 @@ class SendSpinPlayer : Player {
     }
 
     override fun seekBack() {
-        sendSpinClient?.previous()
+        sendSpinClient?.seekRelative(-seekBackIncrement)
     }
 
     override fun seekForward() {
-        sendSpinClient?.next()
+        sendSpinClient?.seekRelative(seekForwardIncrement)
     }
 
     override fun seekToNext() {
@@ -549,7 +593,9 @@ class SendSpinPlayer : Player {
 
     override fun isCurrentMediaItemLive(): Boolean = currentDurationMs <= 0
 
-    override fun isCurrentMediaItemSeekable(): Boolean = false // No seeking in SendSpin
+    // The server omits 'seek' when the seekable range is unknown (live streams).
+    override fun isCurrentMediaItemSeekable(): Boolean =
+        supports("seek") && controllerState?.seekMaxMs != null
 
     override fun getContentPosition(): Long = currentPosition
 
@@ -675,16 +721,28 @@ class SendSpinPlayer : Player {
     // Player Interface - Repeat and Shuffle
     // ========================================================================
 
-    override fun getRepeatMode(): Int = Player.REPEAT_MODE_OFF
-
-    override fun setRepeatMode(repeatMode: Int) {
-        // No-op - SendSpin controls repeat mode server-side
+    // The server owns repeat and shuffle: the getters report its state and the
+    // setters only send the command, so the mode changes when the server says so.
+    override fun getRepeatMode(): Int = when (controllerState?.repeat) {
+        "one" -> Player.REPEAT_MODE_ONE
+        "all" -> Player.REPEAT_MODE_ALL
+        else -> Player.REPEAT_MODE_OFF
     }
 
-    override fun getShuffleModeEnabled(): Boolean = false
+    override fun setRepeatMode(repeatMode: Int) {
+        sendSpinClient?.setRepeatMode(
+            when (repeatMode) {
+                Player.REPEAT_MODE_ONE -> "one"
+                Player.REPEAT_MODE_ALL -> "all"
+                else -> "off"
+            }
+        )
+    }
+
+    override fun getShuffleModeEnabled(): Boolean = controllerState?.shuffle == true
 
     override fun setShuffleModeEnabled(shuffleModeEnabled: Boolean) {
-        // No-op - SendSpin controls shuffle server-side
+        sendSpinClient?.setShuffle(shuffleModeEnabled)
     }
 
     // ========================================================================
@@ -849,14 +907,24 @@ class SendSpinPlayer : Player {
     // Player Interface - Commands
     // ========================================================================
 
+    // Commands the server carries out are offered only while they are in its
+    // supported_commands; the rest are local and always available.
     @Suppress("DEPRECATION")
     override fun getAvailableCommands(): Player.Commands {
         return Player.Commands.Builder()
+            .addIf(Player.COMMAND_PLAY_PAUSE, supports("play") || supports("pause"))
+            .addIf(Player.COMMAND_SEEK_TO_NEXT, supports("next"))
+            .addIf(Player.COMMAND_SEEK_TO_PREVIOUS, supports("previous"))
+            .addIf(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM, isCurrentMediaItemSeekable)
+            .addIf(Player.COMMAND_SEEK_BACK, supports("seek_relative"))
+            .addIf(Player.COMMAND_SEEK_FORWARD, supports("seek_relative"))
+            .addIf(
+                Player.COMMAND_SET_REPEAT_MODE,
+                supports("repeat_off") || supports("repeat_one") || supports("repeat_all")
+            )
+            .addIf(Player.COMMAND_SET_SHUFFLE_MODE, supports("shuffle") || supports("unshuffle"))
             .addAll(
-                Player.COMMAND_PLAY_PAUSE,
                 Player.COMMAND_STOP,
-                Player.COMMAND_SEEK_TO_NEXT,
-                Player.COMMAND_SEEK_TO_PREVIOUS,
                 Player.COMMAND_SET_VOLUME,
                 Player.COMMAND_GET_CURRENT_MEDIA_ITEM,
                 Player.COMMAND_GET_TIMELINE,
@@ -868,7 +936,7 @@ class SendSpinPlayer : Player {
                 Player.COMMAND_SET_MEDIA_ITEM,
                 Player.COMMAND_PREPARE,
                 // Kept for MediaSession compatibility; the overload delegates to
-                // the no-op seekTo(positionMs)
+                // seekTo(positionMs), which is dropped unless the server offers 'seek'
                 Player.COMMAND_SEEK_TO_MEDIA_ITEM
             )
             .build()
@@ -939,7 +1007,8 @@ class SendSpinPlayer : Player {
 @UnstableApi
 private class SingleItemTimeline(
     private val mediaItem: MediaItem,
-    private val durationMs: Long
+    private val durationMs: Long,
+    private val seekable: Boolean
 ) : Timeline() {
 
     override fun getWindowCount(): Int = 1
@@ -953,7 +1022,7 @@ private class SingleItemTimeline(
             /* presentationStartTimeMs= */ C.TIME_UNSET,
             /* windowStartTimeMs= */ C.TIME_UNSET,
             /* elapsedRealtimeEpochOffsetMs= */ C.TIME_UNSET,
-            /* isSeekable= */ false,
+            /* isSeekable= */ seekable,
             /* isDynamic= */ !hasDuration,
             /* liveConfiguration= */ null,
             /* defaultPositionUs= */ 0,

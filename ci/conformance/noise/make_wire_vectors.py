@@ -101,9 +101,30 @@ def main() -> int:
 
     server, client = build(True), build(False)
 
-    msg1_payload = json.dumps({"psk_id": psk_id_for(PSK)}).encode()
+    msg1_payload = json.dumps({"psk_id": psk_id_for(PSK), "psk_category": "lt"}).encode()
     msg1 = server.write_message(msg1_payload)
     assert client.read_message(msg1) == msg1_payload
+
+    # Message 1 again, same keys, with inner payloads a client must refuse. A
+    # malformed payload is a silent failure; a psk_id held only under another
+    # category is a lookup miss.
+    def msg1_frame(payload: bytes) -> str:
+        return json.dumps(
+            {"type": "noise/handshake", "payload": {"data": b64u(build(True).write_message(payload))}},
+            separators=(",", ":"),
+        )
+
+    rejected = {
+        "noiseHandshake1NoCategoryFrame": json.dumps({"psk_id": psk_id_for(PSK)}).encode(),
+        "noiseHandshake1UnknownCategoryFrame": json.dumps(
+            {"psk_id": psk_id_for(PSK), "psk_category": "xx"}).encode(),
+        "noiseHandshake1NoPskIdFrame": json.dumps({"psk_category": "lt"}).encode(),
+        "noiseHandshake1NotJsonFrame": b"psk_id=lt",
+        "noiseHandshake1InvalidUtf8Frame": b'{"psk_id": "\xff\xfe", "psk_category": "lt"}',
+        "noiseHandshake1PairingCategoryFrame": json.dumps(
+            {"psk_id": psk_id_for(PSK), "psk_category": "pr"}).encode(),
+    }
+    rejected_frames = {name: msg1_frame(payload) for name, payload in rejected.items()}
 
     msg2 = client.write_message(b"{}")
     assert server.read_message(msg2) == b"{}"
@@ -135,6 +156,7 @@ def main() -> int:
             {"type": "noise/handshake", "payload": {"data": b64u(msg1)}},
             separators=(",", ":"),
         ),
+        "rejected_noise_handshake_1_frames": rejected_frames,
         "noise_message_2_b64u": b64u(msg2),
         "handshake_hash": client.get_handshake_hash().hex(),
         "app_frame_client_to_server": hello_ct.hex(),
@@ -147,6 +169,9 @@ def main() -> int:
     def kt(s: str) -> str:
         return '"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
 
+    rejected_kt = "\n".join(
+        f"    const val {name} = {kt(frame)}" for name, frame in rejected_frames.items()
+    )
     body = f'''package com.sendspindroid.sendspin.protocol
 
 // GENERATED FILE - do not edit by hand.
@@ -158,6 +183,9 @@ def main() -> int:
 // serverInitFrame deliberately orders its fields differently from the client's
 // and carries an unknown key. A driver that re-encodes it to build the prologue
 // will normalise both away and the handshake will fail - which is the point.
+//
+// The noiseHandshake1*Frame variants are Noise message 1 under the same keys
+// with an inner payload the client must refuse.
 object WireTestVectors {{
     const val suiteWireName = {kt(SUITE_WIRE)}
     const val clientStaticPrivate = {kt(CLIENT_STATIC.hex())}
@@ -170,6 +198,7 @@ object WireTestVectors {{
     const val serverInitFrame = {kt(SERVER_INIT)}
     const val prologueHex = {kt(prologue.hex())}
     const val noiseHandshake1Frame = {kt(v["noise_handshake_1_frame"])}
+{rejected_kt}
     const val noiseMessage2B64u = {kt(v["noise_message_2_b64u"])}
     const val handshakeHash = {kt(v["handshake_hash"])}
     const val appFrameClientToServer = {kt(hello_ct.hex())}

@@ -58,6 +58,11 @@ class NotificationMetadataControlsTest : E2ETestBase() {
 
         // Wire up to our test client
         connectAndHandshake()
+        // Commands only go out once the server has said which it supports.
+        fakeTransport.simulateTextMessage(
+            """{"type":"server/state","payload":{"controller":{""" +
+                """"supported_commands":["play","pause","next","previous"]}}}"""
+        )
         player.setSendSpinClient(client)
     }
 
@@ -188,17 +193,6 @@ class NotificationMetadataControlsTest : E2ETestBase() {
 
         assertEquals("Should report STATE_BUFFERING",
             Player.STATE_BUFFERING, player.playbackState)
-    }
-
-    @Test
-    fun `draining state reports as still playing`() {
-        val mockSync = mockk<SyncAudioPlayer>(relaxed = true)
-        every { mockSync.getPlaybackState() } returns SyncPlaybackState.DRAINING
-        player.setSyncAudioPlayer(mockSync)
-
-        assertTrue("DRAINING should report as playing", player.isPlaying)
-        assertEquals("DRAINING should be STATE_READY",
-            Player.STATE_READY, player.playbackState)
     }
 
     @Test

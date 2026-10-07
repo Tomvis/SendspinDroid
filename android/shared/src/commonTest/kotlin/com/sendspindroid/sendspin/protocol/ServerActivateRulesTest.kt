@@ -4,17 +4,34 @@ import com.sendspindroid.sendspin.crypto.PskCategory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
-import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 
 /**
- * The `server/activate` admissibility table.
+ * The `server/activate` admissibility table, as of Sendspin 1.0.0-rc1:
+ *
+ * | PSK matched   | Allowed activity sets                                          |
+ * |---------------|----------------------------------------------------------------|
+ * | long-term PSK | `[]` or `['playback']`                                         |
+ * | pairing PSK   | `[]`, `['pairing']`, `['playback']`*, `['playback','pairing']`* |
+ * | Sentinel PSK  | `[]`, `['pairing']`, `['playback']`*, `['playback','pairing']`* |
+ *
+ * \* Only when the client has unpaired access enabled.
  *
  * These rules decide whether an unauthenticated server gets to drive this
  * device's audio, so the negative cases matter more than the positive ones.
  */
 class ServerActivateRulesTest {
+
+    private val playback = Activity.PLAYBACK
+    private val pairing = Activity.PAIRING
+
+    private val unauthorized = ActivationOutcome.Close(ServerActivateRules.GOODBYE_UNAUTHORIZED)
+    private val pairingRequired = ActivationOutcome.Close(ServerActivateRules.GOODBYE_PAIRING_REQUIRED)
+    private val methodNotSupported =
+        ActivationOutcome.AbortPairing(ServerActivateRules.ABORT_METHOD_NOT_SUPPORTED)
+
+    private val roles = listOf("player@v1")
 
     private fun parse(json: String): ServerActivate? =
         ServerActivateRules.parse(
@@ -25,7 +42,8 @@ class ServerActivateRulesTest {
         vararg activities: Activity,
         roles: List<String>? = null,
         method: String? = null,
-    ) = ServerActivate(activities.toSet(), roles, method, emptyList())
+        format: String? = if (method == "dynamic_pairing_code") "digits" else null,
+    ) = ServerActivate(activities.toSet(), roles, method, format, emptyList())
 
     private fun evaluate(
         activate: ServerActivate,
@@ -33,166 +51,276 @@ class ServerActivateRulesTest {
         unpairedAccess: Boolean = true,
         previousRoles: List<String> = emptyList(),
         first: Boolean = true,
-        methods: Set<String> = setOf("pairing_psk"),
+        methods: Set<String> = setOf("pairing_psk", "dynamic_pairing_code"),
     ) = ServerActivateRules.evaluate(
         activate, category, unpairedAccess, previousRoles, first, methods
     )
 
-    // ---- the spec's own worked example ----
+    /** The method a conforming server picks for a pairing activation on [category]. */
+    private fun methodFor(category: PskCategory) =
+        if (category == PskCategory.PAIRING) "pairing_psk" else "dynamic_pairing_code"
+
+    // ---- the table, row by row ----
 
     @Test
-    fun sentinelPlaybackWithUnpairedAccessDisabledAsksForPairing() {
-        // "Under a hypothetical unpaired_access: enabled, ['playback'] would be
-        // an allowed set ... so the activation would be admissible: the client
-        // closes with 'pairing_required'."
-        val outcome = evaluate(
-            activate(Activity.PLAYBACK, roles = listOf("player@v1")),
-            unpairedAccess = false,
+    fun theAllowedActivitySetsAreExactlyTheTable() {
+        val none = emptySet<Activity>()
+        val all = listOf(none, setOf(pairing), setOf(playback), setOf(playback, pairing))
+
+        // allowed[category][unpairedAccess] -> the sets the table lists.
+        val expected = mapOf(
+            (PskCategory.LONG_TERM to true) to setOf(none, setOf(playback)),
+            (PskCategory.LONG_TERM to false) to setOf(none, setOf(playback)),
+            (PskCategory.PAIRING to true) to all.toSet(),
+            (PskCategory.PAIRING to false) to setOf(none, setOf(pairing)),
+            (PskCategory.SENTINEL to true) to all.toSet(),
+            (PskCategory.SENTINEL to false) to setOf(none, setOf(pairing)),
         )
-        assertEquals(
-            ActivationOutcome.Close(ServerActivateRules.GOODBYE_PAIRING_REQUIRED),
-            outcome,
-        )
+        for ((key, allowed) in expected) {
+            val (category, unpairedAccess) = key
+            for (activities in all) {
+                assertEquals(
+                    activities in allowed,
+                    ServerActivateRules.activitiesAllowed(category, activities, unpairedAccess),
+                    "$category unpaired_access=$unpairedAccess activities=$activities",
+                )
+            }
+        }
     }
 
     @Test
-    fun sentinelPlaybackPlusManagementIsUnauthorizedNotPairingRequired() {
-        // "no unpaired-access setting makes that set allowed on the Sentinel
-        // PSK, so the reason is 'unauthorized'." The distinction matters: one
-        // tells the operator to pair, the other says never.
-        val outcome = evaluate(
-            activate(Activity.PLAYBACK, Activity.MANAGEMENT, roles = listOf("player@v1")),
-            unpairedAccess = false,
-        )
+    fun aLongTermSessionAcceptsEmptyAndPlaybackAndNothingWithPairing() {
+        val cat = PskCategory.LONG_TERM
+        assertEquals(ActivationOutcome.Accept(emptyList()), evaluate(activate(), category = cat))
         assertEquals(
-            ActivationOutcome.Close(ServerActivateRules.GOODBYE_UNAUTHORIZED),
-            outcome,
+            ActivationOutcome.Accept(roles),
+            evaluate(activate(playback, roles = roles), category = cat),
         )
+        // Unpaired access is irrelevant to a paired session.
+        assertEquals(
+            ActivationOutcome.Accept(roles),
+            evaluate(activate(playback, roles = roles), category = cat, unpairedAccess = false),
+        )
+        // "long-term PSK: [] or ['playback']". A paired session never pairs,
+        // whatever method is named, and no setting of ours would change that.
+        for (method in listOf("pairing_psk", "dynamic_pairing_code")) {
+            for (unpairedAccess in listOf(true, false)) {
+                assertEquals(
+                    unauthorized,
+                    evaluate(activate(pairing, method = method), category = cat, unpairedAccess = unpairedAccess),
+                )
+                assertEquals(
+                    unauthorized,
+                    evaluate(
+                        activate(playback, pairing, roles = roles, method = method),
+                        category = cat, unpairedAccess = unpairedAccess,
+                    ),
+                )
+            }
+        }
     }
 
-    // ---- allowed sets per PSK category ----
-
     @Test
-    fun sentinelAllowsEmptyPairingAndPlaybackOnly() {
-        assertTrue(evaluate(activate()) is ActivationOutcome.Accept)
-        assertTrue(evaluate(activate(Activity.PLAYBACK)) is ActivationOutcome.Accept)
-        // management is never allowed on an unauthenticated session.
-        assertEquals(
-            ActivationOutcome.Close(ServerActivateRules.GOODBYE_UNAUTHORIZED),
-            evaluate(activate(Activity.MANAGEMENT)),
-        )
-    }
-
-    @Test
-    fun pairingPskAllowsOnlyPairing() {
-        val cat = PskCategory.PAIRING
-        assertTrue(
-            evaluate(activate(Activity.PAIRING, method = "pairing_psk"), category = cat)
-                is ActivationOutcome.Accept
-        )
-        for (bad in listOf(setOf(Activity.PLAYBACK), emptySet(), setOf(Activity.MANAGEMENT))) {
+    fun unpairedSessionsWithUnpairedAccessAcceptAllFourSets() {
+        for (cat in listOf(PskCategory.PAIRING, PskCategory.SENTINEL)) {
+            val method = methodFor(cat)
+            assertEquals(ActivationOutcome.Accept(emptyList()), evaluate(activate(), category = cat), "$cat []")
             assertEquals(
-                ActivationOutcome.Close(ServerActivateRules.GOODBYE_UNAUTHORIZED),
-                evaluate(ServerActivate(bad, null, null, emptyList()), category = cat),
-                "activities=$bad",
+                ActivationOutcome.Accept(emptyList()),
+                evaluate(activate(pairing, method = method), category = cat),
+                "$cat [pairing]",
+            )
+            assertEquals(
+                ActivationOutcome.Accept(roles),
+                evaluate(activate(playback, roles = roles), category = cat),
+                "$cat [playback]",
+            )
+            // Pairing runs alongside playback and keeps the roles.
+            assertEquals(
+                ActivationOutcome.Accept(roles),
+                evaluate(activate(playback, pairing, roles = roles, method = method), category = cat),
+                "$cat [playback, pairing]",
             )
         }
     }
 
     @Test
-    fun longTermAllowsPairingAloneOrSubsetsOfPlaybackAndManagement() {
-        val cat = PskCategory.LONG_TERM
-        assertTrue(evaluate(activate(Activity.PAIRING, method = "dynamic_pin"),
-            category = cat, methods = setOf("dynamic_pin")) is ActivationOutcome.Accept)
-        assertTrue(evaluate(activate(Activity.PLAYBACK, Activity.MANAGEMENT),
-            category = cat) is ActivationOutcome.Accept)
-        assertTrue(evaluate(activate(), category = cat) is ActivationOutcome.Accept)
-        // Mixing pairing with the others is not a permitted set.
+    fun unpairedSessionsWithoutUnpairedAccessStillAcceptEmptyAndPairing() {
+        for (cat in listOf(PskCategory.PAIRING, PskCategory.SENTINEL)) {
+            assertEquals(
+                ActivationOutcome.Accept(emptyList()),
+                evaluate(activate(), category = cat, unpairedAccess = false),
+                "$cat []",
+            )
+            assertEquals(
+                ActivationOutcome.Accept(emptyList()),
+                evaluate(activate(pairing, method = methodFor(cat)), category = cat, unpairedAccess = false),
+                "$cat [pairing]",
+            )
+        }
+    }
+
+    // ---- pairing_required versus unauthorized ----
+
+    @Test
+    fun theSpecsWorkedExampleAsksForPairing() {
+        // "A Sentinel-keyed connection to a client with unpaired access
+        // disabled receives activities: ['playback'] and active_roles:
+        // ['player@v1']. Under a hypothetical unpaired_access: enabled ... the
+        // activation would be admissible: the client closes with
+        // 'pairing_required'."
         assertEquals(
-            ActivationOutcome.Close(ServerActivateRules.GOODBYE_UNAUTHORIZED),
-            evaluate(activate(Activity.PAIRING, Activity.PLAYBACK), category = cat),
+            pairingRequired,
+            evaluate(activate(playback, roles = roles), unpairedAccess = false),
+        )
+    }
+
+    @Test
+    fun pairingRequiredAppliesToEveryUnpairedSessionNotOnlyTheSentinel() {
+        // "If the session is unpaired" - a pairing-PSK session is unpaired too.
+        for (cat in listOf(PskCategory.PAIRING, PskCategory.SENTINEL)) {
+            val method = methodFor(cat)
+            // Each of these is admissible the moment unpaired access is on.
+            val needUnpairedAccess = listOf(
+                activate(playback),
+                activate(playback, roles = roles),
+                activate(playback, pairing, method = method),
+                activate(playback, pairing, roles = roles, method = method),
+                // Roles with no playback declared: only a playback-capable
+                // connection may carry them, and this one would be.
+                activate(roles = roles),
+                activate(pairing, roles = roles, method = method),
+            )
+            for (activation in needUnpairedAccess) {
+                assertEquals(
+                    pairingRequired,
+                    evaluate(activation, category = cat, unpairedAccess = false),
+                    "$cat $activation",
+                )
+                // And with it on, the same activation is accepted.
+                assertEquals(
+                    ActivationOutcome.Accept(activation.activeRoles ?: emptyList()),
+                    evaluate(activation, category = cat, unpairedAccess = true),
+                    "$cat $activation",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun enablingUnpairedAccessMustMakeTheWholeActivationAdmissible() {
+        // Rule 1 asks whether enabling unpaired access "would make the
+        // activation admissible". With a pairing method that is wrong for the
+        // PSK it would not, so the answer is the next rule that applies:
+        // 'unauthorized' for the activity set we may not accept.
+        assertEquals(
+            unauthorized,
+            evaluate(
+                activate(playback, pairing, roles = roles, method = "pairing_psk"),
+                category = PskCategory.SENTINEL,
+                unpairedAccess = false,
+            ),
+        )
+    }
+
+    @Test
+    fun aPairedSessionIsNeverToldPairingIsRequired() {
+        // Rule 1 needs an unpaired session; a long-term one falls to rule 2.
+        assertEquals(
+            unauthorized,
+            evaluate(
+                activate(pairing, method = "dynamic_pairing_code"),
+                category = PskCategory.LONG_TERM,
+                unpairedAccess = false,
+            ),
         )
     }
 
     // ---- active_roles ----
 
     @Test
-    fun rolesRequirePlaybackCapability() {
-        // Pairing-only connections are not playback-capable, so they may not
-        // carry roles.
-        assertEquals(
-            ActivationOutcome.Close(ServerActivateRules.GOODBYE_UNAUTHORIZED),
-            evaluate(
-                activate(Activity.PAIRING, roles = listOf("player@v1"), method = "pairing_psk"),
-                category = PskCategory.PAIRING,
-            ),
-        )
-    }
-
-    @Test
     fun rolesMayBeCarriedWithoutPlaybackBeingDeclared() {
-        // "it may do so even when 'playback' is not currently in activities."
-        val outcome = evaluate(
-            activate(roles = listOf("player@v1")),
-            category = PskCategory.LONG_TERM,
-        )
-        assertEquals(ActivationOutcome.Accept(listOf("player@v1")), outcome)
+        // "it MAY do so even when 'playback' is not currently in activities."
+        for (cat in PskCategory.entries) {
+            assertEquals(
+                ActivationOutcome.Accept(roles),
+                evaluate(activate(roles = roles), category = cat),
+                cat.name,
+            )
+        }
     }
 
     @Test
     fun absentRolesOnTheFirstActivationMeanEmpty() {
         assertEquals(
             ActivationOutcome.Accept(emptyList()),
-            evaluate(activate(Activity.PLAYBACK), first = true),
+            evaluate(activate(playback), previousRoles = roles, first = true),
         )
     }
 
     @Test
     fun absentRolesLaterPersistThePreviousValue() {
         assertEquals(
-            ActivationOutcome.Accept(listOf("player@v1")),
+            ActivationOutcome.Accept(roles),
+            evaluate(activate(playback), previousRoles = roles, first = false),
+        )
+        // Entering pairing does not by itself affect active_roles.
+        assertEquals(
+            ActivationOutcome.Accept(roles),
             evaluate(
-                activate(Activity.PLAYBACK),
-                previousRoles = listOf("player@v1"),
+                activate(playback, pairing, method = "dynamic_pairing_code"),
+                previousRoles = roles,
                 first = false,
             ),
         )
-    }
-
-    @Test
-    fun losingPlaybackCapabilityLaterClearsRolesRatherThanRejecting() {
-        // "the persisted roles are treated as empty rather than the message
-        // rejected" - a subtle rule that would otherwise drop the connection.
-        val outcome = evaluate(
-            activate(Activity.PAIRING, method = "pairing_psk"),
-            category = PskCategory.PAIRING,
-            previousRoles = listOf("player@v1"),
-            first = false,
+        // An explicit empty list clears them.
+        assertEquals(
+            ActivationOutcome.Accept(emptyList()),
+            evaluate(activate(playback, roles = emptyList()), previousRoles = roles, first = false),
         )
-        assertEquals(ActivationOutcome.Accept(emptyList()), outcome)
     }
 
     @Test
-    fun sourceRoleIsRefusedWhenUntrusted() {
-        // A source captures microphone or line-in audio; an unauthenticated
-        // server must never be handed it.
-        for (category in listOf(PskCategory.SENTINEL, PskCategory.PAIRING)) {
-            val outcome = evaluate(
-                activate(Activity.PLAYBACK, roles = listOf("source@v1")),
-                category = category,
+    fun losingPlaybackCapabilityLaterClearsPersistedRolesRatherThanRejecting() {
+        // "if a later activation changes activities so the connection is no
+        // longer playback-capable without explicitly sending active_roles, the
+        // persisted roles are treated as empty rather than the message
+        // rejected." Reachable when unpaired access was switched off after the
+        // roles were granted.
+        for (cat in listOf(PskCategory.PAIRING, PskCategory.SENTINEL)) {
+            assertEquals(
+                ActivationOutcome.Accept(emptyList()),
+                evaluate(
+                    activate(pairing, method = methodFor(cat)),
+                    category = cat,
+                    unpairedAccess = false,
+                    previousRoles = roles,
+                    first = false,
+                ),
+                cat.name,
             )
             assertEquals(
-                ActivationOutcome.Close(ServerActivateRules.GOODBYE_UNAUTHORIZED),
-                outcome,
-                category.name,
+                ActivationOutcome.Accept(emptyList()),
+                evaluate(activate(), category = cat, unpairedAccess = false, previousRoles = roles, first = false),
+                cat.name,
             )
         }
-        // Permitted once paired.
-        assertTrue(
+    }
+
+    @Test
+    fun aRehandshakeToTheLongTermPskKeepsRolesWhenTheNextActivationOmitsThem() {
+        // connection.md#re-handshake: the activation after it "is a subsequent
+        // one on the same connection. The activation rules, including those
+        // for omitted active_roles, apply under the newly matched PSK."
+        assertEquals(
+            ActivationOutcome.Accept(roles),
             evaluate(
-                activate(Activity.PLAYBACK, roles = listOf("source@v1")),
+                activate(playback),
                 category = PskCategory.LONG_TERM,
-            ) is ActivationOutcome.Accept
+                unpairedAccess = false,
+                previousRoles = roles,
+                first = false,
+            ),
         )
     }
 
@@ -200,28 +328,73 @@ class ServerActivateRulesTest {
 
     @Test
     fun aMethodWeDoNotOfferAbortsButKeepsTheConnection() {
-        val outcome = evaluate(
-            activate(Activity.PAIRING, method = "static_pin"),
-            methods = setOf("pairing_psk"),
+        assertEquals(
+            methodNotSupported,
+            evaluate(
+                activate(pairing, method = "static_pairing_code"),
+                methods = setOf("pairing_psk", "dynamic_pairing_code"),
+            ),
         )
         assertEquals(
-            ActivationOutcome.AbortPairing(ServerActivateRules.ABORT_METHOD_NOT_SUPPORTED),
-            outcome,
+            methodNotSupported,
+            evaluate(activate(pairing, method = "dynamic_pairing_code"), methods = setOf("pairing_psk")),
         )
     }
 
     @Test
-    fun pairingPskIsOnlyValidOnAPairingPskSession() {
-        // "MUST be 'pairing_psk' if and only if the matched PSK is the Pairing PSK."
+    fun pairingPskIsValidIfAndOnlyIfThePairingPskMatched() {
+        // "pairing.method MUST be 'pairing_psk' if and only if the matched PSK
+        // is the pairing PSK."
         assertEquals(
-            ActivationOutcome.AbortPairing(ServerActivateRules.ABORT_METHOD_NOT_SUPPORTED),
-            evaluate(activate(Activity.PAIRING, method = "pairing_psk"),
-                category = PskCategory.SENTINEL),
+            methodNotSupported,
+            evaluate(activate(pairing, method = "pairing_psk"), category = PskCategory.SENTINEL),
         )
         assertEquals(
-            ActivationOutcome.AbortPairing(ServerActivateRules.ABORT_METHOD_NOT_SUPPORTED),
-            evaluate(activate(Activity.PAIRING, method = "dynamic_pin"),
-                category = PskCategory.PAIRING, methods = setOf("dynamic_pin")),
+            methodNotSupported,
+            evaluate(activate(pairing, method = "dynamic_pairing_code"), category = PskCategory.PAIRING),
+        )
+    }
+
+    @Test
+    fun aPairingActivationWithNoMethodAborts() {
+        // "pairing: Required when 'pairing' is in activities."
+        assertEquals(methodNotSupported, evaluate(activate(pairing)))
+    }
+
+    @Test
+    fun aDynamicActivationNeedsAnEmissionFormatTheClientOffers() {
+        // "... or a pairing.format the client does not currently offer - reply
+        // with pair/abort reason method_not_supported". Only `digits` is
+        // advertised; `format` is required for this method, so absent is not
+        // an offered format either.
+        assertEquals(
+            ActivationOutcome.Accept(emptyList()),
+            evaluate(activate(pairing, method = "dynamic_pairing_code", format = "digits")),
+        )
+        for (format in listOf("qr_code", "semaphore", null)) {
+            assertEquals(
+                methodNotSupported,
+                evaluate(activate(pairing, method = "dynamic_pairing_code", format = format)),
+                "format $format",
+            )
+        }
+    }
+
+    @Test
+    fun theFormatIsIgnoredForThePairingPskMethod() {
+        assertEquals(
+            ActivationOutcome.Accept(emptyList()),
+            evaluate(activate(pairing, method = "pairing_psk"), category = PskCategory.PAIRING),
+        )
+    }
+
+    @Test
+    fun theMethodIsIgnoredWhenPairingIsNotDeclared() {
+        // "A client ignores this field when activities does not include
+        // 'pairing'."
+        assertEquals(
+            ActivationOutcome.Accept(roles),
+            evaluate(activate(playback, roles = roles, method = "static_pairing_code")),
         )
     }
 
@@ -230,16 +403,14 @@ class ServerActivateRulesTest {
     @Test
     fun parsesActivitiesRolesAndPairing() {
         val a = parse(
-            """{"type":"server/activate","payload":{"activities":["playback"],
-               "active_roles":["player@v1"],"pairing":{"method":"dynamic_pin","pin_length":6}}}"""
-            // pin_length is deliberately left in this fixture: it is not a field
-            // ServerActivate parses (the current spec has no such field, and the
-            // dynamic code is fixed at six digits), so this documents that an
-            // unrecognized key is tolerated rather than rejected.
+            """{"type":"server/activate","payload":{"activities":["playback","pairing"],
+               "active_roles":["player@v1"],
+               "pairing":{"method":"dynamic_pairing_code","format":"digits"}}}"""
         )!!
-        assertEquals(setOf(Activity.PLAYBACK), a.activities)
+        assertEquals(setOf(playback, pairing), a.activities)
         assertEquals(listOf("player@v1"), a.activeRoles)
-        assertEquals("dynamic_pin", a.pairingMethod)
+        assertEquals("dynamic_pairing_code", a.pairingMethod)
+        assertEquals("digits", a.pairingFormat)
     }
 
     @Test
@@ -253,10 +424,10 @@ class ServerActivateRulesTest {
 
     @Test
     fun ignoresUnknownActivitiesRatherThanFailing() {
-        // Forward compatibility: "MUST ignore unrecognized payload fields".
-        val a = parse("""{"payload":{"activities":["playback","teleport"]}}""")!!
-        assertEquals(setOf(Activity.PLAYBACK), a.activities)
-        assertEquals(listOf("teleport"), a.unknownActivities)
+        // 'management' was an activity before 1.0.0-rc1; it is unknown now.
+        val a = parse("""{"payload":{"activities":["playback","management"]}}""")!!
+        assertEquals(setOf(playback), a.activities)
+        assertEquals(listOf("management"), a.unknownActivities)
     }
 
     @Test

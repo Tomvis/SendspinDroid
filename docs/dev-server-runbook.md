@@ -28,36 +28,12 @@ python -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
 
-pip install "aiosendspin[server] @ git+https://github.com/sendspin/aiosendspin@90feb19894793749eb017f9e1bb21929dc8fe94a"
+pip install "aiosendspin[server]==10.0.0"
 ```
 
-**This is not a released version, and the pin above is a deliberate stand-in.**
-As of this writing, aiosendspin 10.0.0 -- the version with the dynamic-pairing-code
-API this dev server needs -- exists only as a **draft GitHub release**
-(`draft=true`, `published_at=null`) with **no git tag**; it has not been
-published to PyPI. The dynamic-pairing-code surface
-(`PairMethod.DYNAMIC_PAIRING_CODE`, `run_dynamic_pairing_code_server`,
-`PairingCodeFormat`) exists only on the `aiosendspin` repository's `main`
-branch. The commit above is `main` as of 2026-08-31.
-
-Pin the exact commit SHA, never `@main`: acceptance evidence gathered against
-a branch that moves underneath it is not reproducible, and there would be no
-way to tell a real regression in SendSpinDroid from an unrelated upstream
-change landing on `main` between test runs.
-
-**Revisit this pin once aiosendspin 10.0.0 actually ships** (a real PyPI
-release with a git tag). At that point switch back to a normal version pin
-(`pip install "aiosendspin[server]>=10,<11"`, matching whatever Music
-Assistant has moved to by then) and drop this note. Until then, do not
-assume anyone reading this later can run `pip install aiosendspin==10.0.0`
-and get something that works -- it will not resolve to anything on PyPI.
-
-Prior to this, the script pinned `aiosendspin==9.1.0`, matching what Music
-Assistant currently requires (`music_assistant/providers/sendspin/manifest.json`).
-`aiosendspin.noise.*` is not a stability-guaranteed API, so expect renames
-across major versions -- the 10.x pairing module alone renamed `DYNAMIC_PIN`
-to `DYNAMIC_PAIRING_CODE`, `STATIC_PIN` to `STATIC_PAIRING_CODE`, and
-`decode_token` to `decode_psk_token` relative to 9.1.x.
+10.0.0 is the first release that speaks the Sendspin 1.0.0-rc1 wire, and the
+version Music Assistant pins. `aiosendspin.noise.*` is not a stability-guaranteed
+API, so expect renames across major versions and keep the pin exact.
 
 ## Running
 
@@ -148,14 +124,93 @@ CPace exchange keyed by that code -- never by transmitting the code itself.
      `paired=True` on reconnect without repeating this procedure).
    - **The re-handshake to the new long-term PSK succeeds.** The dynamic
      pairing exchange itself runs over the *old* connection security; once
-     it finishes, the client is expected to reconnect (or the connection is
-     expected to renegotiate) using the newly stored PSK. Confirm the
-     tablet's connection stays healthy across that transition rather than
-     dropping and failing to come back.
+     it finishes, the server re-handshakes in band to the newly stored PSK
+     without closing the WebSocket. Confirm the tablet's connection stays
+     healthy across that transition rather than dropping.
 
-A wrong code produces a `pair/abort` with reason `pairing_code_mismatch`
-instead of a success -- see the device-acceptance checklist below for what to
-confirm about the client's recovery from that.
+A wrong code makes the client send `pair/abort` with reason
+`pairing_code_mismatch` and stop showing the code. The attempt is over (the
+client runs a single round and does not send `client/pair-retry`); the
+connection stays open, and `pair-dynamic` again starts a new attempt with a new
+code.
+
+## Verifying the wire end to end
+
+`--play-test-audio SECONDS` makes the server stream that many seconds of PCM to
+the first client that is granted a player role. The samples are a frame
+counter, so a receiver can prove it read every chunk at the right offset.
+`NoiseHandshakeCheck` drives the app's real handshake driver, wire codec,
+builders, activation rules and binary parser against it:
+
+```bash
+python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
+    --trust-all-unpaired --no-console --debug --play-test-audio 5
+
+cd android && ./gradlew :conformance-client:fatJar
+java -cp conformance-client/build/libs/conformance-client-all.jar \
+    com.sendspindroid.conformance.NoiseHandshakeCheck \
+    ws://127.0.0.1:18931/sendspin --hold-seconds=16 --expect-audio
+```
+
+It passes only if audio arrived, every chunk was a whole number of PCM frames,
+the chunk timestamps follow one another, and the frame counter never breaks.
+The server log must contain no `non-compliant client` line.
+
+`--send-test-artwork` makes the server send two album artwork images to the
+first client with an artwork stream - one that fits a single part and one that
+needs several - and then clear the channel. Add `--expect-artwork` to the
+client: it reassembles them with the app's `ArtworkReceiver` and passes only if
+an image arrived in more than one part and the last one was cleared. Both sides
+print each image's SHA-256, which must match.
+
+To exercise the in-band re-handshake as well, add
+`--pair-token-file <identity-file>.token` to the server and
+`--expect-rehandshake` to the client. The tool writes its pairing token to that
+file; the server then starts a Pairing PSK pairing, which re-handshakes the
+Sentinel-keyed connection to the pairing PSK. The tool checks that no hello was
+repeated and that `server/activate` followed, then declines the pairing with
+`pair/abort`.
+
+`--offer-seek SEEK_MAX_MS` makes the server offer `seek` (up to that position)
+and `seek_relative` to the first controller, and log a `controller event:` line
+for every command it accepts. Add `--seek` to the client: once the controller
+state offers both, it sends one of each, built by the app's
+`MessageBuilder.buildCommand`. The server log must then show a
+`ControllerSeekEvent` and a `ControllerSeekRelativeEvent`.
+
+### Pairing without an operator
+
+With `--pair` the tool runs the pairing instead of declining it, through the
+app's own `PairingPskFlow` and `DynamicPairingCodeFlow`. It keeps its records
+in `<identity-file>.records`, and passes once the record is persisted, the
+server has re-handshaken to the new long-term PSK and a `server/activate` has
+followed. A second run with `--expect-paired` then passes only if the fresh
+handshake matched that record.
+
+```bash
+ID=/tmp/noisecheck/client.key
+CHECK="java -cp conformance-client/build/libs/conformance-client-all.jar \
+    com.sendspindroid.conformance.NoiseHandshakeCheck ws://127.0.0.1:18931/sendspin $ID"
+
+# Pairing PSK: the server reads the token the tool writes.
+python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
+    --trust-all-unpaired --no-console --debug --pair-token-file $ID.token
+$CHECK --pair && $CHECK --expect-paired
+
+# Dynamic pairing code: the server enters the code the tool writes to $ID.code.
+# --pair-dynamic-wrong-codes 1 enters a wrong code first; the tool answers
+# pair/abort pairing_code_mismatch, stays connected and pairs on the next
+# attempt, which --expect-mismatches=1 requires.
+python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
+    --trust-all-unpaired --no-console --debug \
+    --pair-dynamic-code-file $ID.code --pair-dynamic-wrong-codes 1
+$CHECK --pair --expect-mismatches=1 && $CHECK --expect-paired
+```
+
+Use a fresh `--state-dir` and identity file per run. `--pair` does not drive
+`SendSpinProtocolHandler`, which is Android-only: the `pairing_index` count,
+the routing of messages to the selected flow and the attempt timer are covered
+by `PairingAttemptTest` instead.
 
 ## Verifying the target is configured correctly
 
@@ -302,11 +357,43 @@ adding a log call to that function. (An earlier version of this runbook claimed
 ## Relationship to the conformance harness
 
 The harness (`.github/workflows/conformance.yml`) constructs its own server via
-`Sendspin/conformance`'s `aiosendspin_server.py` adapter, which hardcodes
-`allow_unencrypted=True` and regenerates the identity per run. That is fine for
-the legacy scenarios it runs today but cannot be the encrypted target.
+`Sendspin/conformance`'s `aiosendspin_server.py` adapter. Since 2026-09-04 that
+server requires the Noise handshake (`allow_unencrypted` is off unless a
+scenario asks for the legacy mode), derives its identity from the case's ids on
+every run, and approves every unpaired client that connects.
 
-`ci/conformance/register_sendspindroid.py` now rewrites that literal to read the
-`CONFORMANCE_ALLOW_UNENCRYPTED` environment variable, defaulting to the existing
-behaviour, so a future Phase 1 exit criterion can flip one variable in CI instead
-of forking the harness. The patch fails loudly if the literal disappears upstream.
+The adapter the harness launches (`conformance-client`'s `Main.kt`, through
+`ci/conformance/sendspindroid_client.py`) therefore speaks the encrypted wire
+only. It shares `EncryptedSocket` with `NoiseHandshakeCheck`: the app's
+handshake driver and wire codec, with the app's activation rules, builders and
+parsers on top. It connects unpaired on the Sentinel PSK with a fresh identity.
+
+`ci/conformance/register_sendspindroid.py` copies the launcher into the harness
+and appends the registry entry; it no longer patches the server adapter. The
+workflow asserts on the three client-initiated scenarios:
+
+| scenario | what the adapter does |
+|---|---|
+| `client-initiated-pcm` | hashes the PCM it received; the harness compares it with the source |
+| `client-initiated-request-format-pcm` | starts on 24-bit PCM, then prefers 16-bit |
+| `client-initiated-request-format-flac` | starts on PCM, then prefers FLAC |
+
+The two renegotiation scenarios are named after `stream/request-format`, which
+rc1 removed. The adapter asks the rc1 way, with `format` in the `client/state`
+player object, and the harness only checks that a second `stream/start` carried
+the requested format. Server-initiated scenarios stay declared unsupported: the
+app only ever dials out.
+
+To run it locally, from a directory holding clones of `Sendspin/conformance`,
+`Sendspin/aiosendspin` and `Sendspin/sendspin-cli` (Python 3.12):
+
+```bash
+pip install -e conformance -e aiosendspin
+python <repo>/ci/conformance/register_sendspindroid.py conformance
+cd conformance
+SENDSPINDROID_CLIENT_JAR=<repo>/android/conformance-client/build/libs/conformance-client-all.jar \
+    conformance run --from aiosendspin --to sendspindroid --results-dir results
+```
+
+The command exits non-zero because the server-initiated scenarios are reported
+as failed; each case's logs and summaries are under `results/data/`.

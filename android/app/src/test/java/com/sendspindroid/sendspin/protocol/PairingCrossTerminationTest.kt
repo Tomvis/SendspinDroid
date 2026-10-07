@@ -37,8 +37,7 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class PairingCrossTerminationTest {
 
-    private fun activateJson(method: String) =
-        """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"$method"}}}"""
+    private fun activateJson(method: String) = pairingActivateJson(method)
 
     @Test
     fun `a dynamic activation terminates a live Pairing PSK attempt`() {
@@ -105,6 +104,16 @@ class PairingCrossTerminationTest {
     }
 }
 
+/** A pairing `server/activate`; `format` is required for (only) the dynamic method. */
+fun pairingActivateJson(
+    method: String,
+    format: String? = if (method == "dynamic_pairing_code") "digits" else null,
+): String {
+    val formatField = if (format == null) "" else ""","format":"$format""""
+    return """{"type":"server/activate","payload":{"activities":["pairing"],""" +
+        """"pairing":{"method":"$method"$formatField}}}"""
+}
+
 /**
  * A handler whose matched PSK category can be changed mid-test, to simulate a
  * server switching pairing methods across activations (e.g. around an
@@ -121,6 +130,10 @@ class CrossTerminationTestHandler : SendSpinProtocolHandler("CrossTerminationTes
     val events = mutableListOf<String>()
     val store = RecordingTrustStore()
 
+    /** The code on screen, or null when none is shown. */
+    var shownCode: String? = null
+    val protocolFailures = mutableListOf<String>()
+
     private val timeFilter = SendspinTimeFilter()
     private val counterStore = InMemoryPairingCounterStore()
     private val handshakeHash = ByteArray(32) { 7 }
@@ -134,6 +147,18 @@ class CrossTerminationTestHandler : SendSpinProtocolHandler("CrossTerminationTes
     fun clearEvents() {
         events.clear()
         sent.clear()
+    }
+
+    override fun onDynamicPairingCodeEmitted(code: String) {
+        shownCode = code
+    }
+
+    override fun onDynamicPairingCodeCleared() {
+        shownCode = null
+    }
+
+    override fun onProtocolFailure(reason: String) {
+        protocolFailures.add(reason)
     }
 
     override fun offeredPairMethods(): Set<String> = setOf("pairing_psk", "dynamic_pairing_code")
@@ -156,19 +181,21 @@ class CrossTerminationTestHandler : SendSpinProtocolHandler("CrossTerminationTes
         events.add("close")
     }
 
-    override fun sendTextMessage(text: String) {
+    init {
+        installEncryptedChannel(PlaintextCrypto)
+    }
+
+    override fun sendBinaryFrame(bytes: ByteArray) {
+        val text = bytes.jsonFrameText() ?: return
         sent.add(text)
         events.add("send:" + Json.parseToJsonElement(text).jsonObject["type"]?.jsonPrimitive?.content)
     }
-
-    override fun sendBinaryFrame(bytes: ByteArray) = Unit
 
     override fun getCoroutineScope(): CoroutineScope = scope
 
     override fun getTimeFilter(): SendspinTimeFilter = timeFilter
 
     override fun isLowMemoryMode(): Boolean = false
-    override fun getClientId(): String = "test-client"
     override fun getDeviceName(): String = "Test"
     override fun getManufacturer(): String = "Test"
     override fun getSoftwareVersion(): String = "0.0.0"

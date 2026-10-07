@@ -25,7 +25,6 @@ sealed class FailureReason {
     object HandshakeFailed : FailureReason()
     object AuthRejected : FailureReason()
     object ProtocolError : FailureReason()
-    object Exhausted : FailureReason()
 
     /**
      * The server answered `client/init` with a legacy `server/hello`, so it

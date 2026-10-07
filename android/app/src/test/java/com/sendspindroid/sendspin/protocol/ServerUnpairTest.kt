@@ -22,26 +22,20 @@ import org.junit.Test
  * `server/unpair`.
  *
  * `messaging.md#server--client-serverunpair`: "Sent by a paired server to drop
- * its own pairing record from the client. Valid at any time regardless of the
- * current `activities`; does not require `'management'` in the activity set."
+ * its own pairing record from the client. Valid regardless of the current
+ * `activities`."
  *
- * Three branches that behave differently, and the middle one is a MUST NOT:
- *
- * | matched PSK                        | record       | goodbye | close |
- * |------------------------------------|--------------|---------|-------|
- * | long-term, bound to a `server_id`  | removed      | yes     | yes   |
- * | long-term, shared (no `server_id`) | **retained** | yes     | yes   |
- * | Sentinel or Pairing (trust none)   | untouched    | no      | no    |
- *
- * Treating all records alike would delete a shared PSK that may authenticate
- * other servers, none of which asked to be unpaired.
+ * | matched PSK                    | record    | goodbye | close |
+ * |--------------------------------|-----------|---------|-------|
+ * | long-term (a paired session)   | removed   | yes     | yes   |
+ * | Sentinel or pairing (unpaired) | untouched | no      | no    |
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ServerUnpairTest {
 
     private val unpair = """{"type":"server/unpair"}"""
 
-    // ========== Stored-pubkey record: removed ==========
+    // ========== Paired session: record removed ==========
 
     @Test
     fun `a bound record is removed`() {
@@ -75,31 +69,7 @@ class ServerUnpairTest {
         assertEquals(listOf("send:client/goodbye", "close"), handler.events)
     }
 
-    // ========== Shared-PSK record: retained ==========
-
-    @Test
-    fun `a shared record is NOT removed`() {
-        val (handler, psk) = handlerPairedWith(serverId = null)
-
-        handler.handleTextMessageForTest(unpair)
-
-        assertNotNull(
-            "a shared-PSK record may back other servers; removing it is a MUST NOT",
-            handler.store.findByPskId(psk.pskId),
-        )
-    }
-
-    @Test
-    fun `a shared record still gets a goodbye and a close`() {
-        val (handler, _) = handlerPairedWith(serverId = null)
-
-        handler.handleTextMessageForTest(unpair)
-
-        assertEquals(listOf("send:client/goodbye", "close"), handler.events)
-        assertEquals("unpaired", handler.sent.single().reason())
-    }
-
-    // ========== Trust level none: ignored ==========
+    // ========== Unpaired session: ignored ==========
 
     @Test
     fun `a sentinel session ignores the unpair entirely`() {
@@ -116,7 +86,7 @@ class ServerUnpairTest {
     fun `a pairing session ignores the unpair entirely`() {
         // The dangerous case: a prior pairing may well have left a record for
         // this very server, but THIS session was admitted by the Pairing PSK
-        // and is trust_level none. Deciding the branch on "do we hold a record
+        // and is unpaired. Deciding the branch on "do we hold a record
         // for this server_id" rather than on the matched PSK deletes it.
         val handler = handlerMatching(Psk(ByteArray(32) { 2 }, PskCategory.PAIRING))
         val existing = handler.store.seed(Psk(ByteArray(32) { 9 }, PskCategory.LONG_TERM, "srv1"))
@@ -269,20 +239,22 @@ class UnpairTestHandler(
         events.add("close")
     }
 
-    override fun sendTextMessage(text: String) {
+    init {
+        installEncryptedChannel(PlaintextCrypto)
+    }
+
+    override fun sendBinaryFrame(bytes: ByteArray) {
+        val text = bytes.jsonFrameText() ?: return
         sent.add(text)
         val type = Json.parseToJsonElement(text).jsonObject["type"]?.jsonPrimitive?.content
         events.add("send:$type")
     }
-
-    override fun sendBinaryFrame(bytes: ByteArray) = Unit
 
     override fun getCoroutineScope(): CoroutineScope = scope
 
     override fun getTimeFilter(): SendspinTimeFilter = timeFilter
 
     override fun isLowMemoryMode(): Boolean = false
-    override fun getClientId(): String = "test-client"
     override fun getDeviceName(): String = "Test"
     override fun getManufacturer(): String = "Test"
     override fun getSoftwareVersion(): String = "0.0.0"

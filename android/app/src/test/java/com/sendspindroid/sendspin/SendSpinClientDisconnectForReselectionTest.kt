@@ -12,6 +12,7 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -21,7 +22,6 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
-import java.util.concurrent.atomic.AtomicBoolean
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendSpinDisconnectForReselectionTest {
@@ -131,24 +131,9 @@ class SendSpinDisconnectForReselectionTest {
     }
 
     @Test
-    fun `disconnectForReselection cancels in-flight reconnect coroutine`() {
-        val reconnectingField = SendSpin::class.java.getDeclaredField("reconnecting")
-        reconnectingField.isAccessible = true
-        (reconnectingField.get(client) as AtomicBoolean).set(true)
-
+    fun `disconnectForReselection asks the owner to reconnect`() {
         client.disconnectForReselection()
 
-        assertFalse("Reconnecting flag should be cleared",
-            (reconnectingField.get(client) as AtomicBoolean).get())
-    }
-
-    @Test
-    fun `disconnectForReselection does not set userInitiatedDisconnect`() {
-        client.disconnectForReselection()
-
-        val userInitiatedField = SendSpin::class.java.getDeclaredField("userInitiatedDisconnect")
-        userInitiatedField.isAccessible = true
-        assertFalse("userInitiatedDisconnect must stay false so MainActivity auto-reconnects",
-            (userInitiatedField.get(client) as AtomicBoolean).get())
+        verify(exactly = 1) { mockCallback.onDisconnected(true) }
     }
 }

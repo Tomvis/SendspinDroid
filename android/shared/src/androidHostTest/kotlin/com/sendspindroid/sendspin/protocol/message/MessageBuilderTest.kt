@@ -73,73 +73,45 @@ class MessageBuilderTest {
     }
 
     @Test
-    fun buildPlayerState_carriesAvailableVerbatim() {
-        // Spec PR #115 replaced the `state` enum with the `available` boolean,
-        // and the builder now forwards the caller's decision untouched. The
-        // policy that used to live here - available=false only for
-        // external_source - moved to SendSpinProtocolHandler.isAvailable(),
-        // which also gates on time-filter convergence per the spec.
-        val on = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, available = true)
-        ).jsonObject["payload"]!!.jsonObject
-        assertTrue(on["available"]?.jsonPrimitive?.boolean ?: false)
-
-        val off = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, available = false)
-        ).jsonObject["payload"]!!.jsonObject
-        assertEquals(false, off["available"]?.jsonPrimitive?.boolean)
-    }
-
-    @Test
-    fun buildPlayerState_dropsLegacyStateField() {
-        // The pre-#115 `state` string is gone from the wire; a server that
-        // still wanted it would be older than anything this fork talks to.
-        val payload = Json.parseToJsonElement(
-            MessageBuilder.buildPlayerState(50, false, available = true)
-        ).jsonObject["payload"]!!.jsonObject
-        assertNull(payload["state"])
-    }
-
-    @Test
-    fun buildPlayerState_staticDelayMsRoundedToInt() {
-        // Spec: static_delay_ms is an integer.
+    fun buildPlayerState_outputDelayMsRoundedToInt() {
+        // Spec: output_delay_ms is an integer.
         val msg = Json.parseToJsonElement(
             MessageBuilder.buildPlayerState(50, false, true, 12.5)
         ).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(13, player["static_delay_ms"]?.jsonPrimitive?.int)
+        assertEquals(13, player["output_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
-    fun buildPlayerState_staticDelayMsDefaultsToZero() {
+    fun buildPlayerState_outputDelayMsDefaultsToZero() {
         val msg = Json.parseToJsonElement(
             MessageBuilder.buildPlayerState(50, false, available = true)
         ).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(0, player["static_delay_ms"]?.jsonPrimitive?.int)
+        assertEquals(0, player["output_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
-    fun buildPlayerState_staticDelayMsClampedToSpecRange() {
+    fun buildPlayerState_outputDelayMsClampedToSpecRange() {
         // Spec: 0-5000, negative values not supported. A negative user sync
         // offset is applied locally but reported as 0.
         val negative = Json.parseToJsonElement(
             MessageBuilder.buildPlayerState(50, false, true, -120.0)
         ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(0, negative["static_delay_ms"]?.jsonPrimitive?.int)
+        assertEquals(0, negative["output_delay_ms"]?.jsonPrimitive?.int)
 
         val huge = Json.parseToJsonElement(
             MessageBuilder.buildPlayerState(50, false, true, 9999.0)
         ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals(5000, huge["static_delay_ms"]?.jsonPrimitive?.int)
+        assertEquals(5000, huge["output_delay_ms"]?.jsonPrimitive?.int)
     }
 
     @Test
-    fun buildPlayerState_declaresSetStaticDelaySupport() {
+    fun buildPlayerState_declaresSetOutputDelaySupport() {
         val msg = Json.parseToJsonElement(MessageBuilder.buildPlayerState(50, false, available = true)).jsonObject
         val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
         val commands = player["supported_commands"]!!.jsonArray.map { it.jsonPrimitive.content }
-        assertEquals(listOf("set_static_delay"), commands)
+        assertEquals(listOf("volume", "mute", "set_output_delay"), commands)
     }
 
     @Test
@@ -187,10 +159,7 @@ class MessageBuilderTest {
         val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("mute", mute = true)).jsonObject
         val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
         assertEquals("mute", controller["command"]?.jsonPrimitive?.content)
-        // Spec names the client -> server field `muted` (the server -> client
-        // server/command player payload uses `mute`; the asymmetry is real).
-        assertEquals(true, controller["muted"]?.jsonPrimitive?.boolean)
-        assertNull("client/command must not send `mute`", controller["mute"])
+        assertEquals(true, controller["mute"]?.jsonPrimitive?.boolean)
         assertNull(controller["volume"])
     }
 
@@ -200,34 +169,105 @@ class MessageBuilderTest {
         val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
         assertEquals("repeat_all", controller["command"]?.jsonPrimitive?.content)
         assertNull(controller["volume"])
-        assertNull(controller["muted"])
-    }
-
-    // --- buildStreamRequestFormat ---
-
-    @Test
-    fun buildStreamRequestFormat_includesOnlyProvidedFields() {
-        val msg = Json.parseToJsonElement(
-            MessageBuilder.buildStreamRequestFormat(codec = "flac")
-        ).jsonObject
-        assertEquals("stream/request-format", msg["type"]?.jsonPrimitive?.content)
-        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals("flac", player["codec"]?.jsonPrimitive?.content)
-        assertNull(player["sample_rate"])
-        assertNull(player["channels"])
-        assertNull(player["bit_depth"])
+        assertNull(controller["mute"])
     }
 
     @Test
-    fun buildStreamRequestFormat_allFields() {
-        val msg = Json.parseToJsonElement(
-            MessageBuilder.buildStreamRequestFormat("pcm", 48000, 2, 24)
-        ).jsonObject
-        val player = msg["payload"]!!.jsonObject["player"]!!.jsonObject
-        assertEquals("pcm", player["codec"]?.jsonPrimitive?.content)
-        assertEquals(48000, player["sample_rate"]?.jsonPrimitive?.int)
-        assertEquals(2, player["channels"]?.jsonPrimitive?.int)
-        assertEquals(24, player["bit_depth"]?.jsonPrimitive?.int)
+    fun buildCommand_seekCarriesPositionMs() {
+        val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("seek", positionMs = 42_000)).jsonObject
+        val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
+        assertEquals("seek", controller["command"]?.jsonPrimitive?.content)
+        assertEquals(42_000L, controller["position_ms"]?.jsonPrimitive?.long)
+        assertNull(controller["offset_ms"])
+    }
+
+    @Test
+    fun buildCommand_seekRelativeCarriesSignedOffsetMs() {
+        val msg = Json.parseToJsonElement(MessageBuilder.buildCommand("seek_relative", offsetMs = -10_000)).jsonObject
+        val controller = msg["payload"]!!.jsonObject["controller"]!!.jsonObject
+        assertEquals("seek_relative", controller["command"]?.jsonPrimitive?.content)
+        assertEquals(-10_000L, controller["offset_ms"]?.jsonPrimitive?.long)
+        assertNull(controller["position_ms"])
+    }
+
+    // --- buildPlayerState: format preference and artwork ---
+
+    @Test
+    fun buildPlayerState_omitsFormatWhenThereIsNoOverriddenPreference() {
+        // "Absent means no overridden preference."
+        val player = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, available = true)
+        ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
+        assertNull(player["format"])
+    }
+
+    @Test
+    fun buildPlayerState_reportsThePreferredFormatAsAWholeFormatObject() {
+        // roles/player/v1.md: `format` replaces stream/request-format. It is a
+        // complete supported_formats entry, never a partial one.
+        val player = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(
+                50, false, available = true,
+                format = MessageBuilder.FormatEntry("flac", 48000, 2, 16),
+            )
+        ).jsonObject["payload"]!!.jsonObject["player"]!!.jsonObject
+        val format = player["format"]!!.jsonObject
+        assertEquals(setOf("codec", "sample_rate", "channels", "bit_depth"), format.keys)
+        assertEquals("flac", format["codec"]?.jsonPrimitive?.content)
+        assertEquals(48000, format["sample_rate"]?.jsonPrimitive?.int)
+        assertEquals(2, format["channels"]?.jsonPrimitive?.int)
+        assertEquals(16, format["bit_depth"]?.jsonPrimitive?.int)
+    }
+
+    @Test
+    fun buildPlayerState_omitsTheArtworkObjectUnlessTheRoleIsActive() {
+        val payload = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, available = true)
+        ).jsonObject["payload"]!!.jsonObject
+        assertNull(payload["artwork"])
+    }
+
+    @Test
+    fun buildPlayerState_declaresOneAlbumArtworkChannelWithRc1KeyNames() {
+        // roles/artwork/v1.md: channels are configured here, not in
+        // client/hello, with `width`/`height` (not media_width/media_height).
+        val payload = Json.parseToJsonElement(
+            MessageBuilder.buildPlayerState(50, false, available = true, artworkRoleActive = true)
+        ).jsonObject["payload"]!!.jsonObject
+        val channels = payload["artwork"]!!.jsonObject["channels"]!!.jsonArray
+        assertEquals(1, channels.size)
+        val channel = channels[0].jsonObject
+        assertEquals(setOf("source", "format", "width", "height"), channel.keys)
+        assertEquals("album", channel["source"]?.jsonPrimitive?.content)
+        assertEquals("jpeg", channel["format"]?.jsonPrimitive?.content)
+        assertEquals(500, channel["width"]?.jsonPrimitive?.int)
+        assertEquals(500, channel["height"]?.jsonPrimitive?.int)
+    }
+
+    @Test
+    fun buildPlayerState_wholeMessageWithEveryRoleObject() {
+        // Byte for byte. aiosendspin 10.0.0 parses this text with no deviation
+        // reported by its player or artwork role.
+        assertEquals(
+            """{"type":"client/state","payload":{"available":true,"player":{"volume":80,""" +
+                """"muted":false,"output_delay_ms":120,"required_lead_time_ms":1500,""" +
+                """"min_buffer_ms":350,"supported_commands":["volume","mute","set_output_delay"],""" +
+                """"format":{"codec":"pcm","sample_rate":48000,"channels":2,"bit_depth":16}},""" +
+                """"artwork":{"channels":[{"source":"album","format":"jpeg","width":500,"height":500}]}}}""",
+            MessageBuilder.buildPlayerState(
+                80, false, available = true, outputDelayMs = 120.0,
+                format = MessageBuilder.FormatEntry("pcm", 48000, 2, 16),
+                artworkRoleActive = true,
+            ),
+        )
+    }
+
+    @Test
+    fun buildPlayerState_withNoActiveRolesCarriesOnlyAvailable() {
+        assertEquals(
+            """{"type":"client/state","payload":{"available":true}}""",
+            MessageBuilder.buildPlayerState(80, false, available = true, playerRoleActive = false),
+        )
     }
 
     // --- buildSupportedFormats ---
@@ -391,26 +431,8 @@ class MessageBuilderTest {
         assertEquals(6_720_000, MessageBuilder.calculateBufferCapacity(formats, 35))
     }
 
-    // --- buildClientHello field names ---
-
-    @Test
-    fun buildClientHello_usesV1FieldNames() {
-        val formats = listOf(
-            MessageBuilder.FormatEntry("pcm", 48000, 2, 16)
-        )
-        val text = MessageBuilder.buildClientHello(
-            clientId = "test-id",
-            deviceName = "Test Device",
-            bufferCapacity = 6_720_000,
-            manufacturer = "Test",
-            supportedFormats = formats
-        )
-        val payload = Json.parseToJsonElement(text).jsonObject["payload"]!!.jsonObject
-        assertNotNull("player@v1_support should be present", payload["player@v1_support"])
-        assertNotNull("artwork@v1_support should be present", payload["artwork@v1_support"])
-        assertNull("legacy player_support should not be present", payload["player_support"])
-        assertNull("legacy artwork_support should not be present", payload["artwork_support"])
-    }
+    // --- buildClientHello ---
+    // The message's shape is covered by ClientHelloFieldsTest.
 
     @Test
     fun buildClientHello_hasCorrectBufferCapacity() {
@@ -418,7 +440,6 @@ class MessageBuilderTest {
             MessageBuilder.FormatEntry("pcm", 48000, 2, 16)
         )
         val text = MessageBuilder.buildClientHello(
-            clientId = "test-id",
             deviceName = "Test Device",
             bufferCapacity = 6_720_000,
             manufacturer = "Test",

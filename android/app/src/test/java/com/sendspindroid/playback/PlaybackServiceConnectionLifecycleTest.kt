@@ -184,8 +184,9 @@ class PlaybackServiceConnectionLifecycleTest {
     @Test
     fun `callback interface declares all required streaming and metadata methods`() {
         // Verify the Callback interface has the streaming/metadata methods PlaybackService depends on.
-        // State lifecycle methods (onConnected, onDisconnected, onError, onReconnecting, onReconnected)
-        // have been removed -- PlaybackService now observes connectionState StateFlow instead.
+        // State lifecycle methods (onConnected, onError, onReconnecting, onReconnected) have been
+        // removed -- PlaybackService observes the connectionState StateFlow instead. onDisconnected
+        // is the exception: it carries whether to reconnect, which the state does not.
         val callbackClass = SendSpin.Callback::class.java
         val methodNames = callbackClass.methods.map { it.name }
 
@@ -197,7 +198,7 @@ class PlaybackServiceConnectionLifecycleTest {
 
         // Verify removed state-lifecycle methods are gone
         assertFalse("onConnected should be removed", "onConnected" in methodNames)
-        assertFalse("onDisconnected should be removed", "onDisconnected" in methodNames)
+        assertTrue("Should have onDisconnected", "onDisconnected" in methodNames)
         assertFalse("onError should be removed", "onError" in methodNames)
         assertFalse("onReconnecting should be removed", "onReconnecting" in methodNames)
         assertFalse("onReconnected should be removed", "onReconnected" in methodNames)

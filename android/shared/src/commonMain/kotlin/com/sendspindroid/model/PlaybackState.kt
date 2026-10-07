@@ -47,6 +47,12 @@ data class PlaybackState(
             return minOf(durationMs, positionMs + elapsedMs)
         }
 
+    /**
+     * For title/artist/album null keeps the current value and "" clears it.
+     * Fork: artwork and total tracks survive an empty value, ancillaries clear
+     * on a new track, and a new track's position 0 leaves positionUpdatedAt 0
+     * (the "no anchor yet" sentinel the TV progress rail reads).
+     */
     fun withMetadata(
         title: String?,
         artist: String?,
@@ -132,7 +138,9 @@ data class PlaybackState(
             // positive value replaces it -- same inherit-on-absent contract as
             // artworkUrl. A real reset goes through withClearedMetadata.
             totalTracks = totalTracks?.takeIf { it > 0 } ?: this.totalTracks,
-            durationMs = if (durationMs > 0) durationMs else this.durationMs,
+            // Upstream rc1: 0 means unknown. Keep the prior duration only on a
+            // same-track refresh; a new track takes what it was given.
+            durationMs = if (durationMs > 0 || isNewTrack) durationMs else this.durationMs,
             positionMs = positionMs,
             // positionUpdatedAt: stamp when positionMs > 0 (real anchor),
             // zero on a new track with positionMs == 0 (interpolatedPositionMs

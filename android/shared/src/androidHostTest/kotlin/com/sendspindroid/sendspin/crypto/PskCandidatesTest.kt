@@ -19,37 +19,19 @@ class PskCandidatesTest {
     private fun record(fill: Byte, serverId: String?) =
         PskRecord(PskId.derive(psk(fill)), psk(fill), serverId)
 
-    private fun config(enabled: Boolean = true, pairing: Byte = 7) =
+    private fun config(pairing: Byte = 7) =
         PairingConfig(
             pairingPsk = psk(pairing),
-            pairingPskEnabled = enabled,
             unpairedAccessEnabled = true,
             dynamicPairingCodeEnabled = false,
-            recordModePskId = "record-mode-id",
         )
 
     @Test
-    fun theEnabledPairingPskAppearsExactlyOnceWithItsDerivedId() {
-        val built = PskCandidates.build(emptyList(), config(enabled = true))
+    fun thePairingPskAppearsExactlyOnceWithItsDerivedId() {
+        val built = PskCandidates.build(emptyList(), config())
         val pairing = built.filter { it.category == PskCategory.PAIRING }
         assertEquals(1, pairing.size)
         assertEquals(PskId.derive(psk(7)), pairing.single().pskId)
-    }
-
-    @Test
-    fun aDisabledPairingPskIsExcludedButNothingElseChanges() {
-        // "A PSK for a pairing method disabled in the client's pairing config is
-        // excluded from the candidate set, so a handshake referencing it fails
-        // as a lookup miss."
-        val records = listOf(record(1, "server-a"))
-        val enabled = PskCandidates.build(records, config(enabled = true))
-        val disabled = PskCandidates.build(records, config(enabled = false))
-
-        assertTrue(disabled.none { it.category == PskCategory.PAIRING })
-        assertEquals(
-            enabled.filter { it.category != PskCategory.PAIRING }.map { it.pskId },
-            disabled.map { it.pskId },
-        )
     }
 
     @Test
@@ -86,38 +68,32 @@ class PskCandidatesTest {
 
     @Test
     fun noInputCombinationProducesADuplicatePskId() {
-        // A duplicate would make one wire psk_id map to two trust levels, and
-        // PskCandidateSet.of would refuse the whole set - leaving the client
-        // unable to handshake with anything at all.
-        for (enabled in listOf(true, false)) {
-            for (records in listOf(
-                emptyList(),
-                listOf(record(1, "server-a")),
-                listOf(record(1, "server-a"), record(2, "server-b")),
-            )) {
-                val built = PskCandidates.build(records, config(enabled = enabled))
-                assertEquals(
-                    "duplicate psk_id for enabled=$enabled records=${records.size}",
-                    built.size,
-                    built.map { it.pskId }.toSet().size,
-                )
-                assertTrue(PskCandidateSet.of(built).isSuccess)
-            }
+        for (records in listOf(
+            emptyList(),
+            listOf(record(1, "server-a")),
+            listOf(record(1, "server-a"), record(2, "server-b")),
+        )) {
+            val built = PskCandidates.build(records, config())
+            assertEquals(
+                "duplicate psk_id for records=${records.size}",
+                built.size,
+                built.map { it.pskId }.toSet().size,
+            )
         }
     }
 
     @Test
     fun pairingPskIsCandidateWithNoPairingActivityRunning() {
-        // The standing obligation. "The client MUST keep its Pairing PSK among
-        // its handshake PSK candidates whenever the method is enabled, not only
-        // while a pairing activity is running: the server's re-handshake to the
-        // Pairing PSK succeeds only if the client already recognizes its
-        // psk_id."
+        // The standing obligation. "The client MUST keep its pairing PSK among
+        // its handshake PSK candidates at all times, not only while a pairing
+        // activity is running: the server's re-handshake to the pairing PSK
+        // succeeds only if the client already recognizes its psk_id."
         //
         // Nothing in build()'s signature can express "a pairing screen is open",
         // which is the point: there is no way to make this conditional without
-        // deliberately adding a parameter for it.
-        val built = PskCandidates.build(listOf(record(1, "server-a")), config(enabled = true))
+        // deliberately adding a parameter for it. Nor is there a configuration
+        // switch that withdraws it.
+        val built = PskCandidates.build(listOf(record(1, "server-a")), config())
         assertTrue(
             "the Pairing PSK must be a candidate with no pairing in progress",
             built.any { it.category == PskCategory.PAIRING },

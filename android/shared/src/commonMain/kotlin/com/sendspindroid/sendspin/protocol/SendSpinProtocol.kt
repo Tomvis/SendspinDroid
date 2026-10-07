@@ -18,9 +18,25 @@ object SendSpinProtocol {
     const val PAIR_ATTEMPT_TIMEOUT_MS = 120_000L
 
     /**
-     * Binary message header: 1 byte type + 8 bytes big-endian int64 timestamp.
+     * How long the cleartext init exchange and the Noise handshake may take.
+     *
+     * "Implementations SHOULD apply a timeout (e.g., 30 seconds) for each side
+     * to receive the next expected message during the prologue and
+     * Noise-handshake phases."
      */
-    const val BINARY_HEADER_SIZE_BYTES = 9
+    const val HANDSHAKE_TIMEOUT_MS = 30_000L
+
+    /**
+     * Audio chunk header (roles/player/v1.md): 1 byte type + 8 bytes big-endian
+     * int64 timestamp + 4 bytes big-endian uint32 `send_ahead`.
+     */
+    const val AUDIO_HEADER_SIZE_BYTES = 13
+
+    /**
+     * `send_ahead` saturates at this value instead of wrapping. Like `0`, it
+     * reports that no lead was measured.
+     */
+    const val SEND_AHEAD_SATURATED = 4_294_967_295L
 
     /**
      * Binary message type identifiers.
@@ -32,16 +48,14 @@ object SendSpinProtocol {
          */
         const val JSON = 0
 
-        /** Reserved by the spec for future use. */
-        const val RESERVED = 1
-
-        /** Fragmentation, see messaging.md#fragmentation. Handled in item 1.5. */
-        const val FRAGMENT_MORE = 2
-        const val FRAGMENT_END = 3
+        /**
+         * Fragmentation, see messaging.md#fragmentation. IDs 2-3 are reserved
+         * for future use and are ignored like any other unimplemented ID.
+         */
+        const val FRAGMENT = 1
 
         const val AUDIO = 4
         const val ARTWORK_BASE = 8  // 8-11 for channels 0-3
-        const val VISUALIZER = 16
     }
 
     /**
@@ -73,7 +87,7 @@ object SendSpinProtocol {
     }
 
     /**
-     * Artwork request constants for client/hello handshake.
+     * Artwork request constants for the `client/state` artwork object.
      */
     object Artwork {
         const val REQUEST_SIZE = 500  // Requested artwork width/height in pixels
@@ -106,20 +120,30 @@ object SendSpinProtocol {
     }
 
     /**
-     * Player timing capabilities reported via client/state (spec 2026-06-01,
-     * "player timing capabilities"). Both fields are required for players;
-     * servers use max(required_lead_time_ms, min_buffer_ms) + static_delay_ms
-     * to compute per-player send-ahead, which matters most for live streams.
+     * Player timing parameters reported via client/state (roles/player/v1.md,
+     * "Server Audio Send Constraints"). The server keeps at least
+     * `min_buffer_ms + output_delay_ms` of audio queued, and gives the first
+     * chunk of a stream at least that lead, extended to
+     * `required_lead_time_ms` when the source is buffered.
      *
-     * Values are conservative static defaults for Android: AudioTrack warmup
-     * plus MediaCodec init is typically well under 500 ms, and 500 ms of
-     * jitter buffer comfortably absorbs Wi-Fi variance. The spec allows
-     * runtime (debounced) updates if we later measure these empirically.
-     * For comparison, aiosendspin defaults to 250/250 on desktop.
+     * [REQUIRED_LEAD_TIME_MS] covers the first stream of a connection, when
+     * AudioTrack and the decoder start from cold: on the T901 audio is not
+     * flowing at full rate until about 1.2 s after `stream/start`.
+     * [REQUIRED_LEAD_TIME_WARM_MS] is reported once that stream has started
+     * ("a client MAY lower its reported `required_lead_time_ms` while a stream
+     * is running"): a skip or a new track restarts a pipeline that is already
+     * running. With 500 ms of lead a new track lost up to 63 ms of its start.
+     *
+     * [MIN_BUFFER_MS] is the floor of `min_buffer_ms`: what the player needs
+     * in hand when chunks arrive with no delay at all. It keeps AudioTrack
+     * written up to 300 ms ahead of the DAC (SyncAudioPlayer's pending target
+     * plus tolerance); the other 50 ms is margin for decode and loop timing.
+     * The measured arrival delay is added on top by [MinBufferEstimator].
      */
     object PlayerTiming {
-        const val REQUIRED_LEAD_TIME_MS = 500
-        const val MIN_BUFFER_MS = 500
+        const val REQUIRED_LEAD_TIME_MS = 1500
+        const val REQUIRED_LEAD_TIME_WARM_MS = 650
+        const val MIN_BUFFER_MS = 350
     }
 
     /**
@@ -131,6 +155,7 @@ object SendSpinProtocol {
         // in a binary frame once transport mode begins.
         const val CLIENT_INIT = "client/init"
         const val SERVER_INIT = "server/init"
+        const val SERVER_ERROR = "server/error"
         const val NOISE_HANDSHAKE = "noise/handshake"
 
         const val CLIENT_HELLO = "client/hello"
@@ -154,28 +179,13 @@ object SendSpinProtocol {
         const val SERVER_COMMAND = "server/command"
         const val CLIENT_GOODBYE = "client/goodbye"
 
-        /**
-         * Valid at any time regardless of `activities`; notably it does NOT
-         * require `'management'`, so it must never be gated on the activity set.
-         */
+        /** Valid regardless of the current `activities`; never gate it on them. */
         const val SERVER_UNPAIR = "server/unpair"
         const val GROUP_UPDATE = "group/update"
         const val STREAM_START = "stream/start"
         const val STREAM_END = "stream/end"
         const val STREAM_CLEAR = "stream/clear"
-        const val STREAM_REQUEST_FORMAT = "stream/request-format"
         const val CLIENT_SYNC_OFFSET = "client/sync_offset"
-
-        // Management. Every one of these is answered by exactly one
-        // MANAGEMENT_RESULT; ordering alone matches reply to request, so none
-        // of them carries an identifier.
-        const val MANAGEMENT_LIST_RECORDS = "management/list-records"
-        const val MANAGEMENT_ADD_RECORD = "management/add-record"
-        const val MANAGEMENT_REMOVE_RECORD = "management/remove-record"
-        const val MANAGEMENT_GET_PAIRING_CONFIG = "management/get-pairing-config"
-        const val MANAGEMENT_SET_PAIRING_CONFIG = "management/set-pairing-config"
-        const val MANAGEMENT_OPEN_PAIRING_WINDOW = "management/open-pairing-window"
-        const val MANAGEMENT_RESULT = "management/result"
     }
 
     /**
@@ -275,10 +285,8 @@ data class TrackMetadata(
     val queueTrack: Int? = null,
     val totalTracks: Int? = null
 ) {
-    // Every field is nullable because `server/state` can clear any of them
-    // individually. Null means "the server has no value for this", which is
-    // distinct from the empty string - the old representation, which could not
-    // tell a cleared title from a title the delta simply did not mention.
+    // Null means "the server has no value for this": every `server/state`
+    // carries the role's full state, so a field it omits is gone.
 
     // Convenience properties for backwards compatibility
     val durationMs: Long get() = progress?.trackDuration ?: 0L
@@ -352,9 +360,9 @@ data class StreamConfig(
 /**
  * Controller (group-level) state from the server/state `controller` object.
  *
- * Fields are nullable because server/state carries delta updates; null means
- * "not included in this update". [com.sendspindroid.sendspin.protocol.SendSpinProtocolHandler]
- * merges deltas into the current state before publishing.
+ * Null means the state has no value for the field: before the first
+ * `server/state` controller object, and for `seek_max_ms` whenever 'seek' is
+ * not offered.
  *
  * @param supportedCommands Subset of: play, pause, stop, next, previous,
  *   volume, mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch
@@ -374,12 +382,13 @@ data class ControllerState(
 )
 
 /**
- * Result of parsing a server/state message.
+ * Result of parsing a server/state message. A null role object was not in the
+ * message, which leaves that role's state unchanged.
  */
 data class ServerStateResult(
-    val metadata: RoleUpdate<TrackMetadata>,
+    val metadata: TrackMetadata?,
     val playbackState: String?,
-    val controller: RoleUpdate<ControllerState>
+    val controller: ControllerState?
 )
 
 /**
@@ -392,22 +401,12 @@ data class GroupInfo(
 )
 
 /**
- * Result from parsing server/hello message.
- */
-data class ServerHelloResult(
-    val serverName: String,
-    val serverId: String,
-    val activeRoles: List<String>,
-    val connectionReason: String
-)
-
-/**
  * Result from parsing server/command message.
  */
 sealed class ServerCommandResult {
     data class Volume(val volume: Int) : ServerCommandResult()
     data class Mute(val muted: Boolean) : ServerCommandResult()
-    data class SetStaticDelay(val delayMs: Int) : ServerCommandResult()
+    data class SetOutputDelay(val delayMs: Int) : ServerCommandResult()
     data class Unknown(val command: String) : ServerCommandResult()
 }
 

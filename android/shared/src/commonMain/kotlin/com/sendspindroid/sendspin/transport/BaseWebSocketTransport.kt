@@ -84,15 +84,6 @@ abstract class BaseWebSocketTransport(
     @Volatile
     private var outgoingChannel: Channel<OutgoingMessage>? = null
 
-    // Close intent captured by close()/destroy() so the cancellation-catch path
-    // can deliver the right code/reason to the listener (e.g., 1001 from the
-    // stall watchdog must reach onClosed so the upper layer drops to Idle and
-    // the Coordinator-driven reconnect kicks in).
-    @Volatile
-    private var pendingCloseCode: Int = 1000
-    @Volatile
-    private var pendingCloseReason: String = "cancelled"
-
     // Held so closeAfterFlush can wait for the queue to drain. The sender is a
     // child of connectionJob, so cancelling that kills it mid-queue.
     private var senderJob: Job? = null
@@ -265,25 +256,16 @@ abstract class BaseWebSocketTransport(
                     val code = reason?.code?.toInt() ?: 1000
                     val msg = reason?.message ?: ""
                     Log.d(tag, "WebSocket closed: $code $msg")
-                    _state.store(TransportState.Closed)
-                    listener?.onClosed(code, msg)
+                    reportClosed(code, msg)
                 }
             } catch (e: CancellationException) {
-                // Intentional close via destroy()/close(). The webSocket block
-                // never reached its post-loop listener?.onClosed(...) call
-                // because closeReason.await() re-threw the cancellation.
-                // Deliver the close to the listener here with the code/reason
-                // captured by close(); without this, callers that drive close()
-                // expecting an onClosed callback (notably the stall watchdog)
-                // never learn the connection died and the upper-layer reconnect
-                // path is never invoked.
+                // Intentional close via destroy()/close(); close() reports it.
                 Log.d(tag, "WebSocket cancelled")
-                _state.store(TransportState.Closed)
-                listener?.onClosed(pendingCloseCode, pendingCloseReason)
             } catch (e: Exception) {
                 Log.e(tag, "WebSocket failure: ${e.message}")
-                _state.store(TransportState.Failed)
-                listener?.onFailure(e, isRecoverableError(e))
+                if (endConnection(TransportState.Failed)) {
+                    listener?.onFailure(e, isRecoverableError(e))
+                }
             } finally {
                 sendChannel.close()
                 outgoingChannel = null
@@ -311,18 +293,22 @@ abstract class BaseWebSocketTransport(
 
     override fun close(code: Int, reason: String) {
         Log.d(tag, "Closing WebSocket: code=$code reason=$reason")
-        pendingCloseCode = code
-        pendingCloseReason = reason
-        // Set state synchronously so a caller that immediately re-checks
-        // isConnected (or attempts to reuse this instance via connect()'s
-        // CAS chain that accepts Closed) sees the transition without
-        // having to wait for the IO-dispatcher cancellation-catch to run.
-        // The cancellation catch also stores Closed; the second write is
-        // a redundant no-op.
-        _state.store(TransportState.Closed)
         outgoingChannel?.close()
         connectionJob?.cancel()
         connectionJob = null
+        reportClosed(code, reason)
+    }
+
+    /**
+     * Leave the live state for [terminal]. True for the first caller only, so
+     * a local close racing a remote close or a failure is reported once.
+     */
+    private fun endConnection(terminal: TransportState): Boolean =
+        _state.compareAndSet(TransportState.Connected, terminal) ||
+            _state.compareAndSet(TransportState.Connecting, terminal)
+
+    private fun reportClosed(code: Int, reason: String) {
+        if (endConnection(TransportState.Closed)) listener?.onClosed(code, reason)
     }
 
     /**

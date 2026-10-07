@@ -22,7 +22,11 @@ class NoiseHandshakeException(
         /** The inner handshake payload was not the expected UTF-8 JSON. */
         PayloadNotJson,
 
-        /** No candidate PSK matched the `psk_id` in Noise message 1. */
+        /**
+         * The `psk_id` in Noise message 1 matched a record bound to a
+         * different server. A plain miss in the initial handshake is not a
+         * failure: it falls back to the Sentinel PSK.
+         */
         PskLookupMiss,
 
         /** AEAD tag check failed: wrong keys, wrong prologue, or tampering. */
@@ -56,5 +60,12 @@ class NoiseHandshakeException(
          * the crypto failures in order to say so.
          */
         ServerLacksEncryption,
+
+        /**
+         * The server answered `client/init` with `server/error`: it speaks the
+         * encrypted protocol and refused this init (`unsupported_version`,
+         * `unsupported_suite` or `malformed`).
+         */
+        InitRejected,
     }
 }

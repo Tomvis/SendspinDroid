@@ -14,10 +14,6 @@ import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
-import com.sendspindroid.sendspin.protocol.ControllerState
-import com.sendspindroid.sendspin.protocol.RoleUpdate
-import com.sendspindroid.sendspin.protocol.applyTo
-import com.sendspindroid.sendspin.protocol.TrackMetadata
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -46,24 +42,12 @@ class MessageParserTest {
     // --- parseServerHello ---
 
     @Test
-    fun parseServerHello_validPayload_returnsResult() {
+    fun parseServerHello_returnsTheServerName() {
         val payload = buildJsonObject {
             put("name", "TestServer")
-            put("server_id", "abc-123")
-            put("connection_reason", "user_request")
-            put("active_roles", buildJsonArray {
-                add(JsonPrimitive("player@v1"))
-                add(JsonPrimitive("controller@v1"))
-            })
+            put("languages", buildJsonArray { add(JsonPrimitive("en")) })
         }
-        val result = MessageParser.parseServerHello(payload, "default")
-
-        assertNotNull(result)
-        assertEquals("TestServer", result!!.serverName)
-        assertEquals("abc-123", result.serverId)
-        assertEquals("user_request", result.connectionReason)
-        assertEquals(2, result.activeRoles.size)
-        assertEquals("player@v1", result.activeRoles[0])
+        assertEquals("TestServer", MessageParser.parseServerHello(payload, "default"))
     }
 
     @Test
@@ -72,15 +56,8 @@ class MessageParserTest {
     }
 
     @Test
-    fun parseServerHello_missingOptionalFields_usesDefaults() {
-        val payload = buildJsonObject { } // empty
-        val result = MessageParser.parseServerHello(payload, "MyDefault")
-
-        assertNotNull(result)
-        assertEquals("MyDefault", result!!.serverName)
-        assertEquals("", result.serverId)
-        assertEquals("discovery", result.connectionReason)
-        assertTrue(result.activeRoles.isEmpty())
+    fun parseServerHello_missingName_usesDefault() {
+        assertEquals("MyDefault", MessageParser.parseServerHello(buildJsonObject { }, "MyDefault"))
     }
 
     // --- parseServerTime ---
@@ -175,7 +152,7 @@ class MessageParserTest {
     // --- parseServerState ---
 
     @Test
-    fun parseServerState_specCompliantNested_parsesCorrectly() {
+    fun parseServerState_fullMetadata_parsesEveryField() {
         val payload = buildJsonObject {
             put("metadata", buildJsonObject {
                 put("timestamp", 1234567890L)
@@ -195,135 +172,61 @@ class MessageParserTest {
             put("state", "playing")
         }
 
-        val (update, state) = MessageParser.parseServerState(payload)
-        val metadata = update.applyTo(null)
+        val (metadata, state) = MessageParser.parseServerState(payload)
 
-        assertNotNull(metadata)
-        assertEquals("Test Song", metadata!!.title)
+        assertEquals(1234567890L, metadata!!.timestamp)
+        assertEquals("Test Song", metadata.title)
         assertEquals("Test Artist", metadata.artist)
         assertEquals("Album Artist", metadata.albumArtist)
+        assertEquals("Test Album", metadata.album)
+        assertEquals("https://example.com/art.jpg", metadata.artworkUrl)
+        assertEquals(2024, metadata.year)
+        assertEquals(5, metadata.track)
         assertEquals(45000L, metadata.progress!!.trackProgress)
         assertEquals(180000L, metadata.progress!!.trackDuration)
         assertEquals("playing", state)
     }
 
     @Test
-    fun parseServerState_legacyFlatStructure_parsesAsFallback() {
-        val payload = buildJsonObject {
-            put("metadata", buildJsonObject {
-                put("title", "Legacy Song")
-                put("artist", "Legacy Artist")
-                put("position_ms", 30000L)
-                put("duration_ms", 200000L)
-            })
-        }
-
-        val (update, _) = MessageParser.parseServerState(payload)
-        val metadata = update.applyTo(null)
-
-        assertNotNull(metadata)
-        assertEquals("Legacy Song", metadata!!.title)
-        assertEquals(30000L, metadata.progress!!.trackProgress)
-        assertEquals(200000L, metadata.progress!!.trackDuration)
-    }
-
-    @Test
-    fun parseServerState_queuePositionFields_parseAsPatches() {
-        // Fork extension: album_track / queue_track / total_tracks ride the
-        // same patch machinery as every spec field.
-        val payload = buildJsonObject {
-            put("metadata", buildJsonObject {
-                put("track", 5)
-                put("album_track", 3)
-                put("queue_track", 7)
-                put("total_tracks", 12)
-            })
-        }
-
-        val metadata = MessageParser.parseServerState(payload).metadata.applyTo(null)
-
-        assertNotNull(metadata)
-        assertEquals(3, metadata!!.albumTrack)
-        assertEquals(7, metadata.queueTrack)
-        assertEquals(12, metadata.totalTracks)
-    }
-
-    @Test
-    fun parseServerState_albumTrackFallsBackToLegacyTrack() {
-        // Older servers send only `track`. Without the fallback the field
-        // would go Absent and keep whatever the previous track left behind.
-        val payload = buildJsonObject {
-            put("metadata", buildJsonObject { put("track", 9) })
-        }
-
-        val metadata = MessageParser.parseServerState(payload).metadata
-            .applyTo(TrackMetadata(albumTrack = 1))
-
-        assertEquals(9, metadata!!.albumTrack)
-    }
-
-    @Test
-    fun parseServerState_absentQueueFieldsKeepThePriorValues() {
-        // A progress-only tick must not blank the queue position the
-        // authoritative frame established.
-        val payload = buildJsonObject {
-            put("metadata", buildJsonObject {
-                put("progress", buildJsonObject { put("track_progress", 1000L) })
-            })
-        }
-
-        val metadata = MessageParser.parseServerState(payload).metadata
-            .applyTo(TrackMetadata(albumTrack = 3, queueTrack = 7, totalTracks = 12))
-
-        assertEquals(3, metadata!!.albumTrack)
-        assertEquals(7, metadata.queueTrack)
-        assertEquals(12, metadata.totalTracks)
-    }
-
-    @Test
-    fun parseServerState_explicitNullQueueFieldsClearThem() {
-        val payload = buildJsonObject {
-            put("metadata", buildJsonObject {
-                put("album_track", JsonPrimitive(null as Int?))
-                put("queue_track", JsonPrimitive(null as Int?))
-                put("total_tracks", JsonPrimitive(null as Int?))
-            })
-        }
-
-        val metadata = MessageParser.parseServerState(payload).metadata
-            .applyTo(TrackMetadata(albumTrack = 3, queueTrack = 7, totalTracks = 12))
-
-        assertNull(metadata!!.albumTrack)
-        assertNull(metadata.queueTrack)
-        assertNull(metadata.totalTracks)
-    }
-
-    @Test
     fun parseServerState_nullPayload_returnsNulls() {
-        val (update, state) = MessageParser.parseServerState(null)
-        assertTrue(update is RoleUpdate.Absent)
-        assertNull(state)
+        val result = MessageParser.parseServerState(null)
+        assertNull(result.metadata)
+        assertNull(result.playbackState)
+        assertNull(result.controller)
     }
 
     @Test
-    fun parseServerState_noMetadata_leavesTheRoleUntouched() {
+    fun parseServerState_omittedRoleObjects_areNull() {
+        // "Omitting a role object leaves that role's state unchanged."
+        val result = MessageParser.parseServerState(buildJsonObject { put("state", "paused") })
+
+        assertNull(result.metadata)
+        assertNull(result.controller)
+        assertEquals("paused", result.playbackState)
+    }
+
+    @Test
+    fun parseServerState_metadataWithOnlyATimestamp_isAnEmptyTrack() {
+        // What the reference server sends when nothing is playing. The object
+        // is the role's full state, so everything it omits has no value.
         val payload = buildJsonObject {
-            put("state", "paused")
+            put("metadata", buildJsonObject { put("timestamp", 42L) })
         }
-        val (update, state) = MessageParser.parseServerState(payload)
 
-        assertTrue(update is RoleUpdate.Absent)
-        // Absent must keep whatever we already had, not blank it.
-        assertEquals("Kept", update.applyTo(TrackMetadata(title = "Kept"))?.title)
-        assertEquals("paused", state)
+        val metadata = MessageParser.parseServerState(payload).metadata
+
+        assertEquals(42L, metadata!!.timestamp)
+        assertNull(metadata.title)
+        assertNull(metadata.artist)
+        assertNull(metadata.album)
+        assertNull(metadata.artworkUrl)
+        assertNull("omitting progress clears the position", metadata.progress)
     }
 
     @Test
-    fun parseServerState_idleMetadataWithNullFields_doesNotThrow() {
-        // Reproduces the on-device exception observed 2026-04-23: server emits
-        // idle metadata with every field JsonNull ("progress": null in particular
-        // triggered IllegalArgumentException: ... is not a JsonObject).
-        // Parser must treat JsonNull the same as absent.
+    fun parseServerState_nullLeaves_readAsNoValue() {
+        // Observed on a device 2026-04-23: idle metadata with every leaf a
+        // JSON null. "progress": null used to throw.
         val payload = buildJsonObject {
             put("metadata", buildJsonObject {
                 put("timestamp", 9730008767707L)
@@ -335,38 +238,30 @@ class MessageParserTest {
                 put("year", JsonPrimitive(null as Int?))
                 put("track", JsonPrimitive(null as Int?))
                 put("progress", JsonPrimitive(null as String?))
-                put("repeat", JsonPrimitive(null as String?))
-                put("shuffle", JsonPrimitive(null as String?))
             })
         }
 
-        val (update, state) = MessageParser.parseServerState(payload)
-        val metadata = update.applyTo(TrackMetadata(title = "Previous", artist = "Previous"))
+        val metadata = MessageParser.parseServerState(payload).metadata
 
-        // Explicit nulls are clears now, not "same as absent": the fields go to
-        // null rather than to the empty string, and they do not survive.
-        assertNotNull("idle metadata should still yield a TrackMetadata", metadata)
-        assertNull(metadata!!.title)
+        assertEquals(9730008767707L, metadata!!.timestamp)
+        assertNull(metadata.title)
         assertNull(metadata.artist)
+        assertNull(metadata.year)
         assertNull(metadata.progress)
-        assertNull(state)
     }
 
     @Test
-    fun parseServerState_nullMetadataObject_clearsTheRole() {
-        // Behaviour change: this used to be treated as "missing". Per
-        // messaging.md a whole role object set to null "clears all of that
-        // role's state", and server/activate relies on it when it drops a
-        // state role from active_roles.
+    fun parseServerState_nullRoleObject_isTreatedAsOmitted() {
+        // Not something the spec defines: a role object is present and
+        // complete, or it is not sent.
         val payload = buildJsonObject {
             put("metadata", JsonPrimitive(null as String?))
-            put("state", "stopped")
+            put("controller", JsonPrimitive(null as String?))
         }
-        val (update, state) = MessageParser.parseServerState(payload)
+        val result = MessageParser.parseServerState(payload)
 
-        assertTrue(update is RoleUpdate.Cleared)
-        assertNull(update.applyTo(TrackMetadata(title = "Gone")))
-        assertEquals("stopped", state)
+        assertNull(result.metadata)
+        assertNull(result.controller)
     }
 
     @Test
@@ -382,77 +277,73 @@ class MessageParserTest {
                 put("muted", false)
                 put("repeat", "all")
                 put("shuffle", true)
+                put("seek_max_ms", 180000L)
             })
         }
-        val result = MessageParser.parseServerState(payload)
 
-        val controller = result.controller.applyTo(null)
-        assertNotNull(controller)
+        val controller = MessageParser.parseServerState(payload).controller
+
         assertEquals(listOf("play", "pause", "volume"), controller!!.supportedCommands)
         assertEquals(60, controller.volume)
         assertEquals(false, controller.muted)
         assertEquals("all", controller.repeat)
         assertEquals(true, controller.shuffle)
+        assertEquals(180000L, controller.seekMaxMs)
     }
 
     @Test
-    fun parseServerState_noController_leavesTheRoleUntouched() {
-        val payload = buildJsonObject {
-            put("state", "playing")
-        }
-        val update = MessageParser.parseServerState(payload).controller
-
-        assertTrue(update is RoleUpdate.Absent)
-        assertEquals(60, update.applyTo(ControllerState(volume = 60))?.volume)
-    }
-
-    @Test
-    fun parseServerState_partialControllerDelta_leavesAbsentFieldsNull() {
+    fun parseServerState_controllerWithoutSeek_hasNoSeekMax() {
         val payload = buildJsonObject {
             put("controller", buildJsonObject {
+                put("supported_commands", buildJsonArray { add(JsonPrimitive("play")) })
                 put("volume", 42)
+                put("muted", false)
+                put("repeat", "off")
+                put("shuffle", false)
             })
         }
-        val controller = MessageParser.parseServerState(payload).controller.applyTo(null)
 
-        assertNotNull(controller)
-        assertEquals(42, controller!!.volume)
-        assertNull(controller.supportedCommands)
-        assertNull(controller.muted)
-        assertNull(controller.repeat)
-        assertNull(controller.shuffle)
+        assertNull(MessageParser.parseServerState(payload).controller!!.seekMaxMs)
     }
 
     @Test
-    fun parseServerCommand_setStaticDelay_returnsResult() {
+    fun parseServerCommand_setOutputDelay_returnsResult() {
         val payload = buildJsonObject {
             put("player", buildJsonObject {
-                put("command", "set_static_delay")
-                put("static_delay_ms", 150)
+                put("command", "set_output_delay")
+                put("output_delay_ms", 150)
             })
         }
         val result = MessageParser.parseServerCommand(payload)
-        assertTrue(result is ServerCommandResult.SetStaticDelay)
-        assertEquals(150, (result as ServerCommandResult.SetStaticDelay).delayMs)
+        assertTrue(result is ServerCommandResult.SetOutputDelay)
+        assertEquals(150, (result as ServerCommandResult.SetOutputDelay).delayMs)
     }
 
     @Test
-    fun parseServerCommand_setStaticDelayOutOfRange_returnsNull() {
-        val tooBig = buildJsonObject {
-            put("player", buildJsonObject {
-                put("command", "set_static_delay")
-                put("static_delay_ms", 6000)
-            })
+    fun parseServerCommand_setOutputDelayOutOfRange_isClamped() {
+        // "Clients MUST clamp output_delay_ms to the range 0-5000."
+        fun delayFor(value: Long): Int {
+            val payload = buildJsonObject {
+                put("player", buildJsonObject {
+                    put("command", "set_output_delay")
+                    put("output_delay_ms", value)
+                })
+            }
+            return (MessageParser.parseServerCommand(payload) as ServerCommandResult.SetOutputDelay).delayMs
         }
-        assertNull(MessageParser.parseServerCommand(tooBig))
+        assertEquals(5000, delayFor(6000))
+        assertEquals(5000, delayFor(10_000_000_000L))
+        assertEquals(0, delayFor(-1))
+    }
 
-        val negative = buildJsonObject {
+    @Test
+    fun parseServerCommand_setOutputDelayMissing_returnsNull() {
+        val payload = buildJsonObject {
             put("player", buildJsonObject {
-                put("command", "set_static_delay")
-                put("static_delay_ms", -1)
+                put("command", "set_output_delay")
             })
         }
-        assertNull(MessageParser.parseServerCommand(negative))
+        assertNull(MessageParser.parseServerCommand(payload))
     }
 
     // --- parseServerCommand ---
@@ -520,25 +411,12 @@ class MessageParserTest {
     }
 
     @Test
-    fun parseServerCommand_muteMissing_isIgnored() {
-        // A missing "mute" field must be ignored, not defaulted to false.
-        // Defaulting let a malformed frame audibly unmute the device and
-        // restore the last volume. Matches how `volume` and `set_static_delay`
-        // already reject out-of-range/missing values.
+    fun parseServerCommand_muteMissing_returnsNull() {
+        // `mute` is "required if command is mute". Without it there is nothing
+        // to apply, and defaulting to false would unmute a muted player.
         val payload = buildJsonObject {
             put("player", buildJsonObject {
                 put("command", "mute")
-            })
-        }
-        assertNull(MessageParser.parseServerCommand(payload))
-    }
-
-    @Test
-    fun parseServerCommand_muteNonBoolean_isIgnored() {
-        val payload = buildJsonObject {
-            put("player", buildJsonObject {
-                put("command", "mute")
-                put("mute", "yes")
             })
         }
         assertNull(MessageParser.parseServerCommand(payload))

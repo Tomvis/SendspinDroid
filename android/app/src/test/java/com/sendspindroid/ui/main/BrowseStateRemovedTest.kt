@@ -33,7 +33,6 @@ class BrowseStateRemovedTest {
             "data class TrackMetadata",
             "sealed class ArtworkSource",
             "data class ReconnectingState",
-            "sealed class ServerStatus",
             "data class PlayerColors"
         ).filterNot { text.contains(it) }
         assertEquals("player state types must be retained", emptyList<String>(), missing)

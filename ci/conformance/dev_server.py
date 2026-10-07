@@ -21,12 +21,16 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import hashlib
 import logging
 import os
+import struct
 import sys
 from pathlib import Path
 
 try:
+    from aiosendspin.audio.format import AudioFormat
+    from aiosendspin.models.types import MediaCommand
     from aiosendspin.noise.keys import Identity
     from aiosendspin.noise.pairing import (
         PairingAttempt,
@@ -35,13 +39,13 @@ try:
     )
     from aiosendspin.noise.pairing_token import decode_psk_token
     from aiosendspin.noise.trust_store import FileServerPairingStore
+    from aiosendspin.server.roles.controller.events import ControllerEvent
     from aiosendspin.server.server import SendspinServer
+    from PIL import Image
 except ImportError:  # pragma: no cover - environment guidance, not logic
     print(
         "aiosendspin is not installed. See docs/dev-server-runbook.md:\n"
-        "  pip install \"aiosendspin[server] @ "
-        "git+https://github.com/sendspin/aiosendspin@"
-        "90feb19894793749eb017f9e1bb21929dc8fe94a\"",
+        "  pip install \"aiosendspin[server]==10.0.0\"",
         file=sys.stderr,
     )
     raise SystemExit(2) from None
@@ -50,6 +54,24 @@ LOGGER = logging.getLogger("dev_server")
 
 DEFAULT_STATE_DIR = Path(".dev/sendspin")
 DEFAULT_PORT = 8927
+
+# --play-test-audio: 16-bit stereo at 48 kHz, in 100 ms chunks.
+TEST_AUDIO_FORMAT = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
+TEST_AUDIO_CHUNK_FRAMES = 4800
+
+
+def test_audio_chunk(first_frame: int) -> bytes:
+    """PCM whose samples are a frame counter, so a receiver can prove byte-exactness.
+
+    Frame n carries n as a little-endian uint32: the low 16 bits are the left
+    sample and the next 16 the right. A client that mis-sizes the audio chunk
+    header sees the counter break at every chunk boundary.
+    NoiseHandshakeCheck --expect-audio checks exactly that.
+    """
+    return b"".join(
+        struct.pack("<I", (first_frame + i) & 0xFFFFFFFF)
+        for i in range(TEST_AUDIO_CHUNK_FRAMES)
+    )
 
 
 def b64u_decode(value: str) -> bytes:
@@ -231,6 +253,208 @@ class DevServer:
             seen = current
             await asyncio.sleep(1.0)
 
+    async def play_test_audio(self, seconds: float) -> None:
+        """Stream `seconds` of counter PCM to the first client that gets a player role."""
+        assert self._server is not None
+        while True:
+            target = next(
+                (
+                    client
+                    for client in self._server.connected_clients
+                    if any(role.startswith("player@") for role in client.active_role_ids)
+                ),
+                None,
+            )
+            if target is not None:
+                break
+            await asyncio.sleep(0.5)
+        # The server holds a player's audio until its client/state arrives.
+        await asyncio.sleep(1.0)
+
+        LOGGER.info("test audio: streaming %.1fs to %s", seconds, target.client_id)
+        stream = target.group.start_stream()
+        frame = 0
+        for _ in range(round(seconds * 48000 / TEST_AUDIO_CHUNK_FRAMES)):
+            stream.prepare_audio(test_audio_chunk(frame), TEST_AUDIO_FORMAT)
+            frame += TEST_AUDIO_CHUNK_FRAMES
+            await stream.commit_audio()
+            # Must exceed the client's min_buffer_ms + required_lead_time_ms
+            # (the app reports 1500 + 500): a lower limit stalls after every
+            # commit and leaves holes in the timeline.
+            await stream.sleep_to_limit_buffer(5_000_000)
+        # Let the tail leave the send queue before the stream ends.
+        await asyncio.sleep(2.0)
+        await target.group.stop()
+        LOGGER.info("test audio: done, %d frames (%d bytes) committed", frame, frame * 4)
+
+    async def offer_seek(self, seek_max_ms: int) -> None:
+        """Offer 'seek' and 'seek_relative' to the first controller, and log what arrives.
+
+        A controller event in the log is a command the server accepted: one
+        outside supported_commands, or a seek outside 0..seek_max_ms, is
+        dropped before any event is emitted.
+        """
+        assert self._server is not None
+        while True:
+            target = next(
+                (
+                    client
+                    for client in self._server.connected_clients
+                    if any(role.startswith("controller@") for role in client.active_role_ids)
+                ),
+                None,
+            )
+            if target is not None:
+                break
+            await asyncio.sleep(0.5)
+        target.group.add_event_listener(
+            lambda _group, event: isinstance(event, ControllerEvent)
+            and LOGGER.info("controller event: %r", event)
+        )
+        controller = target.group.group_role("controller")
+        controller.set_seek_max_ms(seek_max_ms)
+        controller.set_supported_commands([MediaCommand.SEEK, MediaCommand.SEEK_RELATIVE])
+        LOGGER.info("offering seek (seek_max_ms=%d) and seek_relative to %s",
+                    seek_max_ms, target.client_id)
+
+    async def send_test_artwork(self) -> None:
+        """Send album artwork to the first client with an artwork stream, then clear it.
+
+        Two images: a flat colour, which encodes to a few kilobytes and travels
+        as one part, and noise, which encodes to well over the 65517 bytes one
+        part can carry. The log line for each is the SHA-256 of the bytes the
+        artwork role was handed to transfer; NoiseHandshakeCheck
+        --expect-artwork prints the same for what it reassembled.
+        """
+        assert self._server is not None
+        while True:
+            target = next(
+                (
+                    (client, role)
+                    for client in self._server.connected_clients
+                    for role in client.roles_by_family("artwork")
+                    if role.get_channel_configs()
+                ),
+                None,
+            )
+            if target is not None:
+                break
+            await asyncio.sleep(0.5)
+        client, role = target
+
+        send_artwork = role.send_artwork
+
+        def logged_send_artwork(channel: int, image_data: bytes, timestamp_us: int) -> None:
+            LOGGER.info(
+                "test artwork: channel %d %s",
+                channel,
+                f"image {len(image_data)} bytes sha256={hashlib.sha256(image_data).hexdigest()}"
+                if image_data
+                else "clear",
+            )
+            send_artwork(channel, image_data, timestamp_us)
+
+        role.send_artwork = logged_send_artwork
+        artwork = client.group.group_role("artwork")
+        # The stream's own late-join clear goes out first.
+        await asyncio.sleep(1.0)
+        for image in (
+            Image.new("RGB", (64, 64), (200, 30, 30)),
+            Image.frombytes("RGB", (500, 500), os.urandom(500 * 500 * 3)),
+            None,
+        ):
+            await artwork.set_album_artwork(image)
+            # The parts of a transfer are paced; let it finish before the next.
+            await asyncio.sleep(2.0)
+        LOGGER.info("test artwork: done")
+
+    async def pair_with_token(self, token_file: Path) -> None:
+        """Pair, by Pairing PSK, with the client whose token is in `token_file`.
+
+        On a Sentinel-keyed connection the server re-handshakes to the pairing
+        PSK first, and to the new long-term PSK once the pairing completes, so
+        this exercises both in-band re-handshakes without an operator at the
+        console.
+        """
+        assert self._server is not None
+        while True:
+            if token_file.exists():
+                token = decode_psk_token(token_file.read_text(encoding="utf-8").strip())
+                client = self._server.get_client(token.client_id)
+                if client is not None and client.is_connected and client.active_role_ids:
+                    break
+            await asyncio.sleep(0.5)
+        LOGGER.info("pairing %s with its token (re-handshake to the pairing PSK)", token.client_id)
+        try:
+            await self._server.initiate_pairing(
+                token.client_id,
+                PairingAttempt(
+                    PairMethod.PAIRING_PSK,
+                    pairing_psk=token.pairing_psk,
+                    client_id=token.client_id,
+                ),
+            )
+        except Exception as err:
+            # NoiseHandshakeCheck without --pair declines the pairing with
+            # pair/abort. Either way the re-handshake has happened.
+            LOGGER.info("pairing attempt ended: %s: %s", type(err).__name__, err)
+        else:
+            LOGGER.info("pairing attempt completed")
+
+    async def pair_with_code_file(self, code_file: Path, wrong_codes: int) -> None:
+        """Pair, by dynamic pairing code, with the first client that gets a role.
+
+        Stands in for the operator: the code is read from `code_file`, where
+        NoiseHandshakeCheck --pair writes the one it is showing. The first
+        `wrong_codes` attempts enter a different code instead, which the client
+        answers with pair/abort pairing_code_mismatch.
+        """
+        assert self._server is not None
+        while True:
+            client = next(
+                (
+                    client
+                    for client in self._server.connected_clients
+                    if client.is_connected and client.active_role_ids
+                ),
+                None,
+            )
+            if client is not None:
+                break
+            await asyncio.sleep(0.5)
+
+        for attempt in range(wrong_codes + 1):
+            wrong = attempt < wrong_codes
+
+            async def entered_code(wrong: bool = wrong) -> str:
+                while True:
+                    with contextlib.suppress(FileNotFoundError):
+                        code = code_file.read_text(encoding="utf-8").strip()
+                        if len(code) == 6:
+                            break
+                    await asyncio.sleep(0.1)
+                if wrong:
+                    code = f"{(int(code) + 1) % 1_000_000:06d}"
+                LOGGER.info("entering %s pairing code", "a wrong" if wrong else "the client's")
+                return code
+
+            # A code left over from an earlier attempt is not this attempt's.
+            code_file.unlink(missing_ok=True)
+            LOGGER.info("pairing %s by dynamic pairing code", client.client_id)
+            try:
+                await self._server.initiate_pairing(
+                    client.client_id,
+                    PairingAttempt(
+                        PairMethod.DYNAMIC_PAIRING_CODE,
+                        pairing_code_provider=entered_code,
+                        pairing_format=PairingCodeFormat.DIGITS,
+                    ),
+                )
+            except Exception as err:
+                LOGGER.info("pairing attempt ended: %s: %s", type(err).__name__, err)
+            else:
+                LOGGER.info("pairing attempt completed")
+
     # -- console -----------------------------------------------------------
 
     async def console(self) -> None:
@@ -294,7 +518,11 @@ class DevServer:
                 )
             await server.initiate_pairing(
                 client_id,
-                PairingAttempt(PairMethod.PAIRING_PSK, pairing_psk=token.pairing_psk),
+                PairingAttempt(
+                    PairMethod.PAIRING_PSK,
+                    pairing_psk=token.pairing_psk,
+                    client_id=client_id,
+                ),
             )
             print("pairing initiated")
         elif cmd in ("pair-dynamic", "pd"):
@@ -365,6 +593,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="auto-trust every unpaired client so it becomes playback-capable",
     )
     parser.add_argument(
+        "--play-test-audio",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="stream this many seconds of counter-pattern PCM to the first player",
+    )
+    parser.add_argument(
+        "--send-test-artwork",
+        action="store_true",
+        help="send two album artwork images, then a clear, to the first artwork client",
+    )
+    parser.add_argument(
+        "--offer-seek",
+        type=int,
+        default=None,
+        metavar="SEEK_MAX_MS",
+        help="offer 'seek' (up to this position) and 'seek_relative' to the first "
+        "controller, and log every controller command accepted",
+    )
+    parser.add_argument(
+        "--pair-token-file",
+        default=None,
+        metavar="PATH",
+        help="pair, by Pairing PSK, with the client whose SP:0 token is in this file "
+        "(after --play-test-audio, if both are given)",
+    )
+    parser.add_argument(
+        "--pair-dynamic-code-file",
+        default=None,
+        metavar="PATH",
+        help="pair, by dynamic pairing code, with the first client that gets a role, "
+        "entering the code that client writes to this file (NoiseHandshakeCheck --pair)",
+    )
+    parser.add_argument(
+        "--pair-dynamic-wrong-codes",
+        type=int,
+        default=0,
+        metavar="N",
+        help="with --pair-dynamic-code-file: enter a wrong code for the first N attempts",
+    )
+    parser.add_argument(
         "--no-console",
         action="store_true",
         help="do not read commands from stdin; serve until killed",
@@ -392,11 +661,38 @@ async def run(args: argparse.Namespace) -> int:
 
     watcher.add_done_callback(report_watcher_death)
 
+    async def scripted() -> None:
+        if args.offer_seek is not None:
+            await server.offer_seek(args.offer_seek)
+        if args.send_test_artwork:
+            await server.send_test_artwork()
+        if args.play_test_audio:
+            await server.play_test_audio(args.play_test_audio)
+        if args.pair_token_file:
+            await server.pair_with_token(Path(args.pair_token_file))
+        if args.pair_dynamic_code_file:
+            await server.pair_with_code_file(
+                Path(args.pair_dynamic_code_file), args.pair_dynamic_wrong_codes
+            )
+
+    test_audio = None
+    if (args.offer_seek is not None or args.send_test_artwork or args.play_test_audio
+            or args.pair_token_file or args.pair_dynamic_code_file):
+        test_audio = asyncio.create_task(scripted())
+        test_audio.add_done_callback(
+            lambda task: task.cancelled() or task.exception() is None
+            or LOGGER.error("scripted run failed", exc_info=task.exception())
+        )
+
     try:
         await server.console()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        if test_audio is not None:
+            test_audio.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await test_audio
         watcher.cancel()
         # Suppress CancelledError from the cancel above, but tolerate a watcher
         # that already died of something else - otherwise that exception would

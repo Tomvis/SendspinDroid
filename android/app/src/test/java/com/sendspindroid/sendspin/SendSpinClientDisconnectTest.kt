@@ -89,7 +89,7 @@ class SendSpinDisconnectTest {
     // =========================================================================
 
     @Test
-    fun `disconnect clears transport listener before tearing down`() {
+    fun `disconnect clears transport listener before closing`() {
         // Use a mock transport that we can inject via the connect flow
         val mockTransport = mockk<SendSpinTransport>(relaxed = true)
         every { mockTransport.state } returns TransportState.Connected
@@ -103,13 +103,10 @@ class SendSpinDisconnectTest {
         // Call disconnect
         client.disconnect()
 
-        // Verify setListener(null) is called BEFORE destroy(). disconnect() must
-        // call destroy() (not close()) so the underlying HttpClient is released --
-        // close() alone leaks the OkHttp engine + ping thread until the next
-        // connect cycle.
+        // Verify setListener(null) is called BEFORE close()
         verify(ordering = Ordering.ORDERED) {
             mockTransport.setListener(null)
-            mockTransport.destroy()
+            mockTransport.close(1000, "user_request")
         }
     }
 
@@ -130,16 +127,14 @@ class SendSpinDisconnectTest {
                 capturedListener = listener
             }
 
-            override fun close(code: Int, reason: String) {}
-
-            override fun destroy() {
-                // Simulate the H-02 race against the CURRENT teardown path:
-                // disconnect() now calls destroy() (not close()), so fire onClosed
-                // synchronously here. disconnect() calls setListener(null) before
-                // destroy(), so capturedListener is null and onClosed must not
-                // write a second Idle -- StateFlow dedup keeps it Idle exactly once.
-                capturedListener?.onClosed(1000, "destroyed")
+            override fun close(code: Int, reason: String) {
+                // Simulate the race: onClosed fires synchronously during close()
+                // After the fix, setListener(null) is called before close(),
+                // so capturedListener should be null here.
+                capturedListener?.onClosed(code, reason)
             }
+
+            override fun destroy() {}
         }
 
         // Register a listener (as the real code does during connect)

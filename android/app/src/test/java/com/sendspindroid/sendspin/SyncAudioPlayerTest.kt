@@ -7,9 +7,6 @@ import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.atomic.AtomicLong
-import kotlin.concurrent.thread
 
 /**
  * Unit tests for SyncAudioPlayer.
@@ -110,47 +107,6 @@ class SyncAudioPlayerTest {
     }
 
     // ========================================================================
-    // Test 2: DRAINING -> INITIALIZING on buffer exhaustion
-    // ========================================================================
-
-    @Test
-    fun `enterDraining transitions PLAYING to DRAINING`() {
-        setField("playbackState", PlaybackState.PLAYING)
-
-        val result = player.enterDraining()
-
-        assertTrue(result)
-        assertEquals(PlaybackState.DRAINING, player.getPlaybackState())
-    }
-
-    @Test
-    fun `enterDraining fails from INITIALIZING state`() {
-        assertEquals(PlaybackState.INITIALIZING, player.getPlaybackState())
-        val result = player.enterDraining()
-        assertFalse(result)
-        assertEquals(PlaybackState.INITIALIZING, player.getPlaybackState())
-    }
-
-    @Test
-    fun `buffer exhaustion during DRAINING is detectable`() {
-        val callback = mockk<SyncAudioPlayerCallback>(relaxed = true)
-        player.setStateCallback(callback)
-
-        queueChunkDirect(1_000_000L, 960)
-        setField("playbackState", PlaybackState.PLAYING)
-
-        player.enterDraining()
-        assertEquals(PlaybackState.DRAINING, player.getPlaybackState())
-
-        // Simulate buffer exhaustion
-        getChunkQueue().clear()
-        val totalQueuedSamples: AtomicLong = getField("totalQueuedSamples")
-        totalQueuedSamples.set(0)
-
-        assertEquals(0L, player.getBufferedDurationMs())
-    }
-
-    // ========================================================================
     // Test 3: Reanchor respects 5-second cooldown
     // ========================================================================
 
@@ -187,85 +143,23 @@ class SyncAudioPlayerTest {
     }
 
     // ========================================================================
-    // Test 4: enterDraining/exitDraining thread safety
+    // Test 5: Correction rate stays inside the spec's +/-0.5% speed limit
     // ========================================================================
 
     @Test
-    fun `concurrent enterDraining and exitDraining do not corrupt state`() {
-        val iterations = 100
-        val errors = mutableListOf<String>()
-        val latch = CountDownLatch(2)
-
-        setField("playbackState", PlaybackState.PLAYING)
-
-        val thread1 = thread {
-            try {
-                for (i in 0 until iterations) {
-                    setField("playbackState", PlaybackState.PLAYING)
-                    player.enterDraining()
-                }
-            } catch (e: Exception) {
-                synchronized(errors) {
-                    errors.add("Thread1: ${e.message}")
-                }
-            } finally {
-                latch.countDown()
-            }
-        }
-
-        val thread2 = thread {
-            try {
-                for (i in 0 until iterations) {
-                    player.exitDraining()
-                    setField("playbackState", PlaybackState.PLAYING)
-                }
-            } catch (e: Exception) {
-                synchronized(errors) {
-                    errors.add("Thread2: ${e.message}")
-                }
-            } finally {
-                latch.countDown()
-            }
-        }
-
-        latch.await()
-
-        assertTrue(
-            "Concurrent enterDraining/exitDraining should not throw: $errors",
-            errors.isEmpty()
-        )
-
-        val finalState = player.getPlaybackState()
-        assertNotNull("Final state should not be null", finalState)
-        assertTrue(
-            "Final state should be a valid PlaybackState",
-            finalState in PlaybackState.entries
-        )
-    }
-
-    // ========================================================================
-    // Test 5: Correction clamps to MAX_SPEED_CORRECTION (+/-2%)
-    // ========================================================================
-
-    @Test
-    fun `correction rate clamped to MAX_SPEED_CORRECTION for large positive error`() {
-        val method = SyncAudioPlayer::class.java.getDeclaredMethod(
-            "updateCorrectionSchedule", Long::class.java
-        )
+    fun `correction rate stays within speed limit for large positive error`() {
+        val method = SyncAudioPlayer::class.java.getDeclaredMethod("updateCorrectionSchedule")
         method.isAccessible = true
 
         setField("startTimeCalibrated", true)
         setField("playingStateEnteredAtUs", 1L)
-        setField("reconnectedAtUs", 0L)
 
         val syncErrorFilter: SyncErrorFilter = getField("syncErrorFilter")
         syncErrorFilter.update(100_000L, 1_000_000L)
         syncErrorFilter.update(100_000L, 2_000_000L)
         syncErrorFilter.update(100_000L, 3_000_000L)
 
-        // nowUs (fixed, deterministic) is well past playingStateEnteredAtUs (1L)
-        // so the startup grace period is over regardless of the platform clock.
-        method.invoke(player, 1_000_000L)
+        method.invoke(player)
 
         val dropEvery: Int = getField("dropEveryNFrames")
         val insertEvery: Int = getField("insertEveryNFrames")
@@ -273,33 +167,25 @@ class SyncAudioPlayerTest {
         assertTrue("Should be dropping for positive error", dropEvery > 0)
         assertEquals("Should not be inserting for positive error", 0, insertEvery)
 
-        // At MAX_SPEED_CORRECTION (2%), min interval = 48000 / 960 = 50 frames
-        val minInterval = (sampleRate / (sampleRate * 0.02)).toInt()
-        assertTrue(
-            "Drop interval ($dropEvery) should be >= min interval ($minInterval)",
-            dropEvery >= minInterval
-        )
+        // One frame per 20ms (960 frames) is 0.1%; the spec allows 0.5% (1 in 200)
+        assertEquals("Drop interval should be 20ms of frames", sampleRate / 50, dropEvery)
+        assertTrue("Drop rate must stay within 0.5%", 1.0 / dropEvery <= 0.005)
     }
 
     @Test
-    fun `correction rate clamped to MAX_SPEED_CORRECTION for large negative error`() {
-        val method = SyncAudioPlayer::class.java.getDeclaredMethod(
-            "updateCorrectionSchedule", Long::class.java
-        )
+    fun `correction rate stays within speed limit for large negative error`() {
+        val method = SyncAudioPlayer::class.java.getDeclaredMethod("updateCorrectionSchedule")
         method.isAccessible = true
 
         setField("startTimeCalibrated", true)
         setField("playingStateEnteredAtUs", 1L)
-        setField("reconnectedAtUs", 0L)
 
         val syncErrorFilter: SyncErrorFilter = getField("syncErrorFilter")
         syncErrorFilter.update(-100_000L, 1_000_000L)
         syncErrorFilter.update(-100_000L, 2_000_000L)
         syncErrorFilter.update(-100_000L, 3_000_000L)
 
-        // nowUs (fixed, deterministic) is well past playingStateEnteredAtUs (1L)
-        // so the startup grace period is over regardless of the platform clock.
-        method.invoke(player, 1_000_000L)
+        method.invoke(player)
 
         val dropEvery: Int = getField("dropEveryNFrames")
         val insertEvery: Int = getField("insertEveryNFrames")
@@ -307,11 +193,8 @@ class SyncAudioPlayerTest {
         assertEquals("Should not be dropping for negative error", 0, dropEvery)
         assertTrue("Should be inserting for negative error", insertEvery > 0)
 
-        val minInterval = (sampleRate / (sampleRate * 0.02)).toInt()
-        assertTrue(
-            "Insert interval ($insertEvery) should be >= min interval ($minInterval)",
-            insertEvery >= minInterval
-        )
+        assertEquals("Insert interval should be 20ms of frames", sampleRate / 50, insertEvery)
+        assertTrue("Insert rate must stay within 0.5%", 1.0 / insertEvery <= 0.005)
     }
 
     // ========================================================================
@@ -320,13 +203,10 @@ class SyncAudioPlayerTest {
 
     @Test
     fun `no corrections during startup grace period`() {
-        val method = SyncAudioPlayer::class.java.getDeclaredMethod(
-            "updateCorrectionSchedule", Long::class.java
-        )
+        val method = SyncAudioPlayer::class.java.getDeclaredMethod("updateCorrectionSchedule")
         method.isAccessible = true
 
         setField("startTimeCalibrated", true)
-        setField("reconnectedAtUs", 0L)
 
         // Set playingStateEnteredAtUs to "now" (within grace period)
         val nowUs = System.nanoTime() / 1000
@@ -336,7 +216,7 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(50_000L, 1_000_000L)
         syncErrorFilter.update(50_000L, 2_000_000L)
 
-        method.invoke(player, nowUs)
+        method.invoke(player)
 
         val dropEvery: Int = getField("dropEveryNFrames")
         val insertEvery: Int = getField("insertEveryNFrames")
@@ -345,64 +225,25 @@ class SyncAudioPlayerTest {
         assertEquals("No insert corrections during grace period", 0, insertEvery)
     }
 
-    // ========================================================================
-    // Test 7: No corrections during RECONNECT_STABILIZATION
-    // ========================================================================
-
     @Test
-    fun `no corrections during reconnect stabilization period`() {
-        val method = SyncAudioPlayer::class.java.getDeclaredMethod(
-            "updateCorrectionSchedule", Long::class.java
-        )
+    fun `corrections are scheduled once the startup grace period has passed`() {
+        val method = SyncAudioPlayer::class.java.getDeclaredMethod("updateCorrectionSchedule")
         method.isAccessible = true
 
         setField("startTimeCalibrated", true)
         setField("playingStateEnteredAtUs", 1L)
-
-        // Set reconnectedAtUs to "now" (within 2s stabilization period)
-        val nowUs = System.nanoTime() / 1000
-        setField("reconnectedAtUs", nowUs)
-
-        val syncErrorFilter: SyncErrorFilter = getField("syncErrorFilter")
-        syncErrorFilter.update(50_000L, 1_000_000L)
-        syncErrorFilter.update(50_000L, 2_000_000L)
-
-        method.invoke(player, nowUs)
-
-        val dropEvery: Int = getField("dropEveryNFrames")
-        val insertEvery: Int = getField("insertEveryNFrames")
-
-        assertEquals("No drop corrections during reconnect stabilization", 0, dropEvery)
-        assertEquals("No insert corrections during reconnect stabilization", 0, insertEvery)
-    }
-
-    @Test
-    fun `corrections resume after reconnect stabilization expires`() {
-        val method = SyncAudioPlayer::class.java.getDeclaredMethod(
-            "updateCorrectionSchedule", Long::class.java
-        )
-        method.isAccessible = true
-
-        setField("startTimeCalibrated", true)
-        setField("playingStateEnteredAtUs", 1L)
-
-        // Set reconnectedAtUs to 3 seconds ago (stabilization is 2 seconds).
-        // Use a fixed clock so the startup-grace check (nowUs - 1L) is
-        // deterministically past the grace window regardless of System.nanoTime().
-        val nowUs = 5_000_000L
-        setField("reconnectedAtUs", nowUs - 3_000_000L)
 
         val syncErrorFilter: SyncErrorFilter = getField("syncErrorFilter")
         syncErrorFilter.update(50_000L, 1_000_000L)
         syncErrorFilter.update(50_000L, 2_000_000L)
         syncErrorFilter.update(50_000L, 3_000_000L)
 
-        method.invoke(player, nowUs)
+        method.invoke(player)
 
         val dropEvery: Int = getField("dropEveryNFrames")
 
         assertTrue(
-            "Corrections should resume after stabilization expires",
+            "Corrections should be scheduled after the grace period",
             dropEvery > 0
         )
     }
@@ -545,108 +386,8 @@ class SyncAudioPlayerTest {
     }
 
     // ========================================================================
-    // Test 11: Frame position wrap detection
-    // ========================================================================
-
-    @Test
-    fun `frame position wrap is detected and rejected`() {
-        // Set a high last valid frame position (simulating long playback near 32-bit wrap)
-        val highFramePos = 4_000_000_000L
-        setField("lastValidFramePosition", highFramePos)
-
-        // After 32-bit wrap, frame position jumps to a small value
-        val wrappedFramePos = 1000L
-
-        // The detection condition in updateSyncError:
-        //   framePosition < lastValidFramePosition - sampleRate
-        assertTrue(
-            "Wrapped frame position should be detected",
-            wrappedFramePos < highFramePos - sampleRate
-        )
-
-        // lastValidFramePosition should not be updated on wrap
-        val lastValid: Long = getField("lastValidFramePosition")
-        assertEquals(
-            "lastValidFramePosition should remain at the pre-wrap value",
-            highFramePos, lastValid
-        )
-    }
-
-    @Test
-    fun `normal frame position advance is not flagged as wrap`() {
-        val currentPos = 1_000_000L
-        setField("lastValidFramePosition", currentPos)
-
-        val nextPos = currentPos + sampleRate  // 1 second advance
-        assertFalse(
-            "Normal advance should not trigger wrap detection",
-            nextPos < currentPos - sampleRate
-        )
-    }
-
-    // ========================================================================
-    // Test 12: Baseline refresh every 5 seconds
-    // ========================================================================
-
-    @Test
-    fun `baseline refresh interval constant is 5 seconds`() {
-        val field = SyncAudioPlayer::class.java.getDeclaredField("BASELINE_REFRESH_INTERVAL_US")
-        field.isAccessible = true
-        val intervalUs = field.getLong(null)
-        assertEquals(
-            "Baseline refresh interval should be 5 seconds",
-            5_000_000L, intervalUs
-        )
-    }
-
-    @Test
-    fun `baseline refresh requires minimum Kalman measurements`() {
-        val field = SyncAudioPlayer::class.java.getDeclaredField("BASELINE_REFRESH_MIN_MEASUREMENTS")
-        field.isAccessible = true
-        val minMeasurements = field.getInt(null)
-        assertEquals(
-            "Baseline refresh should require 10 measurements",
-            10, minMeasurements
-        )
-    }
-
-    @Test
-    fun `baseline fields reset on clearBuffer`() {
-        setField("baselineFramePosition", 12345L)
-        setField("baselineServerTimeUs", 67890L)
-        setField("lastBaselineRefreshUs", 11111L)
-
-        player.clearBuffer()
-
-        assertEquals(0L, getField<Long>("baselineFramePosition"))
-        assertEquals(0L, getField<Long>("baselineServerTimeUs"))
-        assertEquals(0L, getField<Long>("lastBaselineRefreshUs"))
-    }
-
-    // ========================================================================
     // Additional supporting tests
     // ========================================================================
-
-    @Test
-    fun `exitDraining transitions to PLAYING and records reconnection time`() {
-        setField("playbackState", PlaybackState.PLAYING)
-        player.enterDraining()
-        assertEquals(PlaybackState.DRAINING, player.getPlaybackState())
-
-        val result = player.exitDraining()
-        assertTrue(result)
-        assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
-
-        val reconnectedAt: Long = getField("reconnectedAtUs")
-        assertTrue("reconnectedAtUs should be set after exitDraining", reconnectedAt > 0)
-    }
-
-    @Test
-    fun `exitDraining fails when not in DRAINING state`() {
-        assertEquals(PlaybackState.INITIALIZING, player.getPlaybackState())
-        val result = player.exitDraining()
-        assertFalse(result)
-    }
 
     @Test
     fun `clearBuffer resets state to INITIALIZING`() {
@@ -669,9 +410,7 @@ class SyncAudioPlayerTest {
 
     @Test
     fun `no corrections when not calibrated`() {
-        val method = SyncAudioPlayer::class.java.getDeclaredMethod(
-            "updateCorrectionSchedule", Long::class.java
-        )
+        val method = SyncAudioPlayer::class.java.getDeclaredMethod("updateCorrectionSchedule")
         method.isAccessible = true
 
         assertFalse(getField<Boolean>("startTimeCalibrated"))
@@ -680,7 +419,7 @@ class SyncAudioPlayerTest {
         syncErrorFilter.update(50_000L, 1_000_000L)
         syncErrorFilter.update(50_000L, 2_000_000L)
 
-        method.invoke(player, System.nanoTime() / 1000)
+        method.invoke(player)
 
         assertEquals(0, getField<Int>("dropEveryNFrames"))
         assertEquals(0, getField<Int>("insertEveryNFrames"))

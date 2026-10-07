@@ -57,12 +57,9 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     @Volatile
     private var currentArtworkData: ByteArray? = null
 
-    // Source bitmap for the bytes currently in [currentArtworkData]. JPEG
-    // compression is the bulk of [updateMetadata]'s cost (~10-40 ms on Tegra
-    // for a 300x300 ARGB bitmap, on the main thread). Same-track metadata
-    // refreshes re-emit the same Bitmap instance every time; identity check
-    // here skips the redundant recompress without changing observable
-    // behavior. Cleared in lockstep with currentArtworkData.
+    // Source bitmap of [currentArtworkData]. Same-track refreshes re-emit the
+    // same Bitmap; the identity check skips a 10-40 ms JPEG recompress on the
+    // main thread (Tegra). Cleared with currentArtworkData.
     @Volatile
     private var lastCompressedSource: Bitmap? = null
 
@@ -72,21 +69,6 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     // Cached MediaMetadata object (rebuilt when metadata changes)
     @Volatile
     private var cachedMetadata: MediaMetadata = MediaMetadata.EMPTY
-
-    // Reconnecting overlay: when non-null, the rebuilt metadata substitutes
-    // "Reconnecting to {serverName}..." for the title (preserving artwork and
-    // subtitle) and getPlaybackState() returns STATE_BUFFERING. This surfaces
-    // recovery visibly on the lock screen, Android Auto, and AVRCP instead of
-    // leaving the stale track title during reconnect storms. Issue #132.
-    @Volatile
-    private var reconnectingOverlay: String? = null
-
-    // Stand-in MediaItem for the reconnecting overlay, used only when the
-    // wrapped player has dropped its current item. MediaItem is immutable and
-    // getCurrentMediaItem() copies via buildUpon(), so one shared instance is
-    // safe to hand out repeatedly.
-    private val overlayMediaItem: MediaItem =
-        MediaItem.Builder().setMediaId(OVERLAY_MEDIA_ID).build()
 
     /**
      * Updates the current track metadata.
@@ -141,10 +123,7 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
             currentArtworkUri = if (artworkUri.toString().isEmpty()) null else artworkUri
         }
 
-        // Handle artwork bitmap. Recompress only when the source Bitmap is
-        // not the same instance we already compressed - identity check, not
-        // content equality. Same-track refreshes pass the same Bitmap; a new
-        // Coil fetch produces a new instance and falls through to recompress.
+        // Handle artwork bitmap
         if (artwork != null) {
             if (artwork !== lastCompressedSource) {
                 currentArtworkData = ByteArrayOutputStream().use { stream ->
@@ -172,11 +151,6 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
 
     /**
      * Rebuilds the cached MediaMetadata from current values.
-     *
-     * When [reconnectingOverlay] is non-null, the title and displayTitle are
-     * replaced with "Reconnecting to {server}..." while subtitle and artwork
-     * are preserved; the lock screen keeps the album art but clearly reads as
-     * recovering. Issue #132.
      */
     private fun rebuildMetadata() {
         // Build subtitle for Android Auto's DISPLAY_SUBTITLE (e.g. "Artist - Album")
@@ -188,19 +162,14 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
             }
         }.ifEmpty { null }
 
-        val overlayServer = reconnectingOverlay
-        val displayTitle = if (overlayServer != null) "Reconnecting to $overlayServer..." else currentTitle
-
         cachedMetadata = MediaMetadata.Builder()
-            .setTitle(displayTitle)
-            .setDisplayTitle(displayTitle)
+            .setTitle(currentTitle)
+            .setDisplayTitle(currentTitle)
             .setSubtitle(subtitle)  // Android Auto uses DISPLAY_SUBTITLE for second line
             .setArtist(currentArtist)
             .setAlbumTitle(currentAlbum)
-            // Don't fall back to currentArtist: this MediaMetadata is observed
-            // back by MainActivity's onMediaMetadataChanged, which would write
-            // the synthetic albumArtist into TrackMetadata.albumArtist and
-            // erase the "no real albumArtist" distinction in the VM.
+            // No fallback to currentArtist: MainActivity reads this back into
+            // the VM, which must keep "no real album artist" distinct.
             .setAlbumArtist(currentAlbumArtist)
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
             .setIsPlayable(true)
@@ -215,42 +184,7 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     }
 
     /**
-     * Show a "Reconnecting to {serverName}..." overlay on the MediaSession while
-     * the client is in ConnectionState.Reconnecting. Also forces
-     * [getPlaybackState] to return [Player.STATE_BUFFERING] so lock screen /
-     * Auto / AVRCP render the system buffering indicator.
-     *
-     * Idempotent: calling with the same [serverName] twice is a no-op after
-     * the first call, so it is safe to call on every retry attempt.
-     *
-     * Issue #132.
-     */
-    fun setReconnectingOverlay(serverName: String) {
-        if (reconnectingOverlay == serverName) return
-        reconnectingOverlay = serverName
-        rebuildMetadata()
-        notifyMetadataAndState()
-    }
-
-    /**
-     * Clear any active reconnecting overlay and restore normal metadata /
-     * playback-state behavior. Called on [ConnectionState.Connected],
-     * [ConnectionState.Disconnected], or [ConnectionState.Error].
-     *
-     * Idempotent: no-op if no overlay is active. Issue #132.
-     */
-    fun clearReconnectingOverlay() {
-        if (reconnectingOverlay == null) return
-        reconnectingOverlay = null
-        rebuildMetadata()
-        notifyMetadataAndState()
-    }
-
-    /**
-     * Clears all metadata (e.g., on disconnect). Also clears any active
-     * reconnecting overlay so getMediaMetadata()'s overlay-precedence branch
-     * doesn't end up returning the now-EMPTY cachedMetadata while still
-     * claiming "Reconnecting to..." semantics.
+     * Clears all metadata (e.g., on disconnect).
      */
     fun clearMetadata() {
         currentTitle = null
@@ -262,22 +196,10 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         currentArtworkData = null
         currentArtworkUri = null
         lastCompressedSource = null
-        reconnectingOverlay = null
         cachedMetadata = MediaMetadata.EMPTY
 
-        notifyMetadataAndState()
-    }
-
-    /**
-     * Re-fetch the current playback state and push both the cached metadata and
-     * that state to every registered listener. Shared by the overlay set/clear
-     * and metadata-clear paths so the notification contract lives in one place.
-     */
-    private fun notifyMetadataAndState() {
-        val newState = getPlaybackState()
         listeners.forEach { listener ->
             listener.onMediaMetadataChanged(cachedMetadata)
-            listener.onPlaybackStateChanged(newState)
         }
     }
 
@@ -288,23 +210,11 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
      * for lock screen and notifications.
      */
     override fun getMediaMetadata(): MediaMetadata {
-        // The reconnecting overlay always takes precedence: even if no track
-        // metadata has ever been set, the user should see "Reconnecting to..."
-        // rather than an empty lock screen.
-        //
-        // Any populated cache field gates the return on cachedMetadata so a
-        // partial update (e.g. albumArtist-only or year-only) still surfaces
-        // via the cache instead of silently falling through to the underlying
-        // player's empty metadata.
-        return if (reconnectingOverlay != null ||
-            currentTitle != null ||
-            currentArtist != null ||
-            currentAlbum != null ||
-            currentAlbumArtist != null ||
-            currentYear != null ||
-            currentAlbumTrack != null ||
-            currentArtworkData != null ||
-            currentArtworkUri != null) {
+        // Any populated field serves the cache, so a partial update (album
+        // artist or year only) is not lost to the wrapped player's empty one.
+        return if (currentTitle != null || currentArtist != null || currentAlbum != null ||
+            currentAlbumArtist != null || currentYear != null || currentAlbumTrack != null ||
+            currentArtworkData != null || currentArtworkUri != null) {
             cachedMetadata
         } else {
             super.getMediaMetadata()
@@ -312,50 +222,18 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     }
 
     /**
-     * Forces [Player.STATE_BUFFERING] while a reconnecting overlay is active,
-     * so the lock screen / Android Auto / AVRCP render the buffering indicator
-     * rather than showing the old "playing" state. Falls through to the
-     * underlying player's state otherwise. Issue #132.
-     */
-    override fun getPlaybackState(): Int =
-        if (reconnectingOverlay != null) Player.STATE_BUFFERING
-        else super.getPlaybackState()
-
-    /**
      * Returns the current media item with our enhanced metadata injected.
      *
      * Android Auto's legacy compat bridge reads metadata from the MediaItem
      * (not getMediaMetadata()), so we must override this to include artwork
      * and other enhanced fields.
-     *
-     * Edge case: a reconnecting overlay can be active while the underlying
-     * player has no current item. PlaybackService arms the overlay only on the
-     * Ready -> Connecting transition (network handover / stall watchdog), and a
-     * session that reached Ready without ever receiving track metadata (server
-     * connected but idle) never called SendSpinPlayer.updateMediaItem, so its
-     * current item is still null. We synthesize a MediaItem there so the
-     * "Reconnecting to..." overlay still surfaces via the MediaItem path on
-     * legacy Auto bridges.
-     *
-     * That synthesis is gated on [reconnectingOverlay] alone, never on
-     * "baseItem happened to be null". A null baseItem is not evidence of the
-     * overlay state: it is equally the ordinary reading before the first track
-     * metadata arrives, and after tearDownConnection's
-     * SendSpinPlayer.updateConnectionState(false) nulls the item (that teardown
-     * clears the overlay first, so those two never overlap). Handing
-     * [OVERLAY_MEDIA_ID] to Android Auto / AVRCP outside the overlay would
-     * advertise a media id that the browse tree cannot resolve, turning
-     * "nothing is playing" into a browse-callback failure. Outside the overlay
-     * we return null, which is what the Media3 contract expects for "no current
-     * item".
      */
     override fun getCurrentMediaItem(): MediaItem? {
-        val baseItem = super.getCurrentMediaItem()
+        val baseItem = super.getCurrentMediaItem() ?: return null
         val metadata = getMediaMetadata()
         if (metadata == MediaMetadata.EMPTY) return baseItem
-        val base = baseItem
-            ?: if (reconnectingOverlay != null) overlayMediaItem else return null
-        return base.buildUpon()
+
+        return baseItem.buildUpon()
             .setMediaMetadata(metadata)
             .build()
     }
@@ -374,19 +252,5 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     override fun removeListener(listener: Player.Listener) {
         super.removeListener(listener)
         listeners.remove(listener)
-    }
-
-    companion object {
-        /**
-         * Media id carried by the synthetic reconnecting-overlay MediaItem.
-         *
-         * Deliberately absent from the Android Auto browse tree: it exists
-         * only so legacy Auto compat bridges, which read metadata off the
-         * MediaItem rather than getMediaMetadata(), have something to hang
-         * "Reconnecting to {server}..." on while the wrapped player has no
-         * item of its own. It is emitted only while a reconnecting overlay is
-         * active. Issue #132.
-         */
-        const val OVERLAY_MEDIA_ID = "sendspin_overlay"
     }
 }

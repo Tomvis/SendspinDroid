@@ -50,7 +50,6 @@ class DynamicPairingCodeOptInTest {
         every { Log.e(any(), any(), any()) } returns 0
 
         mockkObject(UserSettings)
-        every { UserSettings.getPairingPskEnabled() } returns true
         every { UserSettings.getUnpairedAccessEnabled() } returns true
         every { UserSettings.getDynamicPairingCodeEnabled() } returns false
 
@@ -78,7 +77,6 @@ class DynamicPairingCodeOptInTest {
     }
 
     private fun hello(methods: List<MessageBuilder.PairMethodDescriptor>) = MessageBuilder.buildClientHello(
-        clientId = null,
         deviceName = "TestDevice",
         bufferCapacity = 1,
         manufacturer = "Test",

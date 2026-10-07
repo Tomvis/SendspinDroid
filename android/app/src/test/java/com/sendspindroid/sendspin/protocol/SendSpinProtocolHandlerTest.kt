@@ -1,9 +1,14 @@
 package com.sendspindroid.sendspin.protocol
 
 import com.sendspindroid.sendspin.SendspinTimeFilter
+import com.sendspindroid.sendspin.crypto.PskCategory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -82,39 +87,6 @@ class SendSpinProtocolHandlerTest {
     }
 
     @Test
-    fun `whole-role null clears the metadata instead of updating it`() {
-        handler.handleTextMessageForTest(
-            buildServerStateJson(title = "Song A", artist = "Artist A", album = "Album A")
-        )
-        assertEquals(1, handler.metadataUpdates.size)
-
-        // "a whole role object set to `null` clears all of that role's state" -
-        // it must reach the clear hook, not arrive as an update carrying nulls
-        // (which the delta merge reads as "unreported" and preserves).
-        handler.handleTextMessageForTest(
-            """{"type":"server/state","payload":{"metadata":null}}"""
-        )
-
-        assertEquals("clear must not be delivered as an update", 1, handler.metadataUpdates.size)
-        assertEquals(1, handler.metadataClears)
-    }
-
-    @Test
-    fun `absent metadata role neither updates nor clears`() {
-        handler.handleTextMessageForTest(
-            buildServerStateJson(title = "Song A", artist = "Artist A", album = "Album A")
-        )
-
-        // No `metadata` key at all: keep whatever is on screen.
-        handler.handleTextMessageForTest(
-            """{"type":"server/state","payload":{"state":"paused"}}"""
-        )
-
-        assertEquals(1, handler.metadataUpdates.size)
-        assertEquals(0, handler.metadataClears)
-    }
-
-    @Test
     fun `different metadata fires onMetadataUpdate for each`() {
         val metadata1 = buildServerStateJson(
             title = "Song A",
@@ -143,6 +115,7 @@ class SendSpinProtocolHandlerTest {
 
     @Test
     fun `setExternalSource true reports available false`() {
+        activateRoles("\"player@v1\"")
         handler.sentMessages.clear()
         handler.setExternalSource(true)
 
@@ -175,6 +148,7 @@ class SendSpinProtocolHandlerTest {
 
     @Test
     fun `setExternalSource is idempotent`() {
+        activateRoles("\"player@v1\"")
         handler.sentMessages.clear()
         handler.setExternalSource(true)
         handler.setExternalSource(true)
@@ -184,54 +158,112 @@ class SendSpinProtocolHandlerTest {
     // ========== Controller State Tests ==========
 
     @Test
-    fun `controller state from server_state is merged and published`() {
+    fun `controller state from server_state is published`() {
         handler.handleTextMessageForTest(
             """{"type":"server/state","payload":{"controller":{
                 "supported_commands":["play","pause","volume"],
                 "volume":60,"muted":false,"repeat":"off","shuffle":false}}}"""
         )
-        // Partial delta: only volume changes; earlier fields must survive.
-        handler.handleTextMessageForTest(
-            """{"type":"server/state","payload":{"controller":{"volume":80}}}"""
-        )
 
-        assertEquals(2, handler.controllerStateUpdates.size)
-        val merged = handler.controllerStateUpdates.last()
-        assertEquals(80, merged.volume)
-        assertEquals(listOf("play", "pause", "volume"), merged.supportedCommands)
-        assertEquals("off", merged.repeat)
+        val state = handler.controllerStateUpdates.single()
+        assertEquals(60, state.volume)
+        assertEquals(listOf("play", "pause", "volume"), state.supportedCommands)
+        assertEquals("off", state.repeat)
     }
 
     @Test
-    fun `unchanged controller delta does not republish`() {
+    fun `unchanged controller state does not republish`() {
         val msg = """{"type":"server/state","payload":{"controller":{"volume":60}}}"""
         handler.handleTextMessageForTest(msg)
         handler.handleTextMessageForTest(msg)
         assertEquals(1, handler.controllerStateUpdates.size)
     }
 
+    private fun activateRoles(roles: String) = handler.handleTextMessageForTest(
+        """{"type":"server/activate","payload":{"activities":[],"active_roles":[$roles]}}"""
+    )
+
+    private fun controllerState(fields: String) = handler.handleTextMessageForTest(
+        """{"type":"server/state","payload":{"controller":{$fields}}}"""
+    )
+
+    private fun sentCommands() = handler.sentMessages.filter { it.contains("client/command") }
+
     @Test
     fun `sendCommand drops commands outside server supported_commands`() {
-        handler.handleTextMessageForTest(
-            """{"type":"server/state","payload":{"controller":{
-                "supported_commands":["play","pause"],
-                "volume":60,"muted":false,"repeat":"off","shuffle":false}}}"""
+        activateRoles("\"player@v1\",\"controller@v1\"")
+        controllerState(
+            """"supported_commands":["play","pause"],
+                "volume":60,"muted":false,"repeat":"off","shuffle":false"""
         )
-        handler.sentMessages.clear()
 
+        assertFalse(handler.canSendCommand("shuffle"))
         handler.sendCommand("shuffle")
-        assertEquals("Unsupported command must be dropped", 0, handler.sentMessages.size)
+        assertEquals("Unsupported command must be dropped", 0, sentCommands().size)
 
+        assertTrue(handler.canSendCommand("play"))
         handler.sendCommand("play")
-        assertEquals(1, handler.sentMessages.size)
-        assertTrue(handler.sentMessages[0].contains("\"command\":\"play\""))
+        assertEquals(1, sentCommands().size)
+        assertTrue(sentCommands()[0].contains("\"command\":\"play\""))
     }
 
     @Test
-    fun `sendCommand is not gated before controller state is known`() {
-        handler.sentMessages.clear()
+    fun `sendCommand sends nothing before a controller state has arrived`() {
+        activateRoles("\"player@v1\",\"controller@v1\"")
+        assertFalse(handler.canSendCommand("play"))
         handler.sendCommand("play")
-        assertEquals(1, handler.sentMessages.size)
+        assertEquals(0, sentCommands().size)
+    }
+
+    @Test
+    fun `sendCommand sends nothing while the controller role is not active`() {
+        // "Only valid from clients whose `controller` role is active."
+        activateRoles("\"player@v1\"")
+        controllerState(""""supported_commands":["play","pause"]""")
+        assertFalse(handler.canSendCommand("play"))
+        handler.sendCommand("play")
+        assertEquals(0, sentCommands().size)
+    }
+
+    @Test
+    fun `seek carries position_ms clamped to 0 through seek_max_ms`() {
+        activateRoles("\"controller@v1\"")
+        controllerState(""""supported_commands":["seek"],"seek_max_ms":200000""")
+
+        handler.sendCommand("seek", positionMs = 42_000)
+        handler.sendCommand("seek", positionMs = 999_000)
+        handler.sendCommand("seek", positionMs = -5)
+
+        assertEquals(3, sentCommands().size)
+        assertTrue(sentCommands()[0].contains("\"position_ms\":42000"))
+        assertTrue(sentCommands()[1].contains("\"position_ms\":200000"))
+        assertTrue(sentCommands()[2].contains("\"position_ms\":0"))
+    }
+
+    @Test
+    fun `seek is dropped without a seek_max_ms or a position`() {
+        activateRoles("\"controller@v1\"")
+        controllerState(""""supported_commands":["seek","seek_relative"]""")
+
+        handler.sendCommand("seek", positionMs = 42_000)
+        handler.sendCommand("seek_relative")
+        assertEquals(0, sentCommands().size)
+
+        controllerState(""""seek_max_ms":200000""")
+        handler.sendCommand("seek")
+        assertEquals(0, sentCommands().size)
+    }
+
+    @Test
+    fun `seek_relative carries a signed offset_ms`() {
+        activateRoles("\"controller@v1\"")
+        controllerState(""""supported_commands":["seek_relative"]""")
+
+        handler.sendCommand("seek_relative", offsetMs = -10_000)
+
+        assertEquals(1, sentCommands().size)
+        assertTrue(sentCommands()[0].contains("\"command\":\"seek_relative\""))
+        assertTrue(sentCommands()[0].contains("\"offset_ms\":-10000"))
     }
 
     // ========== Sync State Validation Tests ==========
@@ -349,6 +381,29 @@ class SendSpinProtocolHandlerTest {
     }
 
     @Test
+    fun `available stays true when sync is lost after first convergence`() {
+        val filter = handler.exposedTimeFilter()
+        assertFalse("Not available before the filter converges", handler.exposedIsAvailable())
+
+        for (i in 1..30) {
+            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
+        }
+        handler.evaluateAndPublishSyncStateForTest()
+        assertTrue(handler.exposedIsAvailable())
+
+        // "available: false" ends our streams, so losing sync mid-stream must
+        // mute locally instead of reporting it.
+        filter.reset()
+        handler.evaluateAndPublishSyncStateForTest()
+        assertEquals("error", handler.exposedSyncState())
+        assertTrue("Sync loss must not report unavailable", handler.exposedIsAvailable())
+
+        // A new connection starts from scratch.
+        handler.resetSyncStateTrackingForTest()
+        assertFalse(handler.exposedIsAvailable())
+    }
+
+    @Test
     fun `resetSyncStateTracking clears mute and returns state to error`() {
         val filter = handler.exposedTimeFilter()
         for (i in 1..30) {
@@ -423,105 +478,27 @@ class SendSpinProtocolHandlerTest {
         assertEquals(44100, handler.streamStarts[1].sampleRate)
     }
 
-    // ========== Controller State Dispatch ==========
-
     @Test
-    fun `server state with controller object dispatches onControllerStateUpdate`() {
-        // Group volume / mute / supported commands arrive as `payload.controller`
-        // on server/state for clients with the controller@v1 role.
-        val msg = """
-            {
-                "type": "server/state",
-                "payload": {
-                    "controller": {
-                        "supported_commands": ["play","pause","next"],
-                        "volume": 65,
-                        "muted": false
-                    }
-                }
-            }
-        """.trimIndent()
-        handler.handleTextMessageForTest(msg)
-        assertEquals(1, handler.controllerStates.size)
-        val cs = handler.controllerStates[0]
-        assertEquals(listOf("play", "pause", "next"), cs.supportedCommands)
-        assertEquals(65, cs.volume)
-        assertEquals(false, cs.muted)
-    }
+    fun `required lead time is the cold value until the first stream starts, then the warm one`() {
+        activateRoles("\"${SendSpinProtocol.Roles.PLAYER}\"")
+        val cold = "\"required_lead_time_ms\":${SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS},"
+        val warm = "\"required_lead_time_ms\":${SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_WARM_MS},"
 
-    @Test
-    fun `server state without controller object does not dispatch`() {
-        val msg = """
-            {
-                "type": "server/state",
-                "payload": {
-                    "metadata": {"timestamp": 1, "title": "X"}
-                }
-            }
-        """.trimIndent()
-        handler.handleTextMessageForTest(msg)
-        assertTrue(handler.controllerStates.isEmpty())
-    }
+        handler.sentMessages.clear()
+        handler.setExternalSource(true)
+        assertTrue(handler.sentMessages.last().contains(cold))
 
-    // ========== Stream End / Clear role-filter Tests ==========
+        // The first stream/start reports the lower value by itself...
+        val streamStart = buildStreamStartJson(codec = "pcm", sampleRate = 48000, channels = 2, bitDepth = 16)
+        handler.sentMessages.clear()
+        handler.handleTextMessageForTest(streamStart)
+        assertEquals(1, handler.sentMessages.size)
+        assertTrue(handler.sentMessages[0].contains(warm))
 
-    @Test
-    fun `stream end with roles=player fires onStreamEnd`() {
-        // aiosendspin sends roles=["player"] (unversioned family name); the
-        // handler must treat that as "ends our stream". Versioned "player@v1"
-        // never appears here -- if the comparison ever regresses back to
-        // Roles.PLAYER, this test catches the silent swallow.
-        handler.handleTextMessageForTest(
-            """{"type":"stream/end","payload":{"roles":["player"]}}"""
-        )
-        assertEquals(1, handler.streamEnds.size)
-    }
-
-    @Test
-    fun `stream end with no roles fires onStreamEnd`() {
-        // Absent `roles` means "all streams" per spec; treat as a player end.
-        handler.handleTextMessageForTest("""{"type":"stream/end","payload":{}}""")
-        assertEquals(1, handler.streamEnds.size)
-    }
-
-    @Test
-    fun `stream end with roles=visualizer does not fire onStreamEnd`() {
-        // We only host the player family; a visualizer-only end is not ours.
-        handler.handleTextMessageForTest(
-            """{"type":"stream/end","payload":{"roles":["visualizer"]}}"""
-        )
-        assertEquals(0, handler.streamEnds.size)
-    }
-
-    @Test
-    fun `stream end with roles including player fires onStreamEnd`() {
-        handler.handleTextMessageForTest(
-            """{"type":"stream/end","payload":{"roles":["player","visualizer"]}}"""
-        )
-        assertEquals(1, handler.streamEnds.size)
-    }
-
-    @Test
-    fun `stream clear with roles=player fires onStreamClear`() {
-        handler.handleTextMessageForTest(
-            """{"type":"stream/clear","payload":{"roles":["player"]}}"""
-        )
-        assertEquals(1, handler.streamClears.size)
-    }
-
-    @Test
-    fun `stream clear with no roles fires onStreamClear`() {
-        handler.handleTextMessageForTest("""{"type":"stream/clear","payload":{}}""")
-        assertEquals(1, handler.streamClears.size)
-    }
-
-    @Test
-    fun `stream clear with roles=visualizer does not fire onStreamClear`() {
-        // A visualizer-only clear must not wipe our audio buffer.
-        handler.handleTextMessageForTest(
-            """{"type":"stream/clear","payload":{"roles":["visualizer"]}}"""
-        )
-        assertEquals(0, handler.streamClears.size)
+        // ...and a later one has nothing new to say.
+        handler.sentMessages.clear()
+        handler.handleTextMessageForTest(streamStart)
+        assertTrue(handler.sentMessages.isEmpty())
     }
 
     // ========== Helpers ==========
@@ -584,18 +561,20 @@ class SendSpinProtocolHandlerTest {
  */
 class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
-    private val testScope = TestScope()
+    // Unconfined, so a send the handler launches has reached sendBinaryFrame
+    // by the time the call that triggered it returns.
+    private val testDispatcher = UnconfinedTestDispatcher()
+    private val testScope = CoroutineScope(testDispatcher)
+
+    /** Virtual time for whatever the handler has scheduled with `delay`. */
+    val testScheduler get() = testDispatcher.scheduler
     private val timeFilter = SendspinTimeFilter()
     val sentMessages = mutableListOf<String>()
     val metadataUpdates = mutableListOf<TrackMetadata>()
-    var metadataClears = 0
     val controllerStateUpdates = mutableListOf<ControllerState>()
     val playbackStateChanges = mutableListOf<String>()
     val groupUpdates = mutableListOf<GroupInfo>()
     val streamStarts = mutableListOf<StreamConfig>()
-    val streamClears = mutableListOf<Unit>()
-    val streamEnds = mutableListOf<Unit>()
-    val controllerStates = mutableListOf<ControllerState>()
     val muteEvents = mutableListOf<Boolean>()
 
     fun setHandshakeCompleteForTest() {
@@ -604,39 +583,79 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     fun exposedVolume(): Int = currentVolume
     fun exposedSyncState(): String = currentSyncState
+    fun exposedIsAvailable(): Boolean = isAvailable()
     fun exposedTimeFilter(): SendspinTimeFilter = timeFilter
     fun lastMuteDecision(): Boolean = muteEvents.lastOrNull() ?: false
     fun evaluateAndPublishSyncStateForTest() = evaluateAndPublishSyncState()
+    fun sendGoodbyeForTest(reason: GoodbyeReason) = encodeGoodbye(reason).forEach { sendBinaryFrame(it) }
+    fun resetConnectionStateForTest() = resetConnectionState()
     fun resetSyncStateTrackingForTest() = resetSyncStateTracking()
 
     fun handleTextMessageForTest(text: String) {
         handleTextMessage(text)
     }
 
-    override fun sendTextMessage(text: String) {
-        sentMessages.add(text)
+    /** Deliver a frame the way the transport does: `[type][body]`, since the channel is plaintext. */
+    fun handleBinaryMessageForTest(frame: ByteArray) = handleBinaryMessage(frame)
+
+    var matchedCategory: PskCategory = PskCategory.SENTINEL
+    var unpairedAccess = true
+    var formats: List<MessageBuilder.FormatEntry> = emptyList()
+
+    /** What reached the wire and when the connection was closed, in order. */
+    val events = mutableListOf<String>()
+    val audioChunks = mutableListOf<Pair<Long, ByteArray>>()
+    val protocolFailures = mutableListOf<String>()
+
+    override fun matchedPskCategory(): PskCategory = matchedCategory
+
+    override fun isUnpairedAccessEnabled(): Boolean = unpairedAccess
+
+    override fun currentServerId(): String = "srv1"
+
+    override fun closeConnectionAfterFlush() {
+        events.add("close")
     }
 
-    /** Frames sent on the encrypted path, in order. */
-    val sentBinaryFrames = mutableListOf<ByteArray>()
+    override fun onProtocolFailure(reason: String) {
+        protocolFailures.add(reason)
+    }
+
+    /**
+     * Stands in for the connection's re-handshake: reply under the current
+     * keys, swap, then reset what a re-handshake invalidates. [matchedCategory]
+     * is whatever the test set before delivering the `noise/handshake`.
+     */
+    override fun onRehandshakeMessage(payload: JsonObject?) {
+        sendAndSwapKeys("""{"type":"noise/handshake","payload":{"data":"reply"}}""", PlaintextCrypto) {
+            resetForRehandshake()
+        }
+    }
+
+    init {
+        installEncryptedChannel(PlaintextCrypto)
+    }
 
     override fun sendBinaryFrame(bytes: ByteArray) {
-        sentBinaryFrames.add(bytes)
+        val text = bytes.jsonFrameText() ?: return
+        sentMessages.add(text)
+        events.add("send:" + Json.parseToJsonElement(text).jsonObject["type"]?.jsonPrimitive?.content)
     }
 
     override fun getCoroutineScope(): CoroutineScope = testScope
 
     override fun getTimeFilter(): SendspinTimeFilter = timeFilter
 
-    override fun isLowMemoryMode(): Boolean = false
+    var lowMemoryMode = false
 
-    override fun getClientId(): String = "test-client-id"
+    override fun isLowMemoryMode(): Boolean = lowMemoryMode
+
 
     override fun getDeviceName(): String = "Test Device"
 
     override fun getManufacturer(): String = "TestManufacturer"
 
-    override fun getSupportedFormats(): List<MessageBuilder.FormatEntry> = emptyList()
+    override fun getSupportedFormats(): List<MessageBuilder.FormatEntry> = formats
 
     override fun getSoftwareVersion(): String = "test"
 
@@ -646,13 +665,8 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
         metadataUpdates.add(metadata)
     }
 
-    override fun onMetadataCleared() {
-        metadataClears++
-    }
-
     override fun onControllerStateUpdate(state: ControllerState) {
         controllerStateUpdates.add(state)
-        controllerStates.add(state)
     }
 
     override fun onPlaybackStateChanged(state: String) {
@@ -671,17 +685,27 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
         streamStarts.add(config)
     }
 
-    override fun onStreamClear() {
-        streamClears.add(Unit)
-    }
+    override fun onStreamClear() {}
+
+    var streamEnds = 0
 
     override fun onStreamEnd() {
-        streamEnds.add(Unit)
+        streamEnds++
     }
 
-    override fun onAudioChunk(timestampMicros: Long, audioData: ByteArray) {}
+    override fun onAudioChunk(timestampMicros: Long, audioData: ByteArray) {
+        audioChunks.add(timestampMicros to audioData)
+    }
 
-    override fun onArtwork(channel: Int, payload: ByteArray) {}
+    val artworkDeliveries = mutableListOf<Int>()
+
+    /** Every image made current, in order; an empty one is a clear. */
+    val artworkImages = mutableListOf<ByteArray>()
+
+    override fun onArtwork(channel: Int, payload: ByteArray) {
+        artworkDeliveries.add(channel)
+        artworkImages.add(payload)
+    }
 
     override fun onSyncOffsetApplied(offsetMs: Double, source: String) {}
 

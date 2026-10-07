@@ -1,262 +1,82 @@
 package com.sendspindroid.sendspin
 
-import android.content.SharedPreferences
-import android.util.Log
-import androidx.preference.PreferenceManager
-import com.sendspindroid.UserSettings
 import com.sendspindroid.coordinator.TransportState
-import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
-import com.sendspindroid.sendspin.transport.SendSpinTransport
-import com.sendspindroid.sendspin.transport.TransportState as TransportLayerState
-import io.mockk.every
-import io.mockk.mockk
-import io.mockk.mockkObject
-import io.mockk.mockkStatic
-import io.mockk.unmockkAll
-import io.mockk.verify
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.setMain
-import org.junit.After
-import org.junit.Assert.*
-import org.junit.Before
+import com.sendspindroid.e2e.E2ETestBase
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Tests that SendSpin.connectionState transitions follow the expected
- * lifecycle: Idle -> Connecting -> Ready -> Failed.
+ * lifecycle: Idle -> Connecting -> Ready -> Idle, or Connecting -> Failed.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
-class SendSpinConnectionStateTest {
-
-    private lateinit var mockCallback: SendSpin.Callback
-    private lateinit var client: SendSpin
-
-    @Before
-    fun setUp() {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
-
-        mockkStatic(Log::class)
-        every { Log.v(any(), any()) } returns 0
-        every { Log.d(any(), any()) } returns 0
-        every { Log.i(any(), any()) } returns 0
-        every { Log.w(any(), any<String>()) } returns 0
-        every { Log.e(any(), any<String>()) } returns 0
-        every { Log.e(any(), any(), any()) } returns 0
-
-        mockkObject(UserSettings)
-        every { UserSettings.getPlayerId() } returns "test-player-id"
-        every { UserSettings.getPreferredCodec() } returns "opus"
-        every { UserSettings.lowMemoryMode } returns false
-        every { UserSettings.highPowerMode } returns false
-
-        mockkObject(AudioDecoderFactory)
-        every { AudioDecoderFactory.isCodecSupported(any()) } returns true
-
-        mockkStatic(PreferenceManager::class)
-        val mockPrefs = mockk<SharedPreferences>(relaxed = true)
-        every { PreferenceManager.getDefaultSharedPreferences(any()) } returns mockPrefs
-
-        mockCallback = mockk(relaxed = true)
-
-        client = SendSpin("TestDevice", mockCallback)
-    }
-
-    @After
-    fun tearDown() {
-        client.destroy()
-        Dispatchers.resetMain()
-        unmockkAll()
-    }
+class SendSpinConnectionStateTest : E2ETestBase() {
 
     @Test
     fun `initial state is Idle`() {
-        assertTrue(
-            "Client should start in Idle state",
-            client.connectionState.value is TransportState.Idle
-        )
+        assertEquals(TransportState.Idle, client.connectionState.value)
     }
 
     @Test
     fun `connectLocal transitions to Connecting`() {
-        // connectLocal will call prepareForConnection() which sets Connecting,
-        // then try to create a WebSocketTransport (which will fail in test, but
-        // the state should already be Connecting before that).
-        try {
-            client.connectLocal("127.0.0.1:8080")
-        } catch (_: Exception) {
-            // Transport creation may fail in unit test - that is expected
-        }
+        // The transport itself goes nowhere in a unit test; the state is set
+        // before it is created.
+        runCatching { client.connectLocal("127.0.0.1:8080") }
 
-        // After prepareForConnection(), state should be Connecting
-        // (may have moved to Error if transport creation failed synchronously)
         val state = client.connectionState.value
         assertTrue(
             "State should be Connecting or Failed after connectLocal, was: $state",
-            state is TransportState.Connecting ||
-                    state is TransportState.Failed
+            state is TransportState.Connecting || state is TransportState.Failed
         )
     }
 
     @Test
-    fun `onHandshakeComplete transitions to Connected`() {
-        // Inject a mock transport so the client thinks it has a connection
-        val fakeTransport = object : SendSpinTransport {
-            override val state = TransportLayerState.Connected
-            override val isConnected = true
-            override fun connect() {}
-            override fun send(text: String) = true
-            override fun send(bytes: ByteArray) = true
-            override fun setListener(listener: SendSpinTransport.Listener?) {}
-            override fun close(code: Int, reason: String) {}
-            override fun destroy() {}
-        }
+    fun `server hello transitions to Ready`() {
+        injectTransportAndConnect()
+        fakeTransport.simulateConnected()
 
-        val transportField = SendSpin::class.java.getDeclaredField("transport")
-        transportField.isAccessible = true
-        transportField.set(client, fakeTransport)
+        fakeServer.sendServerHello()
 
-        // Create the inner TransportEventListener and send a server/hello
-        val innerClasses = SendSpin::class.java.declaredClasses
-        val listenerClass = innerClasses.find { it.simpleName == "TransportEventListener" }!!
-        val constructor = listenerClass.getDeclaredConstructor(SendSpin::class.java)
-        constructor.isAccessible = true
-        val listener = constructor.newInstance(client) as SendSpinTransport.Listener
-
-        // Simulate receiving server/hello
-        val serverHello = """{"type":"server/hello","payload":{"name":"TestServer","server_id":"srv-1","protocol_version":1,"active_roles":["player"]}}"""
-        listener.onMessage(serverHello)
-
-        val state = client.connectionState.value
-        assertTrue(
-            "State should be Ready after handshake, was: $state",
-            state is TransportState.Ready
-        )
-        assertEquals("TestServer", client.getServerName())
+        assertEquals(TransportState.Ready, client.connectionState.value)
+        assertEquals(fakeServer.serverName, client.getServerName())
     }
 
     @Test
-    fun `non-recoverable transport failure transitions to Error`() {
-        // Inject transport and set up connection info
-        val fakeTransport = object : SendSpinTransport {
-            override val state = TransportLayerState.Connected
-            override val isConnected = true
-            override fun connect() {}
-            override fun send(text: String) = true
-            override fun send(bytes: ByteArray) = true
-            override fun setListener(listener: SendSpinTransport.Listener?) {}
-            override fun close(code: Int, reason: String) {}
-            override fun destroy() {}
-        }
+    fun `non-recoverable transport failure transitions to Failed`() {
+        injectTransportAndConnect()
+        fakeTransport.simulateConnected()
 
-        val transportField = SendSpin::class.java.getDeclaredField("transport")
-        transportField.isAccessible = true
-        transportField.set(client, fakeTransport)
+        fakeTransport.simulateFailure(java.net.ConnectException("Connection refused"), isRecoverable = false)
 
-        // Create the TransportEventListener
-        val innerClasses = SendSpin::class.java.declaredClasses
-        val listenerClass = innerClasses.find { it.simpleName == "TransportEventListener" }!!
-        val constructor = listenerClass.getDeclaredConstructor(SendSpin::class.java)
-        constructor.isAccessible = true
-        val listener = constructor.newInstance(client) as SendSpinTransport.Listener
-
-        // Simulate a non-recoverable failure
-        listener.onFailure(java.net.ConnectException("Connection refused"), isRecoverable = false)
-
-        val state = client.connectionState.value
-        assertTrue(
-            "State should be Failed after non-recoverable failure, was: $state",
-            state is TransportState.Failed
-        )
+        assertTrue(client.connectionState.value is TransportState.Failed)
     }
 
     @Test
-    fun `disconnect transitions from Connected back to Disconnected`() {
-        // First get to Connected state
-        val fakeTransport = object : SendSpinTransport {
-            override val state = TransportLayerState.Connected
-            override val isConnected = true
-            override fun connect() {}
-            override fun send(text: String) = true
-            override fun send(bytes: ByteArray) = true
-            override fun setListener(listener: SendSpinTransport.Listener?) {}
-            override fun close(code: Int, reason: String) {}
-            override fun destroy() {}
-        }
+    fun `disconnect transitions from Ready back to Idle`() {
+        connectAndHandshake()
+        assertEquals(TransportState.Ready, client.connectionState.value)
 
-        val transportField = SendSpin::class.java.getDeclaredField("transport")
-        transportField.isAccessible = true
-        transportField.set(client, fakeTransport)
-
-        val innerClasses = SendSpin::class.java.declaredClasses
-        val listenerClass = innerClasses.find { it.simpleName == "TransportEventListener" }!!
-        val constructor = listenerClass.getDeclaredConstructor(SendSpin::class.java)
-        constructor.isAccessible = true
-        val listener = constructor.newInstance(client) as SendSpinTransport.Listener
-
-        // Get to Connected
-        val serverHello = """{"type":"server/hello","payload":{"name":"TestServer","server_id":"srv-1","protocol_version":1,"active_roles":["player"]}}"""
-        listener.onMessage(serverHello)
-        assertTrue(client.connectionState.value is TransportState.Ready)
-
-        // Disconnect
         client.disconnect()
 
-        assertTrue(
-            "State should be Idle after disconnect",
-            client.connectionState.value is TransportState.Idle
-        )
+        assertEquals(TransportState.Idle, client.connectionState.value)
     }
 
     @Test
-    fun `full lifecycle Idle to Connecting to Ready to Failed`() {
-        // Verify initial state
-        assertTrue(client.connectionState.value is TransportState.Idle)
+    fun `full lifecycle Idle to Connecting to Ready to Idle, then a failed attempt`() {
+        assertEquals(TransportState.Idle, client.connectionState.value)
 
-        // Set up for connecting
-        val fakeTransport = object : SendSpinTransport {
-            override val state = TransportLayerState.Connected
-            override val isConnected = true
-            override fun connect() {}
-            override fun send(text: String) = true
-            override fun send(bytes: ByteArray) = true
-            override fun setListener(listener: SendSpinTransport.Listener?) {}
-            override fun close(code: Int, reason: String) {}
-            override fun destroy() {}
-        }
+        injectTransportAndConnect()
+        assertEquals(TransportState.Connecting, client.connectionState.value)
 
-        // Manually set state to Connecting (as prepareForConnection does)
-        val stateField = SendSpin::class.java.getDeclaredField("_connectionState")
-        stateField.isAccessible = true
-        @Suppress("UNCHECKED_CAST")
-        val stateFlow = stateField.get(client) as kotlinx.coroutines.flow.MutableStateFlow<TransportState>
-        stateFlow.value = TransportState.Connecting
-        assertTrue(client.connectionState.value is TransportState.Connecting)
+        fakeServer.completeHandshake()
+        assertEquals(TransportState.Ready, client.connectionState.value)
 
-        // Inject transport
-        val transportField = SendSpin::class.java.getDeclaredField("transport")
-        transportField.isAccessible = true
-        transportField.set(client, fakeTransport)
+        fakeTransport.simulateClosed(1006, "abnormal")
+        assertEquals(TransportState.Idle, client.connectionState.value)
 
-        // Create listener
-        val innerClasses = SendSpin::class.java.declaredClasses
-        val listenerClass = innerClasses.find { it.simpleName == "TransportEventListener" }!!
-        val constructor = listenerClass.getDeclaredConstructor(SendSpin::class.java)
-        constructor.isAccessible = true
-        val listener = constructor.newInstance(client) as SendSpinTransport.Listener
-
-        // Transition to Ready
-        val serverHello = """{"type":"server/hello","payload":{"name":"TestServer","server_id":"srv-1","protocol_version":1,"active_roles":["player"]}}"""
-        listener.onMessage(serverHello)
-        assertTrue(client.connectionState.value is TransportState.Ready)
-
-        // Transition to Failed via non-recoverable failure
-        listener.onFailure(java.net.ConnectException("Connection refused"), isRecoverable = false)
-        assertTrue(
-            "State should be Failed at end of lifecycle",
-            client.connectionState.value is TransportState.Failed
-        )
+        injectTransportAndConnect()
+        fakeTransport.simulateConnected()
+        fakeTransport.simulateFailure(java.net.ConnectException("Connection refused"), isRecoverable = false)
+        assertTrue(client.connectionState.value is TransportState.Failed)
     }
 }

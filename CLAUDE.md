@@ -75,16 +75,23 @@ SendSpin Server ──WebSocket──► SendSpinClient ──► SyncAudioPlaye
 - `stream/end` - Audio stream ending
 
 ### Binary Messages
-```
-Header format: struct ">Bq" (big-endian: 1 byte type + 8 byte int64 timestamp)
-Byte 0:     Message type
-Bytes 1-8:  Timestamp (big-endian int64, microseconds since server start)
-Bytes 9+:   Payload (PCM audio or image data)
+Every application message is a WebSocket binary message carrying one Noise
+transport message. After decryption, byte 0 is the message ID:
 
-Types:
-  4:     Audio data
-  8-11:  Artwork channels 0-3 (empty payload = clear artwork)
-  16:    Visualizer data
+```
+  0:     JSON message body (UTF-8)
+  1:     Fragment: [1][flags][orig_type][data] first, [1][flags][data] after
+         (flags bit 1 = first, bit 0 = last)
+  2-3:   Reserved
+  4:     Audio chunk
+  8-11:  Artwork channels 0-3 (announce/part/cancel; only channel 0 is declared)
+  16-23: Visualizer (not claimed)
+
+Audio chunk (13-byte header):
+Byte 0:      Message ID 4
+Bytes 1-8:   Timestamp (big-endian int64, server clock microseconds)
+Bytes 9-12:  send_ahead (big-endian uint32, microseconds)
+Bytes 13+:   Encoded audio frame
 ```
 
 ### Audio Format
@@ -94,11 +101,13 @@ Types:
 - Audio sample data is little-endian; header timestamps are big-endian
 
 ### Client State (`client/state`)
-Reports player state to server:
-- `state`: "synchronized" or "error"
-- `volume`: 0-100
-- `muted`: boolean
-- `static_delay_ms`: device audio output latency compensation (milliseconds)
+Reports client state to server:
+- `available`: boolean, true once the clock is synchronized
+- `player` (while the player role is active): `volume` 0-100, `muted`,
+  `output_delay_ms`, `required_lead_time_ms`, `min_buffer_ms`,
+  `supported_commands`, and `format` when a codec preference overrides the
+  hello's order
+- `artwork` (while the artwork role is active): the channel configuration
 
 ## Audio Pipeline
 
@@ -232,5 +241,5 @@ The CLI shows the canonical approach:
 
 ### Android Deviations from the Python Reference
 
-- **Speed-correction cap**: `SyncAudioPlayer.MAX_SPEED_CORRECTION = 0.02` (+/-2%), vs the reference's +/-4%. The tighter cap is a safety margin against over-correction given that `AudioTrack` DAC-timing jitter on Android can be larger than desktop `sounddevice`. Revisit if high-drift scenarios fail to converge.
-- **Audio output API**: `AudioTrack` in `MODE_STREAM` instead of `sounddevice`. DAC position is read via `AudioTrack.getTimestamp()` for sync-error measurement and start-gating.
+- **Sync correction**: follows the suggested strategy of the Sendspin `player@v1` spec ("Playback Synchronization") instead of the reference's proportional +/-4% rate. Outside a +/-100us dead band, `SyncAudioPlayer` drops or repeats one 21us step (1 frame at 48kHz) at most every 20ms (`CORRECTION_STEP_US`, `CORRECTION_INTERVAL_US`): about 0.1% speed change against the spec's +/-0.5% over 150ms, enough to absorb 1ms of error per second. At startup, and when the smoothed error passes the +/-1ms floor (`SNAP_THRESHOLD_US`), it resyncs in one shot instead: drop the late leading frames, or insert silence if early. After an underrun the estimate starts over and the same resync applies once it has settled.
+- **Audio output API**: `AudioTrack` in `MODE_STREAM` instead of `sounddevice`. DAC position is read via `AudioTrack.getTimestamp()` for sync-error measurement and start-gating. `AudioTimestamp.nanoTime` is already on the `System.nanoTime` clock and is used directly. Its readings jitter by about +/-0.65ms on a tablet, so the error is Kalman-smoothed (`SyncErrorFilter`) before it drives corrections. The track is kept fed with silence while idle or waiting to start: a track left to underrun freezes its timestamps.

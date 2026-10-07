@@ -7,6 +7,7 @@ import com.sendspindroid.UserSettings
 import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
+import com.sendspindroid.sendspin.protocol.PlaintextCrypto
 import com.sendspindroid.sendspin.transport.SendSpinTransport
 import io.mockk.every
 import io.mockk.mockk
@@ -104,10 +105,13 @@ abstract class E2ETestBase {
      * 1. Sets the transport field
      * 2. Creates and registers a TransportEventListener
      * 3. Sets connection info
+     * 4. Installs the encrypted channel a completed Noise handshake would
+     *    have produced, over [PlaintextCrypto]
      */
     protected fun injectTransportAndConnect(
         serverAddress: String? = "192.168.1.100:8927",
         serverPath: String? = "/sendspin",
+        installChannel: Boolean = true,
     ) {
         // Set connection state to Connecting via the existing MutableStateFlow
         val stateFlow: kotlinx.coroutines.flow.MutableStateFlow<TransportState> =
@@ -117,9 +121,6 @@ abstract class E2ETestBase {
         // Set connection info for reconnection
         if (serverAddress != null) setField(client, "serverAddress", serverAddress)
         if (serverPath != null) setField(client, "serverPath", serverPath)
-
-        // Reset disconnect flags
-        setAtomicBoolean(client, "userInitiatedDisconnect", false)
 
         // Set handshakeComplete to false
         setField(client, "handshakeComplete", false,
@@ -136,10 +137,17 @@ abstract class E2ETestBase {
         constructor.isAccessible = true
         val listener = constructor.newInstance(client) as SendSpinTransport.Listener
         fakeTransport.setListener(listener)
+
+        // No fake server speaks Noise, so the handshake driver never reaches
+        // transport mode here. Install what it would have installed.
+        fakeTransport.afterConnected = {
+            if (installChannel) client.installEncryptedChannel(PlaintextCrypto)
+        }
     }
 
     /**
-     * Perform a full handshake: inject transport, simulate connect, exchange hello.
+     * Perform a full handshake: inject transport, simulate connect, exchange
+     * hello, and receive the initial activation.
      */
     protected fun connectAndHandshake(
         serverAddress: String? = "192.168.1.100:8927",

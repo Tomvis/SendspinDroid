@@ -79,10 +79,6 @@ fun StatsContent(
         StatRow(stringResource(R.string.stats_address), state.serverAddress ?: "--")
         StatRow(stringResource(R.string.stats_state), state.connectionState, getStatusColor(getConnectionStatus(state.connectionState)))
         StatRow(stringResource(R.string.stats_codec), state.audioCodec)
-        StatRow(stringResource(R.string.stats_reconnects), state.reconnectAttempts.toString(), getStatusColor(state.reconnectAttempts == 0))
-        if (state.reconnectAttemptsTotal > 0) {
-            StatRow(stringResource(R.string.stats_reconnects_total), state.reconnectAttemptsTotal.toString())
-        }
         if (state.lastByteReceivedAgoMs >= 0) {
             StatRow(
                 stringResource(R.string.stats_last_byte_received),
@@ -159,14 +155,7 @@ fun StatsContent(
         StatRow(stringResource(R.string.stats_converged), if (state.clockConverged) stringResource(R.string.action_yes) else stringResource(R.string.action_no),
             if (state.clockConverged) ColorGood else ColorWarning)
         StatRow(stringResource(R.string.stats_measurements), state.measurementCount.toString())
-        // Kalman-filter health. `stability` should be ~1.0 for a well-tuned filter;
-        // < 1 = over-responsive, > 1 = sluggish. `convergence` is time from first
-        // measurement to first isConverged==true. Issue #128.
-        StatRow(
-            stringResource(R.string.stats_stability),
-            String.format("%.2f", state.timeFilterStability),
-            getStabilityColor(state.timeFilterStability),
-        )
+        // Time from first measurement to first isConverged==true. Issue #128.
         if (state.timeFilterConvergenceMs > 0) {
             StatRow(
                 stringResource(R.string.stats_convergence_time),
@@ -179,9 +168,6 @@ fun StatsContent(
                 getLastSyncColor(state.lastTimeSyncAgeMs))
         }
 
-        StatRow(stringResource(R.string.stats_frozen), if (state.clockFrozen) stringResource(R.string.stats_frozen_reconnecting) else stringResource(R.string.action_no),
-            if (state.clockFrozen) ColorWarning else null)
-
         if (state.staticDelayMs != 0.0) {
             StatRow(stringResource(R.string.stats_sync_offset), String.format("%+.0f ms", state.staticDelayMs))
         }
@@ -192,7 +178,6 @@ fun StatsContent(
         SectionHeader(stringResource(R.string.stats_section_dac_audio))
         StatRow(stringResource(R.string.stats_calibrated), if (state.startTimeCalibrated) stringResource(R.string.action_yes) else stringResource(R.string.action_no),
             if (state.startTimeCalibrated) ColorGood else ColorWarning)
-        StatRow(stringResource(R.string.stats_calibrations), state.dacCalibrationCount.toString())
         StatRow(stringResource(R.string.stats_frames_written), formatNumber(state.totalFramesWritten))
         StatRow(stringResource(R.string.stats_server_position), String.format("%.1fs", state.serverPositionSec))
         StatRow(stringResource(R.string.stats_underruns), state.bufferUnderrunCount.toString(),
@@ -362,17 +347,6 @@ private fun getLastSyncColor(ageMs: Long): Color {
         ageMs < 10_000L -> ColorWarning
         else -> ColorBad
     }
-}
-
-/**
- * Kalman-filter stability score (issue #128). Ideal ~1.0; departures in either
- * direction indicate a mis-tuned or noisy filter. Generous band around 1.0 is
- * fine for "healthy" because jitter is normal on real networks.
- */
-private fun getStabilityColor(stability: Double): Color? = when {
-    stability in 0.7..1.5 -> ColorGood
-    stability in 0.5..2.5 -> ColorWarning
-    else -> ColorBad
 }
 
 private fun formatNumber(value: Long): String {

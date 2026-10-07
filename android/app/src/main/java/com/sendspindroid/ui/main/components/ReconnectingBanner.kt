@@ -28,7 +28,7 @@ import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
  * Banner displayed when reconnecting to a server.
- * Shows attempt number and remaining buffer time.
+ * Shows the attempt number.
  */
 @Composable
 fun ReconnectingBanner(
@@ -55,23 +55,8 @@ fun ReconnectingBanner(
 
         Spacer(modifier = Modifier.width(12.dp))
 
-        val bufferText = if (state.bufferSeconds > 0) {
-            stringResource(
-                R.string.reconnecting_with_buffer,
-                state.serverName,
-                state.attempt,
-                state.bufferSeconds
-            )
-        } else {
-            stringResource(
-                R.string.reconnecting_attempt,
-                state.serverName,
-                state.attempt
-            )
-        }
-
         Text(
-            text = bufferText,
+            text = stringResource(R.string.reconnecting_attempt, state.serverName, state.attempt),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onTertiaryContainer
         )
@@ -85,22 +70,7 @@ private fun ReconnectingBannerPreview() {
         ReconnectingBanner(
             state = ReconnectingState(
                 serverName = "Living Room",
-                attempt = 2,
-                bufferMs = 15000
-            )
-        )
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
-private fun ReconnectingBannerNoBufferPreview() {
-    SendSpinTheme {
-        ReconnectingBanner(
-            state = ReconnectingState(
-                serverName = "Kitchen",
-                attempt = 1,
-                bufferMs = 0
+                attempt = 2
             )
         )
     }

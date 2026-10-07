@@ -3,23 +3,16 @@ package com.sendspindroid.sendspin.protocol.message
 import com.sendspindroid.sendspin.crypto.Base64Url
 import com.sendspindroid.sendspin.protocol.ControllerState
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonArray
-import com.sendspindroid.sendspin.protocol.patch
-import com.sendspindroid.sendspin.protocol.StatePatch
-import com.sendspindroid.sendspin.protocol.RoleUpdate
-import com.sendspindroid.sendspin.protocol.Patch
-import com.sendspindroid.sendspin.protocol.MetadataPatch
-import com.sendspindroid.sendspin.protocol.ControllerPatch
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.ServerCommandResult
-import com.sendspindroid.sendspin.protocol.ServerHelloResult
 import com.sendspindroid.sendspin.protocol.ServerStateResult
 import com.sendspindroid.sendspin.protocol.StreamConfig
 import com.sendspindroid.sendspin.protocol.SyncOffsetResult
 import com.sendspindroid.sendspin.protocol.TimeMeasurement
+import com.sendspindroid.sendspin.protocol.TrackMetadata
 import com.sendspindroid.sendspin.protocol.TrackProgress
 import com.sendspindroid.shared.log.Log
 import com.sendspindroid.shared.platform.Platform
@@ -36,26 +29,18 @@ import kotlinx.serialization.json.longOrNull
 object MessageParser {
     private const val TAG = "MessageParser"
 
-    fun parseServerHello(payload: JsonObject?, defaultName: String): ServerHelloResult? {
+    /**
+     * Parse `server/hello`, returning the server's friendly name.
+     *
+     * `name` is the only field this client reads; `server_id` comes from
+     * `server/init` and the active roles from `server/activate`.
+     */
+    fun parseServerHello(payload: JsonObject?, defaultName: String): String? {
         if (payload == null) {
             Log.e(TAG, "server/hello missing payload")
             return null
         }
-
-        val serverName = payload.stringOrDefault("name", defaultName)
-        val serverId = payload.stringOrDefault("server_id", "")
-        val connectionReason = payload.stringOrDefault("connection_reason", "discovery")
-
-        val activeRoles = payload["active_roles"]?.jsonArray?.map {
-            it.jsonPrimitive.content
-        } ?: emptyList()
-
-        return ServerHelloResult(
-            serverName = serverName,
-            serverId = serverId,
-            activeRoles = activeRoles,
-            connectionReason = connectionReason
-        )
+        return payload.stringOrDefault("name", defaultName)
     }
 
     fun parseServerTime(payload: JsonObject?, clientReceivedMicros: Long): TimeMeasurement? {
@@ -114,146 +99,68 @@ object MessageParser {
     }
 
     /**
-     * `server/state`, as a delta.
+     * `server/state`: "Every message MUST carry the full state of each role
+     * object it includes. Omitting a role object leaves that role's state
+     * unchanged."
      *
-     * Every field is read as a [Patch] so that absent, JSON `null` and a value
-     * stay distinguishable all the way to the merge. The previous
-     * implementation used `as? JsonObject` and `?: ""`, which folded the first
-     * two together - so a delta carrying only `progress` arrived downstream as
-     * a metadata object with empty title, artist and album, and blanked the
-     * Now Playing screen on every progress tick.
+     * So each role object present is that role's whole new state, and a null
+     * role in the result means the message did not include it. Inside an
+     * object, a field that is absent, JSON `null` or of the wrong type has no
+     * value - which for `progress` is what "omitting it clears the client's
+     * position" asks for.
      */
-    fun parseServerState(payload: JsonObject?): ServerStateResult {
-        if (payload == null) {
-            return ServerStateResult(RoleUpdate.Absent, null, RoleUpdate.Absent)
-        }
-
-        val state = payload.stringOrDefault("state", "").takeIf { it.isNotEmpty() }
-
-        return ServerStateResult(
-            metadata = payload.roleUpdate("metadata", ::parseMetadataPatch),
-            playbackState = state,
-            controller = payload.roleUpdate("controller", ::parseControllerPatch),
-        )
-    }
-
-    /** Absent / null / object, for a whole role. */
-    private fun <S> JsonObject.roleUpdate(
-        key: String,
-        parse: (JsonObject) -> StatePatch<S>,
-    ): RoleUpdate<S> {
-        val element = this[key] ?: return RoleUpdate.Absent
-        if (element is JsonNull) return RoleUpdate.Cleared
-        val obj = element as? JsonObject ?: return RoleUpdate.Absent
-        return RoleUpdate.Delta(parse(obj))
-    }
-
-    private fun parseMetadataPatch(obj: JsonObject): MetadataPatch = MetadataPatch(
-        timestamp = obj.patch("timestamp") { it.longOrNull() },
-        title = obj.patch("title", ::cleanString),
-        artist = obj.patch("artist", ::cleanString),
-        albumArtist = obj.patch("album_artist", ::cleanString),
-        album = obj.patch("album", ::cleanString),
-        artworkUrl = obj.patch("artwork_url", ::cleanString),
-        year = obj.patch("year") { it.intOrNull() },
-        track = obj.patch("track") { it.intOrNull() },
-        progress = parseProgress(obj),
-        // Queue-position fields (fork extension). `album_track` is the track
-        // number within its album; older servers only send the legacy `track`,
-        // so an absent `album_track` inherits that patch rather than leaving
-        // the field stale. `queue_track` / `total_tracks` describe the position
-        // within the active play queue.
-        albumTrack = obj.patch("album_track") { it.intOrNull() }
-            .orElse { obj.patch("track") { e -> e.intOrNull() } },
-        queueTrack = obj.patch("queue_track") { it.intOrNull() },
-        totalTracks = obj.patch("total_tracks") { it.intOrNull() },
+    fun parseServerState(payload: JsonObject?): ServerStateResult = ServerStateResult(
+        metadata = (payload?.get("metadata") as? JsonObject)?.let(::parseMetadata),
+        playbackState = payload?.stringOrDefault("state", "")?.takeIf { it.isNotEmpty() },
+        controller = (payload?.get("controller") as? JsonObject)?.let(::parseController),
     )
 
-    /** @return [this] unless it is [Patch.Absent], in which case [fallback]. */
-    private fun <T> Patch<T>.orElse(fallback: () -> Patch<T>): Patch<T> =
-        if (this is Patch.Absent) fallback() else this
-
-    /**
-     * `progress` is replaced or cleared whole, never deep-merged.
-     *
-     * The pre-spec Music Assistant flat fields are honoured only when
-     * `progress` is absent *entirely*. An explicit `"progress": null` is a
-     * clear, and falling back to the legacy fields there would resurrect a
-     * position the server just told us to forget.
-     */
-    private fun parseProgress(obj: JsonObject): Patch<TrackProgress> {
-        val element = obj["progress"]
-        if (element is JsonNull) return Patch.Cleared
-        if (element is JsonObject) {
-            return Patch.Set(
-                TrackProgress(
-                    trackProgress = element.longOrDefault("track_progress", 0),
-                    trackDuration = element.longOrDefault("track_duration", 0),
-                    playbackSpeed = element.intOrDefault("playback_speed", 1000),
-                )
-            )
-        }
-        if (element != null) return Patch.Absent
-
-        val hasLegacy = obj.containsKey("position_ms") || obj.containsKey("duration_ms")
-        if (!hasLegacy) return Patch.Absent
-        return Patch.Set(
+    private fun parseMetadata(obj: JsonObject): TrackMetadata = TrackMetadata(
+        timestamp = obj["timestamp"]?.longOrNull(),
+        title = obj["title"]?.let(::cleanString),
+        artist = obj["artist"]?.let(::cleanString),
+        albumArtist = obj["album_artist"]?.let(::cleanString),
+        album = obj["album"]?.let(::cleanString),
+        artworkUrl = obj["artwork_url"]?.let(::cleanString),
+        year = obj["year"]?.intOrNull(),
+        track = obj["track"]?.intOrNull(),
+        progress = (obj["progress"] as? JsonObject)?.let {
             TrackProgress(
-                trackProgress = obj.longOrDefault("position_ms", 0),
-                trackDuration = obj.longOrDefault("duration_ms", 0),
-                playbackSpeed = 1000,
+                trackProgress = it.longOrDefault("track_progress", 0),
+                trackDuration = it.longOrDefault("track_duration", 0),
+                playbackSpeed = it.intOrDefault("playback_speed", 1000),
             )
-        )
-    }
+        },
+        // Fork extension: queue position. `album_track` falls back to the
+        // spec's `track` for servers that only send that.
+        albumTrack = (obj["album_track"] ?: obj["track"])?.intOrNull(),
+        queueTrack = obj["queue_track"]?.intOrNull(),
+        totalTracks = obj["total_tracks"]?.intOrNull(),
+    )
 
     /**
-     * Parse the unversioned `roles` array from stream/end / stream/clear.
-     * Returns null when the field is absent (meaning "all roles").
-     *
-     * Uses `as? JsonArray` / `as? JsonPrimitive` rather than the `.jsonArray` /
-     * `.jsonPrimitive` accessors: those throw IllegalArgumentException on a
-     * JsonNull or wrong-shaped value, and the only catch is the blanket one in
-     * SendSpinProtocolHandler.handleTextMessage -- so a `"roles": null` frame
-     * would abort the whole stream/clear and silently skip the audio flush.
+     * The unversioned `roles` array of stream/end and stream/clear; null when
+     * absent ("all roles"). Tolerant casts: a `"roles": null` frame must not
+     * throw and abort the clear.
      */
     fun parseRoles(payload: JsonObject?): List<String>? {
         val arr = payload?.get("roles") as? JsonArray ?: return null
         return arr.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
     }
 
-    /**
-     * Parse a proxy auth response frame (non-spec relay handshake). Returns
-     * (type, message) -- e.g. ("auth_failed", "bad token"). On a malformed
-     * frame returns (null, null) so the caller can destructure unconditionally.
-     */
-    fun parseProxyAuthResponse(text: String): Pair<String?, String?> {
-        return try {
-            val obj = kotlinx.serialization.json.Json.parseToJsonElement(text).jsonObject
-            val type = obj["type"]?.jsonPrimitive?.contentOrNull
-            val message = obj["message"]?.jsonPrimitive?.contentOrNull
-            type to message
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse proxy auth response (${e.message}): ${text.take(200)}")
-            null to null
-        }
-    }
-
-    private fun parseControllerPatch(obj: JsonObject): ControllerPatch = ControllerPatch(
-        supportedCommands = obj.patch("supported_commands") { element ->
-            (element as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }
-        },
-        volume = obj.patch("volume") { it.intOrNull() },
-        muted = obj.patch("muted") { it.booleanOrNull() },
-        repeat = obj.patch("repeat", ::cleanString),
-        shuffle = obj.patch("shuffle") { it.booleanOrNull() },
-        seekMaxMs = obj.patch("seek_max_ms") { it.longOrNull() },
+    private fun parseController(obj: JsonObject): ControllerState = ControllerState(
+        supportedCommands = (obj["supported_commands"] as? JsonArray)
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
+        volume = obj["volume"]?.intOrNull(),
+        muted = obj["muted"]?.booleanOrNull(),
+        repeat = obj["repeat"]?.let(::cleanString),
+        shuffle = obj["shuffle"]?.booleanOrNull(),
+        seekMaxMs = obj["seek_max_ms"]?.longOrNull(),
     )
 
     /**
      * Music Assistant sends the four-character string "null" for an absent
-     * title on some tracks. Treated as a clear rather than a title, but only
-     * for strings - narrowly scoped, because any other field could legitimately
-     * carry that text.
+     * title on some tracks. Treated as no value rather than a title.
      */
     private fun cleanString(element: JsonElement): String? =
         (element as? JsonPrimitive)?.contentOrNull?.takeUnless { it == "null" }
@@ -280,26 +187,19 @@ object MessageParser {
                 }
             }
             "mute" -> {
-                // No default: a missing `mute` field must be ignored, not
-                // treated as false. Defaulting would let a malformed frame
-                // audibly unmute the device and restore the last volume.
-                val muted = player["mute"]?.jsonPrimitive?.booleanOrNull
-                if (muted != null) {
-                    ServerCommandResult.Mute(muted)
-                } else {
-                    Log.w(TAG, "mute command missing 'mute' field, ignoring")
-                    null
-                }
+                // `mute` is "required if command is mute". Defaulting a
+                // missing field to false would unmute a muted player.
+                val muted = player["mute"]?.booleanOrNull() ?: return null
+                ServerCommandResult.Mute(muted)
             }
-            "set_static_delay" -> {
-                // Spec: integer, 0-5000 ms.
-                val delayMs = player.intOrDefault("static_delay_ms", -1)
-                if (delayMs in 0..5000) {
-                    ServerCommandResult.SetStaticDelay(delayMs)
-                } else {
-                    Log.w(TAG, "set_static_delay out of range: $delayMs")
-                    null
-                }
+            "set_output_delay" -> {
+                // roles/player/v1.md: integer, 0-5000 ms. The command and its
+                // field were both named static_delay here, which matches no
+                // spec revision - so a conforming server's command fell through
+                // to Unknown and was silently dropped.
+                // "Clients MUST clamp output_delay_ms to the range 0-5000."
+                val delayMs = player["output_delay_ms"]?.longOrNull() ?: return null
+                ServerCommandResult.SetOutputDelay(delayMs.coerceIn(0, 5000).toInt())
             }
             else -> {
                 if (command.isNotEmpty()) {
@@ -371,4 +271,6 @@ object MessageParser {
     private fun JsonObject.doubleOrDefault(key: String, default: Double): Double =
         this[key]?.jsonPrimitive?.doubleOrNull ?: default
 
+    private fun JsonObject.booleanOrDefault(key: String, default: Boolean): Boolean =
+        this[key]?.jsonPrimitive?.booleanOrNull ?: default
 }

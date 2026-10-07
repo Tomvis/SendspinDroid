@@ -1,18 +1,16 @@
 package com.sendspindroid.sendspin.protocol
 
 import android.util.Log
-import com.sendspindroid.sendspin.AdaptiveBufferPolicy
+import com.sendspindroid.UserSettings
+import com.sendspindroid.sendspin.MinBufferEstimator
 import com.sendspindroid.sendspin.SendspinTimeFilter
 import com.sendspindroid.sendspin.crypto.NoiseCipherSuite
 import com.sendspindroid.sendspin.crypto.NoiseCrypto
 import com.sendspindroid.sendspin.crypto.NoiseTransport
 import com.sendspindroid.sendspin.crypto.Psk
 import com.sendspindroid.sendspin.crypto.PskCategory
-import com.sendspindroid.sendspin.crypto.PairingConfigStore
-import com.sendspindroid.sendspin.protocol.management.ManagementResultCode
-import com.sendspindroid.sendspin.protocol.management.ManagementRequestParser
-import com.sendspindroid.sendspin.protocol.management.ManagementService
-import com.sendspindroid.sendspin.protocol.management.ManagementSessionContext
+import com.sendspindroid.sendspin.crypto.asNoiseCrypto
+import com.sendspindroid.sendspin.protocol.message.ArtworkReceiver
 import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import com.sendspindroid.sendspin.protocol.message.MessageParser
@@ -23,6 +21,7 @@ import com.sendspindroid.sendspin.pairing.DynamicPairingAction
 import com.sendspindroid.sendspin.pairing.DynamicPairingCodeFlow
 import com.sendspindroid.sendspin.pairing.DynamicPairingEvent
 import com.sendspindroid.sendspin.pairing.PairAbortReason
+import com.sendspindroid.sendspin.pairing.PairMethod
 import com.sendspindroid.sendspin.pairing.PairingAction
 import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import com.sendspindroid.sendspin.pairing.PairingEvent
@@ -30,8 +29,12 @@ import com.sendspindroid.sendspin.pairing.PairingFailureCounter
 import com.sendspindroid.sendspin.pairing.PairingPskFlow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -74,40 +77,51 @@ abstract class SendSpinProtocolHandler(
     private var externalSourceActive: Boolean = false
 
     // Stream active tracking (mirrors CLI _stream_active)
+    @Volatile
     private var _streamActive = false
     private var _currentStreamConfig: StreamConfig? = null
 
+    /**
+     * Whether a player stream is active: from `stream/start` until
+     * `stream/end`. A `stream/clear` does not end it.
+     */
+    protected val isStreamActive: Boolean get() = _streamActive
+
+    // Artwork stream (roles/artwork/v1.md). One channel is declared, so only
+    // channel 0 is shown. [artworkLock] orders a pending image coming due on
+    // the timer scope against the receive thread replacing or discarding it.
+    private val artworkLock = Any()
+    private val artworkReceiver = ArtworkReceiver()
+    private var artworkStreamActive = false
+    private var artworkChannelConfig: JsonElement? = null
+    private var pendingArtwork: Job? = null
+
     // Last received values for change detection (avoids unnecessary UI recomposition)
-    private var lastMetadata: TrackMetadata? = null
     private var lastPlaybackState: String? = null
     private var lastGroupInfo: GroupInfo? = null
 
-    // Merged controller (group-level) state from server/state deltas.
+    // Scheduled metadata (roles/metadata/v1.md): at most one update waiting
+    // for its timestamp. [metadataLock] orders it coming due on the timer
+    // scope against the receive thread replacing or discarding it.
+    private val metadataLock = Any()
+    private var pendingMetadata: Job? = null
+
+    // Controller (group-level) state from the latest server/state.
     private var currentControllerState: ControllerState? = null
 
     // Time sync manager (lazy initialized by subclass)
     protected var timeSyncManager: TimeSyncManager? = null
 
-    // Adaptive jitter-buffer policy: reports a generous min_buffer_ms by default
-    // and grows it on trouble (RTT spikes / sync loss), backing off slowly on a
-    // sustained-good link. Constructed by [initTimeSyncManager] with the
-    // memory-appropriate profile. Guarded by [adaptiveBufferLock] because the
-    // time-sync callback can fire from either the burst-loop or the receive thread.
-    private var adaptiveBuffer: AdaptiveBufferPolicy? = null
-    private val adaptiveBufferLock = Any()
-    private var lastReportedMinBufferMs: Int = SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS
+    // Sizes the min_buffer_ms we report from audio chunk arrival delay.
+    @Volatile
+    private var minBufferEstimator = MinBufferEstimator()
+
+    // Set once the first stream of this connection has started. Until then
+    // the required_lead_time_ms we report has to cover a cold start.
+    @Volatile
+    private var outputStarted = false
 
     // ========== Abstract Transport Methods ==========
-
-    /**
-     * Send a raw WebSocket TEXT frame.
-     *
-     * After the Noise handshake this is a protocol violation - "all messages
-     * are sent as WebSocket binary frames carrying Noise transport ciphertexts".
-     * Only the handshake driver and the legacy path may call it; everything else
-     * goes through [sendProtocolMessage].
-     */
-    protected abstract fun sendTextMessage(text: String)
 
     /** Send a raw WebSocket BINARY frame. */
     protected abstract fun sendBinaryFrame(bytes: ByteArray)
@@ -126,11 +140,6 @@ abstract class SendSpinProtocolHandler(
      * Whether the device is in low-memory mode (smaller buffer target).
      */
     protected abstract fun isLowMemoryMode(): Boolean
-
-    /**
-     * Get the client ID for this connection.
-     */
-    protected abstract fun getClientId(): String
 
     /**
      * Get the device name for this connection.
@@ -190,7 +199,8 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun onAudioChunk(timestampMicros: Long, audioData: ByteArray)
 
     /**
-     * Called when artwork is received.
+     * Called when a channel's current image changes. An empty [payload] means
+     * the channel no longer displays artwork.
      */
     protected abstract fun onArtwork(channel: Int, payload: ByteArray)
 
@@ -200,7 +210,7 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun onSyncOffsetApplied(offsetMs: Double, source: String)
 
     /**
-     * Called when the merged controller (group-level) state changes:
+     * Called when the controller (group-level) state changes:
      * supported_commands, group volume/mute, repeat, shuffle.
      * Default no-op for handlers that don't surface controller state.
      */
@@ -235,13 +245,27 @@ abstract class SendSpinProtocolHandler(
     protected abstract fun getSoftwareVersion(): String
 
     /**
-     * Send client/hello message to start handshake.
+     * The `supported_formats` this connection's client/hello advertised. A
+     * `format` preference in client/state "MUST be one of the entries" here.
+     */
+    @Volatile
+    private var advertisedFormats: List<MessageBuilder.FormatEntry> = emptyList()
+
+    /** The overridden format preference reported in client/state, if any. */
+    @Volatile
+    private var preferredFormat: MessageBuilder.FormatEntry? = null
+
+    /**
+     * Send client/hello, the reply to server/hello.
      *
      * Buffer capacity is computed from the format list and target duration
      * so the wire-byte cap scales with the highest PCM bitrate we advertise.
      */
-    protected fun sendClientHello() {
+    private fun sendClientHello() {
         val formats = getSupportedFormats()
+        advertisedFormats = formats
+        // The hello's priority order already puts the preferred codec first.
+        preferredFormat = null
         val bufferDuration = if (isLowMemoryMode()) {
             SendSpinProtocol.Buffer.DURATION_LOW_MEM_SEC
         } else {
@@ -249,16 +273,12 @@ abstract class SendSpinProtocolHandler(
         }
         val bufferCapacity = MessageBuilder.calculateBufferCapacity(formats, bufferDuration)
         val text = MessageBuilder.buildClientHello(
-            // Always null: client_id and version live in client/init, and every
-            // session is encrypted, so repeating them here would be sending
-            // fields the spec does not define for this message.
-            clientId = null,
             deviceName = getDeviceName(),
             bufferCapacity = bufferCapacity,
             manufacturer = getManufacturer(),
             supportedFormats = formats,
+            lowMemoryMode = isLowMemoryMode(),
             softwareVersion = getSoftwareVersion(),
-            trustLevel = getTrustLevel(),
             unpairedAccessEnabled = isUnpairedAccessEnabled(),
             supportedPairMethods = getSupportedPairMethods(),
         )
@@ -280,19 +300,28 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Send goodbye message before disconnecting.
+     * Encrypt a `client/goodbye` and retire the channel it was encrypted for.
      *
-     * Note the [handshakeComplete] gate, which means "server/hello seen". A
-     * goodbye is legitimate before that, as soon as the Noise handshake
-     * finishes, so this swallows one silently. `server/unpair` sidesteps it by
-     * sending its own goodbye - it has to sequence the send against the close
-     * anyway - but item 2.9's `concurrent_attempt` will need this relaxed.
+     * Returns the frames instead of sending them, and does so before
+     * returning rather than on the coroutine scope: the caller is about to
+     * close this connection - and may be about to open the next one or cancel
+     * the scope - so the frames have to be in its hands first. A goodbye
+     * queued behind an async encrypt loses that race every time.
+     *
+     * Empty when there is nothing to say goodbye with: before the initial
+     * `server/activate` ("the client MUST NOT send other Sendspin messages
+     * until it receives that activation") or mid re-handshake, when no
+     * application message may be started.
      */
-    protected fun sendGoodbye(reason: GoodbyeReason) = sendGoodbye(reason.wire)
-
-    protected fun sendGoodbye(reason: String) {
-        if (!handshakeComplete) return
-        sendProtocolMessage(MessageBuilder.buildGoodbye(reason))
+    protected fun encodeGoodbye(reason: GoodbyeReason): List<ByteArray> {
+        val codec = wireCodec
+        if (codec == null || !activationSeen || rehandshakeInProgress) return emptyList()
+        // Nothing may follow a goodbye under these keys.
+        wireCodec = null
+        Log.d(tag, "Sending client/goodbye reason=${reason.wire}")
+        // The codec only suspends for its send mutex, which is never held
+        // across anything but the encryption itself.
+        return runBlocking { codec.encodeJson(MessageBuilder.buildGoodbye(reason)) }
     }
 
     /**
@@ -317,35 +346,28 @@ abstract class SendSpinProtocolHandler(
      */
     protected fun isAvailable(): Boolean {
         if (externalSourceActive) return false
-        return getTimeFilter().isConverged
+        // Convergence gates only the FIRST `available: true`. Once reached it
+        // is latched for the connection: the server ends our streams the
+        // moment we report false, so a filter that wobbles when a stream
+        // starts must not take us out of the playback it just joined.
+        return hasEverConverged || getTimeFilter().isConverged
     }
-
-    /**
-     * `'user'` when a pairing record exists for this server, `'none'` otherwise.
-     *
-     * Phase 1 has no record store, so this is always `'none'`. Item 2.1 (#202)
-     * gives it a real answer; 2.3 (#204) makes it follow the matched PSK.
-     */
-    protected open fun getTrustLevel(): String = MessageBuilder.TRUST_NONE
 
     /**
      * Whether this client admits a server holding no pairing record.
      *
      * This is what decides whether an unpaired connection can carry audio at
-     * all: the spec allows `['playback']` on a Sentinel-keyed session "only when
-     * the client has unpaired access enabled". Default on, so a fresh install
-     * plays before anyone has paired anything; item 3.2 (#228) lets a paired
-     * server toggle it.
+     * all: the spec allows `'playback'` on an unpaired session "only when the
+     * client has unpaired access enabled". Default on, so a fresh install plays
+     * before anyone has paired anything.
      */
     protected open fun isUnpairedAccessEnabled(): Boolean = true
 
     /**
      * The pairing methods this client currently offers.
      *
-     * "An implemented method that is disabled is omitted", so a disabled
-     * `pairing_psk` leaves this list - and its PSK leaves the handshake
-     * candidate set at the same time, or the server could still re-handshake to
-     * a method the client no longer advertises.
+     * "Every client offers at least the Pairing PSK method", and its PSK stays
+     * in the handshake candidate set at all times.
      */
     protected open fun getSupportedPairMethods(): List<MessageBuilder.PairMethodDescriptor> =
         listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK)
@@ -354,67 +376,60 @@ abstract class SendSpinProtocolHandler(
      * Send player state update (volume/muted/availability).
      */
     protected fun sendPlayerStateUpdate() {
-        val delayMs = getTimeFilter().staticDelayMs
-        val minBufferMs = synchronized(adaptiveBufferLock) {
-            val target = adaptiveBuffer?.currentTargetMs ?: SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS
-            lastReportedMinBufferMs = target
-            target
-        }
+        // "The client MUST NOT send other Sendspin messages until it receives
+        // that activation." Every client/state goes through here, so this is
+        // the one gate for all of them; accepting the activation sends the
+        // first, with whatever changed in the meantime.
+        if (!activationSeen) return
+
+        // The spec's output_delay_ms, NOT our signed staticDelayMs: the
+        // latter is the hardware latency we already compensate ourselves, and
+        // reporting it would invite the server to compensate it again.
+        val delayMs = getTimeFilter().outputDelayMs
         sendProtocolMessage(
             MessageBuilder.buildPlayerState(
                 currentVolume, currentMuted, isAvailable(), delayMs,
-                minBufferMs = minBufferMs,
-                // On the legacy dialect there is no server/activate, so the
-                // player object always ships; on the spec path it may only
-                // appear once the role is actually active.
-                playerRoleActive = !isEncrypted || activeRoles.contains(ROLE_PLAYER_V1),
+                requiredLeadTimeMs = if (outputStarted) {
+                    SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_WARM_MS
+                } else {
+                    SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS
+                },
+                minBufferMs = minBufferEstimator.minBufferMs,
+                // A role's object may only appear once the role is active.
+                playerRoleActive = activeRoles.contains(ROLE_PLAYER_V1),
+                format = preferredFormat,
+                artworkRoleActive = activeRoles.contains(SendSpinProtocol.Roles.ARTWORK),
             )
         )
     }
 
     /**
-     * Feed one time-sync measurement into the adaptive buffer policy and, if the
-     * learned `min_buffer_ms` target shifted, report it (debounced by the policy's
-     * own grow/shrink cooldowns). Also re-evaluates sync state, preserving the
-     * previous [onMeasurementApplied] behavior.
+     * Measure how late an audio chunk arrived and report `min_buffer_ms` when
+     * that changes it (roles/player/v1.md, "Measuring timing parameters").
+     *
+     * The server sent the chunk at `timestamp - send_ahead` on its clock; the
+     * delay is the arrival time minus that instant on ours. It is clock
+     * mapping only: `min_buffer_ms` "MUST NOT include `output_delay_ms`".
      */
-    private fun onTimeMeasurement(rttMicros: Long) {
+    private fun measureChunkDelay(chunk: BinaryMessageParser.BinaryMessage.Audio) {
+        // Both saturation values report that no lead was measured, and a
+        // player "MUST NOT use a chunk carrying either as a delay sample".
+        if (chunk.sendAheadMicros == 0L || chunk.sendAheadMicros == SendSpinProtocol.SEND_AHEAD_SATURATED) return
         val filter = getTimeFilter()
-        val quality = when {
-            filter.isReady && filter.isConverged -> AdaptiveBufferPolicy.SyncQuality.GOOD
-            filter.isReady -> AdaptiveBufferPolicy.SyncQuality.DEGRADED
-            else -> AdaptiveBufferPolicy.SyncQuality.LOST
-        }
-        val changed = synchronized(adaptiveBufferLock) {
-            val policy = adaptiveBuffer
-            if (policy != null) {
-                policy.update(
-                    nowMs = android.os.SystemClock.elapsedRealtime(),
-                    rttMs = rttMicros / 1000.0,
-                    quality = quality
-                )
-                policy.currentTargetMs != lastReportedMinBufferMs
-            } else {
-                false
-            }
-        }
-        evaluateAndPublishSyncState()
-        if (changed && handshakeComplete) {
-            Log.d(tag, "Adaptive min_buffer_ms -> ${adaptiveBuffer?.currentTargetMs}")
+        if (!filter.isConverged) return
+
+        val arrivalMicros = System.nanoTime() / 1000
+        val sentMicros = filter.computeClientTime(chunk.timestampMicros - chunk.sendAheadMicros)
+        if (minBufferEstimator.addChunk(chunk.timestampMicros, sentMicros, arrivalMicros)) {
             sendPlayerStateUpdate()
         }
     }
 
     /**
-     * Public hook for code outside the protocol handler (e.g.
-     * [OutputLatencyEstimator] via [SyncAudioPlayer]) to push a fresh
-     * `client/state` to the server, for example after auto-measured
-     * `static_delay_ms` converges.
+     * Public hook for code outside the protocol handler to push a fresh
+     * `client/state` to the server.
      */
-    fun sendClientStateSnapshot() {
-        if (!handshakeComplete) return
-        sendPlayerStateUpdate()
-    }
+    fun sendClientStateSnapshot() = sendPlayerStateUpdate()
 
     /**
      * Set sync state and notify server.
@@ -432,9 +447,7 @@ abstract class SendSpinProtocolHandler(
         if (currentSyncState != syncState) {
             currentSyncState = syncState
             Log.d(tag, "Sync state changed to: $syncState")
-            if (handshakeComplete) {
-                sendPlayerStateUpdate()
-            }
+            sendPlayerStateUpdate()
         }
     }
 
@@ -462,7 +475,7 @@ abstract class SendSpinProtocolHandler(
         }
         if (changed) {
             Log.i(tag, "External source ${if (active) "active" else "cleared"}: state=$currentSyncState")
-            if (handshakeComplete) sendPlayerStateUpdate()
+            sendPlayerStateUpdate()
         }
     }
 
@@ -530,41 +543,79 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
+    /** Whether [sendCommand] would send [command] right now; see there for the rule. */
+    fun canSendCommand(command: String): Boolean =
+        SendSpinProtocol.Roles.CONTROLLER in activeRoles &&
+            currentControllerState?.supportedCommands?.contains(command) == true
+
     /**
      * Send a controller command (play, pause, stop, next, previous, volume,
-     * mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch).
+     * mute, repeat_off, repeat_one, repeat_all, shuffle, unshuffle, switch,
+     * seek, seek_relative).
      *
-     * Per spec, commands should be one of the server's advertised
-     * supported_commands; once the server has told us its set, anything
-     * outside it is dropped (the server would ignore it anyway).
+     * "Only valid from clients whose `controller` role is active", and the
+     * command "MUST be one of the values listed in `supported_commands` from
+     * the latest controller state the client received". So nothing is sent
+     * while the role is inactive, before a controller state has arrived, or
+     * for a command outside the advertised set.
      *
      * @param volume only used when [command] is "volume"
      * @param mute only used when [command] is "mute"
+     * @param positionMs required when [command] is "seek"; clamped to the
+     *   spec's "range 0 to seek_max_ms"
+     * @param offsetMs required when [command] is "seek_relative"
      */
-    fun sendCommand(command: String, volume: Int? = null, mute: Boolean? = null) {
-        val supported = currentControllerState?.supportedCommands
-        if (supported != null && command !in supported) {
-            Log.w(tag, "Dropping controller command '$command': not in server supported_commands $supported")
+    fun sendCommand(
+        command: String,
+        volume: Int? = null,
+        mute: Boolean? = null,
+        positionMs: Long? = null,
+        offsetMs: Long? = null,
+    ) {
+        val state = currentControllerState
+        if (!canSendCommand(command)) {
+            Log.w(tag, "Dropping controller command '$command': controller role active=" +
+                "${SendSpinProtocol.Roles.CONTROLLER in activeRoles}, server supported_commands=${state?.supportedCommands}")
             return
         }
-        sendProtocolMessage(MessageBuilder.buildCommand(command, volume, mute))
+        var position = positionMs
+        if (command == "seek") {
+            // The server MUST send seek_max_ms whenever it offers 'seek'.
+            val seekMaxMs = state?.seekMaxMs
+            if (position == null || seekMaxMs == null) {
+                Log.w(tag, "Dropping seek: position_ms=$position seek_max_ms=$seekMaxMs")
+                return
+            }
+            position = position.coerceIn(0, seekMaxMs)
+        } else if (command == "seek_relative" && offsetMs == null) {
+            Log.w(tag, "Dropping seek_relative: offset_ms is required")
+            return
+        }
+        sendProtocolMessage(MessageBuilder.buildCommand(command, volume, mute, position, offsetMs))
     }
 
     /**
-     * Request a different stream format from the server (spec
-     * stream/request-format). Omitted fields keep their current value.
-     * The server responds with stream/start, which flows through the
-     * normal format-change reconfiguration path.
+     * Prefer [codec] for this player's stream.
+     *
+     * Reported as `format` in the client/state player object: "When `format`
+     * changes while a `player` stream is active, the server re-derives the
+     * stream format and sends a `stream/start` if it changed", which flows
+     * through the normal format-change reconfiguration path.
+     *
+     * The preference "MUST be one of the entries in `supported_formats`", and
+     * client/hello is sent once per connection, so a codec this connection did
+     * not advertise can only take effect on the next one.
      */
-    fun requestStreamFormat(
-        codec: String? = null,
-        sampleRate: Int? = null,
-        channels: Int? = null,
-        bitDepth: Int? = null
-    ) {
-        if (!handshakeComplete) return
-        Log.i(tag, "Requesting stream format: codec=$codec, rate=$sampleRate, ch=$channels, bits=$bitDepth")
-        sendProtocolMessage(MessageBuilder.buildStreamRequestFormat(codec, sampleRate, channels, bitDepth))
+    fun setPreferredCodec(codec: String) {
+        val format = advertisedFormats.firstOrNull { it.codec == codec }
+        if (format == null) {
+            Log.i(tag, "Preferred codec $codec was not advertised on this connection; " +
+                "it applies from the next connect")
+            return
+        }
+        Log.i(tag, "Preferring stream format: $format")
+        preferredFormat = format
+        sendPlayerStateUpdate()
     }
 
     // ========== Player State Methods ==========
@@ -625,17 +676,10 @@ abstract class SendSpinProtocolHandler(
      * Initialize time sync manager.
      */
     protected fun initTimeSyncManager(timeFilter: SendspinTimeFilter) {
-        synchronized(adaptiveBufferLock) {
-            val policy = AdaptiveBufferPolicy(
-                if (isLowMemoryMode()) AdaptiveBufferPolicy.lowMemory() else AdaptiveBufferPolicy.generous()
-            )
-            adaptiveBuffer = policy
-            lastReportedMinBufferMs = policy.currentTargetMs
-        }
         timeSyncManager = TimeSyncManager(
             timeFilter = timeFilter,
             sendClientTime = { sendClientTime() },
-            onMeasurementApplied = { rttMicros -> onTimeMeasurement(rttMicros) },
+            onMeasurementApplied = { evaluateAndPublishSyncState() },
             tag = tag
         )
     }
@@ -643,24 +687,21 @@ abstract class SendSpinProtocolHandler(
     // ========== Encrypted channel ==========
 
     /**
-     * Set once the Noise handshake completes. Null means the legacy
-     * (unencrypted) dialect, which Music Assistant still accepts today behind
-     * its `allow_legacy_clients` toggle but has documented as temporary.
-     *
-     * This one field is what switches the whole protocol layer between the two
-     * wire formats: every existing caller of [sendProtocolMessage] becomes
-     * encrypted with no further edits, and [handleBinaryMessage] routes through
-     * the codec instead of parsing a bare frame.
+     * Set once the Noise handshake completes. Every application message, in
+     * both directions, goes through it; before then nothing may be sent or
+     * dispatched at all.
      */
     @Volatile
     private var wireCodec: NoiseWireCodec? = null
 
-    /** True once the connection is carrying Noise ciphertexts. */
-    val isEncrypted: Boolean get() = wireCodec != null
-
     /** Install the transport produced by the handshake driver. */
-    fun installEncryptedTransport(transport: NoiseTransport) {
-        wireCodec = NoiseWireCodec(transport)
+    fun installEncryptedTransport(transport: NoiseTransport) =
+        installEncryptedChannel(transport.asNoiseCrypto())
+
+    /** [installEncryptedTransport], taking the codec's narrow view so tests can fake it. */
+    internal fun installEncryptedChannel(crypto: NoiseCrypto) {
+        wireCodec = NoiseWireCodec(crypto)
+        rehandshakeInProgress = false
         // This is the sole call site for a FRESH handshake - a re-handshake
         // never calls it, going through resetForRehandshake() instead - so
         // without this reset the counter would keep accumulating across
@@ -672,13 +713,76 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Reset [dynamicPairingIndex] to 0: pairing_index counts "the number of
-     * pairing server/activate messages received since the last Noise
-     * handshake" (pairing.md line 335), and that count must restart on
-     * EVERY Noise handshake - fresh or re-handshake alike.
+     * Forget everything that belongs to one connection. Called by the
+     * connection's teardown, whichever way it ended, so that the next
+     * connection starts from the same state as the first.
+     *
+     * What is on display (metadata, artwork) is not touched: that is the
+     * owner's to clear when it reacts to the connection ending.
+     */
+    protected fun resetConnectionState() {
+        // No client/time may follow a connection out of its activation; the
+        // next one starts time sync when it is activated itself.
+        stopTimeSync()
+        handshakeComplete = false
+
+        // Nothing sent from here until the next handshake completes may be
+        // encrypted under this session's keys.
+        wireCodec = null
+        rehandshakeInProgress = false
+
+        // The pairing flows hear that the socket is gone, which ends their
+        // attempt, its timer and any code on display. The dynamic flow is
+        // dropped with the handshake hash it was bound to.
+        runPairingActions(PairingEvent.ConnectionClosed)
+        runDynamicPairingActions(DynamicPairingEvent.ConnectionClosed)
+        attemptTimeoutJob?.cancel()
+        attemptTimeoutJob = null
+        dynamicAttemptTimeoutJob?.cancel()
+        dynamicAttemptTimeoutJob = null
+        dynamicPairingFlow = null
+        activePairingMethod = null
+        pairingAborted = false
+        pairingIndex = 0
+        unpairHandled = false
+
+        activationSeen = false
+        activeRoles = emptyList()
+        activities = emptySet()
+        advertisedFormats = emptyList()
+        preferredFormat = null
+
+        _streamActive = false
+        _currentStreamConfig = null
+        outputStarted = false
+        minBufferEstimator = MinBufferEstimator()
+        resetArtworkStream()
+        resetServerState()
+        lastPlaybackState = null
+        lastGroupInfo = null
+    }
+
+    /**
+     * True from the moment Noise message 1 of a re-handshake is received until
+     * the `server/activate` that follows it.
+     *
+     * "The server MUST NOT start new application messages after sending Noise
+     * message 1, nor the client after receiving it, except for the handshake
+     * and `server/activate`." [sendProtocolMessage] drops everything while
+     * this is set; the activation re-sends client/state, so nothing that
+     * matters is lost.
+     */
+    @Volatile
+    private var rehandshakeInProgress = false
+
+    /**
+     * Reset [pairingIndex] to 0: pairing_index counts "the number of pairing
+     * server/activate messages received since the last Noise handshake"
+     * (pairing.md, "Pairing index"), and that count must restart on EVERY
+     * Noise handshake - fresh or re-handshake alike.
      */
     protected fun resetPairingIndexForFreshHandshake() {
-        dynamicPairingIndex = 0
+        pairingIndex = 0
     }
 
     /**
@@ -694,20 +798,16 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Reset the application-level handshake state after a re-handshake.
+     * Reset what a re-handshake invalidates, once the new keys are in place.
      *
-     * The channel is promoted, not replaced: the transport, the group and the
-     * time filter all survive, so this deliberately does NOT touch them. What
-     * does reset is the message sequence - the server sends `server/hello`
-     * again, and the next `server/activate` is a *first* activation, so a
-     * server that omits `active_roles` clears them rather than inheriting the
-     * roles from before the promotion.
+     * "Connection state, such as open streams with their buffered data or the
+     * time filter, persists across a re-handshake; only the session keys and
+     * what the handshake itself derives change." Neither hello is re-sent and
+     * the next `server/activate` "is a subsequent one on the same connection",
+     * so the active roles, the activities and [handshakeComplete] all stay as
+     * they are: an activation that omits `active_roles` inherits them.
      */
     protected fun resetForRehandshake() {
-        handshakeComplete = false
-        activationSeen = false
-        activeRoles = emptyList()
-        activities = emptySet()
         // The dynamic flow's sid is derived from this session's handshake
         // hash, and pairing_index counts "activations since the last Noise
         // handshake" - both go stale the moment a new handshake completes.
@@ -722,24 +822,10 @@ abstract class SendSpinProtocolHandler(
         onDynamicPairingCodeCleared()
     }
 
-    /** Drop the encrypted channel (disconnect, or falling back to legacy). */
-    fun clearEncryptedTransport() {
-        wireCodec = null
-    }
-
     /**
-     * Send an application protocol message.
-     *
-     * Encrypted when a Noise transport is installed, a plain text frame
-     * otherwise. Callers do not need to know which.
+     * Send an application protocol message over the encrypted channel.
      */
     protected fun sendProtocolMessage(text: String) {
-        val codec = wireCodec
-        if (codec == null) {
-            // Legacy dialect: a plain text frame.
-            sendTextMessage(text)
-            return
-        }
         // encodeJson takes the send mutex, so this has to be in a coroutine.
         getCoroutineScope().launch { sendProtocolMessageAwaiting(text) }
     }
@@ -756,8 +842,19 @@ abstract class SendSpinProtocolHandler(
     protected suspend fun sendProtocolMessageAwaiting(text: String) {
         val codec = wireCodec
         if (codec == null) {
-            sendTextMessage(text)
+            Log.w(tag, "Dropping outbound message: no encrypted channel")
             return
+        }
+        if (rehandshakeInProgress) {
+            Log.d(tag, "Dropping outbound message during re-handshake")
+            return
+        }
+        // client/pair-finalize carries the new long-term PSK; it never goes
+        // to the log.
+        if (SendSpinProtocol.MessageType.CLIENT_PAIR_FINALIZE in text) {
+            Log.d(tag, "Sent: client/pair-finalize (payload withheld)")
+        } else {
+            Log.d(tag, "Sent: ${text.take(500)}")
         }
         try {
             codec.encodeJson(text).forEach { sendBinaryFrame(it) }
@@ -772,9 +869,10 @@ abstract class SendSpinProtocolHandler(
      *
      * The completing frame of a re-handshake. Ordering is the codec's problem
      * (it holds the send mutex across encrypt-then-install); ordering with
-     * respect to the *application* is this method's: [onSwapped] runs only
-     * after the frame is on the wire, so the re-asserted `client/hello` cannot
-     * be built from state the swap has not finished changing.
+     * respect to the *application* is this method's: [onSwapped] runs once the
+     * new keys are installed and BEFORE the frame goes out. The server answers
+     * that frame with `server/activate` straight away, and the activation must
+     * be judged against the PSK this handshake matched, not the previous one.
      */
     protected fun sendAndSwapKeys(text: String, next: NoiseCrypto, onSwapped: () -> Unit) {
         val codec = wireCodec
@@ -784,12 +882,13 @@ abstract class SendSpinProtocolHandler(
         }
         getCoroutineScope().launch {
             try {
-                codec.encodeAndSwap(
+                val frames = codec.encodeAndSwap(
                     SendSpinProtocol.BinaryType.JSON,
                     text.encodeToByteArray(),
                     next,
-                ).forEach { sendBinaryFrame(it) }
+                )
                 onSwapped()
+                frames.forEach { sendBinaryFrame(it) }
             } catch (e: Exception) {
                 Log.e(tag, "Re-handshake key swap failed", e)
                 onProtocolFailure("re-handshake key swap failed: ${e.message}")
@@ -826,11 +925,14 @@ abstract class SendSpinProtocolHandler(
                 // An in-band re-handshake. It arrives as an ordinary encrypted
                 // JSON message inside the current channel, which is why it is
                 // dispatched here and not by the cleartext handshake driver.
-                SendSpinProtocol.MessageType.NOISE_HANDSHAKE -> onRehandshakeMessage(payload)
+                SendSpinProtocol.MessageType.NOISE_HANDSHAKE -> {
+                    rehandshakeInProgress = true
+                    onRehandshakeMessage(payload)
+                }
 
                 // Deliberately not gated on `activities`, and deliberately
-                // discarding the payload: "Valid at any time regardless of the
-                // current `activities`", and the message has no fields.
+                // discarding the payload: "Valid regardless of the current
+                // `activities`", and the message has no fields.
                 SendSpinProtocol.MessageType.SERVER_UNPAIR -> handleServerUnpair()
 
                 SendSpinProtocol.MessageType.PAIR_ABORT -> handlePairAbort(payload)
@@ -848,16 +950,9 @@ abstract class SendSpinProtocolHandler(
                 SendSpinProtocol.MessageType.STREAM_END -> handleStreamEnd(payload)
                 SendSpinProtocol.MessageType.STREAM_CLEAR -> handleStreamClear(payload)
                 SendSpinProtocol.MessageType.CLIENT_SYNC_OFFSET -> handleClientSyncOffset(payload)
-                // Before the else: every management request must be
-                // answered, including one we do not implement. Falling through
-                // to the unhandled log leaves the server waiting for a reply
-                // that never comes - which is exactly how MA's device-settings
-                // dialog hangs (#228).
-                else -> if (type.startsWith("management/")) {
-                    handleManagementRequest(type, payload)
-                } else {
-                    Log.d(tag, "Unhandled message type: $type")
-                }
+                // "Clients and servers MUST ignore JSON messages with an
+                // unrecognized `type`."
+                else -> Log.d(tag, "Unhandled message type: $type")
             }
         } catch (e: Exception) {
             Log.e(tag, "Failed to parse message: ${text.take(100)}", e)
@@ -865,43 +960,25 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected open fun handleServerHello(payload: JsonObject?) {
-        val result = MessageParser.parseServerHello(payload, "Unknown")
-        if (result == null) {
+        val serverName = MessageParser.parseServerHello(payload, "Unknown")
+        if (serverName == null) {
             Log.e(tag, "Failed to parse server/hello")
             return
         }
+        Log.i(tag, "server/hello: name=$serverName")
 
-        // server/hello carries only `name` in the current spec. active_roles
-        // moved to server/activate and connection_reason was an aiosendspin
-        // legacy-mode invention; both are still parsed for the legacy dialect
-        // but must not be acted on here.
-        Log.i(tag, "server/hello: name=${result.serverName}")
-
+        // Everything else per-connection is already as a new connection needs
+        // it: the previous one's teardown reset it (resetConnectionState).
         handshakeComplete = true
 
-        // Clear cached values so the first post-handshake messages always propagate
-        _streamActive = false
-        _currentStreamConfig = null
-        lastMetadata = null
-        lastPlaybackState = null
-        lastGroupInfo = null
-        currentControllerState = null
-        activationSeen = false
-        activeRoles = emptyList()
+        // The server's identity is its static key from server/init;
+        // server/hello carries only the friendly name.
+        onHandshakeComplete(serverName, currentServerId().orEmpty())
 
-        onHandshakeComplete(result.serverName, result.serverId)
-
-        if (isEncrypted) {
-            // "Only after receiving the initial server/activate should the
-            // client send any other messages (including client/time and the
-            // initial client/state)." Starting either here would put frames on
-            // the wire before the server has told us what this connection is
-            // for.
-            Log.d(tag, "Waiting for server/activate before sending state or time")
-        } else {
-            sendPlayerStateUpdate()
-            startTimeSync()
-        }
+        // "Sent by the client once it has received server/hello." Nothing else
+        // may follow until the initial server/activate: "The client MUST NOT
+        // send other Sendspin messages until it receives that activation."
+        sendClientHello()
     }
 
     /** The versioned player role, as it appears in active_roles. */
@@ -929,9 +1006,11 @@ abstract class SendSpinProtocolHandler(
     protected open fun matchedPskCategory(): PskCategory = PskCategory.SENTINEL
 
     /** Pairing methods this client currently offers, as live configuration. */
-    protected open fun offeredPairMethods(): Set<String> = setOf("pairing_psk")
+    protected open fun offeredPairMethods(): Set<String> = setOf(PairMethod.PAIRING_PSK)
 
     protected fun handleServerActivate(payload: JsonObject?) {
+        // The activation that follows a re-handshake ends its quiet period.
+        rehandshakeInProgress = false
         val activate = ServerActivateRules.parse(payload)
         if (activate == null) {
             Log.e(tag, "server/activate missing required activities")
@@ -943,6 +1022,20 @@ abstract class SendSpinProtocolHandler(
             // usually means the server is newer than we are.
             Log.i(tag, "Ignoring unknown activities: ${activate.unknownActivities}")
         }
+
+        val pairing = Activity.PAIRING in activate.activities
+        if (pairing) {
+            // "The number of pairing server/activate messages received since
+            // the last Noise handshake": every one counts, admissible or not,
+            // because the server's own count advances whatever we answer. An
+            // index that only counted the accepted ones would fall behind
+            // after a single method_not_supported, and the server silently
+            // discards a client/pair-init carrying a lower index than its own.
+            pairingIndex += 1
+        }
+        // "A client that has aborted an attempt likewise silently discards
+        // pairing messages received before the next server/activate."
+        pairingAborted = false
 
         val outcome = ServerActivateRules.evaluate(
             activate = activate,
@@ -957,117 +1050,111 @@ abstract class SendSpinProtocolHandler(
             is ActivationOutcome.Close -> {
                 Log.w(tag, "Rejecting server/activate: ${outcome.goodbyeReason} " +
                     "(activities=${activate.activities}, roles=${activate.activeRoles})")
-                sendGoodbye(outcome.goodbyeReason)
-                onProtocolFailure("server/activate not admissible: ${outcome.goodbyeReason}")
+                // Sequenced in one coroutine, as in handleServerUnpair: the
+                // reason is the whole point of the rejection, and a close
+                // issued straight after the send would outrun the frame.
+                getCoroutineScope().launch {
+                    sendProtocolMessageAwaiting(MessageBuilder.buildGoodbye(outcome.goodbyeReason))
+                    closeConnectionAfterFlush()
+                }
             }
 
             is ActivationOutcome.AbortPairing -> {
                 // Connection stays open; the server may re-activate with a
-                // method we do offer.
+                // method we do offer. A new pairing activation supersedes the
+                // attempt in flight even when it is one we refuse.
                 Log.w(tag, "Aborting pairing: ${outcome.reason}")
-                onPairAbort(outcome.reason)
+                activePairingMethod = null
+                runPairingActions(PairingEvent.NonPairingActivation)
+                runDynamicPairingActions(DynamicPairingEvent.NonPairingActivation)
+                sendPairAbort(outcome.reason)
             }
 
             is ActivationOutcome.Accept -> {
+                val removedRoles = activeRoles - outcome.activeRoles.toSet()
                 activities = activate.activities
                 activeRoles = outcome.activeRoles
                 activationSeen = true
                 Log.i(tag, "server/activate accepted: activities=${activate.activities} " +
                     "roles=${outcome.activeRoles}")
+                if (removedRoles.isNotEmpty()) discardRemovedRoles(removedRoles)
                 onAdmissionStateChanged(
                     AdmissionState.from(activate.activities, outcome.activeRoles)
                 )
-                val pairing = Activity.PAIRING in activate.activities
 
-                // A pairing activation is answered with client/pair-finalize and
-                // NOTHING else. The server is sitting in _receive_pairing
-                // waiting for that exact message, so a client/state or the
-                // client/time burst arriving first is read as the finalize and
-                // rejected as malformed - which is precisely how this failed
-                // against both Music Assistant builds.
-                //
-                // pairing.md says "Pairing and playback are mutually exclusive
-                // on a connection", but its "Sequence violations" rule only
-                // covers a *pairing* message arriving out of order - it does
-                // not explicitly forbid client/time during pairing. We stop it
-                // anyway on the strength of that mutual-exclusivity statement
-                // plus the observed fact above: every real server rejects it.
-                // This is an interop-driven reading, not a quoted spec rule.
-                //
-                // Withholding them costs nothing while pairing: the
-                // admissibility table grants no roles on a Pairing-PSK
-                // connection, so there is no player state worth reporting and
-                // no stream to synchronise to.
-                //
-                // The dynamic flow's real sequence is: the server activates
-                // with EMPTY activities first (time sync starts), and only
-                // LATER activates into pairing (time sync must then stop) -
-                // so this cannot be gated on "first activation" the way the
-                // original Pairing-PSK-only version was. A later activation
-                // that leaves pairing must restore both, whether or not it is
-                // the first activation ever seen on this connection.
-                if (pairing) {
-                    stopTimeSync()
-                } else {
-                    sendPlayerStateUpdate()
-                    startTimeSync()
-                }
+                // "Pairing can run alongside playback. A server/activate that
+                // adds 'pairing' to activities does not by itself affect
+                // active_roles, streams, or group membership." So every
+                // accepted activation reports state and keeps the clock
+                // synchronized, pairing or not. The state is also what a role
+                // added by this activation is waiting for: "When a role that
+                // defines a state object becomes active in active_roles, the
+                // client MUST send an update that includes that role's object."
+                sendPlayerStateUpdate()
+                startTimeSync()
 
-                if (pairing) {
-                    // The client's own tally of "pairing activations since the
-                    // last Noise handshake" (pairing.md) - the value folded
-                    // into the CPace sid as `pairing_index`. Incremented for
-                    // EVERY accepted pairing activation, whatever the method:
-                    // the server's own count advances the same way. Counting
-                    // only dynamic activations would leave our tally lower
-                    // than the server's after a pairing_psk activation, and
-                    // the spec silently discards an index lower than the
-                    // server's count - the dynamic attempt would then never
-                    // start. Incremented before use, so the first pairing
-                    // activation on a session is index 1.
-                    dynamicPairingIndex += 1
-                }
-
-                // Every accepted activation is fed to the pairing flow, not
-                // only the pairing ones: an activation WITHOUT `pairing` is how
-                // the server ends an attempt without finalizing, and the client
-                // must then discard the PSK it generated.
-                if (pairing && activate.pairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
-                    activePairingMethod = activate.pairingMethod
-                    runDynamicPairingActions(
-                        DynamicPairingEvent.PairingActivation(dynamicPairingIndex)
-                    )
-                    // The PSK flow was not selected by this activation. If a
-                    // server switches methods across activations, the PSK flow
-                    // must be told its attempt is over too - the same
-                    // "ends without finalizing" rule a non-pairing activation
-                    // applies - or a stale attempt could later persist a record
-                    // the server never stored.
-                    runPairingActions(PairingEvent.NonPairingActivation)
-                } else {
-                    activePairingMethod = if (pairing) activate.pairingMethod else null
-                    runPairingActions(
-                        if (pairing) {
+                // Every accepted activation reaches both flows. The one it
+                // admits an attempt for starts it; the other is told its
+                // attempt, if any, is over - an activation is how the server
+                // ends an attempt without finalizing, and a pairing activation
+                // supersedes whatever attempt was in flight. The old attempt
+                // is ended first so its timer and code are gone before the new
+                // one starts.
+                activePairingMethod = if (pairing) activate.pairingMethod else null
+                when (activePairingMethod) {
+                    PairMethod.PAIRING_PSK -> {
+                        runDynamicPairingActions(DynamicPairingEvent.NonPairingActivation)
+                        runPairingActions(
                             PairingEvent.PairingActivation(
-                                method = activate.pairingMethod,
+                                pairingIndex = pairingIndex,
                                 // From the handshake, never re-derived: this is the
                                 // only thing keeping a long-term secret off an
                                 // unauthenticated connection.
                                 matchedCategory = matchedPskCategory(),
                             )
-                        } else {
-                            PairingEvent.NonPairingActivation
-                        }
-                    )
-                    // A non-pairing OR a Pairing-PSK activation also ends any
-                    // dynamic attempt in flight - the same "ends without
-                    // finalizing" rule the PSK flow above just applied to
-                    // itself. Left live, a stale attempt keeps the code on
-                    // screen and can fire pair/abort(attempt_timeout) into the
-                    // middle of this new attempt.
-                    runDynamicPairingActions(DynamicPairingEvent.NonPairingActivation)
+                        )
+                    }
+
+                    PairMethod.DYNAMIC_PAIRING_CODE -> {
+                        runPairingActions(PairingEvent.NonPairingActivation)
+                        runDynamicPairingActions(DynamicPairingEvent.PairingActivation(pairingIndex))
+                    }
+
+                    else -> {
+                        runPairingActions(PairingEvent.NonPairingActivation)
+                        runDynamicPairingActions(DynamicPairingEvent.NonPairingActivation)
+                    }
                 }
             }
+        }
+    }
+
+    /**
+     * `messaging.md#server--client-serveractivate`, "When applying a
+     * `server/activate`, the client MUST": stop the output and clear the
+     * buffers of every removed stream role, and "immediately discard the
+     * current state and any pending scheduled update" of every removed role
+     * with a `server/state` object.
+     *
+     * [removed] is what dropped out of `active_roles`, which covers all three
+     * kinds of removal the spec lists: explicit, implicit (the connection is
+     * no longer playback-capable) and a replaced role version.
+     */
+    private fun discardRemovedRoles(removed: List<String>) {
+        Log.i(tag, "Roles removed by server/activate: $removed")
+        // The server owes a stream/end before removing a stream role, and ours
+        // leaves nothing playing, so these only act when that did not arrive.
+        if (SendSpinProtocol.Roles.PLAYER in removed && _streamActive) endPlayerStream()
+        if (SendSpinProtocol.Roles.ARTWORK in removed && artworkStreamActive) endArtworkStream()
+        if (SendSpinProtocol.Roles.METADATA in removed) {
+            synchronized(metadataLock) {
+                discardPendingMetadata()
+                onMetadataUpdate(TrackMetadata())
+            }
+        }
+        if (SendSpinProtocol.Roles.CONTROLLER in removed) {
+            currentControllerState = null
+            onControllerStateUpdate(ControllerState())
         }
     }
 
@@ -1085,19 +1172,12 @@ abstract class SendSpinProtocolHandler(
      */
     protected fun sendPairAbort(reason: String) {
         Log.w(tag, "Pairing aborted (sent): reason=$reason")
+        pairingAborted = true
         val closes = reason in PairAbortReason.CLOSES_CONNECTION
         getCoroutineScope().launch {
             sendProtocolMessageAwaiting(MessageBuilder.buildPairAbort(reason))
             if (closes) closeConnectionAfterFlush()
         }
-    }
-
-    /**
-     * Kept as an override point for the legacy call sites in 1.6's activation
-     * handling, which abort before any attempt exists.
-     */
-    protected open fun onPairAbort(reason: String) {
-        sendPairAbort(reason)
     }
 
     /**
@@ -1124,78 +1204,18 @@ abstract class SendSpinProtocolHandler(
         val reason = payload?.get("reason")?.jsonPrimitive?.contentOrNull ?: "unspecified"
         Log.w(tag, "Pairing aborted (received): reason=$reason")
         runPairingActions(PairingEvent.PairAbortReceived(reason))
-        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod == PairMethod.DYNAMIC_PAIRING_CODE) {
             runDynamicPairingActions(DynamicPairingEvent.PairAbortReceived(reason))
         }
     }
 
-    // ========== Management (item 3.1) ==========
-
-    /** Where the pairing configuration lives. Null on the legacy path. */
-    protected open fun pairingConfigStore(): PairingConfigStore? = null
-
     /**
-     * Answer one `management/` request.
-     *
-     * Handled to completion on the receive path, synchronously, and that is a
-     * requirement rather than a convenience: "At most one management request
-     * may be in flight per connection; in-order WebSocket delivery makes the
-     * reply unambiguous", and the reply carries no request identifier. The Nth
-     * result on the wire IS the answer to the Nth request. Moving the work to
-     * another dispatcher would let two replies race and be attributed to the
-     * wrong requests, with nothing in either frame to reveal the swap.
-     *
-     * If persistence ever has to leave this thread, it needs a single-consumer
-     * serialized queue, not a `launch`.
+     * The operator cancelled pairing from the UI: sends `pair/abort` reason
+     * `user_cancelled` for the attempt in flight. Leaves the connection open.
      */
-    private fun handleManagementRequest(type: String, payload: JsonObject?) {
-        val request = ManagementRequestParser.parse(type, payload) ?: return
-
-        val matched = matchedPsk()
-        val outcome = ManagementService(trustStore(), pairingConfigStore()).handle(
-            request,
-            ManagementSessionContext(
-                hasManagementActivity = Activity.MANAGEMENT in activities,
-                // No PIN method is implemented (audit D2), so none can be on.
-                pinMethodEnabled = false,
-                // Only a record identifies "our own record"; the Sentinel and
-                // the Pairing PSK are not records and cannot be removed.
-                matchedPskId = matched?.takeIf { it.category == PskCategory.LONG_TERM }?.pskId,
-            ),
-        )
-
-        Log.i(tag, "management: $type -> ${outcome.code.wire}")
-
-        // Sequenced in one coroutine, and that is the contract: the result must
-        // reach the wire before the goodbye, because the result is the only
-        // thing that tells the server the operation happened. A close on its
-        // own reads as a failure. sendProtocolMessage returns while the encrypt
-        // is still queued, so the awaiting form is what makes the order real.
-        getCoroutineScope().launch {
-            sendProtocolMessageAwaiting(
-                MessageBuilder.buildManagementResult(outcome.code, outcome.data)
-            )
-            outcome.closeAfterReply?.let { reason ->
-                sendProtocolMessageAwaiting(MessageBuilder.buildGoodbye(reason))
-                onManagementSessionRevoked()
-                closeConnectionAfterFlush()
-            }
-        }
-    }
-
-    /**
-     * The client removed the record that authenticated this session.
-     *
-     * "Server should not auto-reconnect with the same activity set" - and we
-     * should not either: the credential is gone, so every attempt would fail
-     * the handshake PSK lookup and loop.
-     */
-    protected open fun onManagementSessionRevoked() {}
-
-    /** The operator cancelled pairing from the UI. Leaves the connection open. */
     fun cancelPairing() {
         runPairingActions(PairingEvent.UserCancelled)
-        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod == PairMethod.DYNAMIC_PAIRING_CODE) {
             runDynamicPairingActions(DynamicPairingEvent.UserCancelled)
         }
     }
@@ -1205,7 +1225,7 @@ abstract class SendSpinProtocolHandler(
      * gesture-gated wait on an escalated attempt.
      */
     fun confirmDynamicPairingGesture() {
-        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
+        if (activePairingMethod == PairMethod.DYNAMIC_PAIRING_CODE) {
             runDynamicPairingActions(DynamicPairingEvent.WindowOpened)
         }
     }
@@ -1219,7 +1239,7 @@ abstract class SendSpinProtocolHandler(
 
     /**
      * The `server_id` this connection authenticated against, for the record a
-     * successful pairing persists. Null on the legacy path.
+     * successful pairing persists. Null before the handshake.
      */
     protected open fun currentServerId(): String? = null
 
@@ -1234,12 +1254,12 @@ abstract class SendSpinProtocolHandler(
     /**
      * The PSK that admitted this connection, or null before the handshake.
      *
-     * This is the single source of truth for the session's trust level, and
-     * `server/unpair` must read it rather than ask "do we hold a record for
+     * This is the single source of truth for whether the session is paired,
+     * and `server/unpair` must read it rather than ask "do we hold a record for
      * this server?". The two differ in a case that matters: during a pairing
      * handshake we may well hold a record for that same server from a previous
      * pairing, while the current session was admitted by the Pairing PSK and is
-     * `trust_level: none`. Deciding on the record would delete it.
+     * unpaired. Deciding on the record would delete it.
      *
      * A re-handshake replaces it at the key swap, so an unpair arriving just
      * after a promotion sees the post-swap value.
@@ -1257,7 +1277,7 @@ abstract class SendSpinProtocolHandler(
      */
     protected open fun closeConnectionAfterFlush() {}
 
-    /** One unpair per connection; a repeat is a no-op. */
+    /** One unpair per connection; a repeat is a no-op. Reset with the connection. */
     private var unpairHandled = false
 
     /**
@@ -1271,11 +1291,11 @@ abstract class SendSpinProtocolHandler(
     protected fun handleServerUnpair() {
         val matched = matchedPsk()
 
-        // "If the connection's `trust_level` is `'none'` (e.g., an in-flight
-        // pairing handshake), ignore the message and continue unchanged." Not
-        // an error, and specifically not a close: the connection carries on.
+        // "If the session is unpaired, ignore the message and continue
+        // unchanged." Not an error, and specifically not a close: the
+        // connection carries on.
         if (matched == null || matched.category != PskCategory.LONG_TERM) {
-            Log.i(tag, "server/unpair at trust_level none (psk=${matched?.category}) - ignoring")
+            Log.i(tag, "server/unpair on an unpaired session (psk=${matched?.category}) - ignoring")
             return
         }
 
@@ -1284,31 +1304,23 @@ abstract class SendSpinProtocolHandler(
             return
         }
 
-        if (matched.serverId == null) {
-            // "If the matched record is a shared-PSK record ... the client MUST
-            // NOT remove it." The same PSK may authenticate other servers, and
-            // none of them asked to be unpaired. Wholesale removal is
-            // management/remove-record's job.
-            Log.i(tag, "server/unpair matched shared-PSK record ${matched.pskId} - retaining it")
-        } else {
-            val store = trustStore()
-            if (store == null) {
-                Log.e(tag, "server/unpair with no trust store - cannot drop the record")
-                return
-            }
-            // Durable before we say a word. A crash between the two must not
-            // leave a record the server has already forgotten, and telling the
-            // server we unpaired while the record survives is worse still: the
-            // device keeps authenticating with a credential that is gone, and
-            // it looks like a working pairing until the next handshake fails.
-            try {
-                store.removeRecord(matched.pskId)
-            } catch (e: Exception) {
-                Log.e(tag, "server/unpair could not remove record ${matched.pskId}", e)
-                return
-            }
-            Log.i(tag, "server/unpair removed record ${matched.pskId} for ${matched.serverId}")
+        val store = trustStore()
+        if (store == null) {
+            Log.e(tag, "server/unpair with no trust store - cannot drop the record")
+            return
         }
+        // Durable before we say a word. A crash between the two must not
+        // leave a record the server has already forgotten, and telling the
+        // server we unpaired while the record survives is worse still: the
+        // device keeps authenticating with a credential that is gone, and
+        // it looks like a working pairing until the next handshake fails.
+        try {
+            store.removeRecord(matched.pskId)
+        } catch (e: Exception) {
+            Log.e(tag, "server/unpair could not remove record ${matched.pskId}", e)
+            return
+        }
+        Log.i(tag, "server/unpair removed record ${matched.pskId} for ${matched.serverId}")
 
         unpairHandled = true
         onUnpaired(matched.pskId, matched.serverId)
@@ -1324,23 +1336,22 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected fun handleServerPairFinalize() {
-        runPairingActions(PairingEvent.ServerPairFinalize)
-        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
-            runDynamicPairingActions(DynamicPairingEvent.ServerPairFinalize)
+        if (pairingAborted) {
+            Log.d(tag, "Discarding server/pair-finalize after pair/abort")
+            return
         }
-    }
-
-    /** Called by the connection when the socket goes away mid-attempt. */
-    fun onConnectionClosedForPairing() {
-        runPairingActions(PairingEvent.ConnectionClosed)
-        if (activePairingMethod == MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
-            runDynamicPairingActions(DynamicPairingEvent.ConnectionClosed)
+        runPairingActions(PairingEvent.ServerPairFinalize)
+        if (activePairingMethod == PairMethod.DYNAMIC_PAIRING_CODE) {
+            runDynamicPairingActions(DynamicPairingEvent.ServerPairFinalize)
         }
     }
 
     private fun runPairingActions(event: PairingEvent) {
         for (action in pairingFlow.onEvent(event)) {
             when (action) {
+                is PairingAction.SendPairInit ->
+                    sendProtocolMessage(MessageBuilder.buildClientPairInit(action.pairingIndex))
+
                 is PairingAction.SendPairFinalize -> {
                     // Metadata only. The payload carries the long-term PSK in
                     // the clear (inside the encrypted channel), so logging the
@@ -1382,6 +1393,7 @@ abstract class SendSpinProtocolHandler(
             Log.e(tag, "Paired, but there is nowhere to store the record")
             return
         }
+        // Replaces any record already held for this server.
         when (val result = store.addRecord(psk, serverId)) {
             is TrustStore.AddRecordResult.Ok -> {
                 Log.i(tag, "Paired with $serverId (psk_id=${result.record.pskId})")
@@ -1422,11 +1434,20 @@ abstract class SendSpinProtocolHandler(
     private var dynamicAttemptTimeoutJob: Job? = null
 
     /**
-     * Accepted pairing activations (any method) since the last Noise
-     * handshake. Reset on every fresh handshake in [installEncryptedTransport]
-     * and on every re-handshake in [resetForRehandshake].
+     * Pairing activations received since the last Noise handshake: any
+     * method, admissible or not. Reset on every fresh handshake in
+     * [installEncryptedTransport] and on every re-handshake in
+     * [resetForRehandshake].
      */
-    private var dynamicPairingIndex = 0
+    private var pairingIndex = 0
+
+    /**
+     * True from the moment this client sends `pair/abort` until the next
+     * `server/activate`. Pairing messages the server sent before it saw the
+     * abort are discarded silently while it is set, not treated as a sequence
+     * violation.
+     */
+    private var pairingAborted = false
 
     /** Backing store for the method's brute-force counter. Null on paths that never offer it. */
     protected open fun pairingCounterStore(): PairingCounterStore? = null
@@ -1453,11 +1474,25 @@ abstract class SendSpinProtocolHandler(
     /** Surfaced for the pairing UI: the attempt is gesture-gated; show the "Allow pairing" prompt. */
     protected open fun onDynamicPairingGestureRequested() {}
 
-    private fun handleServerPairInit(payload: JsonObject?) {
-        if (activePairingMethod != MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
-            onProtocolFailure("server/pair-init received outside a dynamic pairing attempt")
-            return
+    /**
+     * Whether a message exclusive to the dynamic method may be acted on:
+     * discarded silently after our own `pair/abort`, a protocol error outside
+     * a dynamic attempt.
+     */
+    private fun dynamicPairingMessageExpected(type: String): Boolean {
+        if (pairingAborted) {
+            Log.d(tag, "Discarding $type after pair/abort")
+            return false
         }
+        if (activePairingMethod != PairMethod.DYNAMIC_PAIRING_CODE) {
+            onProtocolFailure("$type received outside a dynamic pairing attempt")
+            return false
+        }
+        return true
+    }
+
+    private fun handleServerPairInit(payload: JsonObject?) {
+        if (!dynamicPairingMessageExpected("server/pair-init")) return
         val nonceA = MessageParser.parseServerPairInit(payload)
         if (nonceA == null) {
             onProtocolFailure("malformed server/pair-init")
@@ -1467,10 +1502,7 @@ abstract class SendSpinProtocolHandler(
     }
 
     private fun handleServerPairAuth(payload: JsonObject?) {
-        if (activePairingMethod != MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
-            onProtocolFailure("server/pair-auth received outside a dynamic pairing attempt")
-            return
-        }
+        if (!dynamicPairingMessageExpected("server/pair-auth")) return
         val ya = MessageParser.parseServerPairAuth(payload)
         if (ya == null) {
             onProtocolFailure("malformed server/pair-auth")
@@ -1480,10 +1512,7 @@ abstract class SendSpinProtocolHandler(
     }
 
     private fun handleServerPairConfirm(payload: JsonObject?) {
-        if (activePairingMethod != MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.wireName) {
-            onProtocolFailure("server/pair-confirm received outside a dynamic pairing attempt")
-            return
-        }
+        if (!dynamicPairingMessageExpected("server/pair-confirm")) return
         val ta = MessageParser.parseServerPairConfirm(payload)
         if (ta == null) {
             onProtocolFailure("malformed server/pair-confirm")
@@ -1558,9 +1587,9 @@ abstract class SendSpinProtocolHandler(
                 DynamicPairingAction.StopEmittingCode -> {
                     // No separate "clear the timer" action exists on this flow
                     // (unlike PairingAction.ClearAttemptTimeout): StopEmittingCode
-                    // is emitted on every exit path - success, abort, timeout,
-                    // and a superseding activation - so it doubles as that
-                    // signal here. Without this, a completed pairing's timer
+                    // is emitted on every exit path - success, abort, mismatch,
+                    // timeout, and a superseding activation - so it doubles as
+                    // that signal here. Without this, a completed pairing's timer
                     // would still fire minutes later and abort a connection
                     // that already succeeded.
                     dynamicAttemptTimeoutJob?.cancel()
@@ -1590,62 +1619,86 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * `server/state` is a delta, so every field is merged into the cached role
-     * state rather than replacing it.
+     * `server/state`: "Every message MUST carry the full state of each role
+     * object it includes. Omitting a role object leaves that role's state
+     * unchanged and any pending scheduled update in place."
      *
-     * Before this merge existed, a delta carrying only `progress` arrived as a
-     * metadata object with empty title, artist and album, and blanked the Now
-     * Playing screen on every progress tick.
+     * So an included role object replaces that role's state outright. A field
+     * it does not carry is gone: a `metadata` object with only a `timestamp`
+     * is an empty track, and one without `progress` has no position.
      */
     protected fun handleServerState(payload: JsonObject?) {
-        val (metadataUpdate, state, controllerUpdate) = MessageParser.parseServerState(payload)
+        val (metadata, state, controller) = MessageParser.parseServerState(payload)
 
-        when (metadataUpdate) {
-            RoleUpdate.Absent -> Unit
-
-            RoleUpdate.Cleared -> {
-                // The role was dropped from active_roles; the UI must blank
-                // rather than keep showing a track the server no longer has.
-                lastMetadata = null
-                onMetadataCleared()
-            }
-
-            is RoleUpdate.Delta -> {
-                val merged = metadataUpdate.applyTo(lastMetadata)
-                lastMetadata = merged
-                // Fired even when the merged value is unchanged: progress
-                // extrapolation needs a fresh receive-time anchor on every
-                // message, not only on a change.
-                if (merged != null) onMetadataUpdate(merged)
-            }
-        }
+        if (metadata != null) scheduleMetadata(metadata)
 
         if (state != null && state != lastPlaybackState) {
             lastPlaybackState = state
             onPlaybackStateChanged(state)
         }
 
-        when (controllerUpdate) {
-            RoleUpdate.Absent -> Unit
+        if (controller != null && controller != currentControllerState) {
+            currentControllerState = controller
+            onControllerStateUpdate(controller)
+        }
+    }
 
-            RoleUpdate.Cleared -> {
-                currentControllerState = null
-                onControllerStateUpdate(ControllerState())
-            }
-
-            is RoleUpdate.Delta -> {
-                val merged = controllerUpdate.applyTo(currentControllerState)
-                if (merged != null && merged != currentControllerState) {
-                    currentControllerState = merged
-                    onControllerStateUpdate(merged)
+    /**
+     * roles/metadata/v1.md, "Scheduled metadata updates": "Clients keep a
+     * current state plus at most one pending update." The current state is
+     * whatever [onMetadataUpdate] last delivered.
+     *
+     * "A message whose `timestamp`, translated to the local clock via the
+     * time filter (current best estimate, no waiting for convergence), is
+     * still in the future becomes the pending update, replacing any held one,
+     * and is applied when that moment is reached. A message whose translated
+     * timestamp is in the past or present is applied immediately and discards
+     * any held pending update." Before the filter has any estimate there is
+     * nothing to translate with, so the update is applied at once, which the
+     * spec allows ("Clients MAY show the pending update early").
+     */
+    private fun scheduleMetadata(metadata: TrackMetadata) = synchronized(metadataLock) {
+        discardPendingMetadata()
+        val filter = getTimeFilter()
+        val timestamp = metadata.timestamp
+        val delayMicros = if (timestamp == null || !filter.isReady) {
+            0L
+        } else {
+            filter.serverToClient(timestamp) - System.nanoTime() / 1000
+        }
+        if (delayMicros <= 0) {
+            // Delivered even when nothing changed: progress extrapolation
+            // needs a fresh anchor on every message.
+            onMetadataUpdate(metadata)
+            return@synchronized
+        }
+        Log.d(tag, "Metadata pending for ${delayMicros / 1000}ms")
+        pendingMetadata = getCoroutineScope().launch {
+            delay(delayMicros / 1000)
+            // A cancel takes the same lock, so an update discarded while this
+            // was waiting for it is no longer active here.
+            synchronized(metadataLock) {
+                if (isActive) {
+                    pendingMetadata = null
+                    onMetadataUpdate(metadata)
                 }
             }
         }
     }
 
-    /** The server dropped the metadata role. Default: treat as an empty track. */
-    protected open fun onMetadataCleared() {
-        onMetadataUpdate(TrackMetadata())
+    private fun discardPendingMetadata() {
+        pendingMetadata?.cancel()
+        pendingMetadata = null
+    }
+
+    /**
+     * Forget the `server/state` roles when a connection ends, so a metadata
+     * update still pending cannot come due afterwards. Does not touch what is
+     * on display.
+     */
+    private fun resetServerState() {
+        synchronized(metadataLock) { discardPendingMetadata() }
+        currentControllerState = null
     }
 
     protected fun handleServerCommand(payload: JsonObject?) {
@@ -1663,13 +1716,15 @@ abstract class SendSpinProtocolHandler(
                 onMuteCommand(result.muted)
                 sendPlayerStateUpdate()
             }
-            is ServerCommandResult.SetStaticDelay -> {
-                Log.i(tag, "Server command: set static delay to ${result.delayMs}ms")
-                // Same application path as the client/sync_offset extension:
-                // a server-pushed correction on top of the auto-measured
-                // hardware latency.
-                getTimeFilter().setServerSyncOffsetMs(result.delayMs.toDouble())
-                onSyncOffsetApplied(result.delayMs.toDouble(), "server_command")
+            is ServerCommandResult.SetOutputDelay -> {
+                Log.i(tag, "Server command: set output delay to ${result.delayMs}ms")
+                // This is NOT a sync-offset correction, which is how it used to
+                // be applied. roles/player/v1.md defines it as delay BEYOND the
+                // audio port - an external amplifier or powered speaker - which
+                // sits on top of the hardware latency the client compensates
+                // itself. It must also survive a reboot.
+                getTimeFilter().setOutputDelayMs(result.delayMs.toDouble())
+                UserSettings.setOutputDelayMs(result.delayMs)
                 sendPlayerStateUpdate()
             }
             is ServerCommandResult.Unknown -> {
@@ -1689,6 +1744,10 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected fun handleStreamStart(payload: JsonObject?) {
+        // A stream/start carries an object per role it starts or reconfigures,
+        // so one for artwork alone has no `player` object.
+        (payload?.get("artwork") as? JsonObject)?.let { handleArtworkStreamStart(it) }
+
         val config = MessageParser.parseStreamStart(payload)
         if (config == null) return
 
@@ -1706,6 +1765,12 @@ abstract class SendSpinProtocolHandler(
         _streamActive = true
         _currentStreamConfig = config
         onStreamStart(config)
+
+        if (!outputStarted) {
+            // The pipeline is running from here on: later starts need less lead.
+            outputStarted = true
+            sendPlayerStateUpdate()
+        }
     }
 
     /**
@@ -1747,15 +1812,36 @@ abstract class SendSpinProtocolHandler(
         // Comparing against "player@v1" here matched nothing, so every
         // stream/end carrying a roles array was silently dropped and the
         // stream never ended.
+        if (artworkStreamActive && rolesCover(roles, SendSpinProtocol.StreamRoles.ARTWORK)) {
+            endArtworkStream()
+        }
+
         if (!rolesCover(roles, SendSpinProtocol.StreamRoles.PLAYER)) {
             Log.d(tag, "Stream end for non-player roles: $roles - ignoring")
             return
         }
 
         Log.i(tag, "Stream end - server terminated playback (roles=${roles ?: "all"})")
+        endPlayerStream()
+    }
+
+    /** Stop the player's output and clear its buffers; the stream is over. */
+    private fun endPlayerStream() {
         _streamActive = false
         _currentStreamConfig = null
         onStreamEnd()
+    }
+
+    /**
+     * "On stream/end for the artwork role, clients MUST clear the current
+     * image and discard any pending image."
+     */
+    private fun endArtworkStream() {
+        Log.i(tag, "Artwork stream ended - clearing artwork")
+        synchronized(artworkLock) {
+            resetArtworkStream()
+            onArtwork(0, ByteArray(0))
+        }
     }
 
     protected fun handleClientSyncOffset(payload: JsonObject?) {
@@ -1793,19 +1879,24 @@ abstract class SendSpinProtocolHandler(
     protected fun handleBinaryMessage(bytes: ByteArray) {
         val codec = wireCodec
         if (codec == null) {
-            // Legacy path: the frame is a bare SendSpin binary message.
-            BinaryMessageParser.parse(bytes)?.let { dispatchBinaryMessage(it) }
+            // A binary frame before the Noise handshake completed. There is
+            // no channel to decrypt it with, and no cleartext binary dialect.
+            Log.w(tag, "Dropping binary frame: no encrypted channel")
             return
         }
         when (val decoded = codec.decode(bytes)) {
             is NoiseWireCodec.Decoded.Json -> handleTextMessage(decoded.text)
             is NoiseWireCodec.Decoded.Typed ->
-                BinaryMessageParser.parse(decoded.type, decoded.body)
-                    ?.let { dispatchBinaryMessage(it) }
+                if (decoded.type - SendSpinProtocol.BinaryType.ARTWORK_BASE in 0..3) {
+                    handleArtworkMessage(decoded.type, decoded.body)
+                } else {
+                    BinaryMessageParser.parse(decoded.type, decoded.body)
+                        ?.let { dispatchBinaryMessage(it) }
+                }
             is NoiseWireCodec.Decoded.Buffered -> {
                 // A fragment landed and the message is still incomplete. The
                 // codec holds the partial buffer; nothing to dispatch until the
-                // fragment-end frame arrives.
+                // last fragment arrives.
             }
             is NoiseWireCodec.Decoded.ProtocolError ->
                 onProtocolFailure(decoded.reason)
@@ -1824,17 +1915,91 @@ abstract class SendSpinProtocolHandler(
                     Log.v(tag, "Dropping audio chunk: no active stream")
                     return
                 }
+                measureChunkDelay(message)
                 onAudioChunk(message.timestampMicros, message.payload)
             }
-            is BinaryMessageParser.BinaryMessage.Artwork -> {
-                Log.v(tag, "Received artwork channel ${message.channel}: ${message.payload.size} bytes")
-                onArtwork(message.channel, message.payload)
+        }
+    }
+
+    // ========== Artwork (roles/artwork/v1.md) ==========
+
+    private fun handleArtworkStreamStart(artwork: JsonObject) {
+        val config = (artwork["channels"] as? JsonArray)?.getOrNull(0)
+        synchronized(artworkLock) {
+            artworkStreamActive = true
+            // "A stream/start that changes a channel's configuration likewise
+            // discards that channel's pending image."
+            if (config != artworkChannelConfig) discardPendingArtwork()
+            artworkChannelConfig = config
+        }
+    }
+
+    /**
+     * Forget the artwork stream, when it or its connection ends, so an image
+     * still pending cannot come due afterwards. Does not touch the image on
+     * display.
+     */
+    private fun resetArtworkStream() = synchronized(artworkLock) {
+        artworkStreamActive = false
+        artworkChannelConfig = null
+        artworkReceiver.reset()
+        discardPendingArtwork()
+    }
+
+    private fun discardPendingArtwork() {
+        pendingArtwork?.cancel()
+        pendingArtwork = null
+    }
+
+    private fun handleArtworkMessage(type: Int, body: ByteArray) {
+        val result = synchronized(artworkLock) {
+            if (artworkStreamActive) {
+                artworkReceiver.accept(type, body)
+            } else {
+                // "Servers MUST NOT send artwork messages outside an active
+                // artwork stream." A malformed message is a protocol error
+                // regardless; the sequence rules only apply within a stream,
+                // so a well-formed stray is dropped.
+                artworkReceiver.malformed(body)?.let { ArtworkReceiver.Result.ProtocolError(it) }
+                    ?: ArtworkReceiver.Result.None
             }
-            is BinaryMessageParser.BinaryMessage.Visualizer -> {
-                // Visualization data - currently not used, no logging needed
-            }
-            is BinaryMessageParser.BinaryMessage.Unknown -> {
-                Log.v(tag, "Unknown binary message type: ${message.type}")
+        }
+        when (result) {
+            is ArtworkReceiver.Result.None -> {}
+            is ArtworkReceiver.Result.ProtocolError -> onProtocolFailure(result.reason)
+            is ArtworkReceiver.Result.Discard ->
+                if (result.channel == 0) synchronized(artworkLock) { discardPendingArtwork() }
+            is ArtworkReceiver.Result.Image ->
+                if (result.channel == 0) scheduleArtwork(result.timestampMicros, result.data)
+        }
+    }
+
+    /**
+     * Make [image] the pending image, and the current one once its timestamp
+     * is reached: "translated to the local clock via the time filter (current
+     * best estimate, no waiting for convergence) ... artwork is never dropped
+     * for lateness". Before the filter has any estimate there is nothing to
+     * translate with, so the image is shown at once, which the spec allows
+     * ("or show it early").
+     */
+    private fun scheduleArtwork(timestampMicros: Long, image: ByteArray) = synchronized(artworkLock) {
+        discardPendingArtwork()
+        val filter = getTimeFilter()
+        val delayMicros = filter.serverToClient(timestampMicros) - System.nanoTime() / 1000
+        if (!filter.isReady || delayMicros <= 0) {
+            onArtwork(0, image)
+            return@synchronized
+        }
+        Log.d(tag, "Artwork (${image.size} bytes) pending for ${delayMicros / 1000}ms")
+        pendingArtwork = getCoroutineScope().launch {
+            delay(delayMicros / 1000)
+            // A cancel takes the same lock, so an image discarded while this
+            // was waiting for it is no longer active here.
+            synchronized(artworkLock) {
+                if (isActive) {
+                    pendingArtwork = null
+                    onArtwork(0, image)
+                }
             }
         }
     }

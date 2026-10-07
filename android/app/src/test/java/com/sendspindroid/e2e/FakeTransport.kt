@@ -1,5 +1,7 @@
 package com.sendspindroid.e2e
 
+import com.sendspindroid.sendspin.protocol.asJsonFrame
+import com.sendspindroid.sendspin.protocol.jsonFrameText
 import com.sendspindroid.sendspin.transport.SendSpinTransport
 import com.sendspindroid.sendspin.transport.TransportState
 import java.util.concurrent.CopyOnWriteArrayList
@@ -10,6 +12,12 @@ import java.util.concurrent.CopyOnWriteArrayList
  * Records all sent messages and provides methods to simulate incoming
  * messages and connection events. Allows tests to drive the full
  * connection lifecycle without real network I/O.
+ *
+ * The client under test runs its encrypted channel over
+ * [com.sendspindroid.sendspin.protocol.PlaintextCrypto], so every application
+ * message is a binary frame `[type][body]` here, exactly as it is on the wire
+ * after decryption. JSON messages (type 0) are unwrapped into
+ * [sentTextMessages] alongside the cleartext handshake frames.
  */
 class FakeTransport : SendSpinTransport {
 
@@ -19,10 +27,10 @@ class FakeTransport : SendSpinTransport {
 
     private var listener: SendSpinTransport.Listener? = null
 
-    /** All text messages sent by the client through this transport. */
+    /** Every JSON message the client sent: cleartext handshake frames and type-0 binary frames. */
     val sentTextMessages = CopyOnWriteArrayList<String>()
 
-    /** All binary messages sent by the client through this transport. */
+    /** Binary frames the client sent that are not JSON messages. */
     val sentBinaryMessages = CopyOnWriteArrayList<ByteArray>()
 
     /** Whether close() was called. */
@@ -53,7 +61,8 @@ class FakeTransport : SendSpinTransport {
 
     override fun send(bytes: ByteArray): Boolean {
         if (_state != TransportState.Connected) return false
-        sentBinaryMessages.add(bytes)
+        val json = bytes.jsonFrameText()
+        if (json != null) sentTextMessages.add(json) else sentBinaryMessages.add(bytes)
         return true
     }
 
@@ -61,18 +70,24 @@ class FakeTransport : SendSpinTransport {
         closed = true
         closeCode = code
         closeReason = reason
+        // As the real transport: a local close of a live connection reports
+        // onClosed, once.
+        val wasLive = _state == TransportState.Connected || _state == TransportState.Connecting
         _state = TransportState.Closed
+        if (wasLive) listener?.onClosed(code, reason)
+    }
+
+    /** Whether the close was asked to let queued frames out first. */
+    var flushedBeforeClose = false
+        private set
+
+    override fun closeAfterFlush(code: Int, reason: String) {
+        flushedBeforeClose = true
+        close(code, reason)
     }
 
     override fun destroy() {
         destroyed = true
-        // Mirror BaseWebSocketTransport.destroy(), which calls close(1000,
-        // "Transport destroyed") UNCONDITIONALLY (last-writer-wins) before
-        // tearing down the HttpClient -- so an earlier close(code, ...) must not
-        // suppress these values on the fake either.
-        closed = true
-        closeCode = 1000
-        closeReason = "Transport destroyed"
         _state = TransportState.Closed
     }
 
@@ -83,18 +98,35 @@ class FakeTransport : SendSpinTransport {
     // ========== Simulation Methods ==========
 
     /**
+     * Runs once the client has started its handshake on this transport. No
+     * fake server speaks Noise, so this is where a test installs the channel
+     * the handshake would have produced.
+     */
+    var afterConnected: () -> Unit = {}
+
+    /**
      * Simulate the transport becoming connected (onConnected callback).
      */
     fun simulateConnected() {
         _state = TransportState.Connected
         listener?.onConnected()
+        afterConnected()
     }
 
     /**
-     * Simulate receiving a text message from the server.
+     * Simulate receiving a JSON message from the server, in the type-0 binary
+     * frame every application message travels in.
      */
     fun simulateTextMessage(text: String) {
-        listener?.onMessage(text)
+        listener?.onMessage(text.asJsonFrame())
+    }
+
+    /**
+     * Simulate a text frame arriving off the socket, the way the real
+     * transport delivers it: with its raw bytes.
+     */
+    fun simulateRawTextFrame(text: String) {
+        listener?.onMessage(text, text.toByteArray(Charsets.UTF_8))
     }
 
     /**
@@ -134,9 +166,18 @@ class FakeTransport : SendSpinTransport {
 
     /**
      * Check if any sent message contains the given substring.
+     *
+     * The client encrypts and sends on its own timer thread, so a message
+     * triggered by the line before this call may not have landed yet; this
+     * waits briefly for it.
      */
     fun hasSentMessageContaining(substring: String): Boolean {
-        return sentTextMessages.any { it.contains(substring) }
+        val deadline = System.nanoTime() + SEND_WAIT_NANOS
+        while (true) {
+            if (sentTextMessages.any { it.contains(substring) }) return true
+            if (System.nanoTime() >= deadline) return false
+            Thread.sleep(5)
+        }
     }
 
     /**
@@ -145,5 +186,9 @@ class FakeTransport : SendSpinTransport {
     fun clearRecordedMessages() {
         sentTextMessages.clear()
         sentBinaryMessages.clear()
+    }
+
+    private companion object {
+        const val SEND_WAIT_NANOS = 1_000_000_000L
     }
 }

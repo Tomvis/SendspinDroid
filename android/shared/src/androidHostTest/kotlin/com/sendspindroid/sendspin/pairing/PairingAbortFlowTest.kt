@@ -20,7 +20,7 @@ class PairingAbortFlowTest {
     private fun startedAttempt(): PairingPskFlow {
         val flow = PairingPskFlow()
         val actions = flow.onEvent(
-            PairingEvent.PairingActivation(PairMethod.PAIRING_PSK, PskCategory.PAIRING)
+            PairingEvent.PairingActivation(pairingIndex = 1, PskCategory.PAIRING)
         )
         assertTrue(actions.any { it is PairingAction.SendPairFinalize })
         return flow
@@ -43,7 +43,7 @@ class PairingAbortFlowTest {
     @Test
     fun aReceivedAbortPersistsNothingAfterwards() {
         val flow = startedAttempt()
-        flow.onEvent(PairingEvent.PairAbortReceived(PairAbortReason.PIN_MISMATCH))
+        flow.onEvent(PairingEvent.PairAbortReceived(PairAbortReason.PAIRING_CODE_MISMATCH))
 
         // The server changing its mind and acknowledging anyway must not
         // resurrect a record for a secret we have already discarded.
@@ -96,7 +96,7 @@ class PairingAbortFlowTest {
         flow.onEvent(PairingEvent.PairAbortReceived(PairAbortReason.USER_CANCELLED))
 
         val actions = flow.onEvent(
-            PairingEvent.PairingActivation(PairMethod.PAIRING_PSK, PskCategory.PAIRING)
+            PairingEvent.PairingActivation(pairingIndex = 1, PskCategory.PAIRING)
         )
 
         assertTrue(

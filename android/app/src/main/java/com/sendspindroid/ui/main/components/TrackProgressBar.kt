@@ -58,8 +58,9 @@ fun TrackProgressBar(
     var anchorTime by remember { mutableLongStateOf(positionUpdatedAt) }
     var displayPositionMs by remember { mutableLongStateOf(positionMs) }
 
-    // When the server sends a new position, reset the anchor
-    LaunchedEffect(positionMs) {
+    // When the server sends a new position, reset the anchor. Keyed on the
+    // timestamp too: two tracks in a row can both report the same position.
+    LaunchedEffect(positionMs, positionUpdatedAt) {
         anchorPositionMs = positionMs
         anchorTime = positionUpdatedAt
         displayPositionMs = positionMs
@@ -111,7 +112,7 @@ fun TvTrackProgressBar(
     var anchorTime by remember { mutableLongStateOf(positionUpdatedAt) }
     var displayPositionMs by remember { mutableLongStateOf(positionMs) }
 
-    LaunchedEffect(positionMs) {
+    LaunchedEffect(positionMs, positionUpdatedAt) {
         anchorPositionMs = positionMs
         anchorTime = positionUpdatedAt
         displayPositionMs = positionMs

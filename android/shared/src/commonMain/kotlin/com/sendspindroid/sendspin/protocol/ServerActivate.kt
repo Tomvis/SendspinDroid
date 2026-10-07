@@ -1,6 +1,8 @@
 package com.sendspindroid.sendspin.protocol
 
 import com.sendspindroid.sendspin.crypto.PskCategory
+import com.sendspindroid.sendspin.pairing.PairMethod
+import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
@@ -10,8 +12,7 @@ import kotlinx.serialization.json.jsonPrimitive
 /** The purposes a server may declare on a connection. */
 enum class Activity(val wireName: String) {
     PLAYBACK("playback"),
-    PAIRING("pairing"),
-    MANAGEMENT("management");
+    PAIRING("pairing");
 
     companion object {
         fun fromWire(value: String): Activity? = entries.firstOrNull { it.wireName == value }
@@ -29,6 +30,8 @@ data class ServerActivate(
     val activities: Set<Activity>,
     val activeRoles: List<String>?,
     val pairingMethod: String?,
+    /** `pairing.format`: the dynamic pairing code's emission format. */
+    val pairingFormat: String?,
     /** Activities the client did not recognise; ignored, but worth logging. */
     val unknownActivities: List<String>,
 )
@@ -58,23 +61,18 @@ enum class AdmissionState {
          * Derive the state from an accepted activation.
          *
          * [activeRoles] is checked FIRST, and it is not redundant with
-         * [activities]. `activitiesAllowed` admits the empty activity set for
-         * a long-term PSK (`activities.none { PAIRING }` is true of the empty
-         * set), and `playbackCapable` then admits roles alongside it - so a
-         * server may legitimately send empty `activities` WITH live roles. A
-         * derivation reading only `activities` reports AWAITING_APPROVAL for
-         * that session and hides a working player behind a notice telling the
-         * user to go approve something that is already approved.
+         * [activities]. A playback-capable connection may carry roles "even
+         * when 'playback' is not currently in `activities`" - so a server may
+         * legitimately send empty `activities` WITH live roles, and pairing
+         * "can run alongside playback" without touching them. A derivation
+         * reading only `activities` reports AWAITING_APPROVAL or PAIRING for
+         * such a session and hides a working player behind a notice.
          *
          * Roles are the direct evidence: if any are live the player can do its
          * job, whatever the activity set says, and there is nothing to explain.
-         * Both blocked states have empty roles by construction - pairing
-         * quiesces them, and an unapproved client never receives any.
          *
-         * PAIRING then takes precedence over the empty check so the function
-         * stays total: a conforming server never mixes pairing with another
-         * activity, and if one did, pairing is the state with an operator
-         * action attached.
+         * PAIRING then takes precedence over the empty check: with no roles,
+         * pairing is the state with an operator action attached.
          */
         fun from(activities: Set<Activity>, activeRoles: List<String>): AdmissionState = when {
             activeRoles.isNotEmpty() -> READY
@@ -103,24 +101,21 @@ sealed interface ActivationOutcome {
  * The admissibility table (`messaging.md#server--client-serveractivate`) binds
  * what a server may declare to which PSK admitted the connection:
  *
- * | PSK matched  | Allowed activity sets                                    |
- * |--------------|----------------------------------------------------------|
- * | Sendspin PSK | `['pairing']` or any subset of `{playback, management}`   |
- * | Pairing PSK  | `['pairing']`                                            |
- * | Sentinel PSK | `[]`, `['pairing']`, `['playback']`*                      |
+ * | PSK matched   | Allowed activity sets                                          |
+ * |---------------|----------------------------------------------------------------|
+ * | long-term PSK | `[]` or `['playback']`                                         |
+ * | pairing PSK   | `[]`, `['pairing']`, `['playback']`*, `['playback','pairing']`* |
+ * | Sentinel PSK  | `[]`, `['pairing']`, `['playback']`*, `['playback','pairing']`* |
  *
- * \* `['playback']` on the Sentinel only when the client has unpaired access
- * enabled - which is why advertising `unpaired_access` in `client/hello` is what
- * makes unpaired playback possible at all.
+ * \* Only when the client has unpaired access enabled - which is why
+ * advertising `unpaired_access` in `client/hello` is what makes unpaired
+ * playback possible at all.
  */
 object ServerActivateRules {
 
     const val GOODBYE_UNAUTHORIZED = "unauthorized"
     const val GOODBYE_PAIRING_REQUIRED = "pairing_required"
     const val ABORT_METHOD_NOT_SUPPORTED = "method_not_supported"
-
-    /** A source captures sensitive audio, so it may never run untrusted. */
-    const val ROLE_SOURCE_V1 = "source@v1"
 
     fun parse(payload: JsonObject?): ServerActivate? {
         if (payload == null) return null
@@ -142,6 +137,7 @@ object ServerActivateRules {
             activeRoles = roles,
             // The client ignores `pairing` unless 'pairing' is in activities.
             pairingMethod = pairing?.get("method")?.jsonPrimitive?.contentOrNull,
+            pairingFormat = pairing?.get("format")?.jsonPrimitive?.contentOrNull,
             unknownActivities = unknown,
         )
     }
@@ -152,20 +148,13 @@ object ServerActivateRules {
         activities: Set<Activity>,
         unpairedAccessEnabled: Boolean,
     ): Boolean = when (category) {
-        // 'pairing' alone, or any subset of {playback, management} - so a set
-        // mixing pairing with either of the others is never allowed.
-        PskCategory.LONG_TERM ->
-            activities == setOf(Activity.PAIRING) ||
-                activities.none { it == Activity.PAIRING }
+        // A paired session never pairs: the server re-handshakes to the
+        // Sentinel or the pairing PSK first.
+        PskCategory.LONG_TERM -> Activity.PAIRING !in activities
 
-        PskCategory.PAIRING -> activities == setOf(Activity.PAIRING)
-
-        PskCategory.SENTINEL -> when {
-            activities.isEmpty() -> true
-            activities == setOf(Activity.PAIRING) -> true
-            activities == setOf(Activity.PLAYBACK) -> unpairedAccessEnabled
-            else -> false
-        }
+        // Unpaired sessions may always idle or pair; playback is the footnote.
+        PskCategory.PAIRING, PskCategory.SENTINEL ->
+            Activity.PLAYBACK !in activities || unpairedAccessEnabled
     }
 
     /**
@@ -186,6 +175,10 @@ object ServerActivateRules {
     /**
      * Decide what to do with an activation.
      *
+     * "When one is not admissible, the client rejects it, selecting the
+     * response by the first rule that applies", and the three rules below are
+     * the spec's three, in its order.
+     *
      * @param previousRoles roles persisted from an earlier activation, used when
      *   [activate] omits the field.
      * @param offeredPairMethods the LIVE pairing configuration, which may have
@@ -199,71 +192,64 @@ object ServerActivateRules {
         isFirstActivation: Boolean,
         offeredPairMethods: Set<String>,
     ): ActivationOutcome {
-        // "A client treats a first server/activate that omits it as carrying an
-        // empty active_roles"; later omissions persist the previous value.
-        val requestedRoles = activate.activeRoles
-            ?: if (isFirstActivation) emptyList() else previousRoles
+        val activities = activate.activities
 
-        val allowed = activitiesAllowed(category, activate.activities, unpairedAccessEnabled)
-        val capable = playbackCapable(category, activate.activities, unpairedAccessEnabled)
-
-        // Rule 1: would enabling unpaired access have made this admissible? If
-        // so the server is asking for something we could grant but have turned
-        // off, and the honest answer is "pair with me first" rather than a flat
-        // unauthorized. Only reachable on the Sentinel.
-        if (category == PskCategory.SENTINEL && !unpairedAccessEnabled) {
-            val allowedIfEnabled =
-                activitiesAllowed(category, activate.activities, unpairedAccessEnabled = true)
-            val capableIfEnabled =
-                playbackCapable(category, activate.activities, unpairedAccessEnabled = true)
-            val admissibleIfEnabled = allowedIfEnabled &&
-                (requestedRoles.isEmpty() || capableIfEnabled) &&
-                !forbidsRoleAtTrustLevel(category, requestedRoles)
-            if (!allowed || (requestedRoles.isNotEmpty() && !capable)) {
-                if (admissibleIfEnabled) {
-                    return ActivationOutcome.Close(GOODBYE_PAIRING_REQUIRED)
-                }
+        // The roles this activation leaves live, under a given unpaired-access
+        // setting. "A client treats a first server/activate that omits it as
+        // carrying an empty active_roles"; later omissions persist the previous
+        // value - except that persisted roles on a connection that is no longer
+        // playback-capable "are treated as empty rather than the message
+        // rejected".
+        fun rolesUnder(unpairedAccess: Boolean): List<String> = activate.activeRoles
+            ?: if (!isFirstActivation && playbackCapable(category, activities, unpairedAccess)) {
+                previousRoles
+            } else {
+                emptyList()
             }
+
+        fun activitiesAndRolesOk(unpairedAccess: Boolean): Boolean =
+            activitiesAllowed(category, activities, unpairedAccess) &&
+                (rolesUnder(unpairedAccess).isEmpty() ||
+                    playbackCapable(category, activities, unpairedAccess))
+
+        // "pairing.method MUST be 'pairing_psk' if and only if the matched PSK
+        // is the pairing PSK, and MUST be a method present in the client's
+        // supported_pair_methods." `pairing.format` is "required when method
+        // is 'dynamic_pairing_code'" and must be a format the client offers.
+        val pairingOk = Activity.PAIRING !in activities || activate.pairingMethod.let { method ->
+            method != null &&
+                (method == PairMethod.PAIRING_PSK) == (category == PskCategory.PAIRING) &&
+                method in offeredPairMethods &&
+                (method != PairMethod.DYNAMIC_PAIRING_CODE ||
+                    activate.pairingFormat in MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.formats)
         }
 
-        // Rule 2: structurally not permitted for this PSK, whatever we enable.
-        if (!allowed) return ActivationOutcome.Close(GOODBYE_UNAUTHORIZED)
-        if (requestedRoles.isNotEmpty() && !capable) {
-            // The spec is specific here: a LATER activation that drops
-            // playback-capability without explicitly sending active_roles
-            // treats the persisted roles as empty rather than rejecting.
-            if (activate.activeRoles == null && !isFirstActivation) {
-                return ActivationOutcome.Accept(emptyList())
-            }
+        if (activitiesAndRolesOk(unpairedAccessEnabled) && pairingOk) {
+            return ActivationOutcome.Accept(rolesUnder(unpairedAccessEnabled))
+        }
+
+        // Rule 1: the session is unpaired, unpaired access is off, and turning
+        // it on would make this very activation admissible. The server is
+        // asking for something we could grant but have switched off, and the
+        // honest answer is "pair with me first" rather than a flat
+        // unauthorized. Applies to every unpaired session, pairing PSK and
+        // Sentinel alike.
+        if (category != PskCategory.LONG_TERM && !unpairedAccessEnabled &&
+            activitiesAndRolesOk(unpairedAccess = true) && pairingOk
+        ) {
+            return ActivationOutcome.Close(GOODBYE_PAIRING_REQUIRED)
+        }
+
+        // Rule 2: an activity set this PSK may not declare, or roles on a
+        // connection that is not playback-capable.
+        if (!activitiesAndRolesOk(unpairedAccessEnabled)) {
             return ActivationOutcome.Close(GOODBYE_UNAUTHORIZED)
         }
-        if (forbidsRoleAtTrustLevel(category, requestedRoles)) {
-            return ActivationOutcome.Close(GOODBYE_UNAUTHORIZED)
-        }
 
-        // Rule 3: a pairing method we cannot or must not run. Connection stays
-        // open - the server may re-activate with a different method.
-        if (Activity.PAIRING in activate.activities) {
-            val method = activate.pairingMethod
-            val methodAllowedForPsk = when (category) {
-                // "pairing.method MUST be 'pairing_psk' if and only if the
-                // matched PSK is the Sendspin Pairing PSK."
-                PskCategory.PAIRING -> method == "pairing_psk"
-                else -> method != null && method != "pairing_psk"
-            }
-            if (method == null || !methodAllowedForPsk || method !in offeredPairMethods) {
-                return ActivationOutcome.AbortPairing(ABORT_METHOD_NOT_SUPPORTED)
-            }
-        }
-
-        return ActivationOutcome.Accept(requestedRoles)
+        // Rule 3: a pairing method the matched PSK disallows or we do not
+        // currently offer, or an emission format we do not offer. The
+        // connection stays open - the server may
+        // re-activate with a different method.
+        return ActivationOutcome.AbortPairing(ABORT_METHOD_NOT_SUPPORTED)
     }
-
-    /**
-     * `source@v1` MUST NOT be activated at trust level 'none' - it captures
-     * microphone or line-in audio, so an unauthenticated server must never get
-     * it. Trust is `user` only for a long-term record.
-     */
-    private fun forbidsRoleAtTrustLevel(category: PskCategory, roles: List<String>): Boolean =
-        category != PskCategory.LONG_TERM && roles.contains(ROLE_SOURCE_V1)
 }

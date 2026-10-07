@@ -12,8 +12,8 @@ import kotlin.math.sqrt
  *
  * Algorithm shape matches `SendspinTimeFilter` post-Phase-2 with one
  * deliberate divergence: the drift-significance gate is omitted.
- * Upstream gates drift in its time-conversion API (which we don't
- * expose); for the prediction step, drift is always applied here, so
+ * The time filter gates drift in its conversions; this filter has no
+ * conversions, and in the prediction step drift is always applied, so
  * the drift estimate isn't biased by suppressing its own contribution
  * to predicted offset.
  *
@@ -101,6 +101,15 @@ class SyncErrorFilter(
         p11 = 0.0
         lastUpdateTimeUs = 0
         measurementCount = 0
+    }
+
+    /**
+     * Move the offset estimate by a known amount: a correction the caller has
+     * just applied to the quantity being measured. Keeps the estimate from
+     * lagging behind the caller's own corrections.
+     */
+    fun shift(deltaMicros: Double) {
+        offset += deltaMicros
     }
 
     /**

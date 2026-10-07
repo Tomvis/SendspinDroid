@@ -14,18 +14,12 @@ object PskCandidates {
 
     /**
      * @param records long-term PSKs from the trust store
-     * @param config the pairing configuration; its Pairing PSK joins the set
-     *   only while [PairingConfig.pairingPskEnabled] is true
-     * @return records, the Sentinel, and (when enabled) the Pairing PSK.
-     *   Suitable for [PskCandidateSet.of], which will not reject it: the trust
-     *   store rejects a colliding record on the write path, and a Pairing PSK
-     *   colliding with a record cannot be stored either.
+     * @param config the pairing configuration, for its Pairing PSK
+     * @return records, the Sentinel, and the Pairing PSK.
      */
     fun build(records: List<PskRecord>, config: PairingConfig): List<Psk> = buildList {
         records.forEach { add(it.toPsk()) }
         add(SentinelPsk.psk)
-        if (config.pairingPskEnabled) {
-            add(Psk(config.pairingPsk, PskCategory.PAIRING))
-        }
+        add(Psk(config.pairingPsk, PskCategory.PAIRING))
     }
 }

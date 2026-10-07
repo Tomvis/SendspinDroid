@@ -1,15 +1,15 @@
 package com.sendspindroid.sendspin.crypto
 
 /**
- * The record and namespace semantics, with no persistence.
+ * The record semantics, with no persistence.
  *
  * All the logic lives here so it can be tested without Android; the encrypted
  * preferences implementation wraps this and adds loading and flushing.
  *
  * @param initial records restored from storage
- * @param pairingPskId the client's own Pairing PSK id once 2.2 provides one. It
- *   participates in the namespace even though it is not a record, because a
- *   `psk_id` must be unique across all three categories.
+ * @param pairingPskId the client's own Pairing PSK id. Not a record, but a
+ *   record may not reuse it: a long-term PSK is a fresh secret, so a collision
+ *   means the pairing went wrong.
  * @param storageIsEncrypted reported through [TrustStore]; always true for a
  *   store that never touches disk.
  */
@@ -27,8 +27,17 @@ open class InMemoryTrustStore(
      * The persistence layer subclasses rather than wraps: a wrapper would have
      * to redeclare all seven members just to add a write, and the one that got
      * forgotten would lose records silently.
+     *
+     * @return false if the change could not be persisted.
      */
-    protected open fun onChanged() {}
+    protected open fun onChanged(): Boolean = true
+
+    /**
+     * [onChanged], with a write that throws counted as a write that failed.
+     * An encrypted store can throw from the write itself; letting that escape
+     * would leave this list changed and the stored one not.
+     */
+    private fun persist(): Boolean = runCatching { onChanged() }.getOrDefault(false)
 
     override fun listRecords(): List<PskRecord> = records.toList()
 
@@ -42,14 +51,24 @@ open class InMemoryTrustStore(
         if (isClaimed(pskId)) return TrustStore.AddRecordResult.AlreadyExists
 
         val record = PskRecord(pskId, psk, serverId, used = false)
+        // "The client MUST persist the new record, replacing any record it
+        // already holds for the server."
+        val before = records.toList()
+        if (serverId != null) records.removeAll { it.serverId == serverId }
         records += record
-        onChanged()
+        if (!persist()) {
+            // Not stored, so not paired: put back what was held, or this
+            // process would authenticate with a record the next one has lost.
+            records.clear()
+            records += before
+            return TrustStore.AddRecordResult.StorageFailed
+        }
         return TrustStore.AddRecordResult.Ok(record)
     }
 
     override fun removeRecord(pskId: String): Boolean {
         val removed = records.removeAll { it.pskId == pskId }
-        if (removed) onChanged()
+        if (removed) persist()
         return removed
     }
 
@@ -58,20 +77,13 @@ open class InMemoryTrustStore(
         if (index < 0) return
         if (records[index].used) return  // idempotent; no needless write
         records[index] = records[index].withUsed(true)
-        onChanged()
+        persist()
     }
 
     override fun candidates(): List<Psk> =
         records.map { it.toPsk() } + SentinelPsk.psk
 
-    /**
-     * The write-path half of the single-namespace rule.
-     *
-     * [PskCandidateSet.of] enforces the same rule when the set is built; this
-     * stops a colliding record being persisted in the first place, so the
-     * failure surfaces as a rejected pairing rather than as a client that can
-     * no longer build a candidate set at all.
-     */
+    /** A record may not reuse a `psk_id` this client already holds. */
     private fun isClaimed(pskId: String): Boolean =
         pskId == SentinelPsk.EXPECTED_PSK_ID ||
             pskId == pairingPskId ||

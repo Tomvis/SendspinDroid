@@ -1,6 +1,5 @@
 package com.sendspindroid.sendspin
 
-import com.sendspindroid.sendspin.latency.StaticDelaySource
 import com.sendspindroid.shared.log.Log
 import io.mockk.every
 import io.mockk.mockkObject
@@ -12,16 +11,9 @@ import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import kotlin.math.abs
 
 class SendspinTimeFilterTest {
-
-    private companion object {
-        // Stable identity used by tests that exercise freeze/thaw but do not
-        // care about cross-server detection. The dedicated identity tests use
-        // their own literals.
-        const val TEST_SERVER_NAME = "TestServer"
-        const val TEST_SERVER_ID = "test-server-id"
-    }
 
     private lateinit var filter: SendspinTimeFilter
 
@@ -67,11 +59,6 @@ class SendspinTimeFilterTest {
     @Test
     fun initialState_measurementCountIsZero() {
         assertEquals(0, filter.measurementCountValue)
-    }
-
-    @Test
-    fun initialState_isNotFrozen() {
-        assertFalse(filter.isFrozen)
     }
 
     // --- Readiness ---
@@ -169,6 +156,117 @@ class SendspinTimeFilterTest {
         assertEquals(originalTime, roundTrip)
     }
 
+    // --- Drift in the conversions ---
+
+    /** Server clock running [ppm] fast: offset(t) = 10ms + ppm * t. */
+    private fun driftingOffset(clientTimeMicros: Long, ppm: Double = 100.0): Double =
+        10_000.0 + ppm * 1e-6 * clientTimeMicros
+
+    /** Feed noise-free measurements of [driftingOffset], one per [stepMicros]. */
+    private fun feedDrifting(from: Int, to: Int, stepMicros: Long = 1_000_000L) {
+        for (i in from..to) {
+            val t = i * stepMicros
+            filter.addMeasurement(driftingOffset(t).toLong(), 500L, t)
+        }
+    }
+
+    @Test
+    fun clientToServer_followsDriftBetweenUpdates() {
+        feedDrifting(1, 300)
+        // 3 s after the last update the true offset has moved on by 300us.
+        val clientTime = 303_000_000L
+        val expected = clientTime + driftingOffset(clientTime)
+        assertEquals(expected, filter.clientToServer(clientTime).toDouble(), 20.0)
+        // Holding the offset flat would be about 300us short.
+        assertTrue(expected - (clientTime + filter.offsetMicros) > 250.0)
+    }
+
+    @Test
+    fun serverToClient_followsDriftBetweenUpdates() {
+        feedDrifting(1, 300)
+        val clientTime = 303_000_000L
+        val serverTime = (clientTime + driftingOffset(clientTime)).toLong()
+        assertEquals(clientTime.toDouble(), filter.serverToClient(serverTime).toDouble(), 20.0)
+    }
+
+    @Test
+    fun conversions_areInversesWithDriftAndPlayoutTerms() {
+        feedDrifting(1, 60)
+        filter.setUserSyncOffsetMs(35.0)
+        filter.setOutputDelayMs(120.0)
+        // Before, at and long after the last update, at realistic magnitudes.
+        for (serverTime in listOf(30_000_000L, 60_010_000L, 63_000_000L, 3_600_000_000L, 10_000_000_000_000L)) {
+            val roundTrip = filter.clientToServer(filter.serverToClient(serverTime))
+            assertEquals(serverTime.toDouble(), roundTrip.toDouble(), 1.0)
+        }
+    }
+
+    @Test
+    fun computeClientTime_hasNoPlayoutTerms() {
+        feedDrifting(1, 300)
+        val serverTime = 303_040_300L
+        val clockOnly = filter.computeClientTime(serverTime)
+
+        filter.setUserSyncOffsetMs(35.0)
+        filter.setOutputDelayMs(120.0)
+
+        assertEquals(clockOnly, filter.computeClientTime(serverTime))
+        assertEquals(clockOnly + 35_000 - 120_000, filter.serverToClient(serverTime))
+    }
+
+    @Test
+    fun conversions_ignoreDriftUntilItIsSignificant() {
+        // Two measurements give a drift estimate from one finite difference;
+        // that is not evidence of drift yet, so the offset is held.
+        filter.addMeasurement(10_000L, 5000L, 1_000_000L)
+        filter.addMeasurement(10_400L, 5000L, 2_000_000L)
+        assertTrue(filter.driftPpm > 100.0)
+        val clientTime = 12_000_000L
+        assertEquals(clientTime + filter.offsetMicros, filter.clientToServer(clientTime))
+    }
+
+    @Test
+    fun wrongFirstDriftEstimate_isCorrectedByTheNextMeasurements() {
+        // 1.2ms of noise between the first two measurements, 3 s apart, reads
+        // as 400 ppm. The clock does not drift at all.
+        filter.addMeasurement(10_000L, 2000L, 3_000_000L)
+        filter.addMeasurement(11_200L, 2000L, 6_000_000L)
+        assertEquals(400.0, filter.driftPpm, 1.0)
+
+        for (i in 3..8) {
+            filter.addMeasurement(10_000L, 2000L, i * 3_000_000L)
+        }
+        assertEquals(0.0, filter.driftPpm, 40.0)
+        // 3 s past the last update the conversion is within 150us of the truth.
+        val clientTime = 27_000_000L
+        assertEquals((clientTime + 10_000L).toDouble(), filter.clientToServer(clientTime).toDouble(), 150.0)
+    }
+
+    @Test
+    fun conversions_seeOffsetDriftAndUpdateTimeFromTheSameUpdate() {
+        // Updates 10 s apart on a 100 ppm clock: the offset moves 1000us per
+        // update. A consistent snapshot extrapolates to the true offset a few
+        // updates away; one update's offset with another's update time would
+        // be out by a multiple of 1000us.
+        val step = 10_000_000L
+        feedDrifting(1, 300, step)
+
+        val done = AtomicBoolean(false)
+        var worstErrorUs = 0.0
+        val reader = thread(name = "conversion-reader") {
+            while (!done.get()) {
+                val clientTime = filter.lastUpdateTimeUs + step / 2
+                val error = abs(filter.clientToServer(clientTime) - clientTime - driftingOffset(clientTime))
+                if (error > worstErrorUs) worstErrorUs = error
+            }
+        }
+        feedDrifting(301, 20_000, step)
+        done.set(true)
+        reader.join(5000)
+
+        assertTrue("worst error ${worstErrorUs}us", worstErrorUs < 100.0)
+    }
+
     // --- Static delay ---
 
     @Test
@@ -225,167 +323,6 @@ class SendspinTimeFilterTest {
         val accepted = filter.addMeasurement(outlierOffset, 5000L, 14_000_000L)
 
         assertTrue("4th consecutive outlier should be force-accepted", accepted)
-    }
-
-    // --- Freeze / thaw ---
-
-    @Test
-    fun freeze_whenReady_storesState() {
-        for (i in 1..5) {
-            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
-        }
-        assertTrue(filter.isReady)
-
-        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
-        assertTrue(filter.isFrozen)
-    }
-
-    @Test
-    fun freeze_whenNotReady_doesNotStore() {
-        filter.addMeasurement(10_000L, 3000L, 1_000_000L)
-        assertFalse(filter.isReady)
-
-        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
-        assertFalse(filter.isFrozen)
-    }
-
-    @Test
-    fun thaw_restoresOffsetWithInflatedCovariance() {
-        // Converge the filter
-        for (i in 1..10) {
-            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
-        }
-        val offsetBeforeFreeze = filter.offsetMicros
-        val errorBeforeFreeze = filter.errorMicros
-
-        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
-        filter.reset()
-
-        assertFalse(filter.isReady)
-
-        val restored = filter.thaw(TEST_SERVER_NAME, TEST_SERVER_ID)
-        assertTrue("thaw with matching identity should restore", restored)
-
-        // Offset should be restored
-        assertEquals(offsetBeforeFreeze, filter.offsetMicros)
-        // Error should be inflated (covariance * 10)
-        assertTrue(
-            "Error should be inflated after thaw",
-            filter.errorMicros > errorBeforeFreeze
-        )
-        assertFalse("Frozen state should be cleared after thaw", filter.isFrozen)
-    }
-
-    // --- thaw() server-identity guard ---
-
-    @Test
-    fun thaw_withMatchingIdentity_restoresState() {
-        for (i in 1..5) {
-            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
-        }
-        val offsetBefore = filter.offsetMicros
-        filter.freeze("ServerA", "server-id-A")
-        filter.reset()
-
-        val restored = filter.thaw("ServerA", "server-id-A")
-
-        assertTrue("thaw with matching identity should return true", restored)
-        assertEquals("Offset should be restored", offsetBefore, filter.offsetMicros)
-        assertFalse("Frozen state should be cleared after successful thaw", filter.isFrozen)
-    }
-
-    @Test
-    fun thaw_withDifferentServerName_doesNotRestoreAndDiscards() {
-        // Cross-server reconnect: freeze on A, then thaw against B.
-        // We must NOT restore A's clock estimate as if it were B's.
-        for (i in 1..5) {
-            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
-        }
-        filter.freeze("ServerA", "server-id-A")
-        filter.reset()
-
-        val restored = filter.thaw("ServerB", "server-id-A")
-
-        assertFalse("thaw with different server name should return false", restored)
-        assertEquals("Offset should NOT be restored", 0L, filter.offsetMicros)
-        assertFalse(
-            "Frozen state should be discarded so a later thaw cannot restore it",
-            filter.isFrozen
-        )
-        // Re-thaw with the original identity should ALSO fail, proving the
-        // discard is real (not just isFrozen flipping because nothing was
-        // captured in the first place).
-        assertFalse(
-            "Frozen state must be truly gone, not merely flagged",
-            filter.thaw("ServerA", "server-id-A")
-        )
-    }
-
-    @Test
-    fun thaw_withDifferentServerId_doesNotRestoreAndDiscards() {
-        // Same display name, different server id.
-        for (i in 1..5) {
-            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
-        }
-        filter.freeze("HomeStereo", "uuid-old")
-        filter.reset()
-
-        val restored = filter.thaw("HomeStereo", "uuid-new")
-
-        assertFalse("thaw with different server id should return false", restored)
-        assertEquals("Offset should NOT be restored", 0L, filter.offsetMicros)
-        assertFalse(filter.isFrozen)
-        assertFalse(
-            "Frozen state must be truly gone, not merely flagged",
-            filter.thaw("HomeStereo", "uuid-old")
-        )
-    }
-
-    // --- thaw() must restore lastUpdateTime ---
-
-    @Test
-    fun thaw_restoresLastUpdateTime() {
-        // After freeze -> reset -> thaw, the filter must remember its last
-        // measurement time. If it does not, the next addMeasurement computes
-        // dt against zero (epoch) and explodes the covariance prediction.
-        // Use realistic clientTimeMicros (System.nanoTime()/1000-scale) so a
-        // lost lastUpdateTime is visible.
-        val baseTimeUs = 1_000_000_000_000L  // ~11.5 days uptime
-        for (i in 1..10) {
-            filter.addMeasurement(10_000L, 3000L, baseTimeUs + i * 1_000_000L)
-        }
-        val lastUpdateBefore = filter.lastUpdateTimeUs
-        assertTrue("Sanity: lastUpdateTime should be set", lastUpdateBefore > 0L)
-
-        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
-        filter.reset()
-        assertEquals("reset() zeros lastUpdateTime", 0L, filter.lastUpdateTimeUs)
-
-        val restored = filter.thaw(TEST_SERVER_NAME, TEST_SERVER_ID)
-        assertTrue("thaw with matching identity should restore", restored)
-
-        assertEquals(
-            "thaw() must restore lastUpdateTime so first post-thaw dt is sane",
-            lastUpdateBefore,
-            filter.lastUpdateTimeUs
-        )
-    }
-
-    // --- resetAndDiscard ---
-
-    @Test
-    fun resetAndDiscard_clearsFrozenStateAndResets() {
-        for (i in 1..5) {
-            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
-        }
-        filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
-        assertTrue(filter.isFrozen)
-
-        filter.resetAndDiscard()
-
-        assertFalse(filter.isFrozen)
-        assertFalse(filter.isReady)
-        assertEquals(0L, filter.offsetMicros)
     }
 
     // --- Reset ---
@@ -603,71 +540,32 @@ class SendspinTimeFilterTest {
         assertFalse("Concurrent reset and read should not cause exceptions", failed.get())
     }
 
-    // --- Static delay split: auto-measured + user sync offset ---
+    // --- Static delay: user slider and server sync offset share one field ---
 
     @Test
-    fun `staticDelayMs returns sum of auto-measured and user sync offset`() {
+    fun `staticDelayMs is the user sync offset`() {
         val f = SendspinTimeFilter()
         f.setUserSyncOffsetMs(30.0)
-        f.setAutoMeasuredDelayMicros(50_000L, StaticDelaySource.AUTO)
-        assertEquals(80.0, f.staticDelayMs, 0.0001)
+        assertEquals(30.0, f.staticDelayMs, 0.0001)
     }
 
     @Test
-    fun `user and auto-measured writes do not clobber each other`() {
+    fun `server sync_offset adds to the user sync offset`() {
+        // Fork: the two are kept apart so neither clobbers the other.
         val f = SendspinTimeFilter()
-        f.setAutoMeasuredDelayMicros(100_000L, StaticDelaySource.AUTO)
         f.setUserSyncOffsetMs(25.0)
-        assertEquals(125.0, f.staticDelayMs, 0.0001)
-        assertEquals(StaticDelaySource.USER, f.staticDelaySource)  // Most recent writer
+        f.setServerSyncOffsetMs(-40.0)
+        assertEquals(-15.0, f.staticDelayMs, 0.0001)
+        assertEquals(-40.0, f.serverSyncOffsetMs, 0.0001)
+    }
 
-        f.setAutoMeasuredDelayMicros(0L, StaticDelaySource.NONE)
+    @Test
+    fun `reset drops the server sync offset but keeps the user one`() {
+        val f = SendspinTimeFilter()
+        f.setUserSyncOffsetMs(25.0)
+        f.setServerSyncOffsetMs(-40.0)
+        f.reset()
         assertEquals(25.0, f.staticDelayMs, 0.0001)
-    }
-
-    @Test
-    fun `server sync_offset reports SERVER source and contributes to staticDelayMs`() {
-        val f = SendspinTimeFilter()
-        f.setServerSyncOffsetMs(-40.0)
-        assertEquals(-40.0, f.staticDelayMs, 0.0001)
-        assertEquals(StaticDelaySource.SERVER, f.staticDelaySource)
-    }
-
-    @Test
-    fun `server sync_offset does not clobber user sync_offset`() {
-        // Both server-pushed and user-set offsets must stack: they are
-        // independent corrections on top of the measured hardware latency.
-        // Previously they shared one backing field and the server value
-        // silently wiped the user value (and vice versa).
-        val f = SendspinTimeFilter()
-        f.setUserSyncOffsetMs(30.0)
-        f.setServerSyncOffsetMs(-40.0)
-        // 30 + (-40) = -10
-        assertEquals(-10.0, f.staticDelayMs, 0.0001)
-        // The most recent writer is SERVER; the user value is still active.
-        assertEquals(StaticDelaySource.SERVER, f.staticDelaySource)
-        assertEquals(30.0, f.userSyncOffsetMs, 0.0001)
-        assertEquals(-40.0, f.serverSyncOffsetMs, 0.0001)
-    }
-
-    @Test
-    fun `user sync_offset does not clobber server sync_offset`() {
-        val f = SendspinTimeFilter()
-        f.setServerSyncOffsetMs(-40.0)
-        f.setUserSyncOffsetMs(30.0)
-        assertEquals(-10.0, f.staticDelayMs, 0.0001)
-        assertEquals(StaticDelaySource.USER, f.staticDelaySource)
-        assertEquals(30.0, f.userSyncOffsetMs, 0.0001)
-        assertEquals(-40.0, f.serverSyncOffsetMs, 0.0001)
-    }
-
-    @Test
-    fun `auto-measured plus user plus server stack into staticDelayMs`() {
-        val f = SendspinTimeFilter()
-        f.setAutoMeasuredDelayMicros(100_000L, StaticDelaySource.AUTO) // 100ms
-        f.setUserSyncOffsetMs(25.0)
-        f.setServerSyncOffsetMs(-10.0)
-        assertEquals(115.0, f.staticDelayMs, 0.0001)
     }
 
     @Test
@@ -692,49 +590,5 @@ class SendspinTimeFilterTest {
         reader.start()
         writer.join()
         reader.join()
-    }
-
-    @Test
-    fun concurrentAccess_freezeThawAndServerToClient_doesNotCrash() {
-        // Verify that freeze/thaw during concurrent reads does not crash
-        val failed = AtomicBoolean(false)
-        val done = AtomicBoolean(false)
-
-        // Converge the filter
-        for (i in 1..10) {
-            filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
-        }
-
-        val freezeThawer = thread(name = "freeze-thaw") {
-            try {
-                repeat(100) {
-                    filter.freeze(TEST_SERVER_NAME, TEST_SERVER_ID)
-                    Thread.sleep(1)
-                    filter.thaw(TEST_SERVER_NAME, TEST_SERVER_ID)
-                    // Re-add measurements after thaw
-                    filter.addMeasurement(10_000L, 3000L, (it + 11) * 1_000_000L)
-                }
-            } catch (e: Exception) {
-                failed.set(true)
-            } finally {
-                done.set(true)
-            }
-        }
-
-        val reader = thread(name = "reader") {
-            try {
-                while (!done.get()) {
-                    filter.serverToClient(100_000_000L)
-                    filter.clientToServer(100_000_000L)
-                }
-            } catch (e: Exception) {
-                failed.set(true)
-            }
-        }
-
-        freezeThawer.join(10000)
-        reader.join(10000)
-
-        assertFalse("Concurrent freeze/thaw and read should not crash", failed.get())
     }
 }
