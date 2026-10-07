@@ -275,7 +275,6 @@
     <string name="stats_watchdog_armed">Armed</string>
     <string name="stats_watchdog_idle">Idle</string>
     <string name="stats_last_disconnect">Last Disconnect</string>
-    <string name="stats_stability">Filter Stability</string>
     <string name="stats_convergence_time">Convergence Time</string>
     <string name="stats_type">Type</string>
     <string name="stats_quality">Quality</string>

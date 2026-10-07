@@ -2,7 +2,7 @@ package com.sendspindroid.sendspin.protocol
 
 import android.util.Log
 import com.sendspindroid.UserSettings
-import com.sendspindroid.sendspin.AdaptiveBufferPolicy
+import com.sendspindroid.sendspin.MinBufferEstimator
 import com.sendspindroid.sendspin.SendspinTimeFilter
 import com.sendspindroid.sendspin.crypto.NoiseCipherSuite
 import com.sendspindroid.sendspin.crypto.NoiseCrypto
@@ -106,14 +106,13 @@ abstract class SendSpinProtocolHandler(
     // Time sync manager (lazy initialized by subclass)
     protected var timeSyncManager: TimeSyncManager? = null
 
-    // Adaptive jitter-buffer policy: reports a generous min_buffer_ms by default
-    // and grows it on trouble (RTT spikes / sync loss), backing off slowly on a
-    // sustained-good link. Constructed by [initTimeSyncManager] with the
-    // memory-appropriate profile. Guarded by [adaptiveBufferLock] because the
-    // time-sync callback can fire from either the burst-loop or the receive thread.
-    private var adaptiveBuffer: AdaptiveBufferPolicy? = null
-    private val adaptiveBufferLock = Any()
-    private var lastReportedMinBufferMs: Int = SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS
+    // Sizes the min_buffer_ms we report from audio chunk arrival delay.
+    private val minBufferEstimator = MinBufferEstimator()
+
+    // Set once the first stream of this connection has started. Until then
+    // the required_lead_time_ms we report has to cover a cold start.
+    @Volatile
+    private var outputStarted = false
 
     // ========== Abstract Transport Methods ==========
 
@@ -378,15 +377,15 @@ abstract class SendSpinProtocolHandler(
         // latter is the hardware latency we already compensate ourselves, and
         // reporting it would invite the server to compensate it again.
         val delayMs = getTimeFilter().outputDelayMs
-        val minBufferMs = synchronized(adaptiveBufferLock) {
-            val target = adaptiveBuffer?.currentTargetMs ?: SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS
-            lastReportedMinBufferMs = target
-            target
-        }
         sendProtocolMessage(
             MessageBuilder.buildPlayerState(
                 currentVolume, currentMuted, isAvailable(), delayMs,
-                minBufferMs = minBufferMs,
+                requiredLeadTimeMs = if (outputStarted) {
+                    SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_WARM_MS
+                } else {
+                    SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS
+                },
+                minBufferMs = minBufferEstimator.minBufferMs,
                 // A role's object may only appear once the role is active.
                 playerRoleActive = activeRoles.contains(ROLE_PLAYER_V1),
                 format = preferredFormat,
@@ -396,34 +395,23 @@ abstract class SendSpinProtocolHandler(
     }
 
     /**
-     * Feed one time-sync measurement into the adaptive buffer policy and, if the
-     * learned `min_buffer_ms` target shifted, report it (debounced by the policy's
-     * own grow/shrink cooldowns). Also re-evaluates sync state, preserving the
-     * previous [onMeasurementApplied] behavior.
+     * Measure how late an audio chunk arrived and report `min_buffer_ms` when
+     * that changes it (roles/player/v1.md, "Measuring timing parameters").
+     *
+     * The server sent the chunk at `timestamp - send_ahead` on its clock; the
+     * delay is the arrival time minus that instant on ours. It is clock
+     * mapping only: `min_buffer_ms` "MUST NOT include `output_delay_ms`".
      */
-    private fun onTimeMeasurement(rttMicros: Long) {
+    private fun measureChunkDelay(chunk: BinaryMessageParser.BinaryMessage.Audio) {
+        // Both saturation values report that no lead was measured, and a
+        // player "MUST NOT use a chunk carrying either as a delay sample".
+        if (chunk.sendAheadMicros == 0L || chunk.sendAheadMicros == SendSpinProtocol.SEND_AHEAD_SATURATED) return
         val filter = getTimeFilter()
-        val quality = when {
-            filter.isReady && filter.isConverged -> AdaptiveBufferPolicy.SyncQuality.GOOD
-            filter.isReady -> AdaptiveBufferPolicy.SyncQuality.DEGRADED
-            else -> AdaptiveBufferPolicy.SyncQuality.LOST
-        }
-        val changed = synchronized(adaptiveBufferLock) {
-            val policy = adaptiveBuffer
-            if (policy != null) {
-                policy.update(
-                    nowMs = android.os.SystemClock.elapsedRealtime(),
-                    rttMs = rttMicros / 1000.0,
-                    quality = quality
-                )
-                policy.currentTargetMs != lastReportedMinBufferMs
-            } else {
-                false
-            }
-        }
-        evaluateAndPublishSyncState()
-        if (changed && handshakeComplete) {
-            Log.d(tag, "Adaptive min_buffer_ms -> ${adaptiveBuffer?.currentTargetMs}")
+        if (!filter.isConverged) return
+
+        val arrivalMicros = System.nanoTime() / 1000
+        val sentMicros = filter.computeClientTime(chunk.timestampMicros - chunk.sendAheadMicros)
+        if (minBufferEstimator.addChunk(chunk.timestampMicros, sentMicros, arrivalMicros) && handshakeComplete) {
             sendPlayerStateUpdate()
         }
     }
@@ -683,17 +671,10 @@ abstract class SendSpinProtocolHandler(
      * Initialize time sync manager.
      */
     protected fun initTimeSyncManager(timeFilter: SendspinTimeFilter) {
-        synchronized(adaptiveBufferLock) {
-            val policy = AdaptiveBufferPolicy(
-                if (isLowMemoryMode()) AdaptiveBufferPolicy.lowMemory() else AdaptiveBufferPolicy.generous()
-            )
-            adaptiveBuffer = policy
-            lastReportedMinBufferMs = policy.currentTargetMs
-        }
         timeSyncManager = TimeSyncManager(
             timeFilter = timeFilter,
             sendClientTime = { sendClientTime() },
-            onMeasurementApplied = { rttMicros -> onTimeMeasurement(rttMicros) },
+            onMeasurementApplied = { evaluateAndPublishSyncState() },
             tag = tag
         )
     }
@@ -946,6 +927,7 @@ abstract class SendSpinProtocolHandler(
         // Clear cached values so the first post-handshake messages always propagate
         _streamActive = false
         _currentStreamConfig = null
+        outputStarted = false
         resetArtworkStream()
         resetServerState()
         lastPlaybackState = null
@@ -1755,6 +1737,12 @@ abstract class SendSpinProtocolHandler(
         _streamActive = true
         _currentStreamConfig = config
         onStreamStart(config)
+
+        if (!outputStarted) {
+            // The pipeline is running from here on: later starts need less lead.
+            outputStarted = true
+            sendPlayerStateUpdate()
+        }
     }
 
     protected fun handleStreamClear(payload: JsonObject?) {
@@ -1890,6 +1878,7 @@ abstract class SendSpinProtocolHandler(
                     Log.v(tag, "Dropping audio chunk: no active stream")
                     return
                 }
+                measureChunkDelay(message)
                 onAudioChunk(message.timestampMicros, message.payload)
             }
         }

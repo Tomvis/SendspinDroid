@@ -250,8 +250,8 @@ class MessageBuilderTest {
         // reported by its player or artwork role.
         assertEquals(
             """{"type":"client/state","payload":{"available":true,"player":{"volume":80,""" +
-                """"muted":false,"output_delay_ms":120,"required_lead_time_ms":500,""" +
-                """"min_buffer_ms":500,"supported_commands":["volume","mute","set_output_delay"],""" +
+                """"muted":false,"output_delay_ms":120,"required_lead_time_ms":1500,""" +
+                """"min_buffer_ms":350,"supported_commands":["volume","mute","set_output_delay"],""" +
                 """"format":{"codec":"pcm","sample_rate":48000,"channels":2,"bit_depth":16}},""" +
                 """"artwork":{"channels":[{"source":"album","format":"jpeg","width":500,"height":500}]}}}""",
             MessageBuilder.buildPlayerState(
