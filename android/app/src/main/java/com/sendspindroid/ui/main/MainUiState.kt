@@ -40,11 +40,8 @@ sealed class ArtworkSource {
  */
 data class ReconnectingState(
     val serverName: String,
-    val attempt: Int,
-    val bufferMs: Long
-) {
-    val bufferSeconds: Long get() = bufferMs / 1000
-}
+    val attempt: Int
+)
 
 /**
  * Player colors extracted from album artwork.

@@ -8,7 +8,7 @@ import org.junit.Test
 
 /**
  * Tests that SendSpin.connectionState transitions follow the expected
- * lifecycle: Idle -> Connecting -> Ready -> Idle or Failed.
+ * lifecycle: Idle -> Connecting -> Ready -> Idle, or Connecting -> Failed.
  */
 class SendSpinConnectionStateTest : E2ETestBase() {
 
@@ -62,7 +62,7 @@ class SendSpinConnectionStateTest : E2ETestBase() {
     }
 
     @Test
-    fun `full lifecycle Idle to Connecting to Ready to Failed`() {
+    fun `full lifecycle Idle to Connecting to Ready to Idle, then a failed attempt`() {
         assertEquals(TransportState.Idle, client.connectionState.value)
 
         injectTransportAndConnect()
@@ -71,6 +71,11 @@ class SendSpinConnectionStateTest : E2ETestBase() {
         fakeServer.completeHandshake()
         assertEquals(TransportState.Ready, client.connectionState.value)
 
+        fakeTransport.simulateClosed(1006, "abnormal")
+        assertEquals(TransportState.Idle, client.connectionState.value)
+
+        injectTransportAndConnect()
+        fakeTransport.simulateConnected()
         fakeTransport.simulateFailure(java.net.ConnectException("Connection refused"), isRecoverable = false)
         assertTrue(client.connectionState.value is TransportState.Failed)
     }

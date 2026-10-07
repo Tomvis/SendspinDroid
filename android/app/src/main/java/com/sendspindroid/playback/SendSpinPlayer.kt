@@ -242,10 +242,17 @@ class SendSpinPlayer : Player {
      *
      * @param connected Whether we're connected to a server
      * @param serverName Name of the connected server (if connected)
+     * @param reconnecting Not connected, but the service is working on it.
+     *   Reported as buffering with playWhenReady left as it was, which is what
+     *   it is to anyone watching the session: playback that was running is
+     *   expected back. It also keeps the media session in the foreground.
      */
-    fun updateConnectionState(connected: Boolean, serverName: String? = null) {
+    fun updateConnectionState(connected: Boolean, serverName: String? = null, reconnecting: Boolean = false) {
         if (!connected) {
-            updatePlaybackStateInternal(Player.STATE_IDLE, false)
+            updatePlaybackStateInternal(
+                if (reconnecting) Player.STATE_BUFFERING else Player.STATE_IDLE,
+                false,
+            )
             anchorPositionMs = 0
             anchorElapsedRealtime = 0
             currentDurationMs = 0

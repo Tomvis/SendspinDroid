@@ -1233,7 +1233,13 @@ class SendSpin(
         }
 
         override fun onFailure(error: Throwable, isRecoverable: Boolean) {
-            Log.e(TAG, "Transport failure", error)
+            if (handshakeComplete) {
+                Log.e(TAG, "Transport failure", error)
+            } else {
+                // An attempt that did not get through, possibly one of many
+                // while a server is away: the reason is enough.
+                Log.w(TAG, "Connect failed: $error")
+            }
 
             // Record telemetry for the stats screen + emit the structured [disconnect]
             // log line. onFailure has no WebSocket close code -- use `null` code and
@@ -1243,7 +1249,9 @@ class SendSpin(
                 reasonText = error.message ?: error::class.java.simpleName,
             )
 
-            val state = if (isRecoverable) {
+            // Failed is for an attempt that did not get through. A connection
+            // that was up and broke has simply ended, whatever broke it.
+            val state = if (isRecoverable || handshakeComplete) {
                 TransportState.Idle
             } else {
                 TransportState.Failed(classifyFailureReason(throwable = error))

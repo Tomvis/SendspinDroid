@@ -77,8 +77,8 @@ class ConnectionEndTest : E2ETestBase() {
         assertTrue("the connection left state behind to clear", connectionState() != pristine)
     }
 
-    private fun assertEnded(reconnect: Boolean, state: TransportState = TransportState.Idle) {
-        assertEquals(state, client.connectionState.value)
+    private fun assertEnded(reconnect: Boolean) {
+        assertEquals(TransportState.Idle, client.connectionState.value)
         verify(exactly = 1) { mockCallback.onDisconnected(reconnect) }
         verify(exactly = 0) { mockCallback.onDisconnected(!reconnect) }
         assertEquals(pristine, connectionState())
@@ -129,12 +129,14 @@ class ConnectionEndTest : E2ETestBase() {
     }
 
     @Test
-    fun `an unrecoverable transport failure is reconnected and reported as failed`() {
+    fun `an unrecoverable transport failure is reconnected too`() {
+        // "Unrecoverable" is the transport's guess about retrying a connect;
+        // a connection that was up and broke has ended like any other.
         connectedAndBusy()
 
         fakeTransport.simulateFailure(IllegalStateException("boom"), isRecoverable = false)
 
-        assertEnded(reconnect = true, state = TransportState.Failed(FailureReason.TransientNetwork))
+        assertEnded(reconnect = true)
     }
 
     @Test
@@ -230,6 +232,19 @@ class ConnectionEndTest : E2ETestBase() {
     }
 
     // ========== Never established: nothing to report ==========
+
+    @Test
+    fun `an attempt that cannot connect is failed and reports no disconnect`() {
+        pristine = connectionState()
+        injectTransportAndConnect()
+        fakeTransport.simulateConnected()
+
+        fakeTransport.simulateFailure(IllegalStateException("boom"), isRecoverable = false)
+
+        assertEquals(TransportState.Failed(FailureReason.TransientNetwork), client.connectionState.value)
+        verify(exactly = 0) { mockCallback.onDisconnected(any()) }
+        assertEquals(pristine, connectionState())
+    }
 
     @Test
     fun `an attempt that fails before server hello reports no disconnect`() {

@@ -32,7 +32,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Events emitted by [ConnectionCoordinator] for Android-specific network signals
@@ -60,20 +59,17 @@ sealed class NetworkEvent {
 
 /**
  * Single authority for "what server is active, and which of its transports are up,"
- * plus owner of the auto-reconnect retry loop.
+ * plus the one reconnect loop in the app. PlaybackService starts the loop when a
+ * connection is lost and cancels it when the user disconnects or picks a server;
+ * neither the client nor the UI retries on its own.
  *
- * Phase 2B: absorbs the retry loop entirely. AutoReconnectManager.kt deletes
- * after this phase. The loop preserves today's behavior:
- * - 11-attempt backoff schedule (500ms, 1s, 2s, 4s, 8s, 15s, 30s, 60s x 4)
- * - Per-attempt local connection retry (LOCAL is the only method left)
- * - 2s debounce on network-availability skip
- * - 500ms minimum stabilization delay after network-triggered skip
+ * The loop:
+ * - backs off 500ms, 1s, 2s, 4s, 8s, 15s, 30s, then every 60s, with no attempt cap
+ * - cuts the wait short on [retryNow] (network back, server seen again on mDNS),
+ *   debounced to once per 2s and followed by a 500ms settling delay
  *
- * Phase 3: Owns the ConnectivityManager.NetworkCallback. PlaybackService observes
+ * Also owns the ConnectivityManager.NetworkCallback. PlaybackService observes
  * [networkState] and [networkEvents] to dispatch side effects.
- *
- * SendSpin.selfReconnectEnabled is set to false externally so it no longer
- * runs its own reconnect loop -- this Coordinator is the only retry driver.
  *
  * See docs/superpowers/specs/2026-05-05-connection-coordinator-design.md
  */
@@ -82,19 +78,18 @@ class ConnectionCoordinator(
     sendSpinStateFlow: Flow<TransportState>,
     musicAssistantStateFlow: Flow<TransportState>,
     private val scope: CoroutineScope,
-    private val onDisconnectRequested: () -> Unit,
     private val connectAttempt: suspend (UnifiedServer, ConnectionType) -> Boolean,
     private val context: android.content.Context,
 ) {
     companion object {
         private const val TAG = "ConnectionCoordinator"
+        // The wait before each attempt. The last value repeats for as long as
+        // the server stays away: there is no attempt cap.
         private val BACKOFF_DELAYS = listOf(
-            500L, 1000L, 2000L, 4000L, 8000L,
-            15000L, 30000L, 60000L, 60000L, 60000L, 60000L,
+            500L, 1000L, 2000L, 4000L, 8000L, 15000L, 30000L, 60000L,
         )
-        private const val MAX_ATTEMPTS = 11
-        private const val NETWORK_DEBOUNCE_MS = 2_000L
-        private const val MIN_DELAY_AFTER_NETWORK_SKIP_MS = 500L
+        private const val RETRY_NOW_DEBOUNCE_MS = 2_000L
+        private const val MIN_DELAY_AFTER_RETRY_NOW_MS = 500L
         private const val VALIDATION_LOSS_DEBOUNCE_MS = 3_000L
     }
 
@@ -122,11 +117,9 @@ class ConnectionCoordinator(
     val networkEvents: SharedFlow<NetworkEvent> = _networkEvents.asSharedFlow()
 
     private var reconnectJob: Job? = null
-    private var reconnectingServer: UnifiedServer? = null
-    private val currentAttempt = AtomicInteger(0)
     private val isReconnecting = AtomicBoolean(false)
     @Volatile private var skipDelay: CompletableDeferred<Unit>? = null
-    @Volatile private var lastNetworkSkipNanos: Long = 0L
+    @Volatile private var lastRetryNowNanos: Long = 0L
 
     // Network callback state -- all written exclusively from binder/callback threads.
     @Volatile private var lastNetworkHandle: Long = -1L
@@ -152,9 +145,8 @@ class ConnectionCoordinator(
             networkEvaluator?.evaluateCurrentNetwork(network)
             networkEvaluator?.networkState?.value?.let { _networkState.value = it }
 
-            // Trigger the reconnect-skip path (replaces the coordinator.onNetworkAvailable()
-            // call that PlaybackService used to make directly).
-            triggerNetworkAvailableSkip()
+            // A network is back: no point waiting out the rest of a backoff.
+            retryNow()
 
             // Detect network identity change (not the very first callback).
             if (lastNetworkHandle != -1L && lastNetworkHandle != handle) {
@@ -180,12 +172,10 @@ class ConnectionCoordinator(
             validationLossJob = null
 
             if (!stillHaveNetwork) {
-                Log.i(TAG, "No active network remaining - pausing client reconnect")
-                // isConnected will be false in the emitted NetworkState; PlaybackService
-                // observes that and calls setNetworkAvailable(false).
+                Log.i(TAG, "No active network remaining")
                 lastLinkAddresses = null
             } else {
-                Log.d(TAG, "Another network still active - keeping client reconnect running")
+                Log.d(TAG, "Another network still active")
             }
         }
 
@@ -206,7 +196,6 @@ class ConnectionCoordinator(
                     kotlinx.coroutines.delay(VALIDATION_LOSS_DEBOUNCE_MS)
                     if (lastValidatedState == false) {
                         Log.w(TAG, "Validation loss confirmed after debounce - marking network unavailable")
-                        // Emit a disconnected NetworkState to signal PlaybackService.
                         _networkState.value = _networkState.value.copy(isConnected = false)
                     }
                 }
@@ -214,8 +203,7 @@ class ConnectionCoordinator(
                 Log.i(TAG, "Network regained VALIDATED")
                 validationLossJob?.cancel()
                 validationLossJob = null
-                // Re-emit the current (connected) evaluator state, which will cause
-                // PlaybackService's collector to call setNetworkAvailable(true).
+                // Re-emit the current (connected) evaluator state.
                 networkEvaluator?.networkState?.value?.let { _networkState.value = it }
             }
         }
@@ -270,16 +258,17 @@ class ConnectionCoordinator(
         }
     }
 
-    fun disconnect() {
-        onDisconnectRequested()
-    }
-
+    /**
+     * Keep trying to connect to [server] until an attempt succeeds or
+     * [cancelReconnect] is called. Replaces any loop already running.
+     */
     fun connect(server: UnifiedServer) {
         cancelReconnect()
-        reconnectingServer = server
-        currentAttempt.set(0)
         isReconnecting.set(true)
-        lastNetworkSkipNanos = 0L
+        lastRetryNowNanos = 0L
+        // Published here and not from inside the loop, so the caller can rely
+        // on the status as soon as this returns.
+        _reconnectStatusFlow.value = ReconnectStatus.Attempting(server.id, attempt = 1, method = null)
         reconnectJob = scope.launch {
             runReconnectLoop(server)
         }
@@ -291,47 +280,52 @@ class ConnectionCoordinator(
         reconnectJob = null
         skipDelay = null
         isReconnecting.set(false)
-        reconnectingServer = null
-        currentAttempt.set(0)
-        lastNetworkSkipNanos = 0L
+        lastRetryNowNanos = 0L
         _reconnectStatusFlow.value = ReconnectStatus.Idle
     }
 
-    private fun triggerNetworkAvailableSkip() {
+    /**
+     * Skip what is left of the current backoff wait, because something says
+     * the next attempt is worth making now: a network came up, or the server
+     * was seen again on mDNS. Does nothing when no loop is waiting.
+     */
+    fun retryNow() {
         if (!isReconnecting.get()) return
         val now = System.nanoTime()
-        val elapsedMs = (now - lastNetworkSkipNanos) / 1_000_000
-        if (elapsedMs < NETWORK_DEBOUNCE_MS) return
-        lastNetworkSkipNanos = now
+        val elapsedMs = (now - lastRetryNowNanos) / 1_000_000
+        if (elapsedMs < RETRY_NOW_DEBOUNCE_MS) return
+        lastRetryNowNanos = now
         skipDelay?.complete(Unit)
     }
 
     private suspend fun runReconnectLoop(server: UnifiedServer) {
-        for (attemptNumber in 1..MAX_ATTEMPTS) {
-            currentAttempt.set(attemptNumber)
+        var attemptNumber = 0
+        while (true) {
+            // An attempt may have cancelled the loop it was running in.
+            coroutineContext.ensureActive()
+            attemptNumber++
             val delayMs = BACKOFF_DELAYS.getOrElse(attemptNumber - 1) { BACKOFF_DELAYS.last() }
 
             _reconnectStatusFlow.value = ReconnectStatus.Attempting(
                 serverId = server.id,
                 attempt = attemptNumber,
-                maxAttempts = MAX_ATTEMPTS,
                 method = null,
             )
 
             val signal = CompletableDeferred<Unit>()
             skipDelay = signal
-            var skippedByNetwork = false
+            var skipped = false
             try {
                 withTimeout(delayMs) {
                     signal.await()
-                    skippedByNetwork = true
+                    skipped = true
                 }
             } catch (_: TimeoutCancellationException) {
                 // Normal: full delay elapsed.
             }
             skipDelay = null
 
-            if (skippedByNetwork) delay(MIN_DELAY_AFTER_NETWORK_SKIP_MS)
+            if (skipped) delay(MIN_DELAY_AFTER_RETRY_NOW_MS)
             coroutineContext.ensureActive()
 
             val methods = priorityMethodsForCurrentNetwork()
@@ -343,7 +337,6 @@ class ConnectionCoordinator(
                 _reconnectStatusFlow.value = ReconnectStatus.Attempting(
                     serverId = server.id,
                     attempt = attemptNumber,
-                    maxAttempts = MAX_ATTEMPTS,
                     method = method,
                 )
 
@@ -362,19 +355,9 @@ class ConnectionCoordinator(
             if (succeeded) {
                 _reconnectStatusFlow.value = ReconnectStatus.Succeeded(server.id)
                 isReconnecting.set(false)
-                reconnectingServer = null
-                currentAttempt.set(0)
                 return
             }
         }
-
-        _reconnectStatusFlow.value = ReconnectStatus.Failed(
-            serverId = server.id,
-            error = "Connection lost after $MAX_ATTEMPTS reconnection attempts",
-        )
-        isReconnecting.set(false)
-        reconnectingServer = null
-        currentAttempt.set(0)
     }
 
     private fun priorityMethodsForCurrentNetwork(): List<ConnectionType> {
