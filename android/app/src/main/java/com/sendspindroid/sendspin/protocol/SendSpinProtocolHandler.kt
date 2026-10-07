@@ -295,6 +295,10 @@ abstract class SendSpinProtocolHandler(
      * Send client/time message for clock synchronization.
      */
     protected fun sendClientTime() {
+        // A burst that was already under way when its connection ended can
+        // reach this point after the next connection's channel is installed.
+        // Nothing but client/hello may precede that connection's activation.
+        if (!activationSeen) return
         val clientTransmitted = System.nanoTime() / 1000 // Convert to microseconds
         sendProtocolMessage(MessageBuilder.buildClientTime(clientTransmitted))
     }

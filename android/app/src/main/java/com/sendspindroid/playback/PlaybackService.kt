@@ -290,8 +290,7 @@ class PlaybackService : MediaLibraryService() {
     @Volatile
     private var decoderReady = false
 
-    // Identifies the stream a chunk belongs to, mirroring
-    // SyncAudioPlayer.streamGeneration one layer down. onAudioChunk snapshots
+    // Identifies the stream a chunk belongs to. onAudioChunk snapshots
     // it on WS-IO at enqueue time and the decode worker re-checks it before
     // decoding, so chunks from a superseded stream are discarded no matter how
     // long they sat on the main dispatch queue or in decodeChannel. Ordering
@@ -1168,20 +1167,27 @@ class PlaybackService : MediaLibraryService() {
         // No decoder means the stream's codec could not be set up: drop the
         // chunk. PCM has a decoder of its own, so nothing passes through raw.
         val decoder = audioDecoder ?: return
-        val pcmData: ByteArray = try {
-            decoder.decode(t.audioData)
+        val decoded = try {
+            decoder.decode(t.audioData, t.serverTimeMicros)
         } catch (e: Exception) {
             Log.e(TAG, "Decode error, dropping chunk", e)
             return
         }
-        // Checked again: a stream/clear or stream/end that landed while this
-        // chunk was decoding has already cleared the player, and queueing it
-        // now would leave one chunk with the old stream's timestamp at the
-        // head of the queue. The new stream's audio is then discarded as
-        // overlap until it catches up - seconds of silence after a skip.
-        if (t.generation != decodeGeneration) return
         val player = syncAudioPlayer ?: return
-        player.queueChunk(t.serverTimeMicros, pcmData)
+        // Checked again, by the player under the lock its clear takes: a
+        // stream/clear or stream/end that landed while this chunk was
+        // decoding has cleared the player or is about to, and a chunk queued
+        // after that would sit at the head of the queue with the old stream's
+        // timestamp. The new stream's audio is then discarded as overlap
+        // until it catches up - seconds of silence after a skip. The
+        // generation is bumped before the clear is posted, so a chunk that
+        // passes here is queued before the clear and removed by it.
+        //
+        // Stamped by the decoder, not with this chunk's time: what comes out
+        // can be the previous chunk's audio.
+        for (audio in decoded) {
+            player.queueChunk(audio.timestampUs, audio.pcm) { t.generation == decodeGeneration }
+        }
     }
 
     /**

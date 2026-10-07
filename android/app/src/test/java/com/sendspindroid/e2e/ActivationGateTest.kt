@@ -40,6 +40,19 @@ class ActivationGateTest : E2ETestBase() {
     }
 
     @Test
+    fun `no client time before the initial activation`() {
+        helloOnly()
+
+        // What a time-sync burst left over from the previous connection does.
+        val send = com.sendspindroid.sendspin.protocol.SendSpinProtocolHandler::class.java
+            .getDeclaredMethod("sendClientTime")
+        send.isAccessible = true
+        send.invoke(client)
+
+        assertEquals(emptyList<String>(), sentAfterHello())
+    }
+
+    @Test
     fun `the activation sends the state that changed while waiting for it`() {
         helloOnly()
         client.setVolume(0.5)

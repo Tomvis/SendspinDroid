@@ -3,7 +3,6 @@ package com.sendspindroid.sendspin.decoder
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.util.Log
-import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 
 /**
@@ -95,11 +94,11 @@ abstract class MediaCodecDecoder(
         codecHeader: ByteArray?
     )
 
-    override fun decode(compressedData: ByteArray): ByteArray {
+    override fun decode(compressedData: ByteArray, timestampUs: Long): List<DecodedAudio> {
         val codec = mediaCodec
             ?: throw IllegalStateException("Decoder not configured")
 
-        val outputBuffer = ByteArrayOutputStream()
+        val output = ArrayList<DecodedAudio>(1)
 
         // Submit input with retry.
         // When all input buffers are occupied (codec backpressure), we drain
@@ -113,7 +112,10 @@ abstract class MediaCodecDecoder(
                 if (inputBuffer != null) {
                     inputBuffer.clear()
                     inputBuffer.put(compressedData)
-                    codec.queueInputBuffer(inputIndex, 0, compressedData.size, 0, 0)
+                    // The codec hands this timestamp back on the output it
+                    // produces from this input, which is how late output is
+                    // still placed correctly.
+                    codec.queueInputBuffer(inputIndex, 0, compressedData.size, timestampUs, 0)
                     submitted = true
                 }
                 break
@@ -121,7 +123,7 @@ abstract class MediaCodecDecoder(
 
             // No input buffer available -- drain output to free a slot, then retry.
             if (attempt < MAX_INPUT_RETRIES) {
-                drainOutput(codec, outputBuffer)
+                drainOutput(codec, output)
             }
         }
 
@@ -130,24 +132,31 @@ abstract class MediaCodecDecoder(
                     "frame dropped (${compressedData.size} bytes)")
         }
 
-        // Drain all available output
-        drainOutput(codec, outputBuffer)
+        drainOutput(codec, output)
 
-        return outputBuffer.toByteArray()
+        return output
     }
 
     /**
-     * Drain all available output buffers from the codec.
+     * Collect the output the codec has ready, each buffer with its timestamp.
      *
-     * Handles all dequeueOutputBuffer status codes correctly:
+     * Waits up to [TIMEOUT_US] for the first buffer, so in the normal case a
+     * chunk's audio comes back from the call that submitted it. Once there is
+     * output it stops waiting: anything the codec finishes later is picked up
+     * by the next call, still carrying the right timestamp.
+     *
+     * Handles all dequeueOutputBuffer status codes:
      * - >= 0: Valid output buffer with PCM data to collect
      * - INFO_OUTPUT_FORMAT_CHANGED: Update cached format, continue draining
      * - INFO_OUTPUT_BUFFERS_CHANGED: Deprecated but harmless, continue draining
      * - INFO_TRY_AGAIN_LATER: No more output available, stop draining
      */
-    private fun drainOutput(codec: MediaCodec, outputBuffer: ByteArrayOutputStream) {
+    private fun drainOutput(codec: MediaCodec, output: MutableList<DecodedAudio>) {
         repeat(MAX_DRAIN_ITERATIONS) {
-            val outputIndex = codec.dequeueOutputBuffer(bufferInfo, TIMEOUT_US)
+            val outputIndex = codec.dequeueOutputBuffer(
+                bufferInfo,
+                if (output.isEmpty()) TIMEOUT_US else 0L,
+            )
 
             when {
                 outputIndex >= 0 -> {
@@ -156,7 +165,7 @@ abstract class MediaCodecDecoder(
                         val pcmData = ByteArray(bufferInfo.size)
                         outBuffer.position(bufferInfo.offset)
                         outBuffer.get(pcmData, 0, bufferInfo.size)
-                        outputBuffer.write(pcmData)
+                        output += DecodedAudio(bufferInfo.presentationTimeUs, pcmData)
                     }
                     codec.releaseOutputBuffer(outputIndex, false)
                 }

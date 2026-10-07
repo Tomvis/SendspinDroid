@@ -1,6 +1,7 @@
 package com.sendspindroid.playback
 
 import com.sendspindroid.sendspin.decoder.AudioDecoder
+import com.sendspindroid.sendspin.decoder.DecodedAudio
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -58,7 +59,7 @@ class FakeAudioDecoder : AudioDecoder {
         configured.set(true)
     }
 
-    override fun decode(compressedData: ByteArray): ByteArray {
+    override fun decode(compressedData: ByteArray, timestampUs: Long): List<DecodedAudio> {
         decodeCalls.incrementAndGet()
         if (errored.get()) {
             throw IllegalStateException("decoder is in ERROR state")
@@ -78,7 +79,7 @@ class FakeAudioDecoder : AudioDecoder {
         }
         expectedNextSeq.set(expected + 1L)
         observed.add(seq)
-        return makePcmWithSeq(seq)
+        return listOf(DecodedAudio(timestampUs, makePcmWithSeq(seq)))
     }
 
     override fun flush() {

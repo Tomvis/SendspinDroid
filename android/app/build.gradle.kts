@@ -74,14 +74,14 @@ android {
         // Ranges: MAJOR 0-9999, MINOR 0-99, PATCH 0-99
         // Example: 2.0.0 = 20000, 2.1.3 = 20103, 10.5.22 = 100522
         // Beta releases: bump by N from base, BetaN = base + N
-        // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta16 = 20016). Every installable
+        // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta18 = 20018). Every installable
         // build needs a strictly higher code than the one it replaces, so a
         // beta cannot share one; see the versionCode table in CLAUDE.md.
-        versionCode = 20017
+        versionCode = 20018
 
         // versionName: User-visible version string
         // Follows semantic versioning (major.minor.patch[-prerelease])
-        versionName = "2.0.0-Beta17"
+        versionName = "2.0.0-Beta18"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

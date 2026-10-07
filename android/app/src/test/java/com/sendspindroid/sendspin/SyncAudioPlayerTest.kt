@@ -332,57 +332,21 @@ class SyncAudioPlayerTest {
     }
 
     // ========================================================================
-    // Test 10: Pre-sync chunk buffering
+    // Test 10: Chunks that arrive before time sync
     // ========================================================================
 
     @Test
-    fun `chunks buffered when time sync not ready`() {
+    fun `chunks received before time sync is ready are queued`() {
         every { timeFilter.isReady } returns false
 
         for (i in 0 until 5) {
-            player.queueChunk(i * 20_000L, makePcmData(960))
+            player.queueChunk(1_000_000L + i * 20_000L, makePcmData(960))
         }
 
-        assertEquals(PlaybackState.INITIALIZING, player.getPlaybackState())
-
-        val pendingChunks: MutableList<*> = getField("pendingChunks")
-        assertEquals("5 chunks should be buffered", 5, pendingChunks.size)
-    }
-
-    @Test
-    fun `pending chunks processed when time sync becomes ready`() {
-        every { timeFilter.isReady } returns false
-
-        for (i in 0 until 5) {
-            val ts = 1_000_000L + i * 20_000L
-            player.queueChunk(ts, makePcmData(960))
-        }
-
-        val pendingChunks: MutableList<*> = getField("pendingChunks")
-        assertEquals(5, pendingChunks.size)
-
-        // Make time sync ready and queue one more chunk to trigger processing
-        every { timeFilter.isReady } returns true
-        val nextTs = 1_000_000L + 5 * 20_000L
-        player.queueChunk(nextTs, makePcmData(960))
-
-        assertEquals("Pending chunks should be processed", 0, pendingChunks.size)
+        // They wait in the queue; start gating holds them until the clock is
+        // synchronised (see SyncAudioPlayerLoopTest).
+        assertEquals("5 chunks should be queued", 5, getChunkQueue().size)
         assertEquals(PlaybackState.WAITING_FOR_START, player.getPlaybackState())
-    }
-
-    @Test
-    fun `pending buffer respects MAX_PENDING_CHUNKS limit`() {
-        every { timeFilter.isReady } returns false
-
-        for (i in 0 until 510) {
-            player.queueChunk(i * 20_000L, makePcmData(960))
-        }
-
-        val pendingChunks: MutableList<*> = getField("pendingChunks")
-        assertEquals("Buffer should cap at MAX_PENDING_CHUNKS (500)", 500, pendingChunks.size)
-
-        val stats = player.getStats()
-        assertTrue("Excess chunks should be dropped", stats.chunksDropped > 0)
     }
 
     // ========================================================================

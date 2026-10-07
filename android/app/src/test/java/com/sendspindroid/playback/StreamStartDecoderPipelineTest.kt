@@ -2,6 +2,7 @@ package com.sendspindroid.playback
 
 import android.util.Log
 import com.sendspindroid.sendspin.decoder.AudioDecoder
+import com.sendspindroid.sendspin.decoder.DecodedAudio
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import io.mockk.*
 import org.junit.After
@@ -163,7 +164,8 @@ class StreamStartDecoderPipelineTest {
             override fun configure(sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
                 throw RuntimeException("configure failed")
             }
-            override fun decode(compressedData: ByteArray) = compressedData
+            override fun decode(compressedData: ByteArray, timestampUs: Long) =
+                listOf(DecodedAudio(timestampUs, compressedData))
             override fun flush() {}
             override fun release() {}
         }
