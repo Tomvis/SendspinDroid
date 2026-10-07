@@ -1774,139 +1774,142 @@ class SyncAudioPlayer(
             AppLog.Audio.d("Playback loop started, initial state=$playbackState")
 
             while (isActive && isPlaying.get()) {
-                if (isPaused.get()) {
-                    delay(STATE_POLL_DELAY_MS)
-                    continue
-                }
-
-                // Handle deferred flush from clearBuffer()/enterIdle().
-                // Performed here (on the playback thread) rather than on the
-                // main thread to avoid flushing mid-write (H-11).
-                if (isFlushPending.compareAndSet(true, false)) {
-                    val track = audioSink
-                    if (track != null) {
-                        try {
-                            track.pause()
-                            track.flush()
-                            track.play()
-                        } catch (e: IllegalStateException) {
-                            AppLog.Audio.w("Failed to flush AudioTrack (deferred)", e)
-                        }
-                    }
-                    // The flush restarts the track's frame position from zero.
-                    // Restart our count here, on the thread that writes, so a
-                    // write that raced the clear cannot leave the two apart.
-                    totalFramesWritten.set(0)
-                    consecutiveValidTimestamps = 0
-                    dacTimestampsStable = false
-                }
-
-                // State machine for synchronized playback
-                when (playbackState) {
-                    PlaybackState.INITIALIZING -> {
-                        // Write silence to keep DAC timestamps warm while waiting
-                        // for first chunk. Once stable, reduced-rate keepalive.
-                        if (!dacTimestampsStable) {
-                            preCalibrateDacTiming()
-                        } else {
-                            writeSilenceKeepAlive()
-                        }
-                        delay(STATE_POLL_DELAY_MS)
-                        continue
-                    }
-
-                    PlaybackState.WAITING_FOR_START -> {
-                        // Check if we have enough buffer before starting
-                        // Duration check alone is sufficient -- the old chunk count gate
-                        // (MIN_CHUNKS_BEFORE_START=16) added unnecessary delay and is now
-                        // replaced by DAC timestamp stability tracking in preCalibrateDacTiming()
-                        val bufferedMs = (totalQueuedSamples.get() * 1000) / sampleRate
-                        if (bufferedMs < MIN_BUFFER_BEFORE_START_MS || handleStartGating()) {
-                            // Still waiting for buffer or for the scheduled start.
-                            // Keep the track fed with silence throughout: a track
-                            // left to underrun stalls with its timestamps frozen,
-                            // and a start aligned against those is off by however
-                            // long it sat idle.
-                            if (!dacTimestampsStable) {
-                                preCalibrateDacTiming()
-                            } else {
-                                writeSilenceKeepAlive()
-                            }
-                            delay(STATE_POLL_DELAY_MS)
-                            continue
-                        }
-                        // handleStartGating() transitioned us to PLAYING
-                    }
-
-                    PlaybackState.REANCHORING -> {
-                        // Write silence to keep DAC timestamps warm while waiting
-                        // for new chunks after reanchor
-                        if (!dacTimestampsStable) {
-                            preCalibrateDacTiming()
-                        } else {
-                            writeSilenceKeepAlive()
-                        }
-                        delay(STATE_POLL_DELAY_MS)
-                        continue
-                    }
-
-                    PlaybackState.PLAYING -> {
-                        // Normal playback - handled below
-                    }
-                }
-
-                // PLAYING state: process chunks with sync correction
-                val chunk = chunkQueue.peek()
-                if (chunk == null) {
-                    // No chunks available - buffer underrun
-                    bufferUnderrunCount++
-                    // The track may stall now. Start the sync error estimate over
-                    // and hold corrections until it has settled on fresh readings.
-                    syncErrorFilter.reset()
-                    playingStateEnteredAtUs = nowNs() / 1000
-                    delay(BUFFER_EMPTY_DELAY_MS)
-                    continue
-                }
-
-                // Pending-to-DAC pacing: only mechanism needed for write timing.
-                // The Python CLI uses a pull/callback model (audio system requests
-                // frames); on Android we push, so we pace writes by keeping the
-                // AudioTrack ring buffer at a target depth. This replaces the old
-                // effectiveLead scheduling which drifted due to Kalman offset changes
-                // between chunk-queue time and chunk-play time.
-                val pendingToDacUs = if (audioSink != null && dacTimestampsStable)
-                    getPendingToDacUs(audioSink!!) else 0L
-
-                // Rate-limited DAC pacing diagnostics. The watchdog shares this
-                // cadence so stuck-state warnings come out on the same log tick.
-                val nowMicros = nowNs() / 1000
-                checkStuckState()
-                if (dacTimestampsStable && nowMicros - lastDacPacingLogTimeUs > DAC_PACING_LOG_INTERVAL_US) {
-                    lastDacPacingLogTimeUs = nowMicros
-                    AppLog.Sync.d("DAC pacing: pending=${pendingToDacUs/1000}ms, syncErr=${syncErrorUs}us, " +
-                        "smoothed=${syncErrorFilter.offsetMicros}us, dropped=$framesDropped, inserted=$framesInserted")
-                }
-
-                // Pause writing when the AudioTrack buffer is sufficiently full
-                if (dacTimestampsStable && pendingToDacUs > TARGET_PENDING_US + PENDING_TOL_US) {
-                    delay(STATE_POLL_DELAY_MS)
-                    continue
-                }
-
-                // Reanchor if sync error is extremely large (e.g. after long pause/seek)
-                if (startTimeCalibrated && abs(syncErrorUs) > REANCHOR_THRESHOLD_US) {
-                    AppLog.Sync.w("Large sync error: ${syncErrorUs/1000}ms, considering reanchor")
-                    if (triggerReanchor()) {
-                        continue
-                    }
-                }
-
-                // Normal playback: update correction schedule and write chunk
-                playChunkWithCorrection(chunk)
+                val waitMs = playbackLoopStep()
+                if (waitMs > 0) delay(waitMs)
             }
 
             AppLog.Audio.d("Playback loop ended")
         }
+    }
+
+    /**
+     * One iteration of the playback loop. Audio thread only.
+     *
+     * @return milliseconds to wait before the next iteration, 0 for none
+     */
+    private fun playbackLoopStep(): Long {
+        if (isPaused.get()) return STATE_POLL_DELAY_MS
+
+        // Handle deferred flush from clearBuffer()/enterIdle().
+        // Performed here (on the playback thread) rather than on the
+        // main thread to avoid flushing mid-write (H-11).
+        if (isFlushPending.compareAndSet(true, false)) {
+            val track = audioSink
+            if (track != null) {
+                try {
+                    track.pause()
+                    track.flush()
+                    track.play()
+                } catch (e: IllegalStateException) {
+                    AppLog.Audio.w("Failed to flush AudioTrack (deferred)", e)
+                }
+            }
+            // The flush restarts the track's frame position from zero.
+            // Restart our count here, on the thread that writes, so a
+            // write that raced the clear cannot leave the two apart.
+            totalFramesWritten.set(0)
+            consecutiveValidTimestamps = 0
+            dacTimestampsStable = false
+        }
+
+        // State machine for synchronized playback
+        when (playbackState) {
+            PlaybackState.INITIALIZING -> {
+                // Write silence to keep DAC timestamps warm while waiting
+                // for first chunk. Once stable, reduced-rate keepalive.
+                if (!dacTimestampsStable) {
+                    preCalibrateDacTiming()
+                } else {
+                    writeSilenceKeepAlive()
+                }
+                return STATE_POLL_DELAY_MS
+            }
+
+            PlaybackState.WAITING_FOR_START -> {
+                // Check if we have enough buffer before starting
+                // Duration check alone is sufficient -- the old chunk count gate
+                // (MIN_CHUNKS_BEFORE_START=16) added unnecessary delay and is now
+                // replaced by DAC timestamp stability tracking in preCalibrateDacTiming()
+                val bufferedMs = (totalQueuedSamples.get() * 1000) / sampleRate
+                if (bufferedMs < MIN_BUFFER_BEFORE_START_MS || handleStartGating()) {
+                    // Still waiting for buffer or for the scheduled start.
+                    // Keep the track fed with silence throughout: a track
+                    // left to underrun stalls with its timestamps frozen,
+                    // and a start aligned against those is off by however
+                    // long it sat idle.
+                    if (!dacTimestampsStable) {
+                        preCalibrateDacTiming()
+                    } else {
+                        writeSilenceKeepAlive()
+                    }
+                    return STATE_POLL_DELAY_MS
+                }
+                // handleStartGating() transitioned us to PLAYING
+            }
+
+            PlaybackState.REANCHORING -> {
+                // Write silence to keep DAC timestamps warm while waiting
+                // for new chunks after reanchor
+                if (!dacTimestampsStable) {
+                    preCalibrateDacTiming()
+                } else {
+                    writeSilenceKeepAlive()
+                }
+                return STATE_POLL_DELAY_MS
+            }
+
+            PlaybackState.PLAYING -> {
+                // Normal playback - handled below
+            }
+        }
+
+        // PLAYING state: process chunks with sync correction
+        val chunk = chunkQueue.peek()
+        if (chunk == null) {
+            // No chunks available - buffer underrun
+            bufferUnderrunCount++
+            // The track may stall now. Start the sync error estimate over
+            // and hold corrections until it has settled on fresh readings.
+            syncErrorFilter.reset()
+            playingStateEnteredAtUs = nowNs() / 1000
+            return BUFFER_EMPTY_DELAY_MS
+        }
+
+        // Pending-to-DAC pacing: only mechanism needed for write timing.
+        // The Python CLI uses a pull/callback model (audio system requests
+        // frames); on Android we push, so we pace writes by keeping the
+        // AudioTrack ring buffer at a target depth. This replaces the old
+        // effectiveLead scheduling which drifted due to Kalman offset changes
+        // between chunk-queue time and chunk-play time.
+        val pendingToDacUs = if (audioSink != null && dacTimestampsStable)
+            getPendingToDacUs(audioSink!!) else 0L
+
+        // Rate-limited DAC pacing diagnostics. The watchdog shares this
+        // cadence so stuck-state warnings come out on the same log tick.
+        val nowMicros = nowNs() / 1000
+        checkStuckState()
+        if (dacTimestampsStable && nowMicros - lastDacPacingLogTimeUs > DAC_PACING_LOG_INTERVAL_US) {
+            lastDacPacingLogTimeUs = nowMicros
+            AppLog.Sync.d("DAC pacing: pending=${pendingToDacUs/1000}ms, syncErr=${syncErrorUs}us, " +
+                "smoothed=${syncErrorFilter.offsetMicros}us, dropped=$framesDropped, inserted=$framesInserted")
+        }
+
+        // Pause writing when the AudioTrack buffer is sufficiently full
+        if (dacTimestampsStable && pendingToDacUs > TARGET_PENDING_US + PENDING_TOL_US) {
+            return STATE_POLL_DELAY_MS
+        }
+
+        // Reanchor if sync error is extremely large (e.g. after long pause/seek)
+        if (startTimeCalibrated && abs(syncErrorUs) > REANCHOR_THRESHOLD_US) {
+            AppLog.Sync.w("Large sync error: ${syncErrorUs/1000}ms, considering reanchor")
+            if (triggerReanchor()) {
+                return 0
+            }
+        }
+
+        // Normal playback: update correction schedule and write chunk
+        playChunkWithCorrection(chunk)
+        return 0
     }
 
     /**
