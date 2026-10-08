@@ -123,13 +123,17 @@ fun StatsContent(
             String.format("+/- %.2f ms", state.clockErrorMs),
             getStatusColor(getClockErrorStatus(state.clockErrorUs)),
         )
-        StatRow(stringResource(R.string.stats_clock_offset), String.format("%+.2f ms", state.clockOffsetMs))
         StatRow(stringResource(R.string.stats_measurements), state.measurementCount.toString())
         if (state.lastTimeSyncAgeMs >= 0) {
+            // Once synchronized the clock is measured every 3 s.
             StatRow(
                 stringResource(R.string.stats_last_measurement),
                 agoSeconds(state.lastTimeSyncAgeMs),
-                getLastSyncColor(state.lastTimeSyncAgeMs),
+                when {
+                    state.lastTimeSyncAgeMs < 10_000L -> ColorGood
+                    state.lastTimeSyncAgeMs < 30_000L -> ColorWarning
+                    else -> ColorBad
+                },
             )
         }
         SectionNote(stringResource(R.string.stats_clock_note))
@@ -503,7 +507,6 @@ private fun StatsContentPreview() {
                 syncErrorUs = -410,
                 smoothedSyncErrorUs = -40,
                 startTimeCalibrated = true,
-                clockOffsetUs = 5000,
                 clockDriftPpm = 2.5,
                 clockErrorUs = 300,
                 clockConverged = true,

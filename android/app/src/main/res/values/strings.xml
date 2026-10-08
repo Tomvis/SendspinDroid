@@ -70,7 +70,6 @@
     <string name="stats_clock_drift">Drift</string>
     <string name="stats_clock_drift_per_hour">Drift per hour</string>
     <string name="stats_clock_uncertainty">Uncertainty</string>
-    <string name="stats_clock_offset">Offset to server</string>
     <string name="stats_last_measurement">Last measurement</string>
     <string name="stats_clock_note">Drift is how fast this device\'s clock runs against the server\'s. It is measured and compensated, so it does not become sync error.</string>
     <string name="stats_correcting_now">Now</string>
@@ -283,9 +282,9 @@
     <string name="stats_measurements">Measurements</string>
     <string name="stats_underruns">Underruns</string>
     <string name="stats_queued">Queued</string>
-    <string name="stats_gaps">Gaps Filled</string>
-    <string name="stats_overlaps">Overlaps</string>
-    <string name="stats_reanchors">Reanchors</string>
+    <string name="stats_gaps">Gaps filled</string>
+    <string name="stats_overlaps">Overlaps trimmed</string>
+    <string name="stats_reanchors">Re-anchors</string>
 
     <!-- Admission notice: a connected session that cannot carry playback -->
     <string name="admission_awaiting_approval_title">Waiting for approval</string>

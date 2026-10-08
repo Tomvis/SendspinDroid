@@ -142,7 +142,6 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
             staticDelayMs = bundle.getDouble("static_delay_ms", 0.0),
 
             // Clock
-            clockOffsetUs = bundle.getLong("clock_offset_us", 0L),
             clockDriftPpm = bundle.getDouble("clock_drift_ppm", 0.0),
             clockErrorUs = bundle.getLong("clock_error_us", 0L),
             clockConverged = bundle.getBoolean("clock_converged", false),
@@ -220,7 +219,6 @@ data class StatsState(
     val staticDelayMs: Double = 0.0,
 
     // Clock
-    val clockOffsetUs: Long = 0L,
     val clockDriftPpm: Double = 0.0,
     val clockErrorUs: Long = 0L,
     val clockConverged: Boolean = false,
@@ -251,7 +249,6 @@ data class StatsState(
 ) {
     val syncErrorMs: Double get() = syncErrorUs / 1000.0
     val smoothedSyncErrorMs: Double get() = smoothedSyncErrorUs / 1000.0
-    val clockOffsetMs: Double get() = clockOffsetUs / 1000.0
     val clockErrorMs: Double get() = clockErrorUs / 1000.0
 
     /** The stream's rate once one has started; the 48 kHz every stream has used so far before that. */
