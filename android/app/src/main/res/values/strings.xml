@@ -45,20 +45,56 @@
 
     <!-- Stats for Nerds -->
     <string name="stats_title">Stats for Nerds</string>
+    <string name="stats_section_sync">SYNC</string>
+    <string name="stats_section_clock">CLOCK</string>
+    <string name="stats_section_correction">CORRECTION</string>
+    <string name="stats_section_protocol">PROTOCOL</string>
+    <string name="stats_section_reconnects">RECONNECTS</string>
+    <string name="stats_summary_not_connected">Not connected</string>
+    <string name="stats_summary_settling">Settling</string>
+    <string name="stats_summary_in_sync">In sync</string>
+    <string name="stats_summary_correcting">In sync, correcting</string>
+    <string name="stats_summary_out_of_sync">Out of sync</string>
+    <string name="stats_playback_playing">Playing</string>
+    <string name="stats_playback_waiting">Waiting to start</string>
+    <string name="stats_playback_reanchoring">Re-anchoring</string>
+    <string name="stats_playback_idle">Idle</string>
+    <string name="stats_sync_error_smoothed">Sync error</string>
+    <string name="stats_sync_error_raw">Last reading</string>
+    <string name="stats_start_aligned">Start aligned to output</string>
+    <string name="stats_settling">Settling</string>
+    <string name="stats_manual_offset">Manual offset</string>
+    <string name="stats_sync_note">Positive is late. Left alone within +/-0.10 ms, nudged back outside it, resynced in one step past 1 ms.</string>
+    <string name="stats_clock_synced">Synchronized</string>
+    <string name="stats_clock_synced_after">Yes, after %.1f s</string>
+    <string name="stats_clock_drift">Drift</string>
+    <string name="stats_clock_drift_per_hour">Drift per hour</string>
+    <string name="stats_clock_uncertainty">Uncertainty</string>
+    <string name="stats_last_measurement">Last measurement</string>
+    <string name="stats_clock_note">Drift is how fast this device\'s clock runs against the server\'s. It is measured and compensated, so it does not become sync error.</string>
+    <string name="stats_correcting_now">Now</string>
+    <string name="stats_correcting_none">None</string>
+    <string name="stats_correcting_dropping">Dropping a frame every 20 ms</string>
+    <string name="stats_correcting_inserting">Repeating a frame every 20 ms</string>
+    <string name="stats_frames_dropped">Frames dropped</string>
+    <string name="stats_frames_inserted">Frames inserted</string>
+    <string name="stats_correction_note">Since the stream started. Dropped frames catch up, inserted frames wait; both include one-step resyncs. A re-anchor restarts playback from the buffer.</string>
+    <string name="stats_min_buffer">Buffer asked of server</string>
+    <string name="stats_lead_time">Lead time asked</string>
+    <string name="stats_chunks">Chunks in / played / dropped</string>
+    <string name="stats_encryption">Encryption</string>
+    <string name="stats_encryption_paired">Encrypted, paired</string>
+    <string name="stats_encryption_pairing">Encrypted, pairing</string>
+    <string name="stats_encryption_unpaired">Encrypted, not paired</string>
+    <string name="stats_roles">Roles</string>
+    <string name="stats_stream">Stream</string>
+    <string name="stats_last_message">Last message</string>
 
     <!-- Stats sections -->
-    <string name="stats_section_connection">CONNECTION</string>
     <string name="stats_section_network">NETWORK</string>
-    <string name="stats_section_sync_error">SYNC ERROR</string>
     <string name="stats_section_buffer">BUFFER</string>
-    <string name="stats_section_sync_correction">SYNC CORRECTION</string>
-    <string name="stats_section_clock_sync">CLOCK SYNC</string>
-    <string name="stats_section_dac_audio">DAC / AUDIO</string>
-    <string name="stats_section_connection_health">CONNECTION HEALTH</string>
-    <string name="stats_no_handoffs">No handoff episodes recorded</string>
 
     <!-- Stats labels - Sync Status -->
-    <string name="stats_sync_error">Sync Error</string>
 
     <!-- Menu -->
     <string name="action_stats">Stats for Nerds</string>
@@ -236,46 +272,19 @@
     <string name="stats_server">Server</string>
     <string name="stats_address">Address</string>
     <string name="stats_state">State</string>
-    <string name="stats_codec">Codec</string>
-    <string name="stats_last_byte_received">Last Byte Received</string>
-    <string name="stats_stall_watchdog">Stall Watchdog</string>
-    <string name="stats_watchdog_armed">Armed</string>
-    <string name="stats_watchdog_idle">Idle</string>
     <string name="stats_last_disconnect">Last Disconnect</string>
-    <string name="stats_convergence_time">Convergence Time</string>
     <string name="stats_type">Type</string>
     <string name="stats_quality">Quality</string>
-    <string name="stats_metered">Metered</string>
     <string name="stats_wifi_rssi">WiFi RSSI</string>
     <string name="stats_wifi_speed">WiFi Speed</string>
     <string name="stats_wifi_band">WiFi Band</string>
-    <string name="stats_cellular">Cellular</string>
     <string name="stats_playback">Playback</string>
-    <string name="stats_smoothed">Smoothed</string>
-    <string name="stats_drift_rate">Drift Rate</string>
-    <string name="stats_grace_period">Grace Period</string>
-    <string name="stats_grace_inactive">Inactive</string>
-    <string name="stats_offset">Offset</string>
-    <string name="stats_drift">Drift</string>
-    <string name="stats_error">Error</string>
-    <string name="stats_converged">Converged</string>
     <string name="stats_measurements">Measurements</string>
-    <string name="stats_last_sync">Last Sync</string>
-    <string name="stats_sync_offset">Sync Offset</string>
-    <string name="stats_calibrated">Calibrated</string>
-    <string name="stats_frames_written">Frames Written</string>
-    <string name="stats_server_position">Server Position</string>
     <string name="stats_underruns">Underruns</string>
     <string name="stats_queued">Queued</string>
-    <string name="stats_received">Received</string>
-    <string name="stats_played">Played</string>
-    <string name="stats_dropped">Dropped</string>
-    <string name="stats_gaps">Gaps Filled</string>
-    <string name="stats_overlaps">Overlaps</string>
-    <string name="stats_mode">Mode</string>
-    <string name="stats_inserted">Inserted</string>
-    <string name="stats_corrections">Corrections</string>
-    <string name="stats_reanchors">Reanchors</string>
+    <string name="stats_gaps">Gaps filled</string>
+    <string name="stats_overlaps">Overlaps trimmed</string>
+    <string name="stats_reanchors">Re-anchors</string>
 
     <!-- Admission notice: a connected session that cannot carry playback -->
     <string name="admission_awaiting_approval_title">Waiting for approval</string>

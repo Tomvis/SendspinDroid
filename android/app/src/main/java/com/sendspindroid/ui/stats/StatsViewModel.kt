@@ -28,14 +28,6 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "StatsViewModel"
         private const val UPDATE_INTERVAL_MS = 500L  // 2 Hz
-
-        // Thresholds for color-coded status
-        private const val SYNC_ERROR_GOOD_US = 2_000L      // <2ms = green
-        private const val SYNC_ERROR_WARNING_US = 10_000L  // 2-10ms = yellow
-        private const val CLOCK_ERROR_GOOD_US = 1_000L     // <1ms = green
-        private const val CLOCK_ERROR_WARNING_US = 5_000L  // 1-5ms = yellow
-        private const val CLOCK_DRIFT_GOOD_PPM = 10.0      // <10 ppm = green
-        private const val CLOCK_DRIFT_WARNING_PPM = 50.0   // 10-50 ppm = yellow
     }
 
     private val _statsState = MutableStateFlow(StatsState())
@@ -118,42 +110,51 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateStats(bundle: Bundle) {
         _statsState.value = StatsState(
-            // Connection
+            // Protocol
             serverName = bundle.getString("server_name", null),
             serverAddress = bundle.getString("server_address", null),
             connectionState = bundle.getString("connection_state", "Unknown"),
             audioCodec = bundle.getString("audio_codec", "--"),
+            streamSampleRate = bundle.getInt("stream_sample_rate", 0),
+            streamBitDepth = bundle.getInt("stream_bit_depth", 0),
+            streamChannels = bundle.getInt("stream_channels", 0),
+            activeRoles = bundle.getString("active_roles", "").split(',').filter { it.isNotEmpty() },
+            pskCategory = bundle.getString("psk_category", null),
+            minBufferMs = bundle.getInt("min_buffer_ms", 0),
+            requiredLeadTimeMs = bundle.getInt("required_lead_time_ms", 0),
+            lastByteReceivedAgoMs = bundle.getLong("last_byte_received_ago_ms", -1L),
+            lastDisconnectCode = if (bundle.containsKey("last_disconnect_code")) bundle.getInt("last_disconnect_code") else null,
+            lastDisconnectReason = bundle.getString("last_disconnect_reason", null),
 
             // Network
             networkType = bundle.getString("network_type", "UNKNOWN"),
             networkQuality = bundle.getString("network_quality", "UNKNOWN"),
-            networkMetered = bundle.getBoolean("network_metered", true),
             wifiRssi = bundle.getInt("wifi_rssi", Int.MIN_VALUE),
             wifiSpeed = bundle.getInt("wifi_link_speed", -1),
             wifiFrequency = bundle.getInt("wifi_frequency", -1),
-            cellularType = bundle.getString("cellular_type", null),
 
-            // Sync Error
+            // Sync
             playbackState = bundle.getString("playback_state", "UNKNOWN"),
             syncErrorUs = bundle.getLong("sync_error_us", 0L),
             smoothedSyncErrorUs = bundle.getLong("smoothed_sync_error_us", 0L),
-            syncErrorDrift = bundle.getDouble("sync_error_drift", 0.0),
             gracePeriodRemainingUs = bundle.getLong("grace_period_remaining_us", -1L),
+            startTimeCalibrated = bundle.getBoolean("start_time_calibrated", false),
+            staticDelayMs = bundle.getDouble("static_delay_ms", 0.0),
 
-            // Clock Sync
-            clockOffsetUs = bundle.getLong("clock_offset_us", 0L),
+            // Clock
             clockDriftPpm = bundle.getDouble("clock_drift_ppm", 0.0),
             clockErrorUs = bundle.getLong("clock_error_us", 0L),
             clockConverged = bundle.getBoolean("clock_converged", false),
             measurementCount = bundle.getInt("measurement_count", 0),
             lastTimeSyncAgeMs = bundle.getLong("last_time_sync_age_ms", -1L),
-            staticDelayMs = bundle.getDouble("static_delay_ms", 0.0),
+            timeFilterConvergenceMs = bundle.getLong("time_filter_convergence_ms", 0L),
 
-            // DAC / Audio
-            startTimeCalibrated = bundle.getBoolean("start_time_calibrated", false),
-            dacCalibrationCount = bundle.getInt("dac_calibration_count", 0),
-            totalFramesWritten = bundle.getLong("total_frames_written", 0L),
-            serverTimelineCursorUs = bundle.getLong("server_timeline_cursor_us", 0L),
+            // Correction
+            insertEveryNFrames = bundle.getInt("insert_every_n_frames", 0),
+            dropEveryNFrames = bundle.getInt("drop_every_n_frames", 0),
+            framesInserted = bundle.getLong("frames_inserted", 0L),
+            framesDropped = bundle.getLong("frames_dropped", 0L),
+            reanchorCount = bundle.getLong("reanchor_count", 0L),
             bufferUnderrunCount = bundle.getLong("buffer_underrun_count", 0L),
 
             // Buffer
@@ -166,22 +167,6 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
             overlapsTrimmed = bundle.getLong("overlaps_trimmed", 0L),
             overlapTrimmedMs = bundle.getLong("overlap_trimmed_ms", 0L),
 
-            // Sync Correction
-            insertEveryNFrames = bundle.getInt("insert_every_n_frames", 0),
-            dropEveryNFrames = bundle.getInt("drop_every_n_frames", 0),
-            framesInserted = bundle.getLong("frames_inserted", 0L),
-            framesDropped = bundle.getLong("frames_dropped", 0L),
-            syncCorrections = bundle.getLong("sync_corrections", 0L),
-            reanchorCount = bundle.getLong("reanchor_count", 0L),
-
-            // Connection health (issue #128)
-            lastByteReceivedAgoMs = bundle.getLong("last_byte_received_ago_ms", -1L),
-            stallWatchdogArmed = bundle.getBoolean("stall_watchdog_armed", false),
-            lastDisconnectCode = if (bundle.containsKey("last_disconnect_code")) bundle.getInt("last_disconnect_code") else null,
-            lastDisconnectReason = bundle.getString("last_disconnect_reason", null),
-            timeFilterConvergenceMs = bundle.getLong("time_filter_convergence_ms", 0L),
-
-            // Connection health (handoff episodes)
             handoffEpisodes = bundle.getString("handoff_episodes", null),
         )
     }
@@ -201,42 +186,52 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
  * Complete stats state for the Stats Bottom Sheet.
  */
 data class StatsState(
-    // Connection
+    // Protocol
     val serverName: String? = null,
     val serverAddress: String? = null,
     val connectionState: String = "Unknown",
     val audioCodec: String = "--",
+    val streamSampleRate: Int = 0,
+    val streamBitDepth: Int = 0,
+    val streamChannels: Int = 0,
+    val activeRoles: List<String> = emptyList(),
+    /** Name of the PskCategory that admitted the connection, or null. */
+    val pskCategory: String? = null,
+    val minBufferMs: Int = 0,
+    val requiredLeadTimeMs: Int = 0,
+    val lastByteReceivedAgoMs: Long = -1L,
+    val lastDisconnectCode: Int? = null,
+    val lastDisconnectReason: String? = null,
 
     // Network
     val networkType: String = "UNKNOWN",
     val networkQuality: String = "UNKNOWN",
-    val networkMetered: Boolean = true,
     val wifiRssi: Int = Int.MIN_VALUE,
     val wifiSpeed: Int = -1,
     val wifiFrequency: Int = -1,
-    val cellularType: String? = null,
 
-    // Sync Error
+    // Sync
     val playbackState: String = "UNKNOWN",
     val syncErrorUs: Long = 0L,
     val smoothedSyncErrorUs: Long = 0L,
-    val syncErrorDrift: Double = 0.0,
     val gracePeriodRemainingUs: Long = -1L,
+    val startTimeCalibrated: Boolean = false,
+    val staticDelayMs: Double = 0.0,
 
-    // Clock Sync
-    val clockOffsetUs: Long = 0L,
+    // Clock
     val clockDriftPpm: Double = 0.0,
     val clockErrorUs: Long = 0L,
     val clockConverged: Boolean = false,
     val measurementCount: Int = 0,
     val lastTimeSyncAgeMs: Long = -1L,
-    val staticDelayMs: Double = 0.0,
+    val timeFilterConvergenceMs: Long = 0L,
 
-    // DAC / Audio
-    val startTimeCalibrated: Boolean = false,
-    val dacCalibrationCount: Int = 0,
-    val totalFramesWritten: Long = 0L,
-    val serverTimelineCursorUs: Long = 0L,
+    // Correction
+    val insertEveryNFrames: Int = 0,
+    val dropEveryNFrames: Int = 0,
+    val framesInserted: Long = 0L,
+    val framesDropped: Long = 0L,
+    val reanchorCount: Long = 0L,
     val bufferUnderrunCount: Long = 0L,
 
     // Buffer
@@ -249,50 +244,33 @@ data class StatsState(
     val overlapsTrimmed: Long = 0L,
     val overlapTrimmedMs: Long = 0L,
 
-    // Sync Correction
-    val insertEveryNFrames: Int = 0,
-    val dropEveryNFrames: Int = 0,
-    val framesInserted: Long = 0L,
-    val framesDropped: Long = 0L,
-    val syncCorrections: Long = 0L,
-    val reanchorCount: Long = 0L,
-
-    // Connection health (issue #128). Exposes keepalive freshness, watchdog
-    // state, last-disconnect details, and
-    // time-filter convergence time for field triage.
-    val lastByteReceivedAgoMs: Long = -1L,
-    val stallWatchdogArmed: Boolean = false,
-    val lastDisconnectCode: Int? = null,
-    val lastDisconnectReason: String? = null,
-    val timeFilterConvergenceMs: Long = 0L,
-
-    // Connection health: newline-delimited handoff-episode summary from the recorder.
+    // Newline-delimited reconnect-episode summary from the recorder.
     val handoffEpisodes: String? = null,
 ) {
-    // Derived values
     val syncErrorMs: Double get() = syncErrorUs / 1000.0
     val smoothedSyncErrorMs: Double get() = smoothedSyncErrorUs / 1000.0
-    val clockOffsetMs: Double get() = clockOffsetUs / 1000.0
     val clockErrorMs: Double get() = clockErrorUs / 1000.0
-    val serverPositionSec: Double get() = serverTimelineCursorUs / 1_000_000.0
-    val queuedMs: Long get() = (queuedSamples * 1000) / 48000  // 48kHz sample rate
+
+    /** The stream's rate once one has started; the 48 kHz every stream has used so far before that. */
+    private val sampleRate: Int get() = if (streamSampleRate > 0) streamSampleRate else 48_000
+
+    val queuedMs: Long get() = queuedSamples * 1000 / sampleRate
+
+    /** How much audio a count of frames is, in milliseconds. */
+    fun framesToMs(frames: Long): Double = frames * 1000.0 / sampleRate
+
+    /** What the clocks drifting at this rate adds up to over an hour. */
+    val clockDriftMsPerHour: Double get() = clockDriftPpm * 3.6
 
     val isWifi: Boolean get() = networkType == "WIFI"
-    val isCellular: Boolean get() = networkType == "CELLULAR"
 
-    val correctionMode: String get() = when {
-        insertEveryNFrames > 0 -> "Insert 1/$insertEveryNFrames"
-        dropEveryNFrames > 0 -> "Drop 1/$dropEveryNFrames"
-        else -> "None"
-    }
+    val isPlaying: Boolean get() = playbackState == "PLAYING"
 
     val wifiBand: String get() = when {
         wifiFrequency >= 5000 -> "5 GHz"
         wifiFrequency > 0 -> "2.4 GHz"
         else -> "--"
     }
-
-    val cellularTypeDisplay: String get() = cellularType?.removePrefix("TYPE_") ?: "--"
 }
 
 /**
@@ -300,12 +278,17 @@ data class StatsState(
  */
 enum class ThresholdStatus { GOOD, WARNING, BAD }
 
-// Helper functions for threshold status
+// The player leaves the error alone inside +/-0.1 ms, nudges it back outside
+// that, and resyncs in one step past 1 ms. A smoothed error under 1 ms is the
+// player working as designed; past it something has knocked it out of sync.
+const val SYNC_DEADBAND_US = 100L
+const val SYNC_RESYNC_US = 1_000L
+
 fun getSyncErrorStatus(errorUs: Long): ThresholdStatus {
     val absError = abs(errorUs)
     return when {
-        absError < 2_000L -> ThresholdStatus.GOOD
-        absError < 10_000L -> ThresholdStatus.WARNING
+        absError < SYNC_RESYNC_US -> ThresholdStatus.GOOD
+        absError < 5 * SYNC_RESYNC_US -> ThresholdStatus.WARNING
         else -> ThresholdStatus.BAD
     }
 }
@@ -315,15 +298,6 @@ fun getClockErrorStatus(errorUs: Long): ThresholdStatus {
     return when {
         absError < 1_000L -> ThresholdStatus.GOOD
         absError < 5_000L -> ThresholdStatus.WARNING
-        else -> ThresholdStatus.BAD
-    }
-}
-
-fun getClockDriftStatus(driftPpm: Double): ThresholdStatus {
-    val absDrift = abs(driftPpm)
-    return when {
-        absDrift < 10.0 -> ThresholdStatus.GOOD
-        absDrift < 50.0 -> ThresholdStatus.WARNING
         else -> ThresholdStatus.BAD
     }
 }
@@ -340,16 +314,6 @@ fun getConnectionStatus(state: String): ThresholdStatus {
     return when {
         state.contains("Connected", ignoreCase = true) -> ThresholdStatus.GOOD
         state.contains("Connecting", ignoreCase = true) -> ThresholdStatus.WARNING
-        state.contains("Reconnecting", ignoreCase = true) -> ThresholdStatus.WARNING
         else -> ThresholdStatus.BAD
-    }
-}
-
-fun getPlaybackStatus(state: String): ThresholdStatus {
-    return when (state) {
-        "PLAYING" -> ThresholdStatus.GOOD
-        "WAITING_FOR_START", "INITIALIZING" -> ThresholdStatus.WARNING
-        "REANCHORING" -> ThresholdStatus.BAD
-        else -> ThresholdStatus.WARNING
     }
 }
