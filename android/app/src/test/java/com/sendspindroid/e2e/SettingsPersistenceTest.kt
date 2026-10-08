@@ -112,8 +112,7 @@ class SettingsPersistenceTest {
                 authToken = "secret-token-123",
                 username = "admin"
             ),
-            isDefaultServer = true,
-            isMusicAssistant = true
+            isDefaultServer = true
         )
 
         UnifiedServerRepository.saveServer(server)
@@ -138,7 +137,6 @@ class SettingsPersistenceTest {
 
         // Flags
         assertTrue(saved.isDefaultServer)
-        assertTrue(saved.isMusicAssistant)
     }
 
     @Test

@@ -40,14 +40,12 @@ class NowPlayingHeadUnitTest {
                     isPlaying = true,
                     controlsEnabled = true,
                     accentColor = null,
-                    isMaConnected = false,
                     positionMs = 60000,
                     durationMs = 375000,
                     onPreviousClick = {},
                     onPlayPauseClick = {},
                     onNextClick = {},
-                    onSwitchGroupClick = {},
-                    onFavoriteClick = {}
+                    onSwitchGroupClick = {}
                 )
             }
         }
@@ -71,14 +69,12 @@ class NowPlayingHeadUnitTest {
                     isPlaying = true,
                     controlsEnabled = true,
                     accentColor = null,
-                    isMaConnected = false,
                     positionMs = 0,
                     durationMs = 375000,
                     onPreviousClick = {},
                     onPlayPauseClick = {},
                     onNextClick = {},
-                    onSwitchGroupClick = {},
-                    onFavoriteClick = {}
+                    onSwitchGroupClick = {}
                 )
             }
         }
@@ -103,14 +99,12 @@ class NowPlayingHeadUnitTest {
                     isPlaying = false,
                     controlsEnabled = true,
                     accentColor = null,
-                    isMaConnected = false,
                     positionMs = 0,
                     durationMs = 0,
                     onPreviousClick = {},
                     onPlayPauseClick = {},
                     onNextClick = {},
-                    onSwitchGroupClick = {},
-                    onFavoriteClick = {}
+                    onSwitchGroupClick = {}
                 )
             }
         }
@@ -134,14 +128,12 @@ class NowPlayingHeadUnitTest {
                     isPlaying = true,
                     controlsEnabled = true,
                     accentColor = null,
-                    isMaConnected = false,
                     positionMs = 0,
                     durationMs = 0,
                     onPreviousClick = {},
                     onPlayPauseClick = {},
                     onNextClick = {},
-                    onSwitchGroupClick = {},
-                    onFavoriteClick = {}
+                    onSwitchGroupClick = {}
                 )
             }
         }
@@ -162,14 +154,12 @@ class NowPlayingHeadUnitTest {
                     isPlaying = false,
                     controlsEnabled = false,
                     accentColor = null,
-                    isMaConnected = false,
                     positionMs = 0,
                     durationMs = 0,
                     onPreviousClick = {},
                     onPlayPauseClick = {},
                     onNextClick = {},
-                    onSwitchGroupClick = {},
-                    onFavoriteClick = {}
+                    onSwitchGroupClick = {}
                 )
             }
         }
@@ -193,14 +183,12 @@ class NowPlayingHeadUnitTest {
                     isPlaying = true,
                     controlsEnabled = true,
                     accentColor = null,
-                    isMaConnected = false,
                     positionMs = 0,
                     durationMs = 0,
                     onPreviousClick = {},
                     onPlayPauseClick = {},
                     onNextClick = {},
-                    onSwitchGroupClick = {},
-                    onFavoriteClick = {}
+                    onSwitchGroupClick = {}
                 )
             }
         }
@@ -210,7 +198,7 @@ class NowPlayingHeadUnitTest {
     }
 
     @Test
-    fun headUnit_maConnected_showsFavoriteButton() {
+    fun headUnit_hasNoFavoriteButton() {
         composeTestRule.setContent {
             SendSpinTheme {
                 NowPlayingHeadUnit(
@@ -225,18 +213,16 @@ class NowPlayingHeadUnitTest {
                     isPlaying = true,
                     controlsEnabled = true,
                     accentColor = null,
-                    isMaConnected = true,
                     positionMs = 0,
                     durationMs = 0,
                     onPreviousClick = {},
                     onPlayPauseClick = {},
                     onNextClick = {},
-                    onSwitchGroupClick = {},
-                    onFavoriteClick = {}
+                    onSwitchGroupClick = {}
                 )
             }
         }
 
-        composeTestRule.onNodeWithContentDescription("Add current track to favorites").assertExists()
+        composeTestRule.onNodeWithContentDescription("Add current track to favorites").assertDoesNotExist()
     }
 }

@@ -699,12 +699,15 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     val artworkDeliveries = mutableListOf<Int>()
 
-    /** Every image made current, in order; an empty one is a clear. */
+    /** Every album image made current, in order; an empty one is a clear. */
     val artworkImages = mutableListOf<ByteArray>()
+
+    /** The same for the artist channel. */
+    val artistImages = mutableListOf<ByteArray>()
 
     override fun onArtwork(channel: Int, payload: ByteArray) {
         artworkDeliveries.add(channel)
-        artworkImages.add(payload)
+        (if (channel == 0) artworkImages else artistImages).add(payload)
     }
 
     override fun onSyncOffsetApplied(offsetMs: Double, source: String) {}

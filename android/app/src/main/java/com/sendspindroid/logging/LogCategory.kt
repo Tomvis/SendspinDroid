@@ -18,7 +18,6 @@ package com.sendspindroid.logging
  * | `sendspin/protocol/`                   | `Protocol`       |
  * | `network/`, `discovery/`               | `Network`        |
  * | `playback/`                            | `Playback`       |
- * | `musicassistant/`                      | `MusicAssistant` |
  * | `ui/`                                  | `UI`             |
  * | root, settings, boot receiver, etc.    | `App`            |
  */
@@ -28,7 +27,6 @@ enum class LogCategory(val tag: String) {
     Protocol("SendSpin.Protocol"),
     Network("SendSpin.Network"),
     Playback("SendSpin.Playback"),
-    MusicAssistant("SendSpin.MA"),
     UI("SendSpin.UI"),
     App("SendSpin.App");
 }

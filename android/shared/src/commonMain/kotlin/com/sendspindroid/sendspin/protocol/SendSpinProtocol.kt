@@ -93,6 +93,13 @@ object SendSpinProtocol {
         // Requested artwork width/height in pixels: MA's largest thumbnail
         // bucket, so the full-screen and TV views are not upscaled.
         const val REQUEST_SIZE = 1024
+
+        // The artist image is shown in the same card as the album art.
+        const val ARTIST_REQUEST_SIZE = 500
+
+        const val ALBUM_CHANNEL = 0
+        const val ARTIST_CHANNEL = 1
+        const val CHANNEL_COUNT = 2
     }
 
     /**

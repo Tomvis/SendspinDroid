@@ -1,6 +1,14 @@
 package com.sendspindroid.ui.main.components
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.widthIn
@@ -10,9 +18,11 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -21,15 +31,20 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.sendspindroid.R
+import com.sendspindroid.playback.PlaybackService
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
  * Album art card with optional buffering overlay.
  * Displays artwork from various sources (byte array, URI, or URL).
+ *
+ * When the server has sent an image of the artist, the card can be swiped
+ * sideways to it and back, with two dots showing which one is in view.
  */
 @Composable
 fun AlbumArtCard(
@@ -74,17 +89,58 @@ fun AlbumArtCard(
                 null -> null
             }
 
-            AsyncImage(
-                model = imageRequest,
-                contentDescription = contentDescription,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(RoundedCornerShape(16.dp)),
-                contentScale = ContentScale.Crop,
-                placeholder = painterResource(R.drawable.placeholder_album_simple),
-                error = painterResource(R.drawable.placeholder_album_simple),
-                fallback = painterResource(R.drawable.placeholder_album_simple)
-            )
+            val albumArt: @Composable () -> Unit = {
+                AsyncImage(
+                    model = imageRequest,
+                    contentDescription = contentDescription,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(16.dp)),
+                    contentScale = ContentScale.Crop,
+                    placeholder = painterResource(R.drawable.placeholder_album_simple),
+                    error = painterResource(R.drawable.placeholder_album_simple),
+                    fallback = painterResource(R.drawable.placeholder_album_simple)
+                )
+            }
+
+            val artistImage by PlaybackService.artistArtwork.collectAsStateWithLifecycle()
+            val artist = artistImage
+            if (artist == null) {
+                albumArt()
+            } else {
+                val pagerState = rememberPagerState(pageCount = { 2 })
+                HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
+                    if (page == 0) {
+                        albumArt()
+                    } else {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context).data(artist).crossfade(true).build(),
+                            contentDescription = stringResource(R.string.artist_photo),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(16.dp)),
+                            contentScale = ContentScale.Crop,
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    repeat(2) { page ->
+                        Box(
+                            Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    Color.White.copy(alpha = if (pagerState.currentPage == page) 0.95f else 0.45f)
+                                )
+                        )
+                    }
+                }
+            }
 
             // Buffering Overlay
             if (isBuffering) {

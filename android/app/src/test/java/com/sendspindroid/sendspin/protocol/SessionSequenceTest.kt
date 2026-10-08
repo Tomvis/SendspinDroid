@@ -78,7 +78,8 @@ class SessionSequenceTest {
         assertTrue(
             state.contains(
                 "\"artwork\":{\"channels\":[{\"source\":\"album\",\"format\":\"jpeg\"," +
-                    "\"width\":1024,\"height\":1024}]}"
+                    "\"width\":1024,\"height\":1024},{\"source\":\"artist\",\"format\":\"jpeg\"," +
+                    "\"width\":500,\"height\":500}]}"
             )
         )
     }

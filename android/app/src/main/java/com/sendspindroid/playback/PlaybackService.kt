@@ -58,8 +58,6 @@ import com.sendspindroid.model.PlaybackState
 import com.sendspindroid.model.PlaybackStateType
 import com.sendspindroid.model.SyncStats
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.musicassistant.MusicAssistant
-import com.sendspindroid.musicassistant.QueueUpdate
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.sendspin.SendSpinEndpoint
@@ -162,9 +160,6 @@ class PlaybackService : MediaLibraryService() {
         currentChannels = 0
         currentBitDepth = 0
     }
-
-    // Current server connection info (for MA integration)
-    private var currentServerId: String? = null
 
     // Active server as a flow, consumed by ConnectionCoordinator.
     private val _currentServerFlow = MutableStateFlow<UnifiedServer?>(null)
@@ -475,6 +470,13 @@ class PlaybackService : MediaLibraryService() {
     private var becomingNoisyReceiver: BroadcastReceiver? = null
 
     companion object {
+        // The artist image the server sends on its own artwork channel, for
+        // the second page of the album art card. In-process: it is a few
+        // tens of kilobytes that only the activity wants, not session
+        // metadata.
+        private val _artistArtwork = MutableStateFlow<ByteArray?>(null)
+        val artistArtwork: StateFlow<ByteArray?> = _artistArtwork.asStateFlow()
+
         private const val TAG = "PlaybackService"
 
         // Every focus change, the audio mode at that moment and the action
@@ -527,7 +529,7 @@ class PlaybackService : MediaLibraryService() {
         const val ARG_SERVER_ADDRESS = "server_address"
         const val ARG_SERVER_PATH = "server_path"
         const val ARG_VOLUME = "volume"
-        const val ARG_SERVER_ID = "server_id"  // For MA integration
+        const val ARG_SERVER_ID = "server_id"
 
         /**
          * Fork: unscaled artwork-stream image behind the session's <=300px
@@ -754,19 +756,6 @@ class PlaybackService : MediaLibraryService() {
         // Initialize UserSettings for player name preference (must be before lowMemoryMode check)
         com.sendspindroid.UserSettings.initialize(this)
 
-        // Initialize MusicAssistant for MA API integration
-        MusicAssistant.initialize(this)
-
-        // Fast metadata path: subscribe to MA command-channel queue_updated events
-        // to update title/artist/album as soon as the server's queue advances,
-        // roughly 1 second before the SendSpin server/state broadcast arrives.
-        // See docs/architecture/sendspin-ma-metadata-flow.md section 8a.
-        serviceScope.launch {
-            MusicAssistant.queueUpdates.collect { update ->
-                applyFastQueueUpdate(update)
-            }
-        }
-
         // Initialize UnifiedServerRepository for server lookups
         UnifiedServerRepository.initialize(this)
 
@@ -816,7 +805,6 @@ class PlaybackService : MediaLibraryService() {
         coordinator = ConnectionCoordinator(
             currentServerFlow = _currentServerFlow,
             sendSpinStateFlow = sendSpinClient?.connectionState ?: flowOf(TransportState.Idle),
-            musicAssistantStateFlow = MusicAssistant.connectionState,
             scope = serviceScope,
             connectAttempt = { lost, method ->
                 // Read again for each attempt: mDNS may have found the server
@@ -930,10 +918,6 @@ class PlaybackService : MediaLibraryService() {
 
                         // Broadcast connection state to controllers (MainActivity)
                         broadcastSessionExtras()
-
-                        // Notify MusicAssistant of connection
-                        // This triggers MA API availability check and token auth if applicable
-                        notifyMusicAssistantConnected()
                     }
                     state is TransportState.Idle && prevSendSpinState !is TransportState.Idle -> {
                         Log.d(TAG, "Disconnected from server")
@@ -1714,6 +1698,12 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
+        override fun onArtistArtwork(imageData: ByteArray?) {
+            if (com.sendspindroid.UserSettings.lowMemoryMode) return
+            Log.d(TAG, "Artist image: ${imageData?.size ?: 0} bytes")
+            _artistArtwork.value = imageData
+        }
+
         override fun onArtworkCleared() {
             mainHandler.post {
                 Log.d(TAG, "Artwork cleared by server (empty payload)")
@@ -1961,110 +1951,6 @@ class PlaybackService : MediaLibraryService() {
 
     }
 
-    // ========================================================================
-    // Fast metadata path: queue_updated event from MA command channel (fix 8a)
-    // ========================================================================
-
-    /**
-     * Apply title/artist/album from a Music Assistant `queue_updated` event.
-     *
-     * Called from [MusicAssistant.queueUpdates] roughly 1 second before
-     * the SendSpin `server/state` broadcast with the same metadata. Updates
-     * [_playbackState] and [sendSpinPlayer]'s MediaItem so the lock screen,
-     * Android Auto, and Bluetooth AVRCP reflect the new track immediately.
-     *
-     * Artwork is intentionally NOT updated here; the SendSpin `server/state`
-     * that follows will carry a fully-resolved artwork_url and is the
-     * authoritative source for imagery. See fix 8b for URL-preferred artwork.
-     *
-     * Must run on the Main thread (serviceScope dispatcher is Main).
-     */
-    @OptIn(UnstableApi::class)
-    private fun applyFastQueueUpdate(update: QueueUpdate) {
-        // Skip if there is no new title information.
-        if (update.title == null && update.artist == null && update.album == null) return
-
-        val current = _playbackState.value
-
-        // Skip if applying this update would not change title/artist/album.
-        // A null field in the update means "no information for this field" --
-        // it's never a change. A non-null field is a change only if it differs
-        // from current. We have to compare all three fields because compilation
-        // tracks share titles across artists (and split EPs share artists
-        // across albums); a title-only check would silently drop those.
-        //
-        // When SendSpin server/state arrives ~1s later as a real same-track
-        // refresh, the withMetadata call below is a no-op anyway (null-preserves
-        // semantics ensure no visible flicker), but the early-return avoids the
-        // sendSpinPlayer round-trip in the common case.
-        val titleMatches = update.title == null || update.title == current.title
-        val artistMatches = update.artist == null || update.artist == current.artist
-        val albumMatches = update.album == null || update.album == current.album
-        if (titleMatches && artistMatches && albumMatches) return
-
-        Log.d(TAG, "Fast metadata via queue_updated: ${update.title} / ${update.artist} / ${update.album}")
-
-        // Title is the authoritative discriminator for a track change: a
-        // same-title update with a different artist/album is almost always a
-        // metadata fix-up, not a queue transition. Branch the position
-        // handling on that:
-        //
-        //  - Track change: zero positionMs (a new track starts at 0; ProgressRail
-        //    then ticks forward from 0 instead of from the prior track's elapsed
-        //    seconds).
-        //  - Same-title fix: bypass withMetadata so we don't re-stamp
-        //    positionUpdatedAt. withMetadata stamps now on any positionMs>0,
-        //    which would snap the rail backward to the anchor (losing the
-        //    interpolated progress) for ~1s until the next server/state.
-        val isTrackChange = update.title != null && update.title != current.title
-        _playbackState.value = if (isTrackChange) {
-            current.withMetadata(
-                title = update.title,
-                artist = update.artist,
-                albumArtist = null,
-                album = update.album,
-                artworkUrl = null,  // preserve existing; server/state will update this
-                year = null,
-                albumTrack = null,
-                queueTrack = null,
-                totalTracks = null,
-                durationMs = update.durationMs ?: current.durationMs,
-                positionMs = 0L,
-                playbackSpeed = current.playbackSpeed
-            )
-        } else {
-            current.copy(
-                title = update.title ?: current.title,
-                artist = update.artist ?: current.artist,
-                album = update.album ?: current.album,
-                durationMs = update.durationMs ?: current.durationMs
-            )
-        }
-
-        // Refresh the forwarding-player cache BEFORE firing updateMediaItem.
-        // updateMediaItem synchronously dispatches onTimelineChanged /
-        // onMediaItemTransition to all listeners (SendSpinPlayer.kt:291-294);
-        // Media3 and the session re-read metadata in response to those
-        // callbacks. Without the cache refresh first,
-        // MetadataForwardingPlayer.getMediaMetadata() returns its prior
-        // cachedMetadata (the override at MetadataForwardingPlayer.kt:259 only
-        // delegates to the underlying player when currentTitle/currentArtist
-        // are null), so lock screen / Auto / AVRCP would see the prior track
-        // for one tick.
-        updateMediaMetadata()
-
-        sendSpinPlayer?.updateMediaItem(
-            title = update.title,
-            artist = update.artist,
-            album = update.album,
-            // Pass through `null` so the player preserves its existing duration
-            // when MA's queue_updated doesn't carry one. Coercing to 0L here
-            // would zero out the Timeline window duration on every fast queue
-            // update, killing Android Auto / lock-screen progress bars.
-            durationMs = update.durationMs,
-        )
-    }
-
     /**
      * Fetches artwork from a URL using Coil.
      * Skipped in low memory mode.
@@ -2215,6 +2101,7 @@ class PlaybackService : MediaLibraryService() {
         // Clear all per-track state BEFORE the disconnection broadcast (see the
         // KDoc above for why ordering matters).
         clearAudioStreamSpec()
+        _artistArtwork.value = null
         _playbackState.value = if (preserveVolume) {
             PlaybackState(
                 volume = _playbackState.value.volume,
@@ -2233,10 +2120,6 @@ class PlaybackService : MediaLibraryService() {
 
         // Broadcast disconnection to controllers (MainActivity)
         broadcastSessionExtras()
-
-        // Notify MusicAssistant of disconnection
-        MusicAssistant.onServerDisconnected()
-        currentServerId = null
     }
 
     @OptIn(UnstableApi::class)
@@ -2598,13 +2481,12 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Sets the current server ID for MA integration.
+     * Sets the current server ID.
      * Call this before connecting when the server ID is known.
      *
      * @param serverId The UnifiedServer.id
      */
     fun setCurrentServer(serverId: String?) {
-        currentServerId = serverId
         Log.d(TAG, "Set current server: $serverId")
 
         _currentServerFlow.value = serverId?.let { UnifiedServerRepository.getServer(it) }
@@ -2645,27 +2527,6 @@ class PlaybackService : MediaLibraryService() {
             disconnectFromServer()
             false
         }
-    }
-
-    /**
-     * Notifies MusicAssistant that a server connection was established.
-     * Looks up the server by ID and triggers MA availability check.
-     */
-    private fun notifyMusicAssistantConnected() {
-        val serverId = currentServerId
-        if (serverId == null) {
-            Log.d(TAG, "No server ID set - skipping MA notification")
-            return
-        }
-
-        val server = UnifiedServerRepository.getServer(serverId)
-        if (server == null) {
-            Log.w(TAG, "Server not found in repository: $serverId")
-            return
-        }
-
-        Log.d(TAG, "Notifying MusicAssistant: server=${server.name}, isMusicAssistant=${server.isMusicAssistant}")
-        MusicAssistant.onServerConnected(server)
     }
 
     /**
@@ -3374,7 +3235,7 @@ class PlaybackService : MediaLibraryService() {
                         val serverAddress = mediaId.removePrefix(MEDIA_ID_SERVER_PREFIX)
                         Log.d(TAG, "User selected server: $serverAddress")
 
-                        // Look up UnifiedServer by local address for MA integration
+                        // Look up UnifiedServer by local address
                         val unifiedServer = UnifiedServerRepository.allServers.value.find {
                             it.local?.address == serverAddress
                         }
@@ -3517,7 +3378,7 @@ class PlaybackService : MediaLibraryService() {
                     val path = args.getString(ARG_SERVER_PATH) ?: "/sendspin"
                     val serverId = args.getString(ARG_SERVER_ID)
                     if (address != null) {
-                        // Set server info for MA integration before connecting
+                        // Set server info before connecting
                         setCurrentServer(serverId)
                         connectToServer(address, path)
                         Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))

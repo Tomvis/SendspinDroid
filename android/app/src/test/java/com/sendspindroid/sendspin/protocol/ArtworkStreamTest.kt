@@ -132,10 +132,66 @@ class ArtworkStreamTest {
         syncClock()
         handler.handleTextMessageForTest(artworkStart)
 
-        sendImage(past, jpeg, channel = 1)
+        sendImage(past, jpeg, channel = 2)
 
         assertImages()
+        assertEquals(emptyList<ByteArray>(), handler.artistImages)
         assertEquals(emptyList<String>(), handler.protocolFailures)
+    }
+
+    // ========== artist channel ==========
+
+    @Test
+    fun `the artist channel is delivered apart from the album channel`() {
+        syncClock()
+        handler.handleTextMessageForTest(artworkStart)
+
+        sendImage(past, jpeg)
+        sendImage(past, otherJpeg, channel = 1)
+
+        assertImages(jpeg)
+        assertEquals(listOf(otherJpeg.toList()), handler.artistImages.map { it.toList() })
+    }
+
+    @Test
+    fun `an image on one channel leaves the other channel's pending image alone`() {
+        syncClock()
+        handler.handleTextMessageForTest(artworkStart)
+        sendImage(future, jpeg)
+
+        sendImage(past, otherJpeg, channel = 1)
+        advance(120)
+
+        assertImages(jpeg)
+        assertEquals(listOf(otherJpeg.toList()), handler.artistImages.map { it.toList() })
+    }
+
+    @Test
+    fun `cancel on the artist channel discards only its pending image`() {
+        syncClock()
+        handler.handleTextMessageForTest(artworkStart)
+        sendImage(future, jpeg)
+        sendImage(future, otherJpeg, channel = 1)
+
+        cancel(channel = 1)
+        advance(120)
+
+        assertImages(jpeg)
+        assertEquals(emptyList<ByteArray>(), handler.artistImages)
+    }
+
+    @Test
+    fun `stream end clears the artist image too`() {
+        syncClock()
+        handler.handleTextMessageForTest(artworkStart)
+        sendImage(past, otherJpeg, channel = 1)
+
+        handler.handleTextMessageForTest("""{"type":"stream/end","payload":{"roles":["artwork"]}}""")
+
+        assertEquals(
+            listOf(otherJpeg.toList(), emptyList()),
+            handler.artistImages.map { it.toList() },
+        )
     }
 
     // ========== pending image ==========

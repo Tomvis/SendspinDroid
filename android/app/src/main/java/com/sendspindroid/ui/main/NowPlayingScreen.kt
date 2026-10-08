@@ -68,7 +68,6 @@ fun NowPlayingScreen(
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     onOpenPairingClick: () -> Unit,
     onAllowPairingClick: () -> Unit,
@@ -83,7 +82,6 @@ fun NowPlayingScreen(
     val artworkSource by viewModel.artworkSource.collectAsStateWithLifecycle()
     val volume by viewModel.volume.collectAsStateWithLifecycle()
     val reconnectingState by viewModel.reconnectingState.collectAsStateWithLifecycle()
-    val isMaConnected by viewModel.isMaConnected.collectAsStateWithLifecycle()
     val playerColors by viewModel.playerColors.collectAsStateWithLifecycle()
     val positionMs by viewModel.positionMs.collectAsStateWithLifecycle()
     val durationMs by viewModel.durationMs.collectAsStateWithLifecycle()
@@ -292,15 +290,13 @@ fun NowPlayingScreen(
                     isPlaying = isPlaying,
                     controlsEnabled = controlsEnabled,
                     accentColor = stickyAccentColor,
-                    isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
                     onPreviousClick = onPreviousClick,
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
-                    onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick
+                    onSwitchGroupClick = onSwitchGroupClick
                 )
             }
             // TV: cinematic layout
@@ -329,7 +325,6 @@ fun NowPlayingScreen(
                     controlsEnabled = controlsEnabled,
                     volume = volume,
                     accentColor = stickyAccentColor,
-                    isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
@@ -337,7 +332,6 @@ fun NowPlayingScreen(
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
                     onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange
                 )
             }
@@ -351,7 +345,6 @@ fun NowPlayingScreen(
                     controlsEnabled = controlsEnabled,
                     volume = volume,
                     accentColor = stickyAccentColor,
-                    isMaConnected = isMaConnected,
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
@@ -359,7 +352,6 @@ fun NowPlayingScreen(
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
                     onSwitchGroupClick = onSwitchGroupClick,
-                    onFavoriteClick = onFavoriteClick,
                     onVolumeChange = onVolumeChange
                 )
             }
@@ -394,7 +386,6 @@ private fun NowPlayingPortrait(
     controlsEnabled: Boolean,
     volume: Float,
     accentColor: Color?,
-    isMaConnected: Boolean,
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
@@ -402,7 +393,6 @@ private fun NowPlayingPortrait(
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -499,9 +489,6 @@ private fun NowPlayingPortrait(
             showSecondaryRow = true,
             isSwitchGroupEnabled = controlsEnabled,
             onSwitchGroupClick = onSwitchGroupClick,
-            showFavorite = isMaConnected,
-            isFavorite = false, // TODO: Track favorite state
-            onFavoriteClick = onFavoriteClick,
             playButtonSize = AdaptiveDefaults.playButtonSize(formFactor),
             controlButtonSize = AdaptiveDefaults.controlButtonSize(formFactor)
         )
@@ -533,7 +520,6 @@ private fun NowPlayingLandscape(
     controlsEnabled: Boolean,
     volume: Float,
     accentColor: Color?,
-    isMaConnected: Boolean,
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
@@ -541,7 +527,6 @@ private fun NowPlayingLandscape(
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
-    onFavoriteClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -641,9 +626,6 @@ private fun NowPlayingLandscape(
                 onNextClick = onNextClick,
                 isSwitchGroupEnabled = controlsEnabled,
                 onSwitchGroupClick = onSwitchGroupClick,
-                showFavorite = isMaConnected,
-                isFavorite = false,
-                onFavoriteClick = onFavoriteClick,
                 playButtonSize = AdaptiveDefaults.playButtonSize(formFactor),
                 controlButtonSize = AdaptiveDefaults.controlButtonSize(formFactor)
             )
@@ -696,14 +678,12 @@ private fun NowPlayingPortraitPreview() {
             controlsEnabled = true,
             volume = 0.75f,
             accentColor = null,
-            isMaConnected = true,
             positionMs = 45000,
             durationMs = 354000,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }
@@ -726,14 +706,12 @@ private fun NowPlayingLandscapePreview() {
             controlsEnabled = true,
             volume = 0.5f,
             accentColor = null,
-            isMaConnected = false,
             positionMs = 120000,
             durationMs = 482000,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }
@@ -752,14 +730,12 @@ private fun NowPlayingBufferingPreview() {
             controlsEnabled = false,
             volume = 0.75f,
             accentColor = null,
-            isMaConnected = false,
             positionMs = 0,
             durationMs = 0,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }
@@ -786,14 +762,12 @@ private fun NowPlayingAllDevicesPortraitPreview() {
             controlsEnabled = true,
             volume = 0.75f,
             accentColor = null,
-            isMaConnected = true,
             positionMs = 45000,
             durationMs = 354000,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }
@@ -812,14 +786,12 @@ private fun NowPlayingAllDevicesLandscapePreview() {
             controlsEnabled = true,
             volume = 0.75f,
             accentColor = null,
-            isMaConnected = true,
             positionMs = 45000,
             durationMs = 354000,
             onPreviousClick = {},
             onPlayPauseClick = {},
             onNextClick = {},
             onSwitchGroupClick = {},
-            onFavoriteClick = {},
             onVolumeChange = {}
         )
     }

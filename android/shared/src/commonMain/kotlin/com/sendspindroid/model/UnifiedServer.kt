@@ -13,8 +13,7 @@ data class UnifiedServer(
 
     val connectionPreference: ConnectionPreference = ConnectionPreference.AUTO,
     val isDiscovered: Boolean = false,
-    val isDefaultServer: Boolean = false,
-    val isMusicAssistant: Boolean = false
+    val isDefaultServer: Boolean = false
 ) {
     val hasAnyConnection: Boolean
         get() = local != null || remote != null || proxy != null

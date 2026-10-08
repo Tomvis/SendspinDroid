@@ -19,10 +19,7 @@ import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.model.ConnectionPreference
 import com.sendspindroid.model.LocalConnection
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.musicassistant.MaSettings
 import com.sendspindroid.coordinator.TransportState
-import com.sendspindroid.network.NetworkEvaluator
-import com.sendspindroid.network.TransportType
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.SendSpinEndpoint
 import com.sendspindroid.sendspin.protocol.TrackMetadata
@@ -86,9 +83,6 @@ class AddServerWizardActivity : FragmentActivity() {
 
     private data class DiscoveredServer(val name: String, val address: String, val path: String)
 
-    // Network evaluator for auto-detecting network type
-    private var networkEvaluator: NetworkEvaluator? = null
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -96,30 +90,13 @@ class AddServerWizardActivity : FragmentActivity() {
         if (savedInstanceState == null) {
             intent.getStringExtra(EXTRA_EDIT_SERVER_ID)?.let { serverId ->
                 UnifiedServerRepository.getServer(serverId)?.let { server ->
-                    val existingMaToken = if (server.isMusicAssistant) {
-                        MaSettings.getTokenForServer(server.id)
-                    } else null
-                    viewModel.initForEdit(server, existingMaToken)
+                    viewModel.initForEdit(server)
                 }
             }
         }
 
         // Initialize discovery manager
         discoveryManager = NsdDiscoveryManager(this, discoveryListener)
-
-        // Initialize network evaluator and set hint
-        networkEvaluator = NetworkEvaluator(this).also { evaluator ->
-            evaluator.evaluateCurrentNetwork()
-            val state = evaluator.networkState.value
-            val hint = when (state.transportType) {
-                TransportType.WIFI -> "You appear to be on WiFi"
-                TransportType.CELLULAR -> "You appear to be on cellular data"
-                TransportType.ETHERNET -> "You appear to be on Ethernet"
-                TransportType.VPN -> "You appear to be on a VPN"
-                TransportType.UNKNOWN -> ""
-            }
-            viewModel.setNetworkHint(hint)
-        }
 
         // Edge-to-edge: transparent system bars with proper inset handling
         enableEdgeToEdge()
@@ -128,10 +105,9 @@ class AddServerWizardActivity : FragmentActivity() {
             SendSpinTheme {
                 val state by viewModel.wizardState.collectAsStateWithLifecycle()
 
-                // Auto-start discovery when entering a FindServer step
+                // Auto-start discovery when entering the FindServer step
                 LaunchedEffect(state.currentStep) {
-                    if ((state.currentStep == WizardStep.SS_FindServer ||
-                         state.currentStep == WizardStep.MA_FindServer) && !state.isSearching) {
+                    if (state.currentStep == WizardStep.SS_FindServer && !state.isSearching) {
                         startDiscovery()
                     }
                 }
@@ -141,7 +117,6 @@ class AddServerWizardActivity : FragmentActivity() {
                     onClose = { finish() },
                     onBack = { handleBack() },
                     onNext = { handleNext() },
-                    onSkip = { viewModel.onSkipMaLogin() },
                     onSave = { attemptSave() },
                     onStepAction = { action -> handleStepAction(action) }
                 )
@@ -167,9 +142,8 @@ class AddServerWizardActivity : FragmentActivity() {
 
     private fun handleNext() {
         when (viewModel.currentStep.value) {
-            // FindServer steps — validate address and start test
-            WizardStep.SS_FindServer,
-            WizardStep.MA_FindServer -> {
+            // FindServer step — validate address and start test
+            WizardStep.SS_FindServer -> {
                 if (viewModel.localAddress.isBlank()) {
                     showToast(getString(R.string.wizard_local_address_hint))
                     return
@@ -177,22 +151,12 @@ class AddServerWizardActivity : FragmentActivity() {
                 startLocalConnectionTest()
             }
 
-            // MA Login step -- test connection if no token yet
-            WizardStep.MA_Login -> {
-                if (viewModel.maToken != null) {
-                    viewModel.onNext()
-                } else {
-                    startMaConnectionTest()
-                }
-            }
-
-            // Finish steps — handled by onSave
-            WizardStep.SS_Finish,
-            WizardStep.MA_Finish -> {
+            // Finish step — handled by onSave
+            WizardStep.SS_Finish -> {
                 // Handled by onSave
             }
 
-            // Card-selection and testing steps — no Next action
+            // Testing step — no Next action
             else -> viewModel.onNext()
         }
     }
@@ -207,7 +171,6 @@ class AddServerWizardActivity : FragmentActivity() {
         if (needsActivityHandling) {
             when (action) {
                 WizardStepAction.StartDiscovery -> startDiscovery()
-                WizardStepAction.TestMaConnection -> startMaConnectionTest()
                 else -> { /* Handled by ViewModel */ }
             }
         }
@@ -285,13 +248,9 @@ class AddServerWizardActivity : FragmentActivity() {
     // ========================================================================
 
     private fun startLocalConnectionTest() {
-        // Navigate to the correct testing step
-        val testStep = when (viewModel.currentStep.value) {
-            WizardStep.SS_FindServer -> WizardStep.SS_TestLocal
-            WizardStep.MA_FindServer -> WizardStep.MA_TestLocal
-            else -> return
-        }
-        viewModel.navigateTo(testStep)
+        // Navigate to the testing step
+        if (viewModel.currentStep.value != WizardStep.SS_FindServer) return
+        viewModel.navigateTo(WizardStep.SS_TestLocal)
 
         lifecycleScope.launch {
             delay(500) // Brief delay for UI to show
@@ -339,15 +298,6 @@ class AddServerWizardActivity : FragmentActivity() {
         }
     }
 
-    private fun startMaConnectionTest() {
-        viewModel.testMaConnection { success ->
-            if (success) {
-                // Advance past the login step
-                viewModel.onNext()
-            }
-        }
-    }
-
     // ========================================================================
     // Save
     // ========================================================================
@@ -376,19 +326,11 @@ class AddServerWizardActivity : FragmentActivity() {
             ) else null,
             connectionPreference = ConnectionPreference.AUTO,
             isDiscovered = false,
-            isDefaultServer = viewModel.setAsDefault,
-            isMusicAssistant = viewModel.isMusicAssistant
+            isDefaultServer = viewModel.setAsDefault
         )
 
         // Save to repository
         UnifiedServerRepository.saveServer(server)
-
-        // Save MA token if we have one
-        if (viewModel.isMusicAssistant && viewModel.maToken != null) {
-            MaSettings.setTokenForServer(serverId, viewModel.maToken!!)
-        } else if (!viewModel.isMusicAssistant) {
-            MaSettings.clearTokenForServer(serverId)
-        }
 
         // Update default server if needed
         if (viewModel.setAsDefault) {

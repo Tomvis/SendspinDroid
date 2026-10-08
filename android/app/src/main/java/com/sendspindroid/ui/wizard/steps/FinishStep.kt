@@ -27,12 +27,13 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
 import com.sendspindroid.ui.theme.SendSpinTheme
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import com.sendspindroid.ui.wizard.keepVisibleWhenFocused
 
 /**
  * Final wizard step — name the server, set as default, and show a summary
  * of configured connections.
- *
- * Used for SS_Finish and MA_Finish.
  */
 @Composable
 fun FinishStep(
@@ -76,10 +77,12 @@ fun FinishStep(
         OutlinedTextField(
             value = serverName,
             onValueChange = onNameChange,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().keepVisibleWhenFocused(),
             label = { Text(stringResource(R.string.wizard_name_title)) },
             placeholder = { Text(stringResource(R.string.wizard_name_hint)) },
             singleLine = true,
+            // Done closes the keyboard, which brings Save back into reach.
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
             supportingText = {
                 Text(stringResource(R.string.wizard_name_description))
             }
@@ -176,8 +179,7 @@ private fun FinishStepPreview() {
             serverName = "Living Room",
             isDefault = true,
             connectionSummary = listOf(
-                "Local: 192.168.1.100:8927",
-                "Music Assistant: Authenticated"
+                "Local: 192.168.1.100:8927"
             ),
             onNameChange = {},
             onDefaultChange = {}

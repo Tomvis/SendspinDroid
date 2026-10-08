@@ -55,7 +55,6 @@ object AppLog {
     val Protocol: Logger = Logger(LogCategory.Protocol)
     val Network: Logger = Logger(LogCategory.Network)
     val Playback: Logger = Logger(LogCategory.Playback)
-    val MusicAssistant: Logger = Logger(LogCategory.MusicAssistant)
     val UI: Logger = Logger(LogCategory.UI)
     val App: Logger = Logger(LogCategory.App)
 

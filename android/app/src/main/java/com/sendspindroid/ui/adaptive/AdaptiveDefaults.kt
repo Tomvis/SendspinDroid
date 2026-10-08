@@ -158,7 +158,7 @@ object AdaptiveDefaults {
     fun showVolumeSlider(formFactor: FormFactor): Boolean =
         formFactor != FormFactor.TV
 
-    /** Secondary button size (switch group, favorite) */
+    /** Secondary button size (switch group) */
     fun secondaryButtonSize(formFactor: FormFactor): Dp = when (formFactor) {
         FormFactor.PHONE -> 48.dp
         FormFactor.TABLET_7 -> 48.dp

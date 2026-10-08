@@ -77,7 +77,6 @@ sealed class NetworkEvent {
 class ConnectionCoordinator(
     currentServerFlow: Flow<UnifiedServer?>,
     sendSpinStateFlow: Flow<TransportState>,
-    musicAssistantStateFlow: Flow<TransportState>,
     private val scope: CoroutineScope,
     private val connectAttempt: suspend (UnifiedServer, ConnectionType) -> Boolean,
     private val context: android.content.Context,
@@ -105,9 +104,8 @@ class ConnectionCoordinator(
     val sessionState: StateFlow<SessionState> = combine(
         currentServerFlow,
         sendSpinStateFlow,
-        musicAssistantStateFlow,
-    ) { server, sendSpin, ma ->
-        SessionState(server = server, sendSpin = sendSpin, musicAssistant = ma)
+    ) { server, sendSpin ->
+        SessionState(server = server, sendSpin = sendSpin)
     }.stateIn(
         scope = scope,
         started = SharingStarted.Eagerly,

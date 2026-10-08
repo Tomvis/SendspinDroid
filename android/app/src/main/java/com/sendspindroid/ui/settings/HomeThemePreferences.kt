@@ -39,19 +39,12 @@ import com.sendspindroid.ui.theme.HomeThemeController
 import home.theme.HomeTheme
 import home.theme.HomeThemes
 
-/**
- * Fork-only (HW-65): "Follow home theme" or any home theme, plus light/dark. Stored for the MA user
- * when the MA API is signed in (same choice MA web and MA mobile show), else on this device only.
- */
+/** Fork-only (HW-65): any home theme, plus light/dark, kept on this device. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeThemePreferences() {
     val effective by HomeThemeController.effective.collectAsStateWithLifecycle()
-    val server by HomeThemeController.server.collectAsStateWithLifecycle()
     var picking by remember { mutableStateOf(false) }
-    val claim = server?.claim
-    val home = HomeThemes.byId(claim?.theme)
-    val follow = stringResource(R.string.home_theme_follow, home.name, modeLabel(claim?.mode ?: "automatic"))
     val current = HomeThemes.byId(effective.theme)
 
     Row(
@@ -64,14 +57,12 @@ fun HomeThemePreferences() {
         Column(modifier = Modifier.weight(1f)) {
             Text(stringResource(R.string.home_theme_title), style = MaterialTheme.typography.bodyLarge)
             Text(
-                text = if (server != null && !effective.fromApp) follow else current.name,
+                text = current.name,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = stringResource(
-                    if (server != null) R.string.home_theme_summary_ma else R.string.home_theme_summary_local,
-                ),
+                text = stringResource(R.string.home_theme_summary_local),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -99,17 +90,8 @@ fun HomeThemePreferences() {
             title = { Text(stringResource(R.string.home_theme_title)) },
             text = {
                 LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
-                    if (server != null) {
-                        item {
-                            ThemeRow(home, follow, selected = !effective.fromApp) {
-                                HomeThemeController.choose(null, effective.mode)
-                                picking = false
-                            }
-                        }
-                    }
                     items(HomeThemes.all, key = { it.id }) { theme ->
-                        val chosen = (effective.fromApp || server == null) && effective.theme == theme.id
-                        ThemeRow(theme, theme.name, selected = chosen) {
+                        ThemeRow(theme, theme.name, selected = effective.theme == theme.id) {
                             HomeThemeController.choose(theme.id, effective.mode)
                             picking = false
                         }

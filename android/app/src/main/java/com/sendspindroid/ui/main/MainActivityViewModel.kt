@@ -140,14 +140,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     val reconnectingState: StateFlow<ReconnectingState?> = _reconnectingState.asStateFlow()
 
     // ========================================================================
-    // UI State
-    // ========================================================================
-
-    // Music Assistant state
-    private val _isMaConnected = MutableStateFlow(false)
-    val isMaConnected: StateFlow<Boolean> = _isMaConnected.asStateFlow()
-
-    // ========================================================================
     // Connection State Updates
     // ========================================================================
 
@@ -320,14 +312,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     }
 
     // ========================================================================
-    // Music Assistant Updates
-    // ========================================================================
-
-    fun setMaConnected(connected: Boolean) {
-        _isMaConnected.value = connected
-    }
-
-    // ========================================================================
     // Reset State
     // ========================================================================
 
@@ -347,7 +331,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         _positionMs.value = 0
         _durationMs.value = 0
         _positionUpdatedAt.value = 0L
-        _isMaConnected.value = false
         _audioStreamSpec.value = null
     }
 

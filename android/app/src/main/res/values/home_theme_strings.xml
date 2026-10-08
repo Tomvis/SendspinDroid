@@ -1,10 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Fork-only (HW-65): per-person home theme. Kept apart from strings.xml so upstream merges stay clean. -->
+<!-- Fork-only (HW-65): home theme. Kept apart from strings.xml so upstream merges stay clean. -->
 <resources>
     <string name="home_theme_title">Theme</string>
-    <string name="home_theme_follow">Follow home theme (%1$s · %2$s)</string>
-    <string name="home_theme_summary_ma">Saved for your Music Assistant user, like in MA. Set once for every app on auth.leratom.cloud › Settings.</string>
-    <string name="home_theme_summary_local">This device only (not signed in to Music Assistant).</string>
+    <string name="home_theme_summary_local">This device only.</string>
     <string name="home_theme_mode_title">Light or dark</string>
     <string name="home_theme_mode_automatic">Automatic</string>
     <string name="home_theme_mode_light">Light</string>

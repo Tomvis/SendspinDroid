@@ -55,7 +55,7 @@ class UnifiedServerConnector(
 
         Log.d(TAG, "Auto-selected ${ConnectionSelector.getConnectionDescription(selected)} for ${server.name}")
 
-        // Execute connection with server ID for MA integration
+        // Execute connection with server ID
         executeConnection(selected, controller, server.id)
         onConnectionStarted?.invoke(selected)
 
@@ -87,7 +87,7 @@ class UnifiedServerConnector(
      *
      * @param selected The selected connection method with connection details
      * @param controller MediaController for sending commands
-     * @param serverId Optional server ID for MA integration (if known)
+     * @param serverId Optional server ID (if known)
      */
     private fun executeConnection(
         selected: ConnectionSelector.SelectedConnection,
