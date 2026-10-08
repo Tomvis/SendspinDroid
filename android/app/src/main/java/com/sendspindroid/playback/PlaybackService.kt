@@ -2949,6 +2949,18 @@ class PlaybackService : MediaLibraryService() {
             }
             bundle.putString("connection_state", stateLabel)
             bundle.putString("audio_codec", currentCodec.uppercase())
+
+            // What the session negotiated
+            val protocol = client.protocolStats()
+            bundle.putString("active_roles", protocol.activeRoles.joinToString(","))
+            protocol.pskCategory?.let { bundle.putString("psk_category", it.name) }
+            bundle.putInt("min_buffer_ms", protocol.minBufferMs)
+            bundle.putInt("required_lead_time_ms", protocol.requiredLeadTimeMs)
+            activeStreamConfig?.let { stream ->
+                bundle.putInt("stream_sample_rate", stream.sampleRate)
+                bundle.putInt("stream_bit_depth", stream.bitDepth)
+                bundle.putInt("stream_channels", stream.channels)
+            }
         } ?: run {
             bundle.putString("connection_state", "Disconnected")
             bundle.putString("audio_codec", "--")

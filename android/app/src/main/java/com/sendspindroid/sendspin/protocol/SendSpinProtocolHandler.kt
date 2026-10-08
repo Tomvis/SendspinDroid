@@ -1926,6 +1926,28 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
+    // ========== Diagnostics ==========
+
+    /** What the session negotiated, for the Stats for Nerds screen. */
+    data class ProtocolStats(
+        val activeRoles: List<String>,
+        /** Which key admitted the connection; null with no encrypted channel. */
+        val pskCategory: PskCategory?,
+        val minBufferMs: Int,
+        val requiredLeadTimeMs: Int,
+    )
+
+    fun protocolStats() = ProtocolStats(
+        activeRoles = activeRoles,
+        pskCategory = if (wireCodec != null) matchedPskCategory() else null,
+        minBufferMs = minBufferEstimator.minBufferMs,
+        requiredLeadTimeMs = if (outputStarted) {
+            SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_WARM_MS
+        } else {
+            SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS
+        },
+    )
+
     // ========== Artwork (roles/artwork/v1.md) ==========
 
     private fun handleArtworkStreamStart(artwork: JsonObject) {
