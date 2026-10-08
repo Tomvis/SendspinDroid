@@ -640,6 +640,13 @@ class SendSpin(
         }
     }
 
+    override fun sendBinaryFrame(bytes: ByteArray, beforeWrite: () -> Unit) {
+        val t = transport ?: return
+        if (!t.send(bytes, beforeWrite)) {
+            Log.w(TAG, "Failed to send binary frame (${bytes.size} bytes)")
+        }
+    }
+
     // TimeSyncManager uses this scope for its periodic scheduler loop
     // (delay then send a small time-sync request). That is timer-dominated
     // work, so it belongs on timerScope.

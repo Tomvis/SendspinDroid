@@ -2935,8 +2935,11 @@ class PlaybackService : MediaLibraryService() {
     private fun getStats(): Bundle {
         val bundle = Bundle()
 
-        // Get connection info from SendSpin
-        sendSpinClient?.let { client ->
+        // Get connection info from SendSpin. An if/else, not `?.let {} ?: run {}`:
+        // that form takes the fallback whenever the block's last expression
+        // is null, which reported a connected, idle player as disconnected.
+        val client = sendSpinClient
+        if (client != null) {
             bundle.putString("server_name", client.getServerName())
             bundle.putString("server_address", client.getServerAddress())
             // TransportState variants are plain objects; toString() would show
@@ -2961,7 +2964,7 @@ class PlaybackService : MediaLibraryService() {
                 bundle.putInt("stream_bit_depth", stream.bitDepth)
                 bundle.putInt("stream_channels", stream.channels)
             }
-        } ?: run {
+        } else {
             bundle.putString("connection_state", "Disconnected")
             bundle.putString("audio_codec", "--")
         }

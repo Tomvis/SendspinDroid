@@ -40,6 +40,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 /**
  * Abstract base class for SendSpin protocol handling.
@@ -128,6 +129,15 @@ abstract class SendSpinProtocolHandler(
 
     /** Send a raw WebSocket BINARY frame. */
     protected abstract fun sendBinaryFrame(bytes: ByteArray)
+
+    /**
+     * [sendBinaryFrame], with [beforeWrite] run as close to the socket write
+     * as the transport allows. The default runs it at once.
+     */
+    protected open fun sendBinaryFrame(bytes: ByteArray, beforeWrite: () -> Unit) {
+        beforeWrite()
+        sendBinaryFrame(bytes)
+    }
 
     /**
      * Get the coroutine scope for async operations.
@@ -302,9 +312,46 @@ abstract class SendSpinProtocolHandler(
         // reach this point after the next connection's channel is installed.
         // Nothing but client/hello may precede that connection's activation.
         if (!activationSeen) return
-        val clientTransmitted = System.nanoTime() / 1000 // Convert to microseconds
-        sendProtocolMessage(MessageBuilder.buildClientTime(clientTransmitted))
+        // The value in the message only identifies it: the server echoes it,
+        // and the reply is matched to the time the frame really left. Between
+        // here and the socket are a coroutine dispatch, the encryption and
+        // the transport's send queue - milliseconds that would otherwise be
+        // counted as network round trip.
+        val id = System.nanoTime() / 1000 // Convert to microseconds
+        val channel = wireCodec ?: return
+        getCoroutineScope().launch {
+            if (wireCodec !== channel || rehandshakeInProgress) return@launch
+            try {
+                val frames = channel.encodeJson(MessageBuilder.buildClientTime(id))
+                frames.forEachIndexed { index, frame ->
+                    if (index == frames.lastIndex) {
+                        sendBinaryFrame(frame) { noteClientTimeSent(id, System.nanoTime() / 1000) }
+                    } else {
+                        sendBinaryFrame(frame)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to encrypt client/time", e)
+                onProtocolFailure("outbound encryption failed: ${e.message}")
+            }
+        }
     }
+
+    // When each client/time in flight left, by the id it carried. A burst is
+    // at most 15 messages, so anything beyond that is a reply that never came.
+    private val clientTimeSentAt = object : LinkedHashMap<Long, Long>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Long>) = size > 32
+    }
+
+    private fun noteClientTimeSent(id: Long, sentAtMicros: Long) = synchronized(clientTimeSentAt) {
+        clientTimeSentAt[id] = sentAtMicros
+    }
+
+    // When the frame being handled arrived, taken before it was decrypted.
+    // Frames are handled one at a time, so the handler of the message a frame
+    // carried reads the value its own frame set.
+    @Volatile
+    private var frameReceivedAtMicros = 0L
 
     /**
      * Encrypt a `client/goodbye` and retire the channel it was encrypted for.
@@ -731,6 +778,7 @@ abstract class SendSpinProtocolHandler(
         // No client/time may follow a connection out of its activation; the
         // next one starts time sync when it is activated itself.
         stopTimeSync()
+        synchronized(clientTimeSentAt) { clientTimeSentAt.clear() }
         handshakeComplete = false
 
         // Nothing sent from here until the next handshake completes may be
@@ -1624,8 +1672,13 @@ abstract class SendSpinProtocolHandler(
     }
 
     protected fun handleServerTime(payload: JsonObject?) {
-        val clientReceived = System.nanoTime() / 1000
-        val measurement = MessageParser.parseServerTime(payload, clientReceived)
+        // Both ends of the round trip are taken at the wire: when the frame
+        // arrived, not after it was decrypted, parsed and logged; and when
+        // the request left, not when it was built.
+        val clientReceived = frameReceivedAtMicros
+        val id = payload?.get("client_transmitted")?.jsonPrimitive?.longOrNull
+        val clientTransmitted = id?.let { synchronized(clientTimeSentAt) { clientTimeSentAt.remove(it) } }
+        val measurement = MessageParser.parseServerTime(payload, clientReceived, clientTransmitted)
 
         if (measurement != null) {
             timeSyncManager?.onServerTime(measurement)
@@ -1882,6 +1935,7 @@ abstract class SendSpinProtocolHandler(
      * Handle binary message from the transport.
      */
     protected fun handleBinaryMessage(bytes: ByteArray) {
+        frameReceivedAtMicros = System.nanoTime() / 1000
         val codec = wireCodec
         if (codec == null) {
             // A binary frame before the Noise handshake completed. There is
