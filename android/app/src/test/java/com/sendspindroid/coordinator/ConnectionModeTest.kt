@@ -13,25 +13,44 @@ import kotlin.random.Random
  */
 class ConnectionModeTest {
 
-    /** The advertisement, and an outbound connection that checks on it. */
-    private class World : ConnectionMode.Advertising {
+    /**
+     * The advertisement, and an outbound connection that checks on it.
+     *
+     * Taking the advertisement down takes time, as closing the listener
+     * does: it stays up until [finishStop], unless [stopsAtOnce].
+     */
+    private class World(private val stopsAtOnce: Boolean = false) : ConnectionMode.Advertising {
         var advertising = false
         var outboundAlive = false
         val log = mutableListOf<String>()
-
-        override fun start() {
-            assertFalse("advertised while an outbound connection was alive", outboundAlive)
-            advertising = true
-            log += "advertise"
-        }
+        private var stopped: (() -> Unit)? = null
+        val stopInFlight get() = stopped != null
 
         /** What withdrawing sets off in the service, if anything. */
         var onStop: () -> Unit = {}
 
-        override fun stop() {
-            advertising = false
+        override fun start() {
+            assertFalse("advertised while an outbound connection was alive", outboundAlive)
+            assertFalse("advertised again before the last listener was gone", stopInFlight)
+            advertising = true
+            log += "advertise"
+        }
+
+        override fun stop(onStopped: () -> Unit) {
+            assertFalse("stopped twice at once", stopInFlight)
             log += "withdraw"
+            stopped = onStopped
             onStop()
+            if (stopsAtOnce) finishStop()
+        }
+
+        /** The listener's port is released. */
+        fun finishStop() {
+            val report = stopped ?: return
+            advertising = false
+            stopped = null
+            log += "gone"
+            report()
         }
 
         /** What the service does to open a connection. */
@@ -66,21 +85,60 @@ class ConnectionModeTest {
         mode.start(searchForServers = false)
 
         mode.setSearching(true)
+        world.finishStop()
         assertFalse(world.advertising)
 
         mode.setSearching(false)
         assertTrue(world.advertising)
-        assertEquals(listOf("advertise", "withdraw", "advertise"), world.log)
+        assertEquals(listOf("advertise", "withdraw", "gone", "advertise"), world.log)
     }
 
     @Test
-    fun `dialling withdraws the advertisement before the connection is opened`() {
+    fun `a dial waits until the advertisement and the listener are gone`() {
         mode.start(searchForServers = false)
 
         mode.dial { world.connect() }
+        assertEquals("nothing is dialled while the listener is closing", listOf("advertise", "withdraw"), world.log)
+        assertFalse(world.outboundAlive)
 
-        assertEquals(listOf("advertise", "withdraw", "dial"), world.log)
+        world.finishStop()
+        assertEquals(listOf("advertise", "withdraw", "gone", "dial"), world.log)
         assertFalse(mode.isAdvertising)
+    }
+
+    @Test
+    fun `a dial with nothing advertised connects at once`() {
+        mode.start(searchForServers = true)
+
+        mode.dial { world.connect() }
+
+        assertEquals(listOf("dial"), world.log)
+    }
+
+    @Test
+    fun `a dial made while a stop is in flight waits for that stop`() {
+        mode.start(searchForServers = false)
+        mode.setSearching(true)
+
+        mode.dial { world.connect() }
+        assertFalse(world.outboundAlive)
+
+        world.finishStop()
+        assertEquals(listOf("advertise", "withdraw", "gone", "dial"), world.log)
+    }
+
+    @Test
+    fun `advertising again waits for the stop in flight`() {
+        mode.start(searchForServers = false)
+        mode.setSearching(true)
+
+        // Back before the listener is gone: 8928 is still bound.
+        mode.setSearching(false)
+        assertEquals(listOf("advertise", "withdraw"), world.log)
+
+        world.finishStop()
+        assertEquals(listOf("advertise", "withdraw", "gone", "advertise"), world.log)
+        assertTrue(world.advertising)
     }
 
     @Test
@@ -92,8 +150,10 @@ class ConnectionModeTest {
         world.onStop = { mode.dialEnded() }
 
         mode.dial { world.connect() }
+        mode.dialEnded()
+        world.finishStop()
 
-        assertEquals(listOf("advertise", "withdraw", "dial"), world.log)
+        assertEquals(listOf("advertise", "withdraw", "gone", "dial"), world.log)
         assertFalse(world.advertising)
     }
 
@@ -101,6 +161,7 @@ class ConnectionModeTest {
     fun `stays withdrawn for as long as the dialled connection lives`() {
         mode.start(searchForServers = false)
         mode.dial { world.connect() }
+        world.finishStop()
 
         // The reconnect loop dials again; the user toggles the mode.
         mode.dial { world.connect() }
@@ -108,12 +169,14 @@ class ConnectionModeTest {
         mode.setSearching(false)
 
         assertFalse(world.advertising)
+        assertFalse(world.stopInFlight)
     }
 
     @Test
     fun `returns to advertising when the dialled connection ends for good`() {
         mode.start(searchForServers = false)
         mode.dial { world.connect() }
+        world.finishStop()
 
         world.outboundAlive = false
         mode.dialEnded()
@@ -151,43 +214,55 @@ class ConnectionModeTest {
         mode.start(searchForServers = false)
 
         mode.stop()
+        world.finishStop()
         mode.setSearching(false)
         mode.dialEnded()
 
         assertFalse(world.advertising)
-        assertEquals(listOf("advertise", "withdraw"), world.log)
+        assertEquals(listOf("advertise", "withdraw", "gone"), world.log)
+    }
+
+    @Test
+    fun `stopping forgets a dial that has not connected yet`() {
+        mode.start(searchForServers = false)
+        mode.dial { world.connect() }
+
+        mode.stop()
+        world.finishStop()
+
+        assertFalse(world.outboundAlive)
     }
 
     @Test
     fun `the advertisement and an outbound connection are never alive together`() {
-        // Every order the service can call these in. World.start and
-        // World.connect each fail the moment the other side is alive.
+        // Every order the service can call these in, with the listener
+        // taking its time to close and with it closing at once. World.start
+        // and World.connect each fail the moment the other side is alive.
         val random = Random(221)
-        repeat(200) {
-            val world = World()
+        repeat(400) { round ->
+            val world = World(stopsAtOnce = round % 2 == 0)
             val mode = ConnectionMode(world)
             // The service reports "nothing dialled is alive" whenever any
             // connection ends, including the ones withdrawing ends.
             world.onStop = { if (!world.outboundAlive) mode.dialEnded() }
-            repeat(60) {
-                when (random.nextInt(6)) {
+            repeat(80) {
+                when (random.nextInt(7)) {
                     0 -> mode.start(searchForServers = random.nextBoolean())
                     1 -> mode.setSearching(random.nextBoolean())
-                    2 -> mode.dial { world.connect() }
-                    3 -> if (world.outboundAlive) {
+                    2, 3 -> mode.dial { world.connect() }
+                    4 -> if (world.outboundAlive) {
                         world.outboundAlive = false
                         mode.dialEnded()
                     }
-                    4 -> mode.dial { world.connect() }
-                    5 -> {
+                    5 -> world.finishStop()
+                    6 -> {
                         // The service going away takes its connection with it.
                         world.outboundAlive = false
-                        mode.dialEnded()
                         mode.stop()
                     }
                 }
                 assertFalse(world.advertising && world.outboundAlive)
-                assertEquals(world.advertising, mode.isAdvertising)
+                if (!world.stopInFlight) assertEquals(world.advertising, mode.isAdvertising)
             }
         }
     }

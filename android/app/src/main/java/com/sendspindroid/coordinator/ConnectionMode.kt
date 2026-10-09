@@ -14,25 +14,35 @@ package com.sendspindroid.coordinator
  *   other two, and stays here for as long as that connection or its
  *   reconnect loop is alive.
  *
- * Every outbound connection is opened through [dial], which takes the
- * advertisement down before the connection is attempted, and nothing else
- * turns [Advertising] on or off. Not thread-safe: call from one thread.
+ * Every outbound connection is opened through [dial], which opens it only
+ * once the advertisement and the listener are gone, and nothing else turns
+ * [Advertising] on or off. Not thread-safe: call from one thread.
  */
 class ConnectionMode(private val advertising: Advertising) {
 
     /** The listener and its mDNS announcement, up or down together. */
     interface Advertising {
         fun start()
-        fun stop()
+
+        /**
+         * Take both down. [onStopped] is called, on the thread this was
+         * called on, once the listener's port is released; that may be
+         * before this returns or some time after it. Nothing here waits.
+         */
+        fun stop(onStopped: () -> Unit)
     }
 
     private var running = false
     private var searching = false
     private var dialledOut = false
 
-    /** Inside [dial], before the connection it opens exists. */
-    private var opening = false
+    /** A stop has been asked for and [Advertising.stop] has not reported back. */
+    private var stopping = false
 
+    /** The connection [dial] was asked to open, until it has been opened. */
+    private var pendingDial: (() -> Unit)? = null
+
+    /** Whether the app is meant to be advertising. While a stop completes, the listener outlives this. */
     var isAdvertising = false
         private set
 
@@ -46,6 +56,7 @@ class ConnectionMode(private val advertising: Advertising) {
     /** Everything down, for good. */
     fun stop() {
         running = false
+        pendingDial = null
         apply()
     }
 
@@ -56,38 +67,54 @@ class ConnectionMode(private val advertising: Advertising) {
     }
 
     /**
-     * Run [connect], which opens an outbound connection, with nothing
-     * advertised. The app stays dialled out until [dialEnded].
+     * Open an outbound connection with [connect], once nothing is advertised
+     * and the listener is closed: at once if that is already so, otherwise
+     * when [Advertising.stop] reports back. The app stays dialled out until
+     * [dialEnded]. A second call before the first has connected replaces it.
      */
-    fun <T> dial(connect: () -> T): T {
+    fun dial(connect: () -> Unit) {
         dialledOut = true
-        opening = true
-        try {
-            apply()
-            return connect()
-        } finally {
-            opening = false
-        }
+        pendingDial = connect
+        apply()
     }
 
     /**
      * The outbound connection is gone and nothing is trying to bring it
      * back: return to whichever mode is selected.
      *
-     * Ignored while [dial] is still on its way to opening the connection.
-     * Taking the advertisement down ends the connection a server had opened
-     * to us, and that ending must not be taken for the end of the dial.
+     * Ignored while [dial] has not opened its connection yet. Taking the
+     * advertisement down ends the connection a server had opened to us, and
+     * that ending must not be taken for the end of the dial.
      */
     fun dialEnded() {
-        if (opening) return
+        if (pendingDial != null) return
         dialledOut = false
         apply()
     }
 
     private fun apply() {
+        // One thing at a time. Whatever was asked for meanwhile is applied
+        // when the stop in flight reports back.
+        if (stopping) return
         val advertise = running && !searching && !dialledOut
-        if (advertise == isAdvertising) return
-        isAdvertising = advertise
-        if (advertise) advertising.start() else advertising.stop()
+        if (advertise != isAdvertising) {
+            isAdvertising = advertise
+            if (advertise) {
+                advertising.start()
+            } else {
+                stopping = true
+                advertising.stop {
+                    stopping = false
+                    apply()
+                }
+                return
+            }
+        }
+        val connect = pendingDial ?: return
+        try {
+            connect()
+        } finally {
+            pendingDial = null
+        }
     }
 }

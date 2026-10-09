@@ -98,6 +98,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
 /**
@@ -948,7 +949,7 @@ class PlaybackService : MediaLibraryService() {
      */
     private val connectionMode = ConnectionMode(object : ConnectionMode.Advertising {
         override fun start() = startAdvertising()
-        override fun stop() = stopAdvertising()
+        override fun stop(onStopped: () -> Unit) = stopAdvertising(onStopped)
     })
 
     private val inboundConnections = InboundConnections(
@@ -988,7 +989,7 @@ class PlaybackService : MediaLibraryService() {
                     return@launch
                 }
             if (generation != advertisingGeneration) {
-                server.stop()
+                withContext(Dispatchers.IO) { server.stop() }
                 return@launch
             }
             // "Advertise the port actually bound": 8928 unless it was taken.
@@ -1002,9 +1003,13 @@ class PlaybackService : MediaLibraryService() {
 
     /**
      * Withdraw the announcement, end every connection a server opened to us
-     * and close the listener. Complete when it returns.
+     * and close the listener.
+     *
+     * Closing the listener waits for those connections to get their goodbye
+     * out, so it is done off the main thread; [onStopped] is called back on
+     * it once the port is released. Nothing is dialled before that.
      */
-    private fun stopAdvertising() {
+    private fun stopAdvertising(onStopped: () -> Unit) {
         advertisingGeneration++
         advertiser?.stop()
         advertiser = null
@@ -1012,9 +1017,22 @@ class PlaybackService : MediaLibraryService() {
         // A server being played from is left with the rest.
         if (!isDestroyed) dialClient?.let { useClient(it) }
         inboundConnections.close()
-        listener?.stop()
+        val server = listener
         listener = null
-        Log.i(TAG, "No longer advertising")
+        when {
+            server == null -> onStopped()
+            // The service is going and its scope with it. Nothing waits for
+            // the port, so the listener closes on a thread of its own.
+            isDestroyed -> {
+                thread(name = "SendspinListenerStop") { server.stop() }
+                onStopped()
+            }
+            else -> serviceScope.launch {
+                withContext(Dispatchers.IO) { server.stop() }
+                Log.i(TAG, "No longer advertising")
+                onStopped()
+            }
+        }
     }
 
     /** A client for one connection a server opens to us. Not on the main thread. */
@@ -2010,13 +2028,18 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Every connection this service dials is opened here, with the
-     * advertisement and the listener down first. See [ConnectionMode].
+     * Every connection this service dials is opened here, once the
+     * advertisement and the listener are gone: at once when nothing is
+     * advertised, which is always so in search mode and in the reconnect
+     * loop, and otherwise as soon as the listener has closed. See
+     * [ConnectionMode].
      */
     private fun openConnection(address: String, path: String) {
-        connectionMode.dial { dialServer(address, path) }
-        // An attempt that failed before it began has ended already.
-        noteDialEnded()
+        connectionMode.dial {
+            dialServer(address, path)
+            // An attempt that failed before it began has ended already.
+            mainHandler.post { noteDialEnded() }
+        }
     }
 
     private fun dialServer(address: String, path: String) {
