@@ -236,7 +236,6 @@
     <string name="welcome_title">Welcome to SendspinDroid</string>
     <string name="welcome_subtitle">Stream high-quality audio from your SendSpin or Music Assistant server</string>
     <string name="welcome_add_first_server">Add Your First Server</string>
-    <string name="welcome_or">or</string>
     <string name="welcome_scanning">Searching for servers nearby\u2026</string>
     <string name="welcome_servers_found">%d server(s) found nearby</string>
     <string name="welcome_no_servers_found">No servers found on this network</string>
