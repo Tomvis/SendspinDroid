@@ -932,11 +932,20 @@ class SendSpin(
      * is a pairing handshake). The client then closes the connection."
      */
     fun leaveForAnotherServer() {
-        if (ConnectionAdmission.Rank.of(activities) == ConnectionAdmission.Rank.PAIRING) {
-            sendPairAbort(PairAbortReason.CONCURRENT_ATTEMPT)
+        // Encoded and handed to the transport before this returns, like
+        // every goodbye: whoever displaced this connection may close the
+        // listener next.
+        val last = if (ConnectionAdmission.Rank.of(activities) == ConnectionAdmission.Rank.PAIRING) {
+            Log.d(TAG, "Disconnecting (pair/abort concurrent_attempt)")
+            encodeLastMessage(
+                MessageBuilder.buildPairAbort(PairAbortReason.CONCURRENT_ATTEMPT),
+                beforeActivation = true,
+            )
         } else {
-            leave(GoodbyeReason.ANOTHER_SERVER, reconnect = false)
+            Log.d(TAG, "Disconnecting (another_server)")
+            encodeGoodbye(GoodbyeReason.ANOTHER_SERVER, beforeActivation = true)
         }
+        closeWith(last, GoodbyeReason.ANOTHER_SERVER.wire, reconnect = false)
     }
 
     /**
@@ -993,16 +1002,20 @@ class SendSpin(
      */
     private fun leave(reason: GoodbyeReason, reconnect: Boolean) {
         Log.d(TAG, "Disconnecting (${reason.wire})")
-        val goodbye = encodeGoodbye(reason)
+        closeWith(encodeGoodbye(reason), reason.wire, reconnect)
+    }
+
+    /** End the connection, with [last] as the final frames on it if there are any. */
+    private fun closeWith(last: List<ByteArray>, why: String, reconnect: Boolean) {
         val closing = endConnection(TransportState.Idle, reconnect) ?: return
-        if (goodbye.isEmpty()) {
+        if (last.isEmpty()) {
             // Nothing to flush: the connection never got as far as an
             // activation, so there is no one to say goodbye to.
-            closing.close(1000, reason.wire)
+            closing.close(1000, why)
             closing.destroy()
         } else {
-            goodbye.forEach { closing.send(it) }
-            closing.closeAfterFlush(1000, reason.wire)
+            last.forEach { closing.send(it) }
+            closing.closeAfterFlush(1000, why)
         }
     }
 

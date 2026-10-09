@@ -1,6 +1,8 @@
 package com.sendspindroid.e2e
 
 import com.sendspindroid.sendspin.SendSpin
+import com.sendspindroid.sendspin.crypto.Psk
+import com.sendspindroid.sendspin.crypto.PskCategory
 import com.sendspindroid.sendspin.protocol.Activity
 import com.sendspindroid.sendspin.protocol.PlaintextCrypto
 import com.sendspindroid.sendspin.transport.SendSpinTransport
@@ -148,6 +150,46 @@ class ServerInitiatedConnectionTest : E2ETestBase() {
         assertTrue(fakeTransport.closed)
         assertTrue(fakeTransport.flushedBeforeClose)
         verify(exactly = 1) { mockCallback.onDisconnected(false) }
+    }
+
+    @Test
+    fun `a displaced pairing connection has its pair abort on the wire when the call returns`() {
+        acceptConnection()
+        setField(client, "matchedPsk", Psk(ByteArray(32) { 3 }, PskCategory.PAIRING))
+        fakeServer.sendServerHello()
+        fakeTransport.simulateTextMessage(
+            """{"type":"server/activate","payload":{"activities":["pairing"],""" +
+                """"active_roles":[],"pairing":{"method":"pairing_psk"}}}"""
+        )
+        assertTrue(fakeTransport.hasSentMessageContaining("client/pair-init"))
+
+        client.leaveForAnotherServer()
+
+        // Checked at once, with no waiting: whoever displaced it may close
+        // the listener next, and a pair/abort still being encrypted on
+        // another thread would be lost with the socket.
+        assertEquals(
+            listOf("""{"type":"pair/abort","payload":{"reason":"concurrent_attempt"}}"""),
+            fakeTransport.sentTextMessages.filter { "pair/abort" in it },
+        )
+        assertTrue(fakeTransport.closed)
+        assertTrue(fakeTransport.flushedBeforeClose)
+        assertEquals(emptyList<String>(), goodbyes())
+    }
+
+    @Test
+    fun `a connection displaced before its activation was applied is still told another_server`() {
+        acceptConnection()
+        fakeServer.sendServerHello()
+        assertTrue(fakeTransport.hasSentMessageContaining("client/hello"))
+
+        client.leaveForAnotherServer()
+
+        assertEquals(
+            listOf("""{"type":"client/goodbye","payload":{"reason":"another_server"}}"""),
+            goodbyes(),
+        )
+        assertTrue(fakeTransport.flushedBeforeClose)
     }
 
     @Test

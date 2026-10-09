@@ -107,20 +107,33 @@ class ServerUnpairTest {
         assertFalse("the connection must continue unchanged", handler.events.contains("close"))
     }
 
-    // ========== Valid at any time ==========
+    // ========== Valid once the connection is activated ==========
 
     @Test
-    fun `unpair is handled before the first server hello`() {
-        // The likeliest way to gate this by accident. `handshakeComplete` is
-        // set by server/hello, and sendGoodbye used to return early without it,
-        // so an unpair arriving straight after the Noise handshake would be
-        // swallowed with no log and no goodbye.
+    fun `unpair before the initial activation is not acted on`() {
+        // "Valid regardless of the current activities, subject to the
+        // initial message sequence": the server "MUST NOT send other
+        // Sendspin messages until it sends the initial server/activate".
         val (handler, psk) = handlerPairedWith(serverId = "srv1", handshakeComplete = false)
 
         handler.handleTextMessageForTest(unpair)
 
+        assertNotNull(handler.store.findByPskId(psk.pskId))
+        assertEquals(emptyList<String>(), handler.events)
+    }
+
+    @Test
+    fun `unpair is handled whatever the activities are`() {
+        val (handler, psk) = handlerPairedWith(serverId = "srv1")
+        handler.handleTextMessageForTest(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}"""
+        )
+        handler.events.clear()
+
+        handler.handleTextMessageForTest(unpair)
+
         assertNull(handler.store.findByPskId(psk.pskId))
-        assertEquals(listOf("send:client/goodbye", "close"), handler.events)
+        assertEquals(listOf("send:client/goodbye", "close"), handler.events.filter { it != "send:client/state" })
     }
 
     // ========== Payload tolerance ==========
@@ -189,7 +202,16 @@ class ServerUnpairTest {
         handshakeComplete: Boolean = true,
     ): UnpairTestHandler {
         val handler = UnpairTestHandler(psk)
-        if (handshakeComplete) handler.setHandshakeCompleteForTest()
+        if (handshakeComplete) {
+            handler.setHandshakeCompleteForTest()
+            // server/unpair is valid "subject to the initial message
+            // sequence": the initial activation comes first.
+            handler.handleTextMessageForTest(
+                """{"type":"server/activate","payload":{"activities":[],"active_roles":[]}}"""
+            )
+            handler.sent.clear()
+            handler.events.clear()
+        }
         return handler
     }
 

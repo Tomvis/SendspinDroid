@@ -30,6 +30,12 @@ class SendSpinProtocolHandlerTest {
         handler = TestProtocolHandler()
         // Mark handshake complete so sendPlayerStateUpdate doesn't short-circuit
         handler.setHandshakeCompleteForTest()
+        // Nothing but the handshake is acted on before an activation, and
+        // nothing for a role that is not active.
+        handler.handleTextMessageForTest(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1","controller@v1","metadata@v1","artwork@v1"]}}"""
+        )
+        handler.sentMessages.clear()
     }
 
     // ========== Volume Clamping Tests ==========

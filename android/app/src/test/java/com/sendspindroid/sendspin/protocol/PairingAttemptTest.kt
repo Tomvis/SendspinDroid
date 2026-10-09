@@ -210,6 +210,7 @@ class PairingAttemptTest {
     fun `a dynamic pairing message with no attempt and no abort is a protocol error`() {
         // The silent discard covers only the window after our own abort.
         val handler = handler(PskCategory.SENTINEL)
+        handler.receive("""{"type":"server/activate","payload":{"activities":[],"active_roles":[]}}""")
 
         handler.receive(serverPairInit())
 

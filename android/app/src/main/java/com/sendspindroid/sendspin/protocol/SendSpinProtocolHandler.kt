@@ -367,15 +367,29 @@ abstract class SendSpinProtocolHandler(
      * until it receives that activation") or mid re-handshake, when no
      * application message may be started.
      */
-    protected fun encodeGoodbye(reason: GoodbyeReason): List<ByteArray> {
-        val codec = wireCodec
-        if (codec == null || !activationSeen || rehandshakeInProgress) return emptyList()
-        // Nothing may follow a goodbye under these keys.
-        wireCodec = null
+    protected fun encodeGoodbye(reason: GoodbyeReason, beforeActivation: Boolean = false): List<ByteArray> {
         Log.d(tag, "Sending client/goodbye reason=${reason.wire}")
+        return encodeLastMessage(MessageBuilder.buildGoodbye(reason), beforeActivation)
+    }
+
+    /**
+     * [encodeGoodbye] for any message that is the last on its connection:
+     * the `pair/abort` a displaced pairing connection is owed is one too.
+     *
+     * @param beforeActivation send it even if no activation has been applied
+     *   yet. The spec allows a goodbye "once the initial Noise handshake has
+     *   completed"; only a connection displaced in the instant between being
+     *   admitted and applying its activation needs that.
+     */
+    protected fun encodeLastMessage(json: String, beforeActivation: Boolean = false): List<ByteArray> {
+        val codec = wireCodec
+        if (codec == null || rehandshakeInProgress) return emptyList()
+        if (!activationSeen && !beforeActivation) return emptyList()
+        // Nothing may follow it under these keys.
+        wireCodec = null
         // The codec only suspends for its send mutex, which is never held
         // across anything but the encryption itself.
-        return runBlocking { codec.encodeJson(MessageBuilder.buildGoodbye(reason)) }
+        return runBlocking { codec.encodeJson(json) }
     }
 
     /**
@@ -983,6 +997,14 @@ abstract class SendSpinProtocolHandler(
             val type = json["type"]?.jsonPrimitive?.contentOrNull ?: return
             val payload = json["payload"]?.jsonObject
 
+            // "The server MUST NOT send other Sendspin messages until it
+            // sends the initial server/activate." The spec asks for no close
+            // here, so one that does is not obeyed and not answered.
+            if (!applicationMessagesAllowed() && type !in BEFORE_ACTIVATION) {
+                Log.w(tag, "Ignoring $type: no activation accepted on this connection")
+                return
+            }
+
             when (type) {
                 // An in-band re-handshake. It arrives as an ordinary encrypted
                 // JSON message inside the current channel, which is why it is
@@ -1021,6 +1043,24 @@ abstract class SendSpinProtocolHandler(
         }
     }
 
+    /**
+     * Whether this is the connection its owner plays from. False for a
+     * server-initiated connection that is provisional or was displaced:
+     * whatever such a connection sends, nothing of it is acted on.
+     */
+    protected open fun isOwnersConnection(): Boolean = true
+
+    /**
+     * Whether anything beyond the handshake may be dispatched: only once an
+     * admissible `server/activate` has been accepted here, and only on the
+     * connection that is in use. A connection needs no more than the
+     * published Sentinel key to get as far as `server/hello`, so until then
+     * it must not reach the audio, the display or the settings.
+     */
+    private fun applicationMessagesAllowed(): Boolean = activationSeen && isOwnersConnection()
+
+    private fun roleActive(role: String): Boolean = role in activeRoles
+
     protected open fun handleServerHello(payload: JsonObject?) {
         val serverName = MessageParser.parseServerHello(payload, "Unknown")
         if (serverName == null) {
@@ -1042,6 +1082,18 @@ abstract class SendSpinProtocolHandler(
         // send other Sendspin messages until it receives that activation."
         sendClientHello()
     }
+
+    /**
+     * All that may arrive before the initial `server/activate` has been
+     * accepted: the server's hello, the activation itself, and a Noise
+     * re-handshake, which is authenticated and changes only this
+     * connection's keys.
+     */
+    private val BEFORE_ACTIVATION = setOf(
+        SendSpinProtocol.MessageType.SERVER_HELLO,
+        SendSpinProtocol.MessageType.SERVER_ACTIVATE,
+        SendSpinProtocol.MessageType.NOISE_HANDSHAKE,
+    )
 
     /** The versioned player role, as it appears in active_roles. */
     protected val ROLE_PLAYER_V1 = SendSpinProtocol.Roles.PLAYER
@@ -1741,7 +1793,11 @@ abstract class SendSpinProtocolHandler(
      * is an empty track, and one without `progress` has no position.
      */
     protected fun handleServerState(payload: JsonObject?) {
-        val (metadata, state, controller) = MessageParser.parseServerState(payload)
+        val parsed = MessageParser.parseServerState(payload)
+        val state = parsed.playbackState
+        // Each object is carried "only if the ... role is active".
+        val metadata = parsed.metadata.takeIf { roleActive(SendSpinProtocol.Roles.METADATA) }
+        val controller = parsed.controller.takeIf { roleActive(SendSpinProtocol.Roles.CONTROLLER) }
 
         if (metadata != null) scheduleMetadata(metadata)
 
@@ -1816,6 +1872,11 @@ abstract class SendSpinProtocolHandler(
 
     protected fun handleServerCommand(payload: JsonObject?) {
         Log.i(tag, "[cmd-trace] T1 handleServerCommand ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
+        // The player object is carried "only if the player role is active".
+        if (!roleActive(ROLE_PLAYER_V1)) {
+            Log.w(tag, "Ignoring server/command: the player role is not active")
+            return
+        }
         when (val result = MessageParser.parseServerCommand(payload)) {
             is ServerCommandResult.Volume -> {
                 Log.d(tag, "Server command: set volume to ${result.volume}%")
@@ -1859,10 +1920,17 @@ abstract class SendSpinProtocolHandler(
     protected fun handleStreamStart(payload: JsonObject?) {
         // A stream/start carries an object per role it starts or reconfigures,
         // so one for artwork alone has no `player` object.
-        (payload?.get("artwork") as? JsonObject)?.let { handleArtworkStreamStart(it) }
+        // Each role's object is carried "only if the ... role is active".
+        (payload?.get("artwork") as? JsonObject)
+            ?.takeIf { roleActive(SendSpinProtocol.Roles.ARTWORK) }
+            ?.let { handleArtworkStreamStart(it) }
 
         val config = MessageParser.parseStreamStart(payload)
         if (config == null) return
+        if (!roleActive(ROLE_PLAYER_V1)) {
+            Log.w(tag, "Ignoring stream/start for the player: the role is not active")
+            return
+        }
 
         val formatChanged = _streamActive && config != _currentStreamConfig
         if (_streamActive) {
@@ -1903,6 +1971,9 @@ abstract class SendSpinProtocolHandler(
             return
         }
 
+        // There is no player stream to clear on a connection without the role.
+        if (!roleActive(ROLE_PLAYER_V1)) return
+
         Log.v(tag, "Stream clear - flushing audio buffers (roles=${roles ?: "all"})")
         onStreamClear()
     }
@@ -1931,6 +2002,10 @@ abstract class SendSpinProtocolHandler(
             Log.d(tag, "Stream end for non-player roles: $roles - ignoring")
             return
         }
+
+        // Nor one to end. A role that was just removed has had its stream
+        // ended by the activation that removed it.
+        if (!roleActive(ROLE_PLAYER_V1)) return
 
         Log.i(tag, "Stream end - server terminated playback (roles=${roles ?: "all"})")
         endPlayerStream()
@@ -1992,7 +2067,9 @@ abstract class SendSpinProtocolHandler(
         when (val decoded = codec.decode(bytes)) {
             is NoiseWireCodec.Decoded.Json -> handleTextMessage(decoded.text)
             is NoiseWireCodec.Decoded.Typed ->
-                if (decoded.type - SendSpinProtocol.BinaryType.ARTWORK_BASE in 0..3) {
+                if (!applicationMessagesAllowed()) {
+                    Log.w(tag, "Ignoring binary message ${decoded.type}: no activation accepted on this connection")
+                } else if (decoded.type - SendSpinProtocol.BinaryType.ARTWORK_BASE in 0..3) {
                     handleArtworkMessage(decoded.type, decoded.body)
                 } else {
                     BinaryMessageParser.parse(decoded.type, decoded.body)
