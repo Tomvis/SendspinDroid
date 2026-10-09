@@ -349,7 +349,8 @@ abstract class SendSpinProtocolHandler(
 
     // When the frame being handled arrived, taken before it was decrypted.
     // Frames are handled one at a time, so the handler of the message a frame
-    // carried reads the value its own frame set.
+    // carried reads the value its own frame set; for a fragmented message
+    // that is its final fragment's, which is the one the spec asks for.
     @Volatile
     private var frameReceivedAtMicros = 0L
 
@@ -478,6 +479,14 @@ abstract class SendSpinProtocolHandler(
      * The server sent the chunk at `timestamp - send_ahead` on its clock; the
      * delay is the arrival time minus that instant on ours. It is clock
      * mapping only: `min_buffer_ms` "MUST NOT include `output_delay_ms`".
+     *
+     * Arrival is when the chunk's frame reached us, not when this runs
+     * (messaging.md, "Receive timestamps"): "A receiver's receive time for a
+     * message is when the message's last byte arrived at the transport; for a
+     * fragmented message, the last byte of its final fragment", and it "MUST
+     * NOT [be taken] later than when their WebSocket implementation delivers
+     * the WebSocket message carrying that last byte". Decryption and parsing
+     * sit between the two and are not network delay.
      */
     private fun measureChunkDelay(chunk: BinaryMessageParser.BinaryMessage.Audio) {
         // Both saturation values report that no lead was measured, and a
@@ -486,7 +495,7 @@ abstract class SendSpinProtocolHandler(
         val filter = getTimeFilter()
         if (!filter.isConverged) return
 
-        val arrivalMicros = System.nanoTime() / 1000
+        val arrivalMicros = frameReceivedAtMicros
         val sentMicros = filter.computeClientTime(chunk.timestampMicros - chunk.sendAheadMicros)
         if (minBufferEstimator.addChunk(chunk.timestampMicros, sentMicros, arrivalMicros)) {
             sendPlayerStateUpdate()
