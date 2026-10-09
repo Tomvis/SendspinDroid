@@ -1,10 +1,11 @@
 package com.sendspindroid.sendspin.protocol
 
-import com.sendspindroid.sendspin.protocol.message.BinaryMessageParser
+import com.sendspindroid.sendspin.crypto.NoiseCrypto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.nio.ByteBuffer
 
 /**
  * messaging.md, "Receive timestamps": "A receiver's receive time for a message
@@ -22,51 +23,53 @@ class ChunkArrivalStampTest {
 
     private lateinit var handler: TestProtocolHandler
 
+    /** A channel on which decrypting a frame takes 200 ms. */
+    private val slowDecrypt = object : NoiseCrypto {
+        override fun encrypt(plaintext: ByteArray) = plaintext
+        override fun decrypt(frame: ByteArray): ByteArray {
+            Thread.sleep(200)
+            return frame
+        }
+    }
+
     @Before
     fun setUp() {
         handler = TestProtocolHandler()
+        handler.setHandshakeCompleteForTest()
+        handler.handleTextMessageForTest(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}"""
+        )
+        handler.handleTextMessageForTest(
+            """{"type":"stream/start","payload":{"player":{"codec":"pcm","sample_rate":48000,""" +
+                """"channels":2,"bit_depth":16}}}"""
+        )
         // A clock filter that has converged on "server time equals ours".
         val filter = handler.exposedTimeFilter()
         val now = System.nanoTime() / 1000
         for (i in 5 downTo 1) filter.addMeasurement(0, 1000, now - i * 1000)
         assertTrue(filter.isConverged)
+        handler.installEncryptedChannel(slowDecrypt)
     }
 
-    private fun setFrameReceivedAt(micros: Long) {
-        SendSpinProtocolHandler::class.java.getDeclaredField("frameReceivedAtMicros")
-            .apply { isAccessible = true }
-            .setLong(handler, micros)
-    }
-
-    private fun measure(chunk: BinaryMessageParser.BinaryMessage.Audio) {
-        SendSpinProtocolHandler::class.java
-            .getDeclaredMethod("measureChunkDelay", BinaryMessageParser.BinaryMessage.Audio::class.java)
-            .apply { isAccessible = true }
-            .invoke(handler, chunk)
+    /** An audio chunk frame the server sent this instant: `[4][timestamp][send_ahead][audio]`. */
+    private fun chunkSentNow(): ByteArray {
+        val sendAhead = 1_100_000
+        return ByteBuffer.allocate(17)
+            .put(4)
+            .putLong(System.nanoTime() / 1000 + sendAhead)
+            .putInt(sendAhead)
+            .array()
     }
 
     @Test
-    fun `a chunk's delay is measured to when its frame arrived, not to when it is processed`() {
-        // Two chunks 20 ms apart whose frames arrived five seconds ago, each
-        // 100 ms after the server sent it. Whatever happened to them since
-        // (decryption, parsing, a busy thread) is not network delay.
-        val arrived = System.nanoTime() / 1000 - 5_000_000
-        val sendAhead = 1_100_000L
-        for (i in 0..1) {
-            val arrival = arrived + i * 20_000
-            setFrameReceivedAt(arrival)
-            // Sent at `timestamp - send_ahead`, which is 100 ms before it arrived.
-            measure(
-                BinaryMessageParser.BinaryMessage.Audio(
-                    timestampMicros = arrival - 100_000 + sendAhead,
-                    sendAheadMicros = sendAhead,
-                    payload = ByteArray(4),
-                )
-            )
-        }
+    fun `a chunk's delay is measured to when its frame arrived, not to when it was decrypted`() {
+        // Each frame arrives the instant the server sent it and then takes
+        // 200 ms to decrypt. That is the client's time, not the network's.
+        repeat(3) { handler.handleBinaryMessageForTest(chunkSentNow()) }
 
-        // The 350 ms floor plus the 100 ms the network took. Measured to the
-        // time of processing it would be the floor plus about 5100 ms.
-        assertEquals(450, handler.protocolStats().minBufferMs)
+        assertEquals(3, handler.audioChunks.size)
+        // The floor alone: no network delay to add. Measured to the time of
+        // processing it would be the floor plus 200 ms.
+        assertEquals(350, handler.protocolStats().minBufferMs)
     }
 }
