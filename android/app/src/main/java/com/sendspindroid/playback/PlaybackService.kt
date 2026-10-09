@@ -61,6 +61,7 @@ import com.sendspindroid.model.PlaybackStateType
 import com.sendspindroid.model.SyncStats
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.sendspin.SendSpin
+import com.sendspindroid.sendspin.pairing.PairedServers
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.sendspin.SendSpinEndpoint
 import com.sendspindroid.discovery.DiscoveryGate
@@ -756,6 +757,15 @@ class PlaybackService : MediaLibraryService() {
                     noteDialEnded()
                 }
                 wasAttempting = attempting
+            }
+        }
+
+        // A pairing record was removed in Settings: whichever connection it
+        // admitted ends, dialled or opened by the server.
+        serviceScope.launch {
+            PairedServers.forgotten.collect { pskId ->
+                dialClient?.leaveIfAdmittedBy(pskId)
+                inboundConnections.leaveIfAdmittedBy(pskId)
             }
         }
 

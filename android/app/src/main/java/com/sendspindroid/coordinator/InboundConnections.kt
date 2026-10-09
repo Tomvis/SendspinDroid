@@ -178,6 +178,16 @@ class InboundConnections(
     }
 
     /**
+     * The user removed the pairing record [pskId]: end every connection it
+     * admitted, provisional ones included, so that none of them is admitted
+     * on a key this device no longer holds.
+     */
+    fun leaveIfAdmittedBy(pskId: String) {
+        val open = synchronized(lock) { connections.toList() }
+        open.forEach { it.client.leaveIfAdmittedBy(pskId) }
+    }
+
+    /**
      * Stop taking connections and end the ones there are. The caller has
      * already stopped playing from the held one.
      */

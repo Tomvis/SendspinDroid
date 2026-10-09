@@ -46,11 +46,11 @@ class InboundConnectionsTest : E2ETestBase() {
         lateinit var callback: SendSpin.Callback
 
         /** Connect as far as the hello exchange: a provisional connection. */
-        fun connect(matched: PskCategory? = null): Server {
+        fun connect(matched: PskCategory? = null, key: Byte = 3): Server {
             transport.afterConnected = {
                 client.installEncryptedChannel(PlaintextCrypto)
                 setField(client, "sessionFacts", sessionFacts(id))
-                matched?.let { setField(client, "matchedPsk", Psk(ByteArray(32) { 3 }, it)) }
+                matched?.let { setField(client, "matchedPsk", Psk(ByteArray(32) { key }, it)) }
             }
             inbound.onConnection(transport, "$id:51000")
             // Refused at the door.
@@ -355,6 +355,53 @@ class InboundConnectionsTest : E2ETestBase() {
         assertEquals("no client is made for it", ConnectionAdmission.MAX_PROVISIONAL, clients.size)
         assertEquals(emptyList<String>(), extra.transport.sentTextMessages.toList())
         assertTrue(waiting.none { it.transport.closed })
+    }
+
+    // ---- forgetting a pairing ----
+
+    private fun pskIdOf(key: Byte) = Psk(ByteArray(32) { key }, PskCategory.LONG_TERM).pskId
+
+    @Test
+    fun `forgetting the record that admitted the held connection ends it as unauthorized`() {
+        inbound.open()
+        val a = Server("a").connect(PskCategory.LONG_TERM, key = 4).activate("playback")
+        val b = Server("b").connect(PskCategory.LONG_TERM, key = 5)
+
+        inbound.leaveIfAdmittedBy(pskIdOf(4))
+        scope.runCurrent()
+
+        assertTrue(a.toldGoodbye("unauthorized"))
+        assertTrue(a.transport.closed)
+        verify(exactly = 1) { a.callback.onDisconnected(false) }
+        verify(exactly = 0) { a.callback.onDisconnected(true) }
+        assertFalse("another server's connection is left alone", b.transport.closed)
+    }
+
+    @Test
+    fun `a provisional connection on the forgotten key is dropped before it can be admitted`() {
+        inbound.open()
+        val a = Server("a").connect(PskCategory.LONG_TERM, key = 4)
+
+        inbound.leaveIfAdmittedBy(pskIdOf(4))
+        scope.runCurrent()
+
+        assertTrue(a.transport.closed)
+        assertEquals(emptyList<SendSpin>(), admitted)
+    }
+
+    @Test
+    fun `the forgotten server connecting again is met as an unpaired one`() {
+        inbound.open()
+        Server("a").connect(PskCategory.LONG_TERM, key = 4).activate("playback")
+        inbound.leaveIfAdmittedBy(pskIdOf(4))
+        scope.runCurrent()
+
+        // Its key is no longer held, so the handshake falls back to the
+        // Sentinel, and the ordinary admission rules take it from there.
+        val again = Server("a").connect(PskCategory.SENTINEL).activate()
+
+        assertSame(again.client, admitted.last())
+        assertFalse(again.transport.closed)
     }
 
     // ---- stopping ----

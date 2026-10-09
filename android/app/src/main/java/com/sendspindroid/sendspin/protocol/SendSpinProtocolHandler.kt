@@ -1333,6 +1333,7 @@ abstract class SendSpinProtocolHandler(
     protected fun sendPairAbort(reason: String) {
         Log.w(tag, "Pairing aborted (sent): reason=$reason")
         pairingAborted = true
+        onPairingAborted(reason, sentByUs = true)
         val closes = reason in PairAbortReason.CLOSES_CONNECTION
         getCoroutineScope().launch {
             sendProtocolMessageAwaiting(MessageBuilder.buildPairAbort(reason))
@@ -1363,6 +1364,9 @@ abstract class SendSpinProtocolHandler(
     protected fun handlePairAbort(payload: JsonObject?) {
         val reason = payload?.get("reason")?.jsonPrimitive?.contentOrNull ?: "unspecified"
         Log.w(tag, "Pairing aborted (received): reason=$reason")
+        // After our own abort the server's has no effect, and ours is the
+        // reason the attempt ended.
+        if (!pairingAborted) onPairingAborted(reason, sentByUs = false)
         runPairingActions(PairingEvent.PairAbortReceived(reason))
         if (activePairingMethod == PairMethod.DYNAMIC_PAIRING_CODE) {
             runDynamicPairingActions(DynamicPairingEvent.PairAbortReceived(reason))
@@ -1408,6 +1412,14 @@ abstract class SendSpinProtocolHandler(
 
     /** Surfaced for the pairing UI (#225). */
     protected open fun onPaired(serverId: String) {}
+
+    /**
+     * A `pair/abort` ended, or refused, a pairing attempt. Surfaced for the
+     * pairing UI (#225): without it a failed attempt is silent.
+     *
+     * @param sentByUs false when the server sent it.
+     */
+    protected open fun onPairingAborted(reason: String, sentByUs: Boolean) {}
 
     // ========== server/unpair (item 2.7) ==========
 

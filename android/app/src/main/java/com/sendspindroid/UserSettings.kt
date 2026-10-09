@@ -63,6 +63,7 @@ object UserSettings {
     const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
     const val KEY_SEARCH_FOR_SERVERS = "search_for_servers"
     const val KEY_LAST_PLAYBACK_SERVER_ID = "last_playback_server_id"
+    const val KEY_PAIRED_SERVER_NAME_PREFIX = "paired_server_name_"
 
     // Long-term PSK records from pairing (stored in encrypted prefs).
     // Record semantics live in the trust store; this is only the blob.
@@ -546,6 +547,19 @@ object UserSettings {
     var lastPlaybackServerId: String?
         get() = prefs?.getString(KEY_LAST_PLAYBACK_SERVER_ID, null)
         set(value) { prefs?.edit()?.putString(KEY_LAST_PLAYBACK_SERVER_ID, value)?.apply() }
+
+    /**
+     * What a paired server last called itself, by `server_id`, for the list
+     * of paired servers. A pairing record holds no name. Display only, and
+     * not a secret: plain preferences.
+     */
+    fun getPairedServerName(serverId: String): String? =
+        prefs?.getString(KEY_PAIRED_SERVER_NAME_PREFIX + serverId, null)
+
+    /** @param name null forgets it. */
+    fun setPairedServerName(serverId: String, name: String?) {
+        prefs?.edit()?.putString(KEY_PAIRED_SERVER_NAME_PREFIX + serverId, name)?.apply()
+    }
 
     /**
      * Layout mode override for adaptive UI.

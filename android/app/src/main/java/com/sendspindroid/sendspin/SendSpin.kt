@@ -5,6 +5,8 @@ import android.util.Log
 import com.sendspindroid.UserSettings
 import com.sendspindroid.logging.AppLog
 import com.sendspindroid.sendspin.pairing.PairAbortReason
+import com.sendspindroid.sendspin.pairing.PairedServers
+import com.sendspindroid.sendspin.pairing.PairingOutcome
 import com.sendspindroid.sendspin.protocol.Activity
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.sendspin.protocol.ConnectionAdmission
@@ -130,6 +132,9 @@ class SendSpin(
         // the worst-case natural silence; 20s gives 2x headroom while still catching
         // server death. Issue #127.
         private const val IDLE_STALL_TIMEOUT_MS = 20_000L
+
+        // Enough of a 43-character server_id to tell two servers apart.
+        private const val SERVER_ID_LABEL_LENGTH = 12
     }
 
     /**
@@ -528,7 +533,23 @@ class SendSpin(
         // client sends nothing further. The new record is already visible to
         // pskCandidates(), which reads the store on every call.
         Log.i(TAG, "Pairing complete with $serverId - awaiting the server's re-handshake")
+        PairedServers.rememberName(serverId, serverLabel())
+        PairedServers.report(PairingOutcome.Paired(serverLabel()))
     }
+
+    override fun onPairingAborted(reason: String, sentByUs: Boolean) {
+        PairedServers.report(PairingOutcome.Aborted(reason, sentByUs, serverLabel()))
+    }
+
+    /**
+     * What to call the server when telling the user how a pairing ended.
+     *
+     * Those outcomes go to [PairedServers] and not through [callback]: a
+     * pairing changes what this device holds whichever connection it ran on,
+     * including one that is not the connection being played from.
+     */
+    private fun serverLabel(): String =
+        serverName ?: sessionFacts?.serverId?.take(SERVER_ID_LABEL_LENGTH).orEmpty()
 
     override fun onAdmissionStateChanged(state: AdmissionState) {
         Log.i(TAG, "Admission state: $state")
@@ -552,6 +573,8 @@ class SendSpin(
 
     override fun onUnpaired(pskId: String, serverId: String?) {
         Log.i(TAG, "Unpaired by $serverId (psk_id=$pskId)")
+        serverId?.let { UserSettings.setPairedServerName(it, null) }
+        PairedServers.report(PairingOutcome.Unpaired(serverLabel()))
         callback.onUnpaired(serverId)
     }
 
@@ -735,6 +758,11 @@ class SendSpin(
 
     override fun onHandshakeComplete(serverName: String, serverId: String) {
         this.serverName = serverName
+        // A pairing record holds no name, so a paired server's is noted here
+        // for the list of paired servers.
+        if (matchedPsk?.category == PskCategory.LONG_TERM && serverId.isNotEmpty()) {
+            PairedServers.rememberName(serverId, serverName)
+        }
 
         evaluateAndPublishSyncState()
 
@@ -1028,6 +1056,18 @@ class SendSpin(
      * Disconnect from the current server because the user asked to.
      */
     fun disconnect() = leave(GoodbyeReason.USER_REQUEST, reconnect = false)
+
+    /**
+     * The user removed the pairing record [pskId] from this device. If it is
+     * the one that admitted this connection, the connection ends with
+     * `unauthorized`: the server is no longer authorised for what this
+     * session was admitted to do, and should not come straight back for it.
+     * Nobody reconnects from this side either. The record is already gone,
+     * so a server that connects again is met with the Sentinel PSK.
+     */
+    fun leaveIfAdmittedBy(pskId: String) {
+        if (matchedPsk?.pskId == pskId) leave(GoodbyeReason.UNAUTHORIZED, reconnect = false)
+    }
 
     /**
      * Say why we are leaving, then end the connection: every deliberate
