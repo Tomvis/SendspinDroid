@@ -1,7 +1,13 @@
 package com.sendspindroid.sendspin.transport
 
 import com.sendspindroid.shared.log.Log
+import com.sendspindroid.sendspin.crypto.MAX_NOISE_MESSAGE
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCallPipeline
+import io.ktor.server.application.call
 import io.ktor.server.application.install
+import io.ktor.server.response.respond
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
@@ -53,6 +59,7 @@ class SendspinWebSocketServer(
     }
 
     private var server: EmbeddedServer<*, *>? = null
+    private var stopped = false
 
     /** Connections, each with the job of the handler serving it. */
     private val open = mutableListOf<Pair<InboundWebSocketTransport, Job>>()
@@ -66,6 +73,9 @@ class SendspinWebSocketServer(
     @Synchronized
     fun start(preferredPort: Int = DEFAULT_PORT): Int {
         check(server == null) { "already listening" }
+        // A listener is used once. Whichever of start() and stop() runs
+        // first, nothing is left bound after stop().
+        check(!stopped) { "stopped" }
         val (started, port) = try {
             bind(preferredPort)
         } catch (e: Exception) {
@@ -79,9 +89,25 @@ class SendspinWebSocketServer(
 
     private fun bind(port: Int): Pair<EmbeddedServer<*, *>, Int> {
         val candidate = embeddedServer(CIO, port = port, host = "0.0.0.0") {
+            // No Sendspin server is a web page, and a page is the one kind
+            // of peer that always says where it came from. Refused before
+            // the upgrade, so before anything is allocated for it.
+            intercept(ApplicationCallPipeline.Plugins) {
+                if (call.request.headers.contains(HttpHeaders.Origin)) {
+                    Log.w(TAG, "Refusing a connection from a browser (Origin header)")
+                    call.respond(HttpStatusCode.Forbidden)
+                    finish()
+                }
+            }
             install(WebSockets) {
                 pingPeriodMillis = PING_INTERVAL_MS
                 timeoutMillis = PING_INTERVAL_MS
+                // Ktor's default is unlimited, and the buffer for a frame is
+                // sized from its header: anyone who can reach the port could
+                // ask for gigabytes before the handshake. The largest thing
+                // a server sends is one Noise transport message; the
+                // cleartext handshake frames are a few hundred bytes.
+                maxFrameSize = MAX_NOISE_MESSAGE.toLong()
             }
             routing {
                 webSocket(path) {
@@ -121,6 +147,7 @@ class SendspinWebSocketServer(
      */
     @Synchronized
     fun stop() {
+        stopped = true
         val running = server ?: return
         val closing = open.filter { it.first.isClosing }.map { it.second }
         if (closing.isNotEmpty()) {

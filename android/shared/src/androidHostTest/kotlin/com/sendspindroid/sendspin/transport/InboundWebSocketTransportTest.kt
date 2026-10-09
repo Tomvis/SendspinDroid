@@ -333,6 +333,90 @@ class InboundWebSocketTransportTest {
         return socket
     }
 
+    /** A masked binary frame of [size] bytes, with the length the header declares. */
+    private fun binaryFrameHeader(size: Long): ByteArray {
+        val length = if (size <= 0xFFFF) {
+            byteArrayOf((0x80 or 126).toByte(), (size shr 8).toByte(), size.toByte())
+        } else {
+            byteArrayOf((0x80 or 127).toByte()) + ByteArray(8) { (size shr (8 * (7 - it))).toByte() }
+        }
+        // FIN + binary, the length, and an all-zero masking key.
+        return byteArrayOf(0x82.toByte()) + length + ByteArray(4)
+    }
+
+    @Test
+    fun `a frame as large as a Noise message is delivered`() {
+        val socket = dialRaw(listen())
+        val (_, client) = take()
+
+        socket.getOutputStream().write(binaryFrameHeader(65535) + ByteArray(65535) { 7 })
+
+        assertEquals("binary", client.next())
+        assertEquals(65535, client.binary.poll()!!.size)
+        socket.close()
+    }
+
+    @Test
+    fun `a frame larger than a Noise message is refused`() {
+        val socket = dialRaw(listen())
+        val (inbound, client) = take()
+
+        // One byte over what the protocol can send. Without a limit the
+        // listener allocates whatever the header asks for.
+        socket.getOutputStream().write(binaryFrameHeader(65536) + ByteArray(65536) { 7 })
+
+        val first = client.next()
+        assertTrue("got $first", first != null && first != "binary")
+        assertNotEquals(TransportState.Connected, inbound.state)
+        socket.close()
+    }
+
+    @Test
+    fun `a huge declared frame is refused from its header alone`() {
+        val socket = dialRaw(listen())
+        val (inbound, client) = take()
+
+        // A gigabyte declared, none of it sent.
+        socket.getOutputStream().write(binaryFrameHeader(1L shl 30))
+
+        val first = client.next()
+        assertTrue("got $first", first != null && first != "binary")
+        assertNotEquals(TransportState.Connected, inbound.state)
+        socket.close()
+    }
+
+    @Test
+    fun `a connection from a web page is refused before it is accepted`() {
+        val port = listen()
+        java.net.Socket("127.0.0.1", port).use { socket ->
+            socket.getOutputStream().write(
+                ("GET /sendspin HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nUpgrade: websocket\r\n" +
+                    "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+                    "Sec-WebSocket-Version: 13\r\nOrigin: http://example.com\r\n\r\n").toByteArray()
+            )
+
+            val status = socket.getInputStream().bufferedReader().readLine()
+
+            assertTrue("answered $status", status.startsWith("HTTP/1.1 403"))
+        }
+        assertNull(accepted.poll(200, TimeUnit.MILLISECONDS))
+    }
+
+    @Test
+    fun `a listener that was stopped cannot be started`() {
+        val server = SendspinWebSocketServer(onConnection = { accepted += it })
+        servers += server
+        val port = ServerSocket(0).use { it.localPort }
+
+        // The stop that overtakes its start, as when the service is
+        // destroyed while the listener is still being brought up.
+        server.stop()
+        val started = runCatching { server.start(port) }
+
+        assertTrue(started.isFailure)
+        ServerSocket().use { it.bind(InetSocketAddress("0.0.0.0", port)) }
+    }
+
     @Test
     fun `a socket closed without a close frame is noticed at once`() {
         val socket = dialRaw(listen())
