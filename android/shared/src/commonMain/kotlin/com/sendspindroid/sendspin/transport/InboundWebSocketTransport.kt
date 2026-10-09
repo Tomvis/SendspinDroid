@@ -7,15 +7,9 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.IO
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -43,14 +37,14 @@ class InboundWebSocketTransport internal constructor(
     private companion object {
         const val TAG = "InboundWsTransport"
 
-        /** A goodbye is best-effort; a wedged socket must not stall the close. */
-        const val FLUSH_TIMEOUT_MS = 500L
-
         /** RFC 6455: the connection closed without a close frame. */
         const val CLOSE_ABNORMAL = 1006
     }
 
     private class Outgoing(val frame: Frame, val beforeWrite: (() -> Unit)? = null)
+
+    /** A local close: what to tell the peer, and whether what is queued goes first. */
+    private class CloseRequest(val code: Int, val reason: String, val flush: Boolean)
 
     private val _state = AtomicReference(TransportState.Disconnected)
     override val state: TransportState get() = _state.load()
@@ -63,18 +57,12 @@ class InboundWebSocketTransport internal constructor(
     /** True once the owner has taken the connection, false if it refused it. */
     private val taken = CompletableDeferred<Boolean>()
 
-    // The frame pump, and its sender half so closeAfterFlush can wait for the
-    // queue to drain.
-    /** True once a close has begun, whether or not it has finished. */
-    @Volatile
-    internal var isClosing = false
-        private set
+    // The first close asked for. A later one changes nothing: a destroy()
+    // that follows closeAfterFlush() must not turn the flush into a discard.
+    private val closeRequest = AtomicReference<CloseRequest?>(null)
 
-    @Volatile private var pumpJob: Job? = null
-    @Volatile private var senderJob: Job? = null
-
-    // Outlives the Ktor session's own scope, which ends with the socket.
-    private val closeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** True once a close has been asked for, whether or not it has finished. */
+    internal val isClosing: Boolean get() = closeRequest.load() != null
 
     override fun setListener(listener: SendSpinTransport.Listener?) {
         this.listener = listener
@@ -95,16 +83,19 @@ class InboundWebSocketTransport internal constructor(
     /**
      * Pump frames until the connection ends. Runs in the server's handler for
      * this socket, which Ktor closes when this returns.
+     *
+     * Every write to the socket is made here, in order: the queued frames,
+     * then the close frame. A close is a request to this coroutine and never
+     * something done to the socket from outside it, so no timing can put the
+     * close ahead of a frame that was queued before it.
      */
     internal suspend fun serve() {
-        if (!taken.await()) return
+        if (!taken.await()) {
+            sayWhyAndClose()
+            return
+        }
         try {
-            coroutineScope {
-                val pump = launch { pump() }
-                pumpJob = pump
-                // A close that raced the line above found no job to cancel.
-                if (state != TransportState.Connected) pump.cancel()
-            }
+            pump()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -122,14 +113,23 @@ class InboundWebSocketTransport internal constructor(
     }
 
     private suspend fun pump() = coroutineScope {
-        val sender = launch {
-            for (msg in outgoing) {
-                msg.beforeWrite?.invoke()
-                session.send(msg.frame)
-            }
-        }
-        senderJob = sender
+        val receiver = launch { receive() }
+        // However the receiving side ends, there is nobody left to send to.
+        receiver.invokeOnCompletion { outgoing.close() }
 
+        // Ends when the queue is closed: by close(), by closeAfterFlush(), or
+        // because the connection ended. What was queued before that is still
+        // handed out by the loop, in order.
+        for (msg in outgoing) {
+            if (closeRequest.load()?.flush == false) break
+            msg.beforeWrite?.invoke()
+            session.send(msg.frame)
+        }
+        sayWhyAndClose()
+        receiver.cancel()
+    }
+
+    private suspend fun receive() {
         for (frame in session.incoming) {
             when (frame) {
                 is Frame.Text -> {
@@ -142,15 +142,22 @@ class InboundWebSocketTransport internal constructor(
                 else -> { /* Ping/Pong/Close are handled by Ktor */ }
             }
         }
-        sender.cancel()
 
         // The server closed it, or the socket dropped.
-        val reason = withTimeoutOrNull(FLUSH_TIMEOUT_MS) { session.closeReason.await() }
+        val reason = session.closeReason.await()
         val code = reason?.code?.toInt() ?: CLOSE_ABNORMAL
         val message = reason?.message ?: ""
         Log.d(TAG, "WebSocket from $remoteAddress closed: $code $message")
-        listener?.onClosing(code, message)
-        if (endConnection(TransportState.Closed)) listener?.onClosed(code, message)
+        if (endConnection(TransportState.Closed)) {
+            listener?.onClosing(code, message)
+            listener?.onClosed(code, message)
+        }
+    }
+
+    /** Send the close frame of a local close, behind everything already written. */
+    private suspend fun sayWhyAndClose() {
+        val request = closeRequest.load() ?: return
+        runCatching { session.close(CloseReason(request.code.toShort(), request.reason)) }
     }
 
     override fun send(text: String): Boolean = enqueue(Outgoing(Frame.Text(text)))
@@ -168,41 +175,25 @@ class InboundWebSocketTransport internal constructor(
         return outgoing.trySend(message).isSuccess
     }
 
-    override fun close(code: Int, reason: String) {
-        Log.d(TAG, "Closing WebSocket from $remoteAddress: code=$code reason=$reason")
-        isClosing = true
-        outgoing.close()
-        val wasLive = endConnection(TransportState.Closed)
-        taken.complete(false)
-        closeScope.launch {
-            // Say why while there is still a socket to say it on, then let
-            // the handler return so Ktor releases it.
-            withTimeoutOrNull(FLUSH_TIMEOUT_MS) {
-                runCatching { session.close(CloseReason(code.toShort(), reason)) }
-            }
-            pumpJob?.cancel()
-        }
-        if (wasLive) listener?.onClosed(code, reason)
-    }
+    /** Close now: what is still queued is discarded. */
+    override fun close(code: Int, reason: String) =
+        requestClose(CloseRequest(code, reason, flush = false))
 
     /**
-     * Closing the channel stops new sends but leaves what is queued
-     * deliverable, so the sender drains and completes on its own. See
-     * [BaseWebSocketTransport.closeAfterFlush].
+     * Close once everything already queued has been written. The pump does
+     * both, one after the other, so nothing here waits or times out.
      */
-    override fun closeAfterFlush(code: Int, reason: String) {
-        val sender = senderJob
-        isClosing = true
+    override fun closeAfterFlush(code: Int, reason: String) =
+        requestClose(CloseRequest(code, reason, flush = true))
+
+    private fun requestClose(request: CloseRequest) {
+        if (!closeRequest.compareAndSet(null, request)) return
+        Log.d(TAG, "Closing WebSocket from $remoteAddress: code=${request.code} reason=${request.reason}")
+        val wasLive = endConnection(TransportState.Closed)
+        // Wakes the pump, or tells serve() the connection was refused.
         outgoing.close()
-        if (sender == null) {
-            close(code, reason)
-            return
-        }
-        closeScope.launch {
-            val drained = withTimeoutOrNull(FLUSH_TIMEOUT_MS) { sender.join() } != null
-            if (!drained) Log.w(TAG, "Outgoing queue did not drain in ${FLUSH_TIMEOUT_MS}ms")
-            close(code, reason)
-        }
+        taken.complete(false)
+        if (wasLive) listener?.onClosed(request.code, request.reason)
     }
 
     override fun destroy() {

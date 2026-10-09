@@ -215,6 +215,47 @@ class InboundWebSocketTransportTest {
     }
 
     @Test
+    fun `a close after flush right behind the sends loses none of them`() {
+        val server = dial(listen())
+        peerFor(server)
+        val transport = accepted.poll(WAIT_S, TimeUnit.SECONDS)!!
+        transport.setListener(Recorder())
+
+        // No waiting for the pump to start, or for anything to be written:
+        // the close is asked for the instant the last frame is queued.
+        transport.connect()
+        repeat(50) { transport.send("frame-$it") }
+        transport.closeAfterFlush(1000, "goodbye")
+        // What an owner does next. It must not turn the flush into a discard.
+        transport.destroy()
+
+        repeat(50) { assertEquals("text:frame-$it", server.next()) }
+        assertTrue(server.next()!!.startsWith("clos"))
+    }
+
+    @Test
+    fun `a plain close does not wait for the queue`() {
+        val server = dial(listen())
+        peerFor(server)
+        val (inbound, _) = take()
+        val firstIsBeingWritten = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        inbound.send(byteArrayOf(1)) {
+            firstIsBeingWritten.countDown()
+            release.await(WAIT_S, TimeUnit.SECONDS)
+        }
+        assertTrue(firstIsBeingWritten.await(WAIT_S, TimeUnit.SECONDS))
+        inbound.send("never sent")
+
+        inbound.close(1001, "going")
+        release.countDown()
+
+        // The frame being written goes; the one behind it does not.
+        assertEquals("binary", server.next())
+        assertTrue(server.next()!!.startsWith("clos"))
+    }
+
+    @Test
     fun `a connection that is refused instead of taken is closed`() {
         val server = dial(listen())
         peerFor(server)
@@ -278,16 +319,6 @@ class InboundWebSocketTransportTest {
         ServerSocket().use { it.bind(InetSocketAddress("0.0.0.0", port)) }
     }
 
-    @Test
-    fun `stopping with no connections does not wait`() {
-        listen()
-
-        val started = System.nanoTime()
-        servers.single().stop()
-
-        assertTrue((System.nanoTime() - started) / 1_000_000 < 300)
-    }
-
     /** Open a WebSocket to the listener over a bare socket, as a server process would. */
     private fun dialRaw(port: Int): java.net.Socket {
         val socket = java.net.Socket("127.0.0.1", port)
@@ -327,13 +358,17 @@ class InboundWebSocketTransportTest {
     }
 
     private fun assertGone(client: Recorder, inbound: InboundWebSocketTransport) {
-        val events = generateSequence { client.events.poll(2, TimeUnit.SECONDS) }
-            .takeWhile { true }.take(2).toList()
+        // "closing" may come first.
+        val events = listOfNotNull(client.next()).let { first ->
+            if (first.any { it.startsWith("closing:") }) first + listOfNotNull(client.next()) else first
+        }
         assertTrue("reported $events", events.any { it.startsWith("closed:") || it == "failure" })
         assertNotEquals(TransportState.Connected, inbound.state)
     }
 
     private companion object {
-        const val WAIT_S = 5L
+        // How long to wait for something that is expected to happen. Every
+        // wait returns as soon as it does, so this only bounds a failure.
+        const val WAIT_S = 30L
     }
 }

@@ -44,8 +44,12 @@ class SendspinWebSocketServer(
         private const val PING_INTERVAL_MS = 30_000L
         private const val STOP_TIMEOUT_MS = 500L
 
-        /** A little over the transport's own flush timeout. */
-        private const val STOP_GRACE_MS = 600L
+        /**
+         * How long [stop] waits for a closing connection whose peer has
+         * stopped reading. A peer that reads is done in milliseconds and is
+         * never cut short by this.
+         */
+        private const val UNRESPONSIVE_PEER_MS = 10_000L
     }
 
     private var server: EmbeddedServer<*, *>? = null
@@ -107,17 +111,20 @@ class SendspinWebSocketServer(
     /**
      * Stop listening and drop every connection still open.
      *
-     * Ktor cuts connections off the moment it stops, so one that is already
-     * closing is first given up to [STOP_GRACE_MS] to finish: a goodbye
-     * queued just before this must not be lost with its socket. With no
-     * connection closing there is nothing to wait for.
+     * Ktor cuts connections off the moment it stops, so this first waits for
+     * the connections that are already closing to finish: each writes what
+     * it had queued, then its close frame, and its handler returns. A
+     * goodbye queued just before this is therefore on the wire before the
+     * socket goes. With no connection closing there is nothing to wait for.
+     *
+     * Blocks until the port is released, so not for the main thread.
      */
     @Synchronized
     fun stop() {
         val running = server ?: return
         val closing = open.filter { it.first.isClosing }.map { it.second }
         if (closing.isNotEmpty()) {
-            runBlocking { withTimeoutOrNull(STOP_GRACE_MS) { closing.joinAll() } }
+            runBlocking { withTimeoutOrNull(UNRESPONSIVE_PEER_MS) { closing.joinAll() } }
         }
         open.clear()
         running.stop(0, STOP_TIMEOUT_MS)
