@@ -48,14 +48,23 @@ class SendspinWebSocketServer(
         const val DEFAULT_PATH = "/sendspin"
 
         private const val PING_INTERVAL_MS = 30_000L
-        private const val STOP_TIMEOUT_MS = 500L
 
         /**
-         * How long [stop] waits for a closing connection whose peer has
-         * stopped reading. A peer that reads is done in milliseconds and is
-         * never cut short by this.
+         * How long the engine may take to release the port. It returns as
+         * soon as it has, which with every connection already ended is at
+         * once, so this only bounds a failure.
+         */
+        private const val STOP_TIMEOUT_MS = 10_000L
+
+        /**
+         * How long [stop] waits for connections whose peers have stopped
+         * reading. A peer that reads is done in milliseconds and is never
+         * cut short by this.
          */
         private const val UNRESPONSIVE_PEER_MS = 10_000L
+
+        /** RFC 6455: "an endpoint is going away". */
+        private const val CLOSE_GOING_AWAY = 1001
     }
 
     private var server: EmbeddedServer<*, *>? = null
@@ -113,8 +122,12 @@ class SendspinWebSocketServer(
                 webSocket(path) {
                     val remote = call.request.local.let { "${it.remoteAddress}:${it.remotePort}" }
                     val transport = InboundWebSocketTransport(this, remote)
-                    track(transport, coroutineContext.job)
-                    onConnection(transport)
+                    if (track(transport, coroutineContext.job)) {
+                        onConnection(transport)
+                    } else {
+                        // Accepted while stop() was running: nobody is told.
+                        transport.close(CLOSE_GOING_AWAY, "listener stopped")
+                    }
                     transport.serve()
                 }
             }
@@ -128,20 +141,27 @@ class SendspinWebSocketServer(
         }
     }
 
+    /** False once the listener has stopped: the connection is not one to hand out. */
     @Synchronized
-    private fun track(transport: InboundWebSocketTransport, handler: Job) {
+    private fun track(transport: InboundWebSocketTransport, handler: Job): Boolean {
+        if (stopped) return false
         open.removeAll { !it.second.isActive }
         open += transport to handler
+        return true
     }
 
     /**
-     * Stop listening and drop every connection still open.
+     * Stop listening and end every connection.
      *
-     * Ktor cuts connections off the moment it stops, so this first waits for
-     * the connections that are already closing to finish: each writes what
-     * it had queued, then its close frame, and its handler returns. A
-     * goodbye queued just before this is therefore on the wire before the
-     * socket goes. With no connection closing there is nothing to wait for.
+     * The connections are ended here, one by one, and not left to the engine:
+     * all Ktor does when it stops is cancel its coroutines and wait a moment,
+     * and when the socket of a cancelled connection is released is not
+     * something it promises. So each connection that is not already closing
+     * is closed (1001), and all of them are waited for: each writes what it
+     * had queued, then its close frame, and its handler returns, which is
+     * what makes Ktor release the socket. A goodbye queued just before this
+     * is therefore on the wire before the socket goes, and a server that was
+     * connected is told at once and does not go on believing it is.
      *
      * Blocks until the port is released, so not for the main thread.
      */
@@ -149,10 +169,10 @@ class SendspinWebSocketServer(
     fun stop() {
         stopped = true
         val running = server ?: return
-        val closing = open.filter { it.first.isClosing }.map { it.second }
-        if (closing.isNotEmpty()) {
-            runBlocking { withTimeoutOrNull(UNRESPONSIVE_PEER_MS) { closing.joinAll() } }
-        }
+        // A no-op for a connection that is already closing: its own close,
+        // and what it queued ahead of it, stand.
+        open.forEach { it.first.close(CLOSE_GOING_AWAY, "listener stopped") }
+        runBlocking { withTimeoutOrNull(UNRESPONSIVE_PEER_MS) { open.map { it.second }.joinAll() } }
         open.clear()
         running.stop(0, STOP_TIMEOUT_MS)
         server = null

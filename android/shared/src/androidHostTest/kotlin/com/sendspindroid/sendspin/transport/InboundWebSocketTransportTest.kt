@@ -9,6 +9,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -47,6 +48,14 @@ class InboundWebSocketTransportTest {
         override fun onFailure(error: Throwable, isRecoverable: Boolean) { events += "failure" }
 
         fun next(): String? = events.poll(WAIT_S, TimeUnit.SECONDS)
+
+        /** The next event that is not "connected" or the "closing" ahead of a "closed". */
+        fun nextClose(): String? {
+            while (true) {
+                val event = next() ?: return null
+                if (event != "connected" && !event.startsWith("closing:")) return event
+            }
+        }
     }
 
     private val accepted = LinkedBlockingQueue<InboundWebSocketTransport>()
@@ -291,17 +300,26 @@ class InboundWebSocketTransportTest {
     }
 
     @Test
-    fun `stopping drops open connections and frees the port`() {
+    fun `stopping tells every connected server and frees the port`() {
         val port = listen()
-        val server = dial(port)
-        peerFor(server)
-        take()
+        val connected = dial(port)
+        peerFor(connected)
+        val (inbound, client) = take()
+        // And one that was accepted and not yet taken or refused.
+        val waiting = dial(port)
+        peerFor(waiting)
+        assertNotNull(accepted.poll(WAIT_S, TimeUnit.SECONDS))
 
         servers.single().stop()
 
-        // Abrupt, so the peer may see a reset where it would otherwise see a close.
-        assertTrue(server.next()!!.let { it.startsWith("clos") || it == "failure" })
+        // All of it has happened by the time stop() returns: nothing below
+        // is waited for. A close frame, not a cut connection, which the
+        // peer might not notice before its next ping.
+        assertEquals("closed:1001", client.events.poll())
+        assertEquals(TransportState.Closed, inbound.state)
         ServerSocket().use { it.bind(InetSocketAddress("0.0.0.0", port)) }
+        assertEquals("closed:1001", connected.nextClose())
+        assertEquals("closed:1001", waiting.nextClose())
     }
 
     @Test

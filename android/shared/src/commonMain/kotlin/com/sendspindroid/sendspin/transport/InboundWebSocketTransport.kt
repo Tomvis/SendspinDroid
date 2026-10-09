@@ -61,9 +61,6 @@ class InboundWebSocketTransport internal constructor(
     // that follows closeAfterFlush() must not turn the flush into a discard.
     private val closeRequest = AtomicReference<CloseRequest?>(null)
 
-    /** True once a close has been asked for, whether or not it has finished. */
-    internal val isClosing: Boolean get() = closeRequest.load() != null
-
     override fun setListener(listener: SendSpinTransport.Listener?) {
         this.listener = listener
     }
