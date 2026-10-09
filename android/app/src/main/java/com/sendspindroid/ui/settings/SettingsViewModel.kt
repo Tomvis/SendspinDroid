@@ -15,6 +15,9 @@ import com.sendspindroid.UserSettings
 import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.LogLevel
 import com.sendspindroid.sendspin.crypto.AndroidPairingConfigStore
+import com.sendspindroid.sendspin.pairing.PairedServer
+import com.sendspindroid.sendspin.pairing.PairedServers
+import com.sendspindroid.sendspin.pairing.PairingOutcome
 import com.sendspindroid.sendspin.pairing.PairingToken
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import kotlinx.coroutines.delay
@@ -71,6 +74,15 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             pairingPsk = config.pairingPsk,
         )
     }
+
+    /** Public, unlike the token: it is the `client_id` servers see on the wire. */
+    val clientId: String get() = UserSettings.getOrCreateClientIdentity().clientId
+
+    // The records may have changed while Settings was closed.
+    val pairedServers: StateFlow<List<PairedServer>> = PairedServers.servers.also { PairedServers.refresh() }
+    val lastPairingOutcome: StateFlow<PairingOutcome?> = PairedServers.lastOutcome
+
+    fun forgetPairedServer(pskId: String) = PairedServers.forget(pskId)
 
     private val _dynamicPairingCodeEnabled = MutableStateFlow(UserSettings.getDynamicPairingCodeEnabled())
     val dynamicPairingCodeEnabled: StateFlow<Boolean> = _dynamicPairingCodeEnabled.asStateFlow()

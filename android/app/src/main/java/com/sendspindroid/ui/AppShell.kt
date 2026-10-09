@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -86,6 +87,7 @@ fun AppShell(
         is AppConnectionState.Error -> {
             ServerListShell(
                 serverListContent = serverListContent,
+                onSettingsClick = onSettingsClick,
                 modifier = modifier
             )
         }
@@ -120,6 +122,7 @@ fun AppShell(
 @Composable
 private fun ServerListShell(
     serverListContent: @Composable () -> Unit,
+    onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val formFactor = LocalFormFactor.current
@@ -133,6 +136,16 @@ private fun ServerListShell(
                     else
                         MaterialTheme.typography.titleLarge
                 )
+            },
+            // The pairing token lives in Settings, and a server that needs
+            // it has usually not connected yet.
+            actions = {
+                IconButton(onClick = onSettingsClick) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = stringResource(R.string.action_app_settings)
+                    )
+                }
             },
             expandedHeight = AdaptiveDefaults.topBarHeight(formFactor),
             colors = TopAppBarDefaults.topAppBarColors(

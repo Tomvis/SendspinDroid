@@ -33,6 +33,9 @@ import com.sendspindroid.ui.theme.SendSpinTheme
  * [AdmissionState.READY] must never reach here - the caller returns early on
  * it - so this takes only the two blocked states and has no third branch to
  * render.
+ *
+ * @param lastFailure what happened to the last pairing attempt, if it did
+ *   not finish.
  */
 @Composable
 fun AdmissionNotice(
@@ -42,6 +45,7 @@ fun AdmissionNotice(
     pairingCode: String? = null,
     gestureRequested: Boolean = false,
     onAllowPairingClick: () -> Unit = {},
+    lastFailure: String? = null,
     modifier: Modifier = Modifier
 ) {
     // Three shapes for AdmissionState.PAIRING: a code to show, a gesture to
@@ -88,6 +92,20 @@ fun AdmissionNotice(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
         )
+
+        // Why the last pairing attempt did not finish. In either state: a
+        // server that gives up on a pairing goes back to waiting for
+        // approval, and this is still why the player cannot play.
+        if (lastFailure != null) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = lastFailure,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+            )
+        }
 
         if (showingCode) {
             Spacer(modifier = Modifier.height(24.dp))

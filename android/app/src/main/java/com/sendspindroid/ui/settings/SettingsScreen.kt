@@ -88,6 +88,8 @@ fun SettingsScreen(
 ) {
     val playerName by viewModel.playerName.collectAsStateWithLifecycle()
     val dynamicPairingCodeEnabled by viewModel.dynamicPairingCodeEnabled.collectAsStateWithLifecycle()
+    val pairedServers by viewModel.pairedServers.collectAsStateWithLifecycle()
+    val lastPairingOutcome by viewModel.lastPairingOutcome.collectAsStateWithLifecycle()
     val fullscreenMode by viewModel.fullscreenMode.collectAsStateWithLifecycle()
     val keepScreenOn by viewModel.keepScreenOn.collectAsStateWithLifecycle()
     val layoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
@@ -144,6 +146,12 @@ fun SettingsScreen(
             // Pairing Category
             PreferenceCategory(title = stringResource(R.string.pairing_category))
             PairingTokenPreference(token = viewModel.pairingToken())
+            PairingClientId(clientId = viewModel.clientId)
+            PairedServersSection(
+                servers = pairedServers,
+                lastOutcome = lastPairingOutcome,
+                onForget = { viewModel.forgetPairedServer(it.pskId) }
+            )
             SwitchPreference(
                 title = stringResource(R.string.pref_dynamic_pairing_code_title),
                 summary = stringResource(R.string.pref_dynamic_pairing_code_summary),
