@@ -45,6 +45,9 @@ class InboundWebSocketTransport internal constructor(
 
         /** A goodbye is best-effort; a wedged socket must not stall the close. */
         const val FLUSH_TIMEOUT_MS = 500L
+
+        /** RFC 6455: the connection closed without a close frame. */
+        const val CLOSE_ABNORMAL = 1006
     }
 
     private class Outgoing(val frame: Frame, val beforeWrite: (() -> Unit)? = null)
@@ -62,6 +65,11 @@ class InboundWebSocketTransport internal constructor(
 
     // The frame pump, and its sender half so closeAfterFlush can wait for the
     // queue to drain.
+    /** True once a close has begun, whether or not it has finished. */
+    @Volatile
+    internal var isClosing = false
+        private set
+
     @Volatile private var pumpJob: Job? = null
     @Volatile private var senderJob: Job? = null
 
@@ -102,6 +110,14 @@ class InboundWebSocketTransport internal constructor(
         } catch (e: Exception) {
             Log.e(TAG, "WebSocket failure from $remoteAddress: ${e.message}")
             if (endConnection(TransportState.Failed)) listener?.onFailure(e, true)
+        } finally {
+            // A connection reset reaches here as a cancellation, of the
+            // frame channel or of this handler, with nothing reported yet.
+            // Whatever ended the pump, the connection is over.
+            if (endConnection(TransportState.Closed)) {
+                Log.d(TAG, "WebSocket from $remoteAddress lost")
+                listener?.onClosed(CLOSE_ABNORMAL, "connection lost")
+            }
         }
     }
 
@@ -130,7 +146,7 @@ class InboundWebSocketTransport internal constructor(
 
         // The server closed it, or the socket dropped.
         val reason = withTimeoutOrNull(FLUSH_TIMEOUT_MS) { session.closeReason.await() }
-        val code = reason?.code?.toInt() ?: 1006
+        val code = reason?.code?.toInt() ?: CLOSE_ABNORMAL
         val message = reason?.message ?: ""
         Log.d(TAG, "WebSocket from $remoteAddress closed: $code $message")
         listener?.onClosing(code, message)
@@ -154,6 +170,7 @@ class InboundWebSocketTransport internal constructor(
 
     override fun close(code: Int, reason: String) {
         Log.d(TAG, "Closing WebSocket from $remoteAddress: code=$code reason=$reason")
+        isClosing = true
         outgoing.close()
         val wasLive = endConnection(TransportState.Closed)
         taken.complete(false)
@@ -175,6 +192,7 @@ class InboundWebSocketTransport internal constructor(
      */
     override fun closeAfterFlush(code: Int, reason: String) {
         val sender = senderJob
+        isClosing = true
         outgoing.close()
         if (sender == null) {
             close(code, reason)

@@ -8,7 +8,11 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocket
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.job
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The listener for server-initiated connections (`connection.md`, "Server
@@ -39,9 +43,15 @@ class SendspinWebSocketServer(
 
         private const val PING_INTERVAL_MS = 30_000L
         private const val STOP_TIMEOUT_MS = 500L
+
+        /** A little over the transport's own flush timeout. */
+        private const val STOP_GRACE_MS = 600L
     }
 
     private var server: EmbeddedServer<*, *>? = null
+
+    /** Connections, each with the job of the handler serving it. */
+    private val open = mutableListOf<Pair<InboundWebSocketTransport, Job>>()
 
     /**
      * Start listening, on [preferredPort] if it is free and on a port the
@@ -73,6 +83,7 @@ class SendspinWebSocketServer(
                 webSocket(path) {
                     val remote = call.request.local.let { "${it.remoteAddress}:${it.remotePort}" }
                     val transport = InboundWebSocketTransport(this, remote)
+                    track(transport, coroutineContext.job)
                     onConnection(transport)
                     transport.serve()
                 }
@@ -87,10 +98,29 @@ class SendspinWebSocketServer(
         }
     }
 
-    /** Stop listening and drop every connection still open. */
+    @Synchronized
+    private fun track(transport: InboundWebSocketTransport, handler: Job) {
+        open.removeAll { !it.second.isActive }
+        open += transport to handler
+    }
+
+    /**
+     * Stop listening and drop every connection still open.
+     *
+     * Ktor cuts connections off the moment it stops, so one that is already
+     * closing is first given up to [STOP_GRACE_MS] to finish: a goodbye
+     * queued just before this must not be lost with its socket. With no
+     * connection closing there is nothing to wait for.
+     */
     @Synchronized
     fun stop() {
-        server?.stop(0, STOP_TIMEOUT_MS)
+        val running = server ?: return
+        val closing = open.filter { it.first.isClosing }.map { it.second }
+        if (closing.isNotEmpty()) {
+            runBlocking { withTimeoutOrNull(STOP_GRACE_MS) { closing.joinAll() } }
+        }
+        open.clear()
+        running.stop(0, STOP_TIMEOUT_MS)
         server = null
     }
 }

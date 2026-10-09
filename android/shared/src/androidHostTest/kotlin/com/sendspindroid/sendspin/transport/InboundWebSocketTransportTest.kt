@@ -263,6 +263,76 @@ class InboundWebSocketTransportTest {
         ServerSocket().use { it.bind(InetSocketAddress("0.0.0.0", port)) }
     }
 
+    @Test
+    fun `stopping lets a connection that is closing deliver its last frame`() {
+        val port = listen()
+        val server = dial(port)
+        peerFor(server)
+        val (inbound, _) = take()
+
+        inbound.send("goodbye")
+        inbound.closeAfterFlush(1000, "goodbye")
+        servers.single().stop()
+
+        assertEquals("text:goodbye", server.next())
+        ServerSocket().use { it.bind(InetSocketAddress("0.0.0.0", port)) }
+    }
+
+    @Test
+    fun `stopping with no connections does not wait`() {
+        listen()
+
+        val started = System.nanoTime()
+        servers.single().stop()
+
+        assertTrue((System.nanoTime() - started) / 1_000_000 < 300)
+    }
+
+    /** Open a WebSocket to the listener over a bare socket, as a server process would. */
+    private fun dialRaw(port: Int): java.net.Socket {
+        val socket = java.net.Socket("127.0.0.1", port)
+        socket.getOutputStream().write(
+            ("GET /sendspin HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nUpgrade: websocket\r\n" +
+                "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+                "Sec-WebSocket-Version: 13\r\n\r\n").toByteArray()
+        )
+        val reader = socket.getInputStream().bufferedReader()
+        assertTrue(reader.readLine().startsWith("HTTP/1.1 101"))
+        while (reader.readLine().isNotEmpty()) { /* skip the response headers */ }
+        return socket
+    }
+
+    @Test
+    fun `a socket closed without a close frame is noticed at once`() {
+        val socket = dialRaw(listen())
+        val (inbound, client) = take()
+
+        socket.close()
+
+        assertGone(client, inbound)
+    }
+
+    @Test
+    fun `a connection reset is noticed at once`() {
+        val socket = dialRaw(listen())
+        val (inbound, client) = take()
+
+        // What a server process leaves behind when it is killed. Ktor
+        // reports it by cancelling the frame channel, which must not pass
+        // for the transport itself being cancelled.
+        socket.setSoLinger(true, 0)
+        socket.close()
+
+        assertGone(client, inbound)
+    }
+
+    private fun assertGone(client: Recorder, inbound: InboundWebSocketTransport) {
+        val events = generateSequence { client.events.poll(2, TimeUnit.SECONDS) }
+            .takeWhile { true }.take(2).toList()
+        assertTrue("reported $events", events.any { it.startsWith("closed:") || it == "failure" })
+        assertNotEquals(TransportState.Connected, inbound.state)
+    }
+
     private companion object {
         const val WAIT_S = 5L
     }
