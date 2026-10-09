@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -41,7 +42,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sendspindroid.R
 import com.sendspindroid.ui.main.components.AdmissionNotice
+import com.sendspindroid.sendspin.pairing.PairedServers
+import com.sendspindroid.sendspin.pairing.PairingOutcome
 import com.sendspindroid.sendspin.protocol.AdmissionState
+import com.sendspindroid.ui.settings.message
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.FormFactor
@@ -93,6 +97,7 @@ fun NowPlayingScreen(
     val admissionState by viewModel.admissionState.collectAsStateWithLifecycle()
     val pairingCode by viewModel.pairingCode.collectAsStateWithLifecycle()
     val pairingGestureRequested by viewModel.pairingGestureRequested.collectAsStateWithLifecycle()
+    val lastPairingOutcome by PairedServers.lastOutcome.collectAsStateWithLifecycle()
 
     // Don't show buffering spinner when paused -- SendSpin's audio stream stops on
     // pause, so Media3 reports STATE_BUFFERING even though the user intentionally paused.
@@ -130,6 +135,8 @@ fun NowPlayingScreen(
             gestureRequested = pairingGestureRequested,
             onOpenPairingClick = onOpenPairingClick,
             onAllowPairingClick = onAllowPairingClick,
+            lastFailure = (lastPairingOutcome as? PairingOutcome.Aborted)
+                ?.message(LocalContext.current.resources),
             modifier = modifier
         )
         return

@@ -47,10 +47,13 @@ import com.google.common.util.concurrent.MoreExecutors
 import com.sendspindroid.discovery.DiscoveryGate
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filterNotNull
 import com.sendspindroid.coordinator.ReconnectStatus
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.playback.PlaybackService
+import com.sendspindroid.sendspin.pairing.PairedServers
 import com.sendspindroid.sendspin.protocol.AdmissionState
+import com.sendspindroid.ui.settings.message
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.DefaultServerPinger
@@ -618,6 +621,20 @@ class MainActivity : AppCompatActivity() {
                     ) {
                         startAutoDiscovery()
                     }
+                }
+            }
+        }
+
+        // Pairing is driven by the server, so how it ended is said here,
+        // where the user is, and not only in Settings. drop(1): the outcome
+        // already there when the activity starts has been seen or is old.
+        lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                PairedServers.lastOutcome.drop(1).filterNotNull().collect { outcome ->
+                    // The explanations run to a few sentences on a phone.
+                    Snackbar.make(snackbarView, outcome.message(resources), Snackbar.LENGTH_LONG)
+                        .setTextMaxLines(5)
+                        .show()
                 }
             }
         }
