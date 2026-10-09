@@ -18,6 +18,8 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.sendspindroid.ui.stats.StatsContent
 import com.sendspindroid.ui.stats.StatsViewModel
 import com.sendspindroid.ui.theme.SendSpinTheme
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
 
 /**
  * Stats for Nerds - Bottom Sheet showing real-time audio synchronization diagnostics.
@@ -68,6 +70,16 @@ class StatsBottomSheet : BottomSheetDialogFragment() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Open at full height. Half-expanded leaves a strip a few rows tall in
+        // landscape, and nothing says there is more above the fold.
+        (dialog as? BottomSheetDialog)?.behavior?.apply {
+            skipCollapsed = true
+            state = BottomSheetBehavior.STATE_EXPANDED
         }
     }
 

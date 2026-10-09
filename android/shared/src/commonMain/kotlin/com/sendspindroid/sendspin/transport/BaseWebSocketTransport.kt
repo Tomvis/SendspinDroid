@@ -90,7 +90,7 @@ abstract class BaseWebSocketTransport(
 
     private sealed class OutgoingMessage {
         data class Text(val text: String) : OutgoingMessage()
-        data class Binary(val bytes: ByteArray) : OutgoingMessage()
+        class Binary(val bytes: ByteArray, val beforeWrite: (() -> Unit)? = null) : OutgoingMessage()
     }
 
     // ------------------------------------------------------------------
@@ -207,7 +207,10 @@ abstract class BaseWebSocketTransport(
                             for (msg in sendChannel) {
                                 when (msg) {
                                     is OutgoingMessage.Text -> send(Frame.Text(msg.text))
-                                    is OutgoingMessage.Binary -> send(Frame.Binary(true, msg.bytes))
+                                    is OutgoingMessage.Binary -> {
+                                        msg.beforeWrite?.invoke()
+                                        send(Frame.Binary(true, msg.bytes))
+                                    }
                                 }
                             }
                         } catch (_: ClosedSendChannelException) {
@@ -289,6 +292,15 @@ abstract class BaseWebSocketTransport(
         }
         val channel = outgoingChannel ?: return false
         return channel.trySend(OutgoingMessage.Binary(bytes)).isSuccess
+    }
+
+    override fun send(bytes: ByteArray, beforeWrite: () -> Unit): Boolean {
+        if (!isConnected) {
+            Log.w(tag, "Cannot send bytes: not connected (state=$state)")
+            return false
+        }
+        val channel = outgoingChannel ?: return false
+        return channel.trySend(OutgoingMessage.Binary(bytes, beforeWrite)).isSuccess
     }
 
     override fun close(code: Int, reason: String) {

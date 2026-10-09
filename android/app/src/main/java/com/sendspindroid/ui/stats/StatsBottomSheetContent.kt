@@ -28,6 +28,9 @@ import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
 import com.sendspindroid.ui.theme.SendSpinTheme
 import kotlin.math.abs
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Alignment
 
 // Color constants for status indicators
 private val ColorGood = Color(0xFF4CAF50)      // Green
@@ -64,51 +67,180 @@ fun StatsContent(
             .padding(horizontal = 16.dp)
             .verticalScroll(rememberScrollState())
     ) {
-        // Title
         Text(
             text = stringResource(R.string.stats_title),
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.padding(bottom = 16.dp)
+            modifier = Modifier.padding(bottom = 12.dp)
         )
 
-        // === CONNECTION ===
-        SectionHeader(stringResource(R.string.stats_section_connection))
-        StatRow(stringResource(R.string.stats_server), state.serverName ?: "--", getStatusColor(state.serverName != null))
+        SyncSummary(state)
+
+        // === SYNC: how far playback is from where the server wants it ===
+        SectionHeader(stringResource(R.string.stats_section_sync))
+        StatRow(stringResource(R.string.stats_playback), playbackLabel(state.playbackState), playbackColor(state.playbackState))
+        StatRow(
+            stringResource(R.string.stats_sync_error_smoothed),
+            String.format("%+.2f ms", state.smoothedSyncErrorMs),
+            if (state.isPlaying) getStatusColor(getSyncErrorStatus(state.smoothedSyncErrorUs)) else null,
+        )
+        // Single readings jitter by more than the player corrects for; the
+        // smoothed value above is what it acts on.
+        StatRow(stringResource(R.string.stats_sync_error_raw), String.format("%+.2f ms", state.syncErrorMs))
+        StatRow(
+            stringResource(R.string.stats_start_aligned),
+            yesNo(state.startTimeCalibrated),
+            if (state.startTimeCalibrated) ColorGood else ColorWarning,
+        )
+        if (state.gracePeriodRemainingUs >= 0) {
+            StatRow(
+                stringResource(R.string.stats_settling),
+                String.format("%.1f s", state.gracePeriodRemainingUs / 1_000_000.0),
+                ColorWarning,
+            )
+        }
+        StatRow(stringResource(R.string.stats_manual_offset), String.format("%+.0f ms", state.staticDelayMs))
+        SectionNote(stringResource(R.string.stats_sync_note))
+
+        SectionDivider()
+
+        // === CLOCK: this device's clock against the server's ===
+        SectionHeader(stringResource(R.string.stats_section_clock))
+        StatRow(
+            stringResource(R.string.stats_clock_synced),
+            if (state.clockConverged && state.timeFilterConvergenceMs > 0) {
+                stringResource(R.string.stats_clock_synced_after, state.timeFilterConvergenceMs / 1000.0)
+            } else {
+                yesNo(state.clockConverged)
+            },
+            if (state.clockConverged) ColorGood else ColorWarning,
+        )
+        StatRow(stringResource(R.string.stats_clock_drift), String.format("%+.2f ppm", state.clockDriftPpm))
+        StatRow(stringResource(R.string.stats_clock_drift_per_hour), String.format("%+.1f ms", state.clockDriftMsPerHour))
+        StatRow(
+            stringResource(R.string.stats_clock_uncertainty),
+            String.format("+/- %.2f ms", state.clockErrorMs),
+            getStatusColor(getClockErrorStatus(state.clockErrorUs)),
+        )
+        StatRow(stringResource(R.string.stats_measurements), state.measurementCount.toString())
+        if (state.lastTimeSyncAgeMs >= 0) {
+            // Once synchronized the clock is measured every 3 s.
+            StatRow(
+                stringResource(R.string.stats_last_measurement),
+                agoSeconds(state.lastTimeSyncAgeMs),
+                when {
+                    state.lastTimeSyncAgeMs < 10_000L -> ColorGood
+                    state.lastTimeSyncAgeMs < 30_000L -> ColorWarning
+                    else -> ColorBad
+                },
+            )
+        }
+        SectionNote(stringResource(R.string.stats_clock_note))
+
+        SectionDivider()
+
+        // === CORRECTION: what the player has done to stay in sync ===
+        SectionHeader(stringResource(R.string.stats_section_correction))
+        StatRow(
+            stringResource(R.string.stats_correcting_now),
+            when {
+                state.dropEveryNFrames > 0 -> stringResource(R.string.stats_correcting_dropping)
+                state.insertEveryNFrames > 0 -> stringResource(R.string.stats_correcting_inserting)
+                else -> stringResource(R.string.stats_correcting_none)
+            },
+            if (state.dropEveryNFrames > 0 || state.insertEveryNFrames > 0) ColorWarning else ColorGood,
+        )
+        StatRow(stringResource(R.string.stats_frames_dropped), framesAndMs(state.framesDropped, state))
+        StatRow(stringResource(R.string.stats_frames_inserted), framesAndMs(state.framesInserted, state))
+        StatRow(
+            stringResource(R.string.stats_reanchors),
+            state.reanchorCount.toString(),
+            if (state.reanchorCount > 0) ColorWarning else ColorGood,
+        )
+        StatRow(
+            stringResource(R.string.stats_underruns),
+            state.bufferUnderrunCount.toString(),
+            if (state.bufferUnderrunCount > 0) ColorBad else ColorGood,
+        )
+        SectionNote(stringResource(R.string.stats_correction_note))
+
+        SectionDivider()
+
+        // === BUFFER ===
+        SectionHeader(stringResource(R.string.stats_section_buffer))
+        StatRow(
+            stringResource(R.string.stats_queued),
+            String.format("%.1f s", state.queuedMs / 1000.0),
+            if (state.isPlaying) getStatusColor(getBufferStatus(state.queuedMs)) else null,
+        )
+        StatRow(stringResource(R.string.stats_min_buffer), "${state.minBufferMs} ms")
+        StatRow(stringResource(R.string.stats_lead_time), "${state.requiredLeadTimeMs} ms")
+        StatRow(
+            stringResource(R.string.stats_chunks),
+            "${state.chunksReceived} / ${state.chunksPlayed} / ${state.chunksDropped}",
+            if (state.chunksDropped > 0) ColorWarning else null,
+        )
+        StatRow(
+            stringResource(R.string.stats_gaps),
+            "${state.gapsFilled} (${state.gapSilenceMs} ms)",
+            if (state.gapsFilled > 0) ColorWarning else null,
+        )
+        StatRow(
+            stringResource(R.string.stats_overlaps),
+            "${state.overlapsTrimmed} (${state.overlapTrimmedMs} ms)",
+            if (state.overlapsTrimmed > 0) ColorWarning else null,
+        )
+
+        SectionDivider()
+
+        // === PROTOCOL: what was negotiated with the server ===
+        SectionHeader(stringResource(R.string.stats_section_protocol))
+        StatRow(stringResource(R.string.stats_server), state.serverName ?: "--")
         StatRow(stringResource(R.string.stats_address), state.serverAddress ?: "--")
-        StatRow(stringResource(R.string.stats_state), state.connectionState, getStatusColor(getConnectionStatus(state.connectionState)))
-        StatRow(stringResource(R.string.stats_codec), state.audioCodec)
+        StatRow(
+            stringResource(R.string.stats_state),
+            state.connectionState,
+            getStatusColor(getConnectionStatus(state.connectionState)),
+        )
+        StatRow(
+            stringResource(R.string.stats_encryption),
+            when (state.pskCategory) {
+                "LONG_TERM" -> stringResource(R.string.stats_encryption_paired)
+                "PAIRING" -> stringResource(R.string.stats_encryption_pairing)
+                "SENTINEL" -> stringResource(R.string.stats_encryption_unpaired)
+                else -> "--"
+            },
+            when (state.pskCategory) {
+                "LONG_TERM" -> ColorGood
+                null -> null
+                else -> ColorWarning
+            },
+        )
+        StatRow(stringResource(R.string.stats_roles), rolesLabel(state.activeRoles))
+        StatRow(stringResource(R.string.stats_stream), streamLabel(state))
         if (state.lastByteReceivedAgoMs >= 0) {
             StatRow(
-                stringResource(R.string.stats_last_byte_received),
-                String.format("%.1fs ago", state.lastByteReceivedAgoMs / 1000.0),
+                stringResource(R.string.stats_last_message),
+                agoSeconds(state.lastByteReceivedAgoMs),
                 getLastSyncColor(state.lastByteReceivedAgoMs),
             )
         }
-        StatRow(
-            stringResource(R.string.stats_stall_watchdog),
-            if (state.stallWatchdogArmed) stringResource(R.string.stats_watchdog_armed) else stringResource(R.string.stats_watchdog_idle),
-            if (state.stallWatchdogArmed) ColorGood else null,
-        )
         if (state.lastDisconnectCode != null || state.lastDisconnectReason != null) {
             val code = state.lastDisconnectCode?.toString() ?: "--"
             val reason = state.lastDisconnectReason?.take(40) ?: ""
             StatRow(
                 stringResource(R.string.stats_last_disconnect),
-                "code=$code ${if (reason.isNotEmpty()) "\"$reason\"" else ""}".trim(),
+                "$code ${if (reason.isNotEmpty()) "\"$reason\"" else ""}".trim(),
             )
         }
 
-        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        SectionDivider()
 
         // === NETWORK ===
         SectionHeader(stringResource(R.string.stats_section_network))
         StatRow(stringResource(R.string.stats_type), state.networkType, getNetworkTypeColor(state.networkType))
         StatRow(stringResource(R.string.stats_quality), state.networkQuality, getNetworkQualityColor(state.networkQuality))
-        StatRow(stringResource(R.string.stats_metered), if (state.networkMetered) stringResource(R.string.action_yes) else stringResource(R.string.action_no),
-            if (state.networkMetered) ColorWarning else ColorGood)
-
         if (state.isWifi) {
             if (state.wifiRssi != Int.MIN_VALUE) {
                 StatRow(stringResource(R.string.stats_wifi_rssi), "${state.wifiRssi} dBm", getWifiRssiColor(state.wifiRssi))
@@ -122,106 +254,11 @@ fun StatsContent(
             }
         }
 
-        if (state.isCellular && state.cellularType != null) {
-            StatRow(stringResource(R.string.stats_cellular), state.cellularTypeDisplay, getCellularTypeColor(state.cellularType))
-        }
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-        // === SYNC ERROR ===
-        SectionHeader(stringResource(R.string.stats_section_sync_error))
-        StatRow(stringResource(R.string.stats_playback), state.playbackState, getStatusColor(getPlaybackStatus(state.playbackState)))
-        StatRow(stringResource(R.string.stats_sync_error), String.format("%+.2f ms", state.syncErrorMs),
-            getStatusColor(getSyncErrorStatus(state.syncErrorUs)))
-        StatRow(stringResource(R.string.stats_smoothed), String.format("%+.2f ms", state.smoothedSyncErrorMs),
-            getStatusColor(getSyncErrorStatus(state.smoothedSyncErrorUs)))
-        StatRow(stringResource(R.string.stats_drift_rate), String.format("%+.4f", state.syncErrorDrift))
-
-        if (state.gracePeriodRemainingUs >= 0) {
-            StatRow(stringResource(R.string.stats_grace_period), String.format("%.1fs", state.gracePeriodRemainingUs / 1_000_000.0), ColorWarning)
-        } else {
-            StatRow(stringResource(R.string.stats_grace_period), stringResource(R.string.stats_grace_inactive), ColorGood)
-        }
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-        // === CLOCK SYNC ===
-        SectionHeader(stringResource(R.string.stats_section_clock_sync))
-        StatRow(stringResource(R.string.stats_offset), String.format("%+.2f ms", state.clockOffsetMs))
-        StatRow(stringResource(R.string.stats_drift), String.format("%+.3f ppm", state.clockDriftPpm),
-            getStatusColor(getClockDriftStatus(state.clockDriftPpm)))
-        StatRow(stringResource(R.string.stats_error), String.format("+/- %.2f ms", state.clockErrorMs),
-            getStatusColor(getClockErrorStatus(state.clockErrorUs)))
-        StatRow(stringResource(R.string.stats_converged), if (state.clockConverged) stringResource(R.string.action_yes) else stringResource(R.string.action_no),
-            if (state.clockConverged) ColorGood else ColorWarning)
-        StatRow(stringResource(R.string.stats_measurements), state.measurementCount.toString())
-        // Time from first measurement to first isConverged==true. Issue #128.
-        if (state.timeFilterConvergenceMs > 0) {
-            StatRow(
-                stringResource(R.string.stats_convergence_time),
-                String.format("%.1fs", state.timeFilterConvergenceMs / 1000.0),
-            )
-        }
-
-        if (state.lastTimeSyncAgeMs >= 0) {
-            StatRow(stringResource(R.string.stats_last_sync), String.format("%.1fs ago", state.lastTimeSyncAgeMs / 1000.0),
-                getLastSyncColor(state.lastTimeSyncAgeMs))
-        }
-
-        if (state.staticDelayMs != 0.0) {
-            StatRow(stringResource(R.string.stats_sync_offset), String.format("%+.0f ms", state.staticDelayMs))
-        }
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-        // === DAC / AUDIO ===
-        SectionHeader(stringResource(R.string.stats_section_dac_audio))
-        StatRow(stringResource(R.string.stats_calibrated), if (state.startTimeCalibrated) stringResource(R.string.action_yes) else stringResource(R.string.action_no),
-            if (state.startTimeCalibrated) ColorGood else ColorWarning)
-        StatRow(stringResource(R.string.stats_frames_written), formatNumber(state.totalFramesWritten))
-        StatRow(stringResource(R.string.stats_server_position), String.format("%.1fs", state.serverPositionSec))
-        StatRow(stringResource(R.string.stats_underruns), state.bufferUnderrunCount.toString(),
-            if (state.bufferUnderrunCount > 0) ColorBad else ColorGood)
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-        // === BUFFER ===
-        SectionHeader(stringResource(R.string.stats_section_buffer))
-        StatRow(stringResource(R.string.stats_queued), "${state.queuedMs} ms", getStatusColor(getBufferStatus(state.queuedMs)))
-        StatRow(stringResource(R.string.stats_received), state.chunksReceived.toString())
-        StatRow(stringResource(R.string.stats_played), state.chunksPlayed.toString())
-        StatRow(stringResource(R.string.stats_dropped), state.chunksDropped.toString(),
-            if (state.chunksDropped > 0) ColorBad else null)
-        StatRow(stringResource(R.string.stats_gaps), "${state.gapsFilled} (${state.gapSilenceMs} ms)",
-            if (state.gapsFilled > 0) ColorWarning else null)
-        StatRow(stringResource(R.string.stats_overlaps), "${state.overlapsTrimmed} (${state.overlapTrimmedMs} ms)",
-            if (state.overlapsTrimmed > 0) ColorWarning else null)
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-        // === SYNC CORRECTION ===
-        SectionHeader(stringResource(R.string.stats_section_sync_correction))
-        StatRow(stringResource(R.string.stats_mode), state.correctionMode,
-            if (state.correctionMode == "None") ColorGood else ColorWarning)
-        StatRow(stringResource(R.string.stats_inserted), state.framesInserted.toString())
-        StatRow(stringResource(R.string.stats_dropped), state.framesDropped.toString())
-        StatRow(stringResource(R.string.stats_corrections), state.syncCorrections.toString())
-        StatRow(stringResource(R.string.stats_reanchors), state.reanchorCount.toString(),
-            if (state.reanchorCount > 0) ColorWarning else ColorGood)
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-        // === CONNECTION HEALTH (network-handoff episodes) ===
-        SectionHeader(stringResource(R.string.stats_section_connection_health))
+        // === RECONNECTS: only when there has been one ===
         val episodes = handoffEpisodeLines(state.handoffEpisodes)
-        if (episodes.isEmpty()) {
-            Text(
-                text = stringResource(R.string.stats_no_handoffs),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(vertical = 4.dp),
-            )
-        } else {
+        if (episodes.isNotEmpty()) {
+            SectionDivider()
+            SectionHeader(stringResource(R.string.stats_section_reconnects))
             episodes.forEach { line ->
                 Text(
                     text = line,
@@ -237,6 +274,92 @@ fun StatsContent(
     }
 }
 
+/**
+ * The one line that answers "is it in sync?": the smoothed error, large, and
+ * what the player is doing about it.
+ */
+@Composable
+private fun SyncSummary(state: StatsState) {
+    val absError = abs(state.smoothedSyncErrorUs)
+    val (label, color) = when {
+        state.connectionState != "Connected" -> stringResource(R.string.stats_summary_not_connected) to null
+        !state.isPlaying -> playbackLabel(state.playbackState) to null
+        state.gracePeriodRemainingUs >= 0 -> stringResource(R.string.stats_summary_settling) to ColorWarning
+        absError <= SYNC_DEADBAND_US -> stringResource(R.string.stats_summary_in_sync) to ColorGood
+        absError < SYNC_RESYNC_US -> stringResource(R.string.stats_summary_correcting) to ColorGood
+        else -> stringResource(R.string.stats_summary_out_of_sync) to ColorBad
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = color ?: MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            if (state.isPlaying) {
+                Text(
+                    text = String.format("%+.2f ms", state.smoothedSyncErrorMs),
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    color = color ?: MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun playbackLabel(playbackState: String): String = stringResource(
+    when (playbackState) {
+        "PLAYING" -> R.string.stats_playback_playing
+        "WAITING_FOR_START" -> R.string.stats_playback_waiting
+        "REANCHORING" -> R.string.stats_playback_reanchoring
+        else -> R.string.stats_playback_idle
+    }
+)
+
+private fun playbackColor(playbackState: String): Color? = when (playbackState) {
+    "PLAYING" -> ColorGood
+    "WAITING_FOR_START", "REANCHORING" -> ColorWarning
+    else -> null
+}
+
+@Composable
+private fun yesNo(value: Boolean): String =
+    stringResource(if (value) R.string.action_yes else R.string.action_no)
+
+private fun agoSeconds(ageMs: Long): String = String.format("%.1f s ago", ageMs / 1000.0)
+
+/** A frame count with the stretch of audio it amounts to. */
+private fun framesAndMs(frames: Long, state: StatsState): String =
+    String.format("%,d (%.1f ms)", frames, state.framesToMs(frames))
+
+/** "player, controller, ..." from the versioned role ids the server activated. */
+private fun rolesLabel(roles: List<String>): String =
+    if (roles.isEmpty()) "--" else roles.joinToString(", ") { it.substringBefore('@') }
+
+/** "OPUS 48 kHz 16-bit stereo", or just the codec while no stream is active. */
+private fun streamLabel(state: StatsState): String {
+    if (state.streamSampleRate <= 0) return state.audioCodec
+    val rate = String.format("%.4g", state.streamSampleRate / 1000.0).trimEnd('0').trimEnd('.')
+    val channels = when (state.streamChannels) {
+        1 -> "mono"
+        2 -> "stereo"
+        else -> "${state.streamChannels} ch"
+    }
+    return "${state.audioCodec} $rate kHz ${state.streamBitDepth}-bit $channels"
+}
+
 /** Episode lines from the recorder's summary, dropping its header / empty marker. */
 private fun handoffEpisodeLines(summary: String?): List<String> =
     summary?.lineSequence()
@@ -249,6 +372,22 @@ private fun handoffLineColor(line: String): Color = when {
     line.contains("RECOVERED") -> ColorGood
     line.contains("EXHAUSTED") -> ColorBad
     else -> ColorWarning
+}
+
+@Composable
+private fun SectionDivider() {
+    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+}
+
+/** A line under a section saying what its numbers mean. */
+@Composable
+private fun SectionNote(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 4.dp),
+    )
 }
 
 @Composable
@@ -302,10 +441,6 @@ private fun getStatusColor(status: ThresholdStatus): Color {
     }
 }
 
-private fun getStatusColor(isGood: Boolean): Color? {
-    return if (isGood) ColorGood else ColorWarning
-}
-
 private fun getNetworkTypeColor(type: String): Color? {
     return when (type) {
         "WIFI", "ETHERNET" -> ColorGood
@@ -332,15 +467,6 @@ private fun getWifiRssiColor(rssi: Int): Color {
     }
 }
 
-private fun getCellularTypeColor(type: String): Color? {
-    return when (type) {
-        "TYPE_5G", "TYPE_LTE" -> ColorGood
-        "TYPE_3G" -> ColorWarning
-        "TYPE_2G" -> ColorBad
-        else -> null
-    }
-}
-
 private fun getLastSyncColor(ageMs: Long): Color {
     return when {
         ageMs < 2_000L -> ColorGood
@@ -349,9 +475,6 @@ private fun getLastSyncColor(ageMs: Long): Color {
     }
 }
 
-private fun formatNumber(value: Long): String {
-    return String.format("%,d", value)
-}
 
 // ============================================================================
 // Previews
@@ -367,24 +490,32 @@ private fun StatsContentPreview() {
                 serverName = "Living Room",
                 serverAddress = "192.168.1.100:8927",
                 connectionState = "Connected",
-                audioCodec = "Opus",
+                audioCodec = "OPUS",
+                streamSampleRate = 48000,
+                streamBitDepth = 16,
+                streamChannels = 2,
+                activeRoles = listOf("player@v1", "controller@v1", "metadata@v1", "artwork@v1"),
+                pskCategory = "LONG_TERM",
+                minBufferMs = 350,
+                requiredLeadTimeMs = 650,
                 networkType = "WIFI",
                 networkQuality = "EXCELLENT",
-                networkMetered = false,
                 wifiRssi = -55,
                 wifiSpeed = 866,
                 wifiFrequency = 5180,
                 playbackState = "PLAYING",
-                syncErrorUs = 1500,
-                smoothedSyncErrorUs = 1200,
-                clockOffsetUs = 5000,
+                syncErrorUs = -410,
+                smoothedSyncErrorUs = -40,
+                startTimeCalibrated = true,
                 clockDriftPpm = 2.5,
-                clockErrorUs = 800,
+                clockErrorUs = 300,
                 clockConverged = true,
+                timeFilterConvergenceMs = 1200,
                 measurementCount = 150,
                 lastTimeSyncAgeMs = 500,
-                startTimeCalibrated = true,
-                queuedSamples = 9600,
+                framesDropped = 12,
+                framesInserted = 3,
+                queuedSamples = 1_440_000,
                 chunksReceived = 1000,
                 chunksPlayed = 998
             )
