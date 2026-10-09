@@ -66,7 +66,7 @@ For development and testing guides, see the [Wiki](https://github.com/chrisuthe/
 
 ### Connecting to a Server
 
-The app and a server find each other in one of two ways, and uses one at a time:
+The app and a server find each other in one of two ways, and uses one at a time. A new install waits for a server; an install that already had a default server when it was updated keeps searching and connecting to it, as before.
 
 - **Waiting for a server** (the default): the app advertises itself as `_sendspin._tcp` and listens on port 8928 (or another port if that one is taken; the one in use is shown). A server that finds it connects by itself. A notification says the app is waiting, so a server can connect while the app is in the background. If several servers connect, the one that is playing is kept; a server with nothing to play does not take the player from one that has.
 - **Searching for servers**: tap "Search for servers instead". The app stops advertising and lists the servers it finds; tap one to connect. "Wait for a server to connect instead" goes back.
