@@ -12,6 +12,9 @@ package com.sendspindroid.sendspin.crypto
  *   means the pairing went wrong.
  * @param storageIsEncrypted reported through [TrustStore]; always true for a
  *   store that never touches disk.
+ *
+ * Synchronized: every connection reads and writes the one store from its own
+ * thread, and Settings removes records from the main thread.
  */
 open class InMemoryTrustStore(
     initial: List<PskRecord> = emptyList(),
@@ -39,11 +42,14 @@ open class InMemoryTrustStore(
      */
     private fun persist(): Boolean = runCatching { onChanged() }.getOrDefault(false)
 
+    @Synchronized
     override fun listRecords(): List<PskRecord> = records.toList()
 
+    @Synchronized
     override fun findByPskId(pskId: String): PskRecord? =
         records.firstOrNull { it.pskId == pskId }
 
+    @Synchronized
     override fun addRecord(psk: ByteArray, serverId: String?): TrustStore.AddRecordResult {
         if (psk.size != Psk.PSK_SIZE) return TrustStore.AddRecordResult.Invalid
 
@@ -66,12 +72,14 @@ open class InMemoryTrustStore(
         return TrustStore.AddRecordResult.Ok(record)
     }
 
+    @Synchronized
     override fun removeRecord(pskId: String): Boolean {
         val removed = records.removeAll { it.pskId == pskId }
         if (removed) persist()
         return removed
     }
 
+    @Synchronized
     override fun markUsed(pskId: String) {
         val index = records.indexOfFirst { it.pskId == pskId }
         if (index < 0) return
@@ -80,6 +88,7 @@ open class InMemoryTrustStore(
         persist()
     }
 
+    @Synchronized
     override fun candidates(): List<Psk> =
         records.map { it.toPsk() } + SentinelPsk.psk
 
