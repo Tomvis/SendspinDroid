@@ -114,6 +114,7 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
             serverName = bundle.getString("server_name", null),
             serverAddress = bundle.getString("server_address", null),
             connectionState = bundle.getString("connection_state", "Unknown"),
+            serverInitiated = bundle.getBoolean("server_initiated", false),
             audioCodec = bundle.getString("audio_codec", "--"),
             streamSampleRate = bundle.getInt("stream_sample_rate", 0),
             streamBitDepth = bundle.getInt("stream_bit_depth", 0),
@@ -190,6 +191,8 @@ data class StatsState(
     val serverName: String? = null,
     val serverAddress: String? = null,
     val connectionState: String = "Unknown",
+    /** Whether the server opened the connection, or this device dialled it. */
+    val serverInitiated: Boolean = false,
     val audioCodec: String = "--",
     val streamSampleRate: Int = 0,
     val streamBitDepth: Int = 0,
