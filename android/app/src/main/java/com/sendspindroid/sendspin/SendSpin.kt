@@ -262,6 +262,13 @@ class SendSpin(
     override fun admitActivation(activities: Set<Activity>): Boolean =
         admission?.invoke(currentServerId().orEmpty(), activities) ?: true
 
+    /**
+     * A connection that is provisional or was displaced gets no further
+     * than its handshake and activation: whatever else it sends is not
+     * acted on, so it can change no setting and nothing on screen.
+     */
+    override fun isOwnersConnection(): Boolean = reporting
+
     // Time synchronization (Kalman filter)
     private val timeFilter = SendspinTimeFilter().apply {
         // roles/player/v1.md requires output_delay_ms be persisted "across

@@ -9,7 +9,10 @@ import com.sendspindroid.sendspin.crypto.PskCategory
 import com.sendspindroid.sendspin.protocol.ConnectionAdmission
 import com.sendspindroid.sendspin.protocol.PlaintextCrypto
 import com.sendspindroid.sendspin.protocol.SendSpinHandshakeDriver
+import android.util.Log
+import com.sendspindroid.UserSettings
 import io.mockk.Called
+import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -22,6 +25,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * Several servers connecting to the client at once (`connection.md`,
@@ -98,6 +104,10 @@ class InboundConnectionsTest : E2ETestBase() {
         return constructor.newInstance(
             serverId, ByteArray(32), SendSpinHandshakeDriver.DEFAULT_SUITE, ByteArray(32)
         )
+    }
+
+    override fun configureUserSettings() {
+        every { UserSettings.setOutputDelayMs(any()) } returns true
     }
 
     @After
@@ -256,6 +266,53 @@ class InboundConnectionsTest : E2ETestBase() {
         assertEquals(emptyList<String>(), a.goodbyes())
     }
 
+    @Test
+    fun `two servers activating together are handed over in the order they were admitted`() {
+        inbound.open()
+        val a = Server("a").connect()
+        val b = Server("b").connect()
+        // Stop a's activation where it has been admitted and before anyone
+        // has been told, the one point at which b's can overtake it.
+        val admittingA = CountDownLatch(1)
+        val carryOn = CountDownLatch(1)
+        every { Log.i("InboundConnections", match { it.startsWith("Admitting a:") }) } answers {
+            admittingA.countDown()
+            carryOn.await(30, TimeUnit.SECONDS)
+            0
+        }
+
+        val first = thread { a.wire.sendServerActivate(emptyList(), activeRoles = emptyList()) }
+        assertTrue(admittingA.await(30, TimeUnit.SECONDS))
+        val second = thread { b.wire.sendServerActivate(listOf("playback"), activeRoles = listOf("player@v1")) }
+        // b's activation either waits for a's to finish, or has run past it.
+        while (second.isAlive && second.state != Thread.State.BLOCKED) Thread.yield()
+        carryOn.countDown()
+        first.join()
+        second.join()
+
+        assertEquals(listOf(a.client, b.client), admitted)
+        assertTrue(b.client.reporting)
+        assertFalse(b.transport.closed)
+        assertFalse("the displaced connection must not report again", a.client.reporting)
+        assertTrue(a.toldGoodbye("another_server"))
+    }
+
+    @Test
+    fun `a connection that is not the one played from cannot change a setting`() {
+        val setOutputDelay =
+            """{"type":"server/command","payload":{"player":{"command":"set_output_delay","output_delay_ms":3000}}}"""
+        inbound.open()
+        val a = Server("a").connect().activate("playback")
+
+        a.client.reporting = false
+        a.transport.simulateTextMessage(setOutputDelay)
+        verify(exactly = 0) { UserSettings.setOutputDelayMs(any()) }
+
+        a.client.reporting = true
+        a.transport.simulateTextMessage(setOutputDelay)
+        verify(exactly = 1) { UserSettings.setOutputDelayMs(3000) }
+    }
+
     // ---- provisional connections ----
 
     @Test
@@ -295,6 +352,7 @@ class InboundConnectionsTest : E2ETestBase() {
 
         assertTrue(extra.transport.closed)
         assertEquals(1013, extra.transport.closeCode)
+        assertEquals("no client is made for it", ConnectionAdmission.MAX_PROVISIONAL, clients.size)
         assertEquals(emptyList<String>(), extra.transport.sentTextMessages.toList())
         assertTrue(waiting.none { it.transport.closed })
     }

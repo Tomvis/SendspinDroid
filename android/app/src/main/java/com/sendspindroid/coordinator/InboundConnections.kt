@@ -27,7 +27,9 @@ import kotlinx.coroutines.launch
  *
  * @param newClient a client for one connection, configured but not connected.
  * @param onAdmitted called, on the connection's own thread, with the client
- *   to play from now. Its activation is applied when this returns.
+ *   to play from now. Its activation is applied when this returns. Called
+ *   in the order connections are admitted, and so with a lock held: it must
+ *   not block and must not call back into this class.
  * @param lastPlaybackServerId the persisted last-playback server.
  * @param storeLastPlaybackServerId persists it.
  */
@@ -46,7 +48,9 @@ class InboundConnections(
         const val CLOSE_TRY_AGAIN_LATER = 1013
     }
 
-    private class Inbound(val client: SendSpin, val remote: String) {
+    private class Inbound(val remote: String) {
+        /** Made once the connection has been given a provisional slot. */
+        lateinit var client: SendSpin
         var ended = false
     }
 
@@ -71,24 +75,30 @@ class InboundConnections(
 
     /** A server connected. Called for every accepted socket, on the listener's thread. */
     fun onConnection(transport: SendSpinTransport, remoteAddress: String) {
-        val connection = Inbound(newClient(), remoteAddress)
-        val room = synchronized(lock) {
-            (accepting && admission.onConnected(connection, nowMs())).also {
-                if (it) connections += connection
-            }
-        }
+        val connection = Inbound(remoteAddress)
+        // The slot first: a connection that is turned away at the door must
+        // cost nothing, and a client is a thread and more.
+        val room = synchronized(lock) { accepting && admission.onConnected(connection, nowMs()) }
         if (!room) {
             // "Rejecting further incoming connections as if they were lower
             // priority." There is no encrypted channel to say so on yet.
             Log.w(TAG, "Refusing $remoteAddress: not accepting, or too many provisional connections")
             transport.close(CLOSE_TRY_AGAIN_LATER, "busy")
-            connection.client.destroy()
             return
         }
         Log.i(TAG, "Connection from $remoteAddress (provisional)")
-        val client = connection.client
+        val client = newClient()
         client.reporting = false
         client.admission = { serverId, activities -> admit(connection, serverId, activities) }
+        connection.client = client
+        val stillAccepting = synchronized(lock) {
+            accepting.also { if (it) connections += connection else admission.onClosed(connection) }
+        }
+        if (!stillAccepting) {
+            transport.close(CLOSE_TRY_AGAIN_LATER, "busy")
+            client.destroy()
+            return
+        }
         client.accept(transport, remoteAddress)
 
         scope.launch {
@@ -120,14 +130,22 @@ class InboundConnections(
                     if (held === connection) return true
                     replaced = held
                     held = connection
+                    Log.i(TAG, "Admitting ${connection.remote}: activities=$activities" +
+                        (replaced?.takeUnless { it.ended }?.let { ", displacing ${it.remote}" } ?: ""))
+                    // Decided and handed over in one step. Two servers that
+                    // activate together are then handed over in the order
+                    // they were admitted, and the one admitted first cannot
+                    // come back as the connection to play from after it was
+                    // displaced. Nothing here blocks or comes back into this
+                    // class: two flags, and onAdmitted, which only posts.
+                    replaced?.client?.reporting = false
+                    connection.client.reporting = true
+                    onAdmitted(connection.client)
                 }
             }
         }
-        Log.i(TAG, "Admitting ${connection.remote}: activities=$activities" +
-            (replaced?.takeUnless { it.ended }?.let { ", displacing ${it.remote}" } ?: ""))
+        // The goodbye does not decide any order, so it is said outside.
         replaced?.let { release(it) }
-        connection.client.reporting = true
-        onAdmitted(connection.client)
         return true
     }
 
@@ -151,7 +169,7 @@ class InboundConnections(
     }
 
     private fun dropExpired() {
-        val expired = synchronized(lock) { admission.expired(nowMs()) }
+        val expired = synchronized(lock) { admission.expired(nowMs()).filter { it in connections } }
         expired.forEach {
             Log.w(TAG, "No server/activate from ${it.remote} in " +
                 "${ConnectionAdmission.PROVISIONAL_TIMEOUT_MS / 1000}s; dropping it")
