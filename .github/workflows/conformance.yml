@@ -74,6 +74,11 @@ jobs:
       - name: Register sendspindroid adapter
         run: python ci/conformance/register_sendspindroid.py harness/conformance
 
+      # Stopgap until Sendspin/conformance observes aiosendspin's
+      # receive_timed(); a no-op once it does.
+      - name: Let the harness see what aiosendspin receives
+        run: python ci/conformance/patch_harness_receive_timed.py harness/conformance
+
       - name: Run conformance matrix (aiosendspin -> sendspindroid)
         working-directory: harness/conformance
         env:
