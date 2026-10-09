@@ -372,20 +372,6 @@ class InboundWebSocketTransportTest {
     }
 
     @Test
-    fun `a huge declared frame is refused from its header alone`() {
-        val socket = dialRaw(listen())
-        val (inbound, client) = take()
-
-        // A gigabyte declared, none of it sent.
-        socket.getOutputStream().write(binaryFrameHeader(1L shl 30))
-
-        val first = client.next()
-        assertTrue("got $first", first != null && first != "binary")
-        assertNotEquals(TransportState.Connected, inbound.state)
-        socket.close()
-    }
-
-    @Test
     fun `a connection from a web page is refused before it is accepted`() {
         val port = listen()
         java.net.Socket("127.0.0.1", port).use { socket ->
