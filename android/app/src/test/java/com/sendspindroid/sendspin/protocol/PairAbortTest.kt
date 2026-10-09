@@ -241,7 +241,7 @@ class PairAbortTest {
 
 /** A handler on a session keyed by [matchedCategory], recording what it sends. */
 @OptIn(ExperimentalCoroutinesApi::class)
-class AbortTestHandler(
+open class AbortTestHandler(
     private val matchedCategory: PskCategory,
 ) : SendSpinProtocolHandler("AbortTest") {
 

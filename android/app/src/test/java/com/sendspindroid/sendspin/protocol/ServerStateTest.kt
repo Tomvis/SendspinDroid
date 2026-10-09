@@ -217,8 +217,13 @@ class ServerStateTest {
         handler.handleTextMessageForTest(activate("\"player@v1\",\"metadata@v1\",\"artwork@v1\""))
 
         assertEquals(ControllerState(), handler.controllerStateUpdates.last())
+        // A controller object is carried "only if the controller role is
+        // active", so one for the removed role is not taken up.
+        serverState(controller)
+        assertEquals(2, handler.controllerStateUpdates.size)
         // With no controller state there is no supported_commands to hold a
-        // command against, and the same state arriving again is news.
+        // command against, and once the role is back the same state is news.
+        handler.handleTextMessageForTest(activate(allRoles))
         serverState(controller)
         assertEquals(3, handler.controllerStateUpdates.size)
     }

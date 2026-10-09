@@ -61,6 +61,20 @@ kotlin {
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
             implementation("io.ktor:ktor-client-core:3.1.1")
             implementation("io.ktor:ktor-client-websockets:3.1.1")
+            // The listener for server-initiated connections. ktor-server-core
+            // also asks for kotlin-reflect and jansi. Nothing in Ktor refers
+            // to jansi at all, and kotlin-reflect is only reached when modules
+            // are loaded by name from a config file or auto-reload is on;
+            // embeddedServer with a lambda does neither. Left in, the pair
+            // adds about 590 KB to the release APK: R8 cannot shrink
+            // kotlin-reflect (its own keep rules pin it) or jansi's bundled
+            // Windows and macOS binaries.
+            listOf("io.ktor:ktor-server-cio:3.1.1", "io.ktor:ktor-server-websockets:3.1.1").forEach {
+                implementation(it) {
+                    exclude(group = "org.jetbrains.kotlin", module = "kotlin-reflect")
+                    exclude(group = "org.fusesource.jansi", module = "jansi")
+                }
+            }
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
