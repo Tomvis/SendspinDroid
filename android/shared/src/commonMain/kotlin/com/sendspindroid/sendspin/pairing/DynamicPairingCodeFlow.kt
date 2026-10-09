@@ -150,6 +150,13 @@ class DynamicPairingCodeFlow(
 
     private var state: State = State.IDLE
 
+    /**
+     * "In progress from `client/pair-init` until success or `pair/abort`."
+     * Waiting for the gesture is before that: `client/pair-pending` "precedes
+     * an attempt and does not start it".
+     */
+    val attemptInProgress: Boolean get() = state.inAttempt && state != State.AWAITING_GESTURE
+
     private var pairingIndex: Int = 0
 
     /** The client's nonce contribution. Discarded on every exit path. */

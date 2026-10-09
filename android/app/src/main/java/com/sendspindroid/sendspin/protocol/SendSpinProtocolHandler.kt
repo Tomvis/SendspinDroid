@@ -1133,6 +1133,13 @@ abstract class SendSpinProtocolHandler(
             }
 
             is ActivationOutcome.Accept -> {
+                // Asked of an admissible activation only, and before any of
+                // it is applied: a refused connection must not have reported
+                // state, started time sync or begun a pairing attempt.
+                if (!admitActivation(activate.activities)) {
+                    refuseConcurrentAttempt(activate.activities)
+                    return
+                }
                 val removedRoles = activeRoles - outcome.activeRoles.toSet()
                 activities = activate.activities
                 activeRoles = outcome.activeRoles
@@ -1190,6 +1197,45 @@ abstract class SendSpinProtocolHandler(
             }
         }
     }
+
+    /**
+     * Whether an admissible `server/activate` on this connection is admitted
+     * under the multiple-server rules (`connection.md`, "Multiple servers
+     * (server-initiated)"). Those rules only exist for connections a server
+     * opened, so the default admits everything.
+     */
+    protected open fun admitActivation(activities: Set<Activity>): Boolean = true
+
+    /**
+     * "A rejected incoming receives `client/goodbye` reason
+     * `'concurrent_attempt'` (or `pair/abort` reason `concurrent_attempt` for
+     * pairings). The client then closes the connection."
+     *
+     * The connection is past its Noise handshake but its activation was never
+     * accepted. That is allowed: before the initial activation the client
+     * "MAY send an encrypted `client/goodbye` once the initial Noise
+     * handshake has completed".
+     */
+    private fun refuseConcurrentAttempt(activities: Set<Activity>) {
+        Log.i(tag, "Refusing connection (concurrent_attempt): activities=$activities")
+        if (ConnectionAdmission.Rank.of(activities) == ConnectionAdmission.Rank.PAIRING) {
+            sendPairAbort(PairAbortReason.CONCURRENT_ATTEMPT)
+            return
+        }
+        getCoroutineScope().launch {
+            sendProtocolMessageAwaiting(MessageBuilder.buildGoodbye(GoodbyeReason.CONCURRENT_ATTEMPT))
+            closeConnectionAfterFlush()
+        }
+    }
+
+    /**
+     * True from `client/pair-init` until the attempt succeeds or is aborted
+     * (`pairing.md`, "Entering and leaving pairing"). Such a connection "is
+     * not displaced by an incoming `'playback'` or `'pairing'` connection".
+     */
+    val pairingAttemptInProgress: Boolean
+        get() = pairingFlow.state == PairingPskFlow.State.AWAITING_ACK ||
+            dynamicPairingFlow?.attemptInProgress == true
 
     /**
      * `messaging.md#server--client-serveractivate`, "When applying a

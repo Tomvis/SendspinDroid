@@ -4,7 +4,10 @@ import android.os.Build
 import android.util.Log
 import com.sendspindroid.UserSettings
 import com.sendspindroid.logging.AppLog
+import com.sendspindroid.sendspin.pairing.PairAbortReason
+import com.sendspindroid.sendspin.protocol.Activity
 import com.sendspindroid.sendspin.protocol.AdmissionState
+import com.sendspindroid.sendspin.protocol.ConnectionAdmission
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
@@ -210,6 +213,22 @@ class SendSpin(
     private var serverAddress: String? = null
     private var serverPath: String? = null
     private var serverName: String? = null
+
+    /** True when the server opened the current connection ([accept]). */
+    @Volatile
+    var isServerInitiated: Boolean = false
+        private set
+
+    /**
+     * Decides whether this connection is admitted, from the `server_id` and
+     * the activities of each admissible `server/activate`. Set by whoever
+     * accepts connections from servers; a dialled connection has none.
+     */
+    @Volatile
+    var admission: ((serverId: String, activities: Set<Activity>) -> Boolean)? = null
+
+    override fun admitActivation(activities: Set<Activity>): Boolean =
+        admission?.invoke(currentServerId().orEmpty(), activities) ?: true
 
     // Time synchronization (Kalman filter)
     private val timeFilter = SendspinTimeFilter().apply {
@@ -869,8 +888,66 @@ class SendSpin(
 
         serverAddress = address
         serverPath = normalizedPath
+        isServerInitiated = false
 
         createLocalTransport(address, normalizedPath)
+    }
+
+    /**
+     * Take a connection a server opened to us (`connection.md`, "Server
+     * Initiated Connections").
+     *
+     * Who opened the socket is the only thing that differs from
+     * [connectLocal]. This is still the Sendspin client: it sends
+     * `client/init` first, the moment the transport is taken, and it is still
+     * the Noise responder - "the server is the Noise initiator, the client is
+     * the Noise responder, regardless of which side initiated the WebSocket
+     * connection". So everything from [TransportEventListener.onConnected]
+     * on is the dialled path, unchanged.
+     *
+     * @param inbound the accepted socket, not yet taken.
+     * @param remoteAddress the server's "host:port", for display.
+     */
+    fun accept(inbound: SendSpinTransport, remoteAddress: String) {
+        check(transport == null) { "this client already has a connection" }
+        Log.d(TAG, "Accepting connection from $remoteAddress")
+        _connectionState.value = TransportState.Connecting
+
+        timeFilter.reset()
+        resetSyncStateTracking()
+
+        serverAddress = remoteAddress
+        serverPath = null
+        isServerInitiated = true
+
+        synchronized(connectionLock) { transport = inbound }
+        inbound.setListener(TransportEventListener())
+        inbound.connect()
+    }
+
+    /**
+     * Give this connection up for another server's, which the admission rules
+     * preferred: "A displaced connection receives `client/goodbye` reason
+     * `'another_server'` (or `pair/abort` reason `concurrent_attempt` if it
+     * is a pairing handshake). The client then closes the connection."
+     */
+    fun leaveForAnotherServer() {
+        if (ConnectionAdmission.Rank.of(activities) == ConnectionAdmission.Rank.PAIRING) {
+            sendPairAbort(PairAbortReason.CONCURRENT_ATTEMPT)
+        } else {
+            leave(GoodbyeReason.ANOTHER_SERVER, reconnect = false)
+        }
+    }
+
+    /**
+     * Close without a word: a connection that never got as far as an
+     * activation has nobody to say goodbye to.
+     */
+    fun drop() {
+        endConnection(TransportState.Idle, reconnect = false)?.let {
+            it.close(1000, "dropped")
+            it.destroy()
+        }
     }
 
     /**
@@ -1099,6 +1176,9 @@ class SendSpin(
      */
     private fun checkStall() {
         if (!handshakeComplete) return
+        // A server that connected to us has 30 seconds to send its first
+        // server/activate, and whoever accepted it keeps that clock.
+        if (isServerInitiated && !activationSeen) return
         val t = transport ?: return
         if (!t.isConnected) return
 
