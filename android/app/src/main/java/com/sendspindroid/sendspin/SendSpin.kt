@@ -80,8 +80,40 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class SendSpin(
     private val deviceName: String,
-    private val callback: Callback
+    callback: Callback
 ) : SendSpinProtocolHandler(TAG) {
+
+    /**
+     * False while this connection is not the one its owner plays from: a
+     * server-initiated connection that is still provisional, or one that
+     * was displaced. Nothing it does reaches the owner then, so a
+     * connection that is refused or times out leaves no trace.
+     */
+    @Volatile
+    var reporting: Boolean = true
+
+    private val callback: Callback = callback
+        get() = if (reporting) field else Silent
+
+    /** Where callbacks go while [reporting] is off. */
+    private object Silent : Callback {
+        override fun onStateChanged(state: String) {}
+        override fun onGroupUpdate(groupId: String, groupName: String, playbackState: String) {}
+        override fun onMetadataUpdate(
+            title: String, artist: String, album: String, artworkUrl: String,
+            durationMs: Long, positionMs: Long, playbackSpeed: Int,
+        ) {}
+        override fun onArtwork(imageData: ByteArray) {}
+        override fun onArtworkCleared() {}
+        override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {}
+        override fun onStreamClear() {}
+        override fun onStreamEnd() {}
+        override fun onAudioChunk(serverTimeMicros: Long, audioData: ByteArray) {}
+        override fun onVolumeChanged(volume: Int) {}
+        override fun onMutedChanged(muted: Boolean) {}
+        override fun onSyncOffsetApplied(offsetMs: Double, source: String) {}
+        override fun onNetworkChanged() {}
+    }
 
     companion object {
         private const val TAG = "SendSpin"
@@ -229,6 +261,13 @@ class SendSpin(
 
     override fun admitActivation(activities: Set<Activity>): Boolean =
         admission?.invoke(currentServerId().orEmpty(), activities) ?: true
+
+    /**
+     * A connection that is provisional or was displaced gets no further
+     * than its handshake and activation: whatever else it sends is not
+     * acted on, so it can change no setting and nothing on screen.
+     */
+    override fun isOwnersConnection(): Boolean = reporting
 
     // Time synchronization (Kalman filter)
     private val timeFilter = SendspinTimeFilter().apply {

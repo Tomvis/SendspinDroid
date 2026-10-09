@@ -44,7 +44,9 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
+import com.sendspindroid.discovery.DiscoveryGate
 import com.sendspindroid.discovery.NsdDiscoveryManager
+import kotlinx.coroutines.flow.drop
 import com.sendspindroid.coordinator.ReconnectStatus
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.playback.PlaybackService
@@ -57,6 +59,7 @@ import com.sendspindroid.ui.server.UnifiedServerConnector
 import androidx.activity.viewModels
 import kotlinx.coroutines.flow.combine
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
@@ -66,10 +69,12 @@ import com.sendspindroid.ui.main.MainActivityViewModel
 import com.sendspindroid.ui.main.PlaybackState
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.main.ServerListScreen
+import com.sendspindroid.ui.main.components.ConnectionModeState
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.ComposeView
@@ -96,6 +101,9 @@ class MainActivity : AppCompatActivity() {
 
     // Scanning indicator for the Compose server list
     private val composeIsScanning = mutableStateOf(false)
+
+    // Mirrors UserSettings.searchForServers for the Compose UI.
+    private val composeSearching = mutableStateOf(false)
 
     // ViewModel for managing UI state (survives configuration changes)
     private val viewModel: MainActivityViewModel by viewModels()
@@ -365,6 +373,8 @@ class MainActivity : AppCompatActivity() {
 
         // Initialize UserSettings for accessing user preferences
         UserSettings.initialize(this)
+        UserSettings.chooseConnectionModeOnce(UnifiedServerRepository.getDefaultServer() != null)
+        composeSearching.value = UserSettings.searchForServers
 
         applyFullScreenMode()
 
@@ -543,6 +553,8 @@ class MainActivity : AppCompatActivity() {
                     AppShell(
                         viewModel = viewModel,
                         serverListContent = {
+                            val listeningPort by PlaybackService.advertisedPort.collectAsStateWithLifecycle()
+                            val advertisingFailed by PlaybackService.advertisingFailed.collectAsStateWithLifecycle()
                             ServerListScreen(
                                 savedServers = UnifiedServerRepository.savedServers,
                                 discoveredServers = UnifiedServerRepository.filteredDiscoveredServers,
@@ -553,7 +565,14 @@ class MainActivity : AppCompatActivity() {
                                 onServerClick = { server -> onUnifiedServerSelected(server) },
                                 onServerLongClick = { server -> showUnifiedServerContextMenu(server) },
                                 onQuickConnectClick = { server -> onUnifiedServerSelected(server) },
-                                onAddServerClick = { showAddServerWizard() }
+                                onAddServerClick = { showAddServerWizard() },
+                                mode = ConnectionModeState(
+                                    searching = composeSearching.value,
+                                    playerName = UserSettings.getPlayerName(),
+                                    listeningPort = listeningPort,
+                                    failed = advertisingFailed,
+                                    onSearchingChange = { search -> onSearchingChanged(search) }
+                                )
                             )
                         },
                         onPreviousClick = { onPreviousClicked() },
@@ -584,6 +603,21 @@ class MainActivity : AppCompatActivity() {
                         },
                         onExitAppClick = { onExitAppClicked() }
                     )
+                }
+            }
+        }
+
+        // Browsing is refused until the advertisement and the listener are
+        // gone, which is a moment after "Search for servers instead" is
+        // pressed: start it when it becomes possible.
+        lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                DiscoveryGate.allowed.drop(1).collect { allowed ->
+                    if (allowed && UserSettings.searchForServers &&
+                        connectionState is AppConnectionState.ServerList
+                    ) {
+                        startAutoDiscovery()
+                    }
                 }
             }
         }
@@ -667,6 +701,15 @@ class MainActivity : AppCompatActivity() {
      * mDNS discovery runs in the background, updating the discovered section.
      */
     private fun showServerListView() {
+        if (!UserSettings.searchForServers) {
+            // Advertising, and waiting for a server to connect: the app does
+            // not look for servers or dial one until the user picks it.
+            discoveryManager?.stopDiscovery()
+            defaultServerPinger?.stop()
+            UnifiedServerRepository.clearDiscoveredServers()
+            return
+        }
+
         // Start discovery automatically (runs in background)
         startAutoDiscovery()
 
@@ -678,6 +721,24 @@ class MainActivity : AppCompatActivity() {
         if (!userManuallyDisconnected) {
             defaultServerPinger?.start()
         }
+    }
+
+    /**
+     * The user chose to search for servers, or to go back to advertising and
+     * waiting for one. The service switches; this side starts or stops
+     * looking.
+     */
+    private fun onSearchingChanged(search: Boolean) {
+        Log.d(TAG, "Search for servers: $search")
+        // Stored here as well as applied by the service, so the choice
+        // holds even if the service is not up yet.
+        UserSettings.searchForServers = search
+        composeSearching.value = search
+        mediaController?.sendCustomCommand(
+            SessionCommand(PlaybackService.COMMAND_SET_SEARCH_FOR_SERVERS, Bundle.EMPTY),
+            Bundle().apply { putBoolean(PlaybackService.ARG_SEARCH_FOR_SERVERS, search) }
+        )
+        showServerListView()
     }
 
     /**
@@ -1115,6 +1176,9 @@ class MainActivity : AppCompatActivity() {
                 val address = when (val currentState = connectionState) {
                     is AppConnectionState.Connecting -> currentState.serverAddress
                     is AppConnectionState.Reconnecting -> currentState.serverAddress
+                    // A server connected to us: there is no saved server
+                    // behind the connection.
+                    is AppConnectionState.ServerList -> ""
                     else -> {
                         Log.w(TAG, "STATE_CONNECTED received in unexpected state: $currentState, using serverId fallback")
                         currentConnectedServerId ?: ""

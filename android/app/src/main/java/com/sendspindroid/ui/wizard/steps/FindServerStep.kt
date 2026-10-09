@@ -55,7 +55,9 @@ fun FindServerStep(
     onServerSelected: (DiscoveredServerUi) -> Unit,
     onStartSearch: () -> Unit,
     onSubmit: () -> Unit = {},
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // False while the app advertises itself: it does one or the other.
+    searchAllowed: Boolean = true,
 ) {
     LazyColumn(
         modifier = modifier
@@ -79,8 +81,19 @@ fun FindServerStep(
             )
         }
 
+        if (!searchAllowed) {
+            item {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = stringResource(R.string.wizard_find_server_not_searching),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
         // Discovered servers section
-        if (discoveredServers.isNotEmpty() || isSearching) {
+        if (searchAllowed && (discoveredServers.isNotEmpty() || isSearching)) {
             item {
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -148,7 +161,7 @@ fun FindServerStep(
         }
 
         // Refresh button
-        if (!isSearching) {
+        if (searchAllowed && !isSearching) {
             item {
                 Spacer(modifier = Modifier.height(8.dp))
                 TextButton(onClick = onStartSearch) {

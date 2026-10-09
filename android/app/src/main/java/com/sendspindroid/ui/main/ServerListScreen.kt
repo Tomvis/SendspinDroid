@@ -32,6 +32,8 @@ import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.model.LocalConnection
 import com.sendspindroid.model.RemoteConnection
 import com.sendspindroid.model.UnifiedServer
+import com.sendspindroid.ui.main.components.ConnectionModeCard
+import com.sendspindroid.ui.main.components.ConnectionModeState
 import com.sendspindroid.ui.main.components.ServerItemStatus
 import com.sendspindroid.ui.main.components.ServerListEmptyState
 import com.sendspindroid.ui.main.components.ServerListItem
@@ -60,6 +62,7 @@ fun ServerListScreen(
     onServerLongClick: (UnifiedServer) -> Unit,
     onQuickConnectClick: (UnifiedServer) -> Unit,
     onAddServerClick: () -> Unit,
+    mode: ConnectionModeState,
     modifier: Modifier = Modifier
 ) {
     val saved by savedServers.collectAsStateWithLifecycle()
@@ -77,6 +80,7 @@ fun ServerListScreen(
         onServerLongClick = onServerLongClick,
         onQuickConnectClick = onQuickConnectClick,
         onAddServerClick = onAddServerClick,
+        mode = mode,
         modifier = modifier
     )
 }
@@ -96,6 +100,7 @@ fun ServerListScreen(
     onServerLongClick: (UnifiedServer) -> Unit,
     onQuickConnectClick: (UnifiedServer) -> Unit,
     onAddServerClick: () -> Unit,
+    mode: ConnectionModeState,
     modifier: Modifier = Modifier
 ) {
     ServerListScreenContent(
@@ -109,6 +114,7 @@ fun ServerListScreen(
         onServerLongClick = onServerLongClick,
         onQuickConnectClick = onQuickConnectClick,
         onAddServerClick = onAddServerClick,
+        mode = mode,
         modifier = modifier
     )
 }
@@ -128,6 +134,7 @@ private fun ServerListScreenContent(
     onServerLongClick: (UnifiedServer) -> Unit,
     onQuickConnectClick: (UnifiedServer) -> Unit,
     onAddServerClick: () -> Unit,
+    mode: ConnectionModeState,
     modifier: Modifier = Modifier
 ) {
     val hasSavedServers = savedServers.isNotEmpty()
@@ -161,7 +168,8 @@ private fun ServerListScreenContent(
                     isScanning = isScanning,
                     discoveredServers = discoveredServers,
                     onAddServerClick = onAddServerClick,
-                    onQuickConnectClick = onQuickConnectClick
+                    onQuickConnectClick = onQuickConnectClick,
+                    mode = mode
                 )
             }
         } else {
@@ -174,6 +182,13 @@ private fun ServerListScreenContent(
                 modifier = contentModifier,
                 contentPadding = PaddingValues(bottom = 88.dp + navigationBarHeight) // Space for FAB
             ) {
+                item(key = "mode") {
+                    ConnectionModeCard(
+                        mode = mode,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)
+                    )
+                }
+
                 // Saved Servers Section
                 item(key = "header_saved") {
                     ServerSectionHeader(
@@ -200,8 +215,9 @@ private fun ServerListScreenContent(
                     )
                 }
 
-                // Discovered Servers Section
-                item(key = "header_discovered") {
+                // Discovered Servers Section. Nothing is discovered while
+                // the app advertises itself instead.
+                if (mode.searching) item(key = "header_discovered") {
                     ServerSectionHeader(
                         title = stringResource(R.string.nearby_servers_section),
                         showScanning = isScanning,
@@ -211,7 +227,7 @@ private fun ServerListScreenContent(
                     )
                 }
 
-                if (discoveredServers.isNotEmpty()) {
+                if (mode.searching && discoveredServers.isNotEmpty()) {
                     items(
                         items = discoveredServers,
                         key = { "discovered_${it.id}" }
@@ -289,7 +305,34 @@ private fun ServerListScreenPreview() {
             onServerClick = {},
             onServerLongClick = {},
             onQuickConnectClick = {},
-            onAddServerClick = {}
+            onAddServerClick = {},
+            mode = ConnectionModeState(searching = true, "Kitchen Tablet", null) {}
+        )
+    }
+}
+
+@Preview(showBackground = true, widthDp = 360, heightDp = 640)
+@Composable
+private fun ServerListScreenAdvertisingPreview() {
+    SendSpinTheme {
+        ServerListScreen(
+            savedServers = listOf(
+                UnifiedServer(
+                    id = "1",
+                    name = "Living Room",
+                    local = LocalConnection("192.168.1.100:8927")
+                )
+            ),
+            discoveredServers = emptyList(),
+            onlineSavedServerIds = emptySet(),
+            isScanning = false,
+            serverStatuses = emptyMap(),
+            reconnectInfo = emptyMap(),
+            onServerClick = {},
+            onServerLongClick = {},
+            onQuickConnectClick = {},
+            onAddServerClick = {},
+            mode = ConnectionModeState(searching = false, "Kitchen Tablet", 8928) {}
         )
     }
 }
@@ -308,7 +351,8 @@ private fun ServerListScreenEmptyPreview() {
             onServerClick = {},
             onServerLongClick = {},
             onQuickConnectClick = {},
-            onAddServerClick = {}
+            onAddServerClick = {},
+            mode = ConnectionModeState(searching = true, "Kitchen Tablet", null) {}
         )
     }
 }
@@ -340,7 +384,8 @@ private fun ServerListScreenEmptyWithDiscoveredPreview() {
             onServerClick = {},
             onServerLongClick = {},
             onQuickConnectClick = {},
-            onAddServerClick = {}
+            onAddServerClick = {},
+            mode = ConnectionModeState(searching = true, "Kitchen Tablet", null) {}
         )
     }
 }
@@ -367,7 +412,8 @@ private fun ServerListScreenConnectingPreview() {
             onServerClick = {},
             onServerLongClick = {},
             onQuickConnectClick = {},
-            onAddServerClick = {}
+            onAddServerClick = {},
+            mode = ConnectionModeState(searching = true, "Kitchen Tablet", null) {}
         )
     }
 }
@@ -416,7 +462,8 @@ private fun ServerListScreenAllDevicesPreview() {
             onServerClick = {},
             onServerLongClick = {},
             onQuickConnectClick = {},
-            onAddServerClick = {}
+            onAddServerClick = {},
+            mode = ConnectionModeState(searching = true, "Kitchen Tablet", null) {}
         )
     }
 }

@@ -203,6 +203,15 @@ fun StatsContent(
             state.connectionState,
             getStatusColor(getConnectionStatus(state.connectionState)),
         )
+        if (state.connectionState == "Connected") {
+            StatRow(
+                stringResource(R.string.stats_opened_by),
+                stringResource(
+                    if (state.serverInitiated) R.string.stats_opened_by_server
+                    else R.string.stats_opened_by_device
+                ),
+            )
+        }
         StatRow(
             stringResource(R.string.stats_encryption),
             when (state.pskCategory) {

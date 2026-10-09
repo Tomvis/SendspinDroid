@@ -25,6 +25,11 @@ import android.util.Log
 class NsdAdvertiser(
     private val context: Context,
     private val nsdManager: NsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager,
+    /**
+     * Whether a registration took: true once servers can find the app,
+     * false if they cannot. Called on whatever thread NsdManager uses.
+     */
+    private val onResult: (registered: Boolean) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "NsdAdvertiser"
@@ -74,7 +79,9 @@ class NsdAdvertiser(
      * old network is not carried to the new one on every Android version.
      */
     fun refresh() {
-        if (registration == null) return
+        // Also when the last registration failed: a network change is when
+        // it is worth trying again.
+        if (advertised == null) return
         Log.i(TAG, "Network changed - advertising again")
         unregister()
         register()
@@ -93,10 +100,12 @@ class NsdAdvertiser(
         val listener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(registered: NsdServiceInfo) {
                 Log.i(TAG, "Advertising ${registered.serviceName} ($SERVICE_TYPE) on port ${info.port}")
+                onResult(true)
             }
 
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.e(TAG, "Advertising failed: error $errorCode")
+                onResult(false)
             }
 
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
@@ -114,6 +123,7 @@ class NsdAdvertiser(
             Log.e(TAG, "Advertising failed", e)
             registration = null
             releaseMulticastLock()
+            onResult(false)
         }
     }
 

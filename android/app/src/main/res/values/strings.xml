@@ -146,6 +146,8 @@
     <string name="pref_auto_start_title">Auto-Start on Boot</string>
     <string name="pref_auto_start_summary_off">Disabled. When enabled, connects to the default server automatically on device boot.</string>
     <string name="pref_auto_start_summary_on">Connects to %1$s automatically on device boot.</string>
+    <string name="pref_auto_start_summary_waiting_off">Disabled. When enabled, starts waiting for a server to connect on device boot.</string>
+    <string name="pref_auto_start_summary_waiting_on">Starts waiting for a server to connect on device boot.</string>
     <string name="pref_auto_start_no_default">Set a default server first (long-press a server in the server list).</string>
 
     <!-- Debug logging -->
@@ -234,10 +236,24 @@
     <string name="welcome_title">Welcome to SendspinDroid</string>
     <string name="welcome_subtitle">Stream high-quality audio from your SendSpin or Music Assistant server</string>
     <string name="welcome_add_first_server">Add Your First Server</string>
-    <string name="welcome_or">or</string>
     <string name="welcome_scanning">Searching for servers nearby\u2026</string>
     <string name="welcome_servers_found">%d server(s) found nearby</string>
     <string name="welcome_no_servers_found">No servers found on this network</string>
+    <!-- Waiting for a server to connect (the default) or searching for one -->
+    <string name="mode_advertising_title">Waiting for a server to connect</string>
+    <string name="mode_advertising_body">Advertising as \"%1$s\" on this network. A SendSpin or Music Assistant server that finds it connects by itself.</string>
+    <string name="mode_advertising_port">Listening on port %1$d</string>
+    <string name="mode_advertising_starting">Starting to listen...</string>
+    <string name="mode_search_instead">Search for servers instead</string>
+    <string name="mode_searching_title">Searching for servers</string>
+    <string name="mode_searching_body">This device is not advertised while it searches. Tap a server to connect to it.</string>
+    <string name="mode_advertise_instead">Wait for a server to connect instead</string>
+    <string name="notification_waiting_for_server">Waiting for a server to connect</string>
+    <string name="notification_cannot_be_found">Servers cannot find this device right now</string>
+    <string name="mode_advertising_failed_title">Servers cannot find this device</string>
+    <string name="mode_advertising_failed_body">It could not start listening or announce itself on this network. It tries again when the network changes. You can also search for servers, or add one by address.</string>
+    <string name="wizard_find_server_not_searching">Not searching: this device is waiting for a server to connect. Enter the server\'s address below.</string>
+    <string name="boot_tap_to_listen">Tap to start waiting for a server</string>
     <string name="welcome_quick_connect">Quick Connect</string>
     <string name="welcome_found_on_network">Found on your local network</string>
 
@@ -271,6 +287,9 @@
     <!-- Stats labels - additional -->
     <string name="stats_server">Server</string>
     <string name="stats_address">Address</string>
+    <string name="stats_opened_by">Opened by</string>
+    <string name="stats_opened_by_server">Server (it found this device)</string>
+    <string name="stats_opened_by_device">This device (it dialled the server)</string>
     <string name="stats_state">State</string>
     <string name="stats_last_disconnect">Last Disconnect</string>
     <string name="stats_type">Type</string>

@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import com.sendspindroid.ui.main.ServerListScreen
+import com.sendspindroid.ui.main.components.ConnectionModeState
 import com.sendspindroid.ui.theme.SendSpinTheme
 import org.junit.Rule
 import org.junit.Test
@@ -40,7 +41,8 @@ class ServerListEmptyStateTest {
                     onServerClick = {},
                     onServerLongClick = {},
                     onQuickConnectClick = {},
-                    onAddServerClick = {}
+                    onAddServerClick = {},
+                    mode = ConnectionModeState(searching = false, "Tablet", 8928) {}
                 )
             }
         }
@@ -62,7 +64,8 @@ class ServerListEmptyStateTest {
                     onServerClick = {},
                     onServerLongClick = {},
                     onQuickConnectClick = {},
-                    onAddServerClick = {}
+                    onAddServerClick = {},
+                    mode = ConnectionModeState(searching = false, "Tablet", 8928) {}
                 )
             }
         }
@@ -84,7 +87,8 @@ class ServerListEmptyStateTest {
                     onServerClick = {},
                     onServerLongClick = {},
                     onQuickConnectClick = {},
-                    onAddServerClick = {}
+                    onAddServerClick = {},
+                    mode = ConnectionModeState(searching = false, "Tablet", 8928) {}
                 )
             }
         }

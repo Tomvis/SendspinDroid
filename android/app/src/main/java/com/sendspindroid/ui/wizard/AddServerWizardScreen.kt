@@ -59,7 +59,8 @@ fun AddServerWizardScreen(
     onNext: () -> Unit,
     onSave: () -> Unit,
     onStepAction: (WizardStepAction) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    searchAllowed: Boolean = true,
 ) {
     // In landscape the keyboard leaves a strip of the screen. The title bar
     // would take half of it, so it steps aside while the keyboard is up; the
@@ -126,7 +127,8 @@ fun AddServerWizardScreen(
                     step = step,
                     state = state,
                     onStepAction = onStepAction,
-                    onNext = { if (state.isNextEnabled) onNext() }
+                    onNext = { if (state.isNextEnabled) onNext() },
+                    searchAllowed = searchAllowed
                 )
             }
         }
@@ -141,7 +143,8 @@ private fun WizardStepContent(
     step: WizardStep,
     state: WizardState,
     onStepAction: (WizardStepAction) -> Unit,
-    onNext: () -> Unit
+    onNext: () -> Unit,
+    searchAllowed: Boolean
 ) {
     when (step) {
         WizardStep.SS_FindServer -> FindServerStep(
@@ -151,7 +154,8 @@ private fun WizardStepContent(
             onAddressChange = { onStepAction(WizardStepAction.UpdateLocalAddress(it)) },
             onServerSelected = { onStepAction(WizardStepAction.SelectDiscoveredServer(it)) },
             onStartSearch = { onStepAction(WizardStepAction.StartDiscovery) },
-            onSubmit = onNext
+            onSubmit = onNext,
+            searchAllowed = searchAllowed
         )
         WizardStep.SS_TestLocal -> TestingStep(
             testState = state.localTestState,
