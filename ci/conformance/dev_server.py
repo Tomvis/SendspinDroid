@@ -30,7 +30,7 @@ from pathlib import Path
 
 try:
     from aiosendspin.audio.format import AudioFormat
-    from aiosendspin.models.types import MediaCommand
+    from aiosendspin.models.types import ConnectionReason, MediaCommand
     from aiosendspin.noise.keys import Identity
     from aiosendspin.noise.pairing import (
         PairingAttempt,
@@ -191,11 +191,20 @@ class DevServer:
             port=args.port,
             host=args.host,
             advertise_addresses=advertise,
-            # SendSpinDroid is client-initiated. The spec forbids a client
-            # advertising _sendspin._tcp in that mode, so we must not browse
-            # for one either.
-            discover_clients=False,
+            # A client uses one method at a time. One that dials in never
+            # advertises _sendspin._tcp, so by default there is nothing to
+            # browse for; --discover-clients is for a client that advertises
+            # itself and waits (server-initiated).
+            discover_clients=args.discover_clients,
         )
+        # A client named by URL is dialled until it answers, whether or not
+        # mDNS can see it.
+        reason = ConnectionReason(args.connect_reason)
+        for url in args.connect_to_client:
+            LOGGER.info("connecting to client %s (reason: %s)", url, reason.value)
+            self._server.connect_to_client(
+                url, connection_reason=reason, retry_initial_connection=True
+            )
 
         LOGGER.info("=" * 72)
         LOGGER.info("Sendspin dev server %r listening on %s:%d%s",
@@ -206,6 +215,8 @@ class DevServer:
         LOGGER.info("allow_unencrypted=False  allow_noncompliant_clients=False")
         if args.trust_all_unpaired:
             LOGGER.info("auto-trusting unpaired clients on connect (--trust-all-unpaired)")
+        if args.discover_clients:
+            LOGGER.info("browsing mDNS for clients that advertise themselves (--discover-clients)")
         LOGGER.info("=" * 72)
 
     async def watch_clients(self) -> None:
@@ -591,6 +602,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--trust-all-unpaired",
         action="store_true",
         help="auto-trust every unpaired client so it becomes playback-capable",
+    )
+    parser.add_argument(
+        "--discover-clients",
+        action="store_true",
+        help="browse mDNS for _sendspin._tcp and connect to every client found "
+        "(server-initiated connections)",
+    )
+    parser.add_argument(
+        "--connect-to-client",
+        action="append",
+        default=[],
+        metavar="URL",
+        help="connect to the client listening at this URL, e.g. "
+        "ws://10.0.1.6:8928/sendspin; may be repeated",
+    )
+    parser.add_argument(
+        "--connect-reason",
+        choices=[ConnectionReason.DISCOVERY.value, ConnectionReason.PLAYBACK.value],
+        default=ConnectionReason.DISCOVERY.value,
+        help="what the first connection to a --connect-to-client URL declares: "
+        "'discovery' activates with empty activities, 'playback' with ['playback']",
     )
     parser.add_argument(
         "--play-test-audio",
