@@ -45,6 +45,8 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
+        UserSettings.chooseConnectionModeOnce(UnifiedServerRepository.getDefaultServer() != null)
+
         if (!UserSettings.searchForServers) {
             // Advertising is the service's own state: started, it listens
             // and waits for a server. There is no server to connect to.

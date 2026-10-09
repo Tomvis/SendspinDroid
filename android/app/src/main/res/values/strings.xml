@@ -249,6 +249,10 @@
     <string name="mode_searching_body">This device is not advertised while it searches. Tap a server to connect to it.</string>
     <string name="mode_advertise_instead">Wait for a server to connect instead</string>
     <string name="notification_waiting_for_server">Waiting for a server to connect</string>
+    <string name="notification_cannot_be_found">Servers cannot find this device right now</string>
+    <string name="mode_advertising_failed_title">Servers cannot find this device</string>
+    <string name="mode_advertising_failed_body">It could not start listening or announce itself on this network. It tries again when the network changes. You can also search for servers, or add one by address.</string>
+    <string name="wizard_find_server_not_searching">Not searching: this device is waiting for a server to connect. Enter the server\'s address below.</string>
     <string name="boot_tap_to_listen">Tap to start waiting for a server</string>
     <string name="welcome_quick_connect">Quick Connect</string>
     <string name="welcome_found_on_network">Found on your local network</string>

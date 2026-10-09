@@ -45,7 +45,12 @@ class ConnectionModeScreenTest {
     private val modeChanges = mutableListOf<Boolean>()
     private val clicked = mutableListOf<String>()
 
-    private fun show(searching: Boolean, savedServers: List<UnifiedServer> = emptyList(), port: Int? = 8928) {
+    private fun show(
+        searching: Boolean,
+        savedServers: List<UnifiedServer> = emptyList(),
+        port: Int? = 8928,
+        failed: Boolean = false,
+    ) {
         composeTestRule.setContent {
             SendSpinTheme {
                 ServerListScreen(
@@ -59,7 +64,7 @@ class ConnectionModeScreenTest {
                     onServerLongClick = {},
                     onQuickConnectClick = {},
                     onAddServerClick = { clicked += "add" },
-                    mode = ConnectionModeState(searching, "Kitchen Tablet", port) { modeChanges += it },
+                    mode = ConnectionModeState(searching, "Kitchen Tablet", port, failed) { modeChanges += it },
                 )
             }
         }
@@ -127,6 +132,15 @@ class ConnectionModeScreenTest {
 
         composeTestRule.onNodeWithText("Nearby Servers").assertIsDisplayed()
         composeTestRule.onNodeWithText("Kitchen Server").assertIsDisplayed()
+    }
+
+    @Test
+    fun `does not say it is waiting when servers cannot find it`() {
+        show(searching = false, port = null, failed = true)
+
+        composeTestRule.onNodeWithText("Servers cannot find this device").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Waiting for a server to connect").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Search for servers instead").performScrollTo().assertIsDisplayed()
     }
 
     @Test

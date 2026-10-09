@@ -29,11 +29,14 @@ import com.sendspindroid.ui.theme.SendSpinTheme
  * @param playerName the name the app is advertised under.
  * @param listeningPort the port servers can connect to; null until the
  *   listener is up.
+ * @param failed advertising is selected but servers cannot find or reach
+ *   the app: no port could be bound, or the mDNS registration failed.
  */
 class ConnectionModeState(
     val searching: Boolean,
     val playerName: String,
     val listeningPort: Int?,
+    val failed: Boolean = false,
     val onSearchingChange: (Boolean) -> Unit,
 )
 
@@ -51,7 +54,11 @@ fun ConnectionModeCard(
     ) {
         Text(
             text = stringResource(
-                if (searching) R.string.mode_searching_title else R.string.mode_advertising_title
+                when {
+                    searching -> R.string.mode_searching_title
+                    mode.failed -> R.string.mode_advertising_failed_title
+                    else -> R.string.mode_advertising_title
+                }
             ),
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface,
@@ -59,16 +66,16 @@ fun ConnectionModeCard(
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = if (searching) {
-                stringResource(R.string.mode_searching_body)
-            } else {
-                stringResource(R.string.mode_advertising_body, mode.playerName)
+            text = when {
+                searching -> stringResource(R.string.mode_searching_body)
+                mode.failed -> stringResource(R.string.mode_advertising_failed_body)
+                else -> stringResource(R.string.mode_advertising_body, mode.playerName)
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
-        if (!searching) {
+        if (!searching && !mode.failed) {
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = if (listeningPort != null) {

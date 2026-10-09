@@ -5,6 +5,7 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import androidx.test.core.app.ApplicationProvider
+import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
@@ -109,6 +110,37 @@ class NsdAdvertiserTest {
             nsdManager.unregisterService(any())
             nsdManager.registerService(any(), any(), any<NsdManager.RegistrationListener>())
         }
+        assertEquals(1, activeMulticastLocks())
+    }
+
+    @Test
+    fun `says whether servers can find the app`() {
+        val results = mutableListOf<Boolean>()
+        val advertiser = NsdAdvertiser(context, nsdManager) { results += it }
+        advertiser.start("Kitchen", 8928, "/sendspin")
+        val listener = slot<NsdManager.RegistrationListener>()
+        verify { nsdManager.registerService(any(), any(), capture(listener)) }
+
+        listener.captured.onRegistrationFailed(NsdServiceInfo(), NsdManager.FAILURE_INTERNAL_ERROR)
+        listener.captured.onServiceRegistered(NsdServiceInfo())
+
+        assertEquals(listOf(false, true), results)
+    }
+
+    @Test
+    fun `a registration that failed is tried again on a network change`() {
+        val results = mutableListOf<Boolean>()
+        val advertiser = NsdAdvertiser(context, nsdManager) { results += it }
+        every {
+            nsdManager.registerService(any(), any(), any<NsdManager.RegistrationListener>())
+        } throws IllegalArgumentException("no network") andThenAnswer { }
+        advertiser.start("Kitchen", 8928, "/sendspin")
+        assertEquals(listOf(false), results)
+        assertEquals(0, activeMulticastLocks())
+
+        advertiser.refresh()
+
+        verify(exactly = 2) { nsdManager.registerService(any(), any(), any<NsdManager.RegistrationListener>()) }
         assertEquals(1, activeMulticastLocks())
     }
 

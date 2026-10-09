@@ -50,6 +50,48 @@ class AddServerWizardTest {
     }
 
     @Test
+    fun wizard_whileAdvertising_doesNotSearchAndSaysSo() {
+        composeTestRule.setContent {
+            SendSpinTheme {
+                AddServerWizardScreen(
+                    state = WizardState(currentStep = WizardStep.SS_FindServer, isSearching = false),
+                    onClose = {},
+                    onBack = {},
+                    onNext = {},
+                    onSave = {},
+                    onStepAction = {},
+                    searchAllowed = false
+                )
+            }
+        }
+
+        composeTestRule.onAllNodesWithText("Not searching", substring = true)[0].assertIsDisplayed()
+        // No "searching" state and no way to start one; the address field stays.
+        composeTestRule.onAllNodesWithText("Search Again").assertCountEquals(0)
+        composeTestRule.onAllNodesWithText("Discovered on network").assertCountEquals(0)
+        composeTestRule.onAllNodesWithText("Server Address", substring = true)[0].assertIsDisplayed()
+    }
+
+    @Test
+    fun wizard_whileSearching_offersToSearchAgain() {
+        composeTestRule.setContent {
+            SendSpinTheme {
+                AddServerWizardScreen(
+                    state = WizardState(currentStep = WizardStep.SS_FindServer, isSearching = false),
+                    onClose = {},
+                    onBack = {},
+                    onNext = {},
+                    onSave = {},
+                    onStepAction = {}
+                )
+            }
+        }
+
+        composeTestRule.onAllNodesWithText("Search Again")[0].assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("Not searching", substring = true).assertCountEquals(0)
+    }
+
+    @Test
     fun wizard_findServerStep_showsFindServerTitle() {
         composeTestRule.setContent {
             SendSpinTheme {

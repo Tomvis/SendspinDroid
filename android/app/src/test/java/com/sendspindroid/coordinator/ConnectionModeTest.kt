@@ -19,9 +19,29 @@ class ConnectionModeTest {
      * Taking the advertisement down takes time, as closing the listener
      * does: it stays up until [finishStop], unless [stopsAtOnce].
      */
-    private class World(private val stopsAtOnce: Boolean = false) : ConnectionMode.Advertising {
+    private class World(private val stopsAtOnce: Boolean = false) :
+        ConnectionMode.Advertising, ConnectionMode.Discovery {
         var advertising = false
         var outboundAlive = false
+        var browsing = false
+        private var browsingForbidden = false
+
+        override fun forbid() {
+            browsingForbidden = true
+            browsing = false
+        }
+
+        override fun allow() {
+            assertFalse("browsing allowed while advertising", advertising)
+            browsingForbidden = false
+        }
+
+        /** What the activity, the wizard or Android Auto does to look for servers. */
+        fun browse() {
+            if (browsingForbidden) return
+            assertFalse("browsed while advertising", advertising)
+            browsing = true
+        }
         val log = mutableListOf<String>()
         private var stopped: (() -> Unit)? = null
         val stopInFlight get() = stopped != null
@@ -30,6 +50,7 @@ class ConnectionModeTest {
         var onStop: () -> Unit = {}
 
         override fun start() {
+            assertFalse("advertised while a browse was running", browsing)
             assertFalse("advertised while an outbound connection was alive", outboundAlive)
             assertFalse("advertised again before the last listener was gone", stopInFlight)
             advertising = true
@@ -62,7 +83,7 @@ class ConnectionModeTest {
     }
 
     private val world = World()
-    private val mode = ConnectionMode(world)
+    private val mode = ConnectionMode(world, world)
 
     @Test
     fun `advertises by default`() {
@@ -78,6 +99,34 @@ class ConnectionModeTest {
 
         assertFalse(world.advertising)
         assertEquals(emptyList<String>(), world.log)
+    }
+
+    @Test
+    fun `a browse under way is stopped before the advertisement goes up`() {
+        mode.start(searchForServers = true)
+        world.browse()
+        assertTrue(world.browsing)
+
+        mode.setSearching(false)
+
+        // World.start fails if the browse is still running when it is called.
+        assertTrue(world.advertising)
+        assertFalse(world.browsing)
+    }
+
+    @Test
+    fun `nothing browses while advertising, or while the listener is still closing`() {
+        mode.start(searchForServers = false)
+        world.browse()
+        assertFalse(world.browsing)
+
+        mode.setSearching(true)
+        world.browse()
+        assertFalse("the advertisement is not gone yet", world.browsing)
+
+        world.finishStop()
+        world.browse()
+        assertTrue(world.browsing)
     }
 
     @Test
@@ -241,12 +290,13 @@ class ConnectionModeTest {
         val random = Random(221)
         repeat(400) { round ->
             val world = World(stopsAtOnce = round % 2 == 0)
-            val mode = ConnectionMode(world)
+            val mode = ConnectionMode(world, world)
             // The service reports "nothing dialled is alive" whenever any
             // connection ends, including the ones withdrawing ends.
             world.onStop = { if (!world.outboundAlive) mode.dialEnded() }
             repeat(80) {
-                when (random.nextInt(7)) {
+                when (random.nextInt(8)) {
+                    7 -> world.browse()
                     0 -> mode.start(searchForServers = random.nextBoolean())
                     1 -> mode.setSearching(random.nextBoolean())
                     2, 3 -> mode.dial { world.connect() }
@@ -262,6 +312,7 @@ class ConnectionModeTest {
                     }
                 }
                 assertFalse(world.advertising && world.outboundAlive)
+                assertFalse(world.advertising && world.browsing)
                 if (!world.stopInFlight) assertEquals(world.advertising, mode.isAdvertising)
             }
         }

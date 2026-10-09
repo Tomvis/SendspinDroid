@@ -16,9 +16,14 @@ package com.sendspindroid.coordinator
  *
  * Every outbound connection is opened through [dial], which opens it only
  * once the advertisement and the listener are gone, and nothing else turns
- * [Advertising] on or off. Not thread-safe: call from one thread.
+ * [Advertising] on or off. Browsing for servers is the other method, so it
+ * is stopped, and refused, for as long as anything is advertised
+ * ([Discovery]). Not thread-safe: call from one thread.
  */
-class ConnectionMode(private val advertising: Advertising) {
+class ConnectionMode(
+    private val advertising: Advertising,
+    private val discovery: Discovery,
+) {
 
     /** The listener and its mDNS announcement, up or down together. */
     interface Advertising {
@@ -30,6 +35,15 @@ class ConnectionMode(private val advertising: Advertising) {
          * before this returns or some time after it. Nothing here waits.
          */
         fun stop(onStopped: () -> Unit)
+    }
+
+    /** Every mDNS browse for servers the app makes, wherever it is made. */
+    interface Discovery {
+        /** Stop every browse under way and refuse new ones. */
+        fun forbid()
+
+        /** Browsing may start again. */
+        fun allow()
     }
 
     private var running = false
@@ -100,12 +114,15 @@ class ConnectionMode(private val advertising: Advertising) {
         if (advertise != isAdvertising) {
             isAdvertising = advertise
             if (advertise) {
+                discovery.forbid()
                 advertising.start()
             } else {
                 stopping = true
                 advertising.stop {
                     stopping = false
                     apply()
+                    // Unless that put the advertisement straight back up.
+                    if (!isAdvertising) discovery.allow()
                 }
                 return
             }

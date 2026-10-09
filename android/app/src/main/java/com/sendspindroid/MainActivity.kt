@@ -44,7 +44,9 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
+import com.sendspindroid.discovery.DiscoveryGate
 import com.sendspindroid.discovery.NsdDiscoveryManager
+import kotlinx.coroutines.flow.drop
 import com.sendspindroid.coordinator.ReconnectStatus
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.playback.PlaybackService
@@ -371,6 +373,7 @@ class MainActivity : AppCompatActivity() {
 
         // Initialize UserSettings for accessing user preferences
         UserSettings.initialize(this)
+        UserSettings.chooseConnectionModeOnce(UnifiedServerRepository.getDefaultServer() != null)
         composeSearching.value = UserSettings.searchForServers
 
         applyFullScreenMode()
@@ -551,6 +554,7 @@ class MainActivity : AppCompatActivity() {
                         viewModel = viewModel,
                         serverListContent = {
                             val listeningPort by PlaybackService.advertisedPort.collectAsStateWithLifecycle()
+                            val advertisingFailed by PlaybackService.advertisingFailed.collectAsStateWithLifecycle()
                             ServerListScreen(
                                 savedServers = UnifiedServerRepository.savedServers,
                                 discoveredServers = UnifiedServerRepository.filteredDiscoveredServers,
@@ -566,6 +570,7 @@ class MainActivity : AppCompatActivity() {
                                     searching = composeSearching.value,
                                     playerName = UserSettings.getPlayerName(),
                                     listeningPort = listeningPort,
+                                    failed = advertisingFailed,
                                     onSearchingChange = { search -> onSearchingChanged(search) }
                                 )
                             )
@@ -598,6 +603,21 @@ class MainActivity : AppCompatActivity() {
                         },
                         onExitAppClick = { onExitAppClicked() }
                     )
+                }
+            }
+        }
+
+        // Browsing is refused until the advertisement and the listener are
+        // gone, which is a moment after "Search for servers instead" is
+        // pressed: start it when it becomes possible.
+        lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                DiscoveryGate.allowed.drop(1).collect { allowed ->
+                    if (allowed && UserSettings.searchForServers &&
+                        connectionState is AppConnectionState.ServerList
+                    ) {
+                        startAutoDiscovery()
+                    }
                 }
             }
         }

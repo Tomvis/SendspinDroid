@@ -522,6 +522,23 @@ object UserSettings {
         set(value) { prefs?.edit()?.putBoolean(KEY_SEARCH_FOR_SERVERS, value)?.apply() }
 
     /**
+     * Settle [searchForServers] the first time it is needed, and only then.
+     *
+     * An install that already has a default server was set up, before the
+     * app could advertise itself, to connect to that server at launch and at
+     * boot; it starts in search mode and goes on doing exactly that. A new
+     * install, or one with no default server, starts advertising. After
+     * this the setting is the user's: adding or removing a default server
+     * later does not move it.
+     */
+    fun chooseConnectionModeOnce(hasDefaultServer: Boolean) {
+        val prefs = prefs ?: return
+        if (prefs.contains(KEY_SEARCH_FOR_SERVERS)) return
+        // commit(): the next read, possibly in the same call stack, must see it.
+        prefs.edit().putBoolean(KEY_SEARCH_FOR_SERVERS, hasDefaultServer).commit()
+    }
+
+    /**
      * "Clients MUST persistently store the `server_id` of the server that
      * most recently held the admitted connection while `'playback'` was among
      * its `activities`." It settles which of two idle servers is kept.

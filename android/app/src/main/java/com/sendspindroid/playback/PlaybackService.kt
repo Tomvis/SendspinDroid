@@ -63,6 +63,7 @@ import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.sendspin.SendSpinEndpoint
+import com.sendspindroid.discovery.DiscoveryGate
 import com.sendspindroid.discovery.NsdAdvertiser
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.sendspin.transport.SendspinWebSocketServer
@@ -573,6 +574,12 @@ class PlaybackService : MediaLibraryService() {
         // itself and waiting for one; null otherwise. For in-process observers.
         private val _advertisedPort = MutableStateFlow<Int?>(null)
         val advertisedPort: StateFlow<Int?> = _advertisedPort.asStateFlow()
+
+        // True while the service is meant to be advertising but servers
+        // cannot find or reach it: no port could be bound, or the mDNS
+        // registration failed.
+        private val _advertisingFailed = MutableStateFlow(false)
+        val advertisingFailed: StateFlow<Boolean> = _advertisingFailed.asStateFlow()
     }
 
 
@@ -660,6 +667,7 @@ class PlaybackService : MediaLibraryService() {
 
         // Initialize UnifiedServerRepository for server lookups
         UnifiedServerRepository.initialize(this)
+        UserSettings.chooseConnectionModeOnce(UnifiedServerRepository.getDefaultServer() != null)
 
         // Register receiver for sync offset changes from settings
         LocalBroadcastManager.getInstance(this).registerReceiver(
@@ -767,13 +775,13 @@ class PlaybackService : MediaLibraryService() {
                             Log.i(TAG, "Triggering connection reselection for new network")
                             sendSpinClient?.disconnectForReselection()
                         }
-                        advertiser?.refresh()
+                        advertiseAgainAfterNetworkChange()
                     }
                     is com.sendspindroid.coordinator.NetworkEvent.LinkAddressesChanged -> {
                         Log.i(TAG, "networkEvent: LinkAddressesChanged")
                         sendSpinClient?.onNetworkChanged()
                         browseDiscoveryManager?.refreshMulticastLockIfActive()
-                        advertiser?.refresh()
+                        advertiseAgainAfterNetworkChange()
                     }
                 }
             }
@@ -947,10 +955,13 @@ class PlaybackService : MediaLibraryService() {
      * Whether the service advertises itself and waits for a server, searches
      * for servers, or is dialled out to one. See [ConnectionMode].
      */
-    private val connectionMode = ConnectionMode(object : ConnectionMode.Advertising {
-        override fun start() = startAdvertising()
-        override fun stop(onStopped: () -> Unit) = stopAdvertising(onStopped)
-    })
+    private val connectionMode = ConnectionMode(
+        object : ConnectionMode.Advertising {
+            override fun start() = startAdvertising()
+            override fun stop(onStopped: () -> Unit) = stopAdvertising(onStopped)
+        },
+        DiscoveryGate,
+    )
 
     private val inboundConnections = InboundConnections(
         scope = serviceScope,
@@ -986,6 +997,7 @@ class PlaybackService : MediaLibraryService() {
             val port = withContext(Dispatchers.IO) { runCatching { server.start() } }
                 .getOrElse {
                     Log.e(TAG, "Cannot listen for servers", it)
+                    if (generation == advertisingGeneration) setAdvertisingFailed(true)
                     return@launch
                 }
             if (generation != advertisingGeneration) {
@@ -993,11 +1005,43 @@ class PlaybackService : MediaLibraryService() {
                 return@launch
             }
             // "Advertise the port actually bound": 8928 unless it was taken.
-            advertiser = NsdAdvertiser(this@PlaybackService).also {
+            advertiser = NsdAdvertiser(this@PlaybackService) { registered ->
+                mainHandler.post {
+                    if (generation == advertisingGeneration) setAdvertisingFailed(!registered)
+                }
+            }.also {
                 it.start(name, port, SendspinWebSocketServer.DEFAULT_PATH)
             }
             _advertisedPort.value = port
             Log.i(TAG, "Advertising as '$name' on port $port, waiting for a server")
+        }
+    }
+
+    /**
+     * Servers cannot find or reach the app although it is meant to be
+     * waiting for one: the listener could not be bound, or the mDNS
+     * registration failed. Said on the default screen and in the
+     * notification, so that "waiting" is never shown over nothing.
+     */
+    private fun setAdvertisingFailed(failed: Boolean) {
+        if (_advertisingFailed.value == failed) return
+        _advertisingFailed.value = failed
+        if (connectionMode.isAdvertising && !isConnectedOrReconnecting()) {
+            startForegroundServiceWithNotification()
+        }
+    }
+
+    /**
+     * The network changed while advertising: announce again, and if the
+     * listener never came up, try that again too. No timer retries either;
+     * a change of network is when the outcome can be different.
+     */
+    private fun advertiseAgainAfterNetworkChange() {
+        if (!connectionMode.isAdvertising) return
+        if (_advertisingFailed.value && _advertisedPort.value == null) {
+            startAdvertising()
+        } else {
+            advertiser?.refresh()
         }
     }
 
@@ -1014,6 +1058,7 @@ class PlaybackService : MediaLibraryService() {
         advertiser?.stop()
         advertiser = null
         _advertisedPort.value = null
+        _advertisingFailed.value = false
         // A server being played from is left with the rest.
         if (!isDestroyed) dialClient?.let { useClient(it) }
         inboundConnections.close()
@@ -2474,8 +2519,10 @@ class PlaybackService : MediaLibraryService() {
             val contentText = when {
                 reconnecting -> "Reconnecting to $serverName..."
                 serverName != null -> "Connected to $serverName"
-                connectionMode.isAdvertising && sendSpinClient?.isConnected != true ->
-                    getString(com.sendspindroid.R.string.notification_waiting_for_server)
+                connectionMode.isAdvertising && sendSpinClient?.isConnected != true -> getString(
+                    if (_advertisingFailed.value) com.sendspindroid.R.string.notification_cannot_be_found
+                    else com.sendspindroid.R.string.notification_waiting_for_server
+                )
                 else -> "Streaming audio..."
             }
 
