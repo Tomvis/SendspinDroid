@@ -229,9 +229,17 @@ fun SettingsScreen(
                     }
                 )
             }
+            // Waiting for a server needs no default server to start for;
+            // searching connects to the default one.
+            val waitsForServer = !UserSettings.searchForServers
             SwitchPreference(
                 title = stringResource(R.string.pref_auto_start_title),
-                summary = if (!hasDefaultServer) {
+                summary = if (waitsForServer) {
+                    stringResource(
+                        if (autoStartOnBoot) R.string.pref_auto_start_summary_waiting_on
+                        else R.string.pref_auto_start_summary_waiting_off
+                    )
+                } else if (!hasDefaultServer) {
                     stringResource(R.string.pref_auto_start_no_default)
                 } else if (autoStartOnBoot) {
                     stringResource(R.string.pref_auto_start_summary_on, defaultServerName)
@@ -240,7 +248,7 @@ fun SettingsScreen(
                 },
                 checked = autoStartOnBoot,
                 onCheckedChange = {
-                    if (hasDefaultServer) {
+                    if (waitsForServer || hasDefaultServer) {
                         viewModel.setAutoStartOnBoot(it)
                     }
                 }
