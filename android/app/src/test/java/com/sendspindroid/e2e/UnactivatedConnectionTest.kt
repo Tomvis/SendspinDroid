@@ -92,7 +92,7 @@ class UnactivatedConnectionTest : E2ETestBase() {
         verify(exactly = 0) { mockCallback.onStreamEnd() }
         verify(exactly = 0) { mockCallback.onVolumeChanged(any()) }
         verify(exactly = 0) { mockCallback.onMutedChanged(any()) }
-        verify(exactly = 0) { mockCallback.onMetadataUpdate(any(), any(), any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { mockCallback.onMetadataUpdate(any()) }
         verify(exactly = 0) { mockCallback.onArtwork(any()) }
         assertEquals(null, client.controllerState.value)
         assertFalse(fakeTransport.closed)
