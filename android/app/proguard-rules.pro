@@ -126,3 +126,18 @@
 # ============================================================================
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
+
+# ============================================================================
+# Ktor server (the listener for connections a server opens to the app)
+# ============================================================================
+# kotlin-reflect is left out of the build (see shared/build.gradle.kts). Ktor
+# reaches it only when it loads modules by name or auto-reloads, and
+# embeddedServer with a lambda does neither.
+-dontwarn kotlin.reflect.full.KCallables
+-dontwarn kotlin.reflect.full.KClasses
+-dontwarn kotlin.reflect.jvm.ReflectJvmMapping
+
+# Ktor asks the JVM's management bean whether a debugger is attached, and
+# takes the class being absent, as it is on Android, for "no".
+-dontwarn java.lang.management.ManagementFactory
+-dontwarn java.lang.management.RuntimeMXBean

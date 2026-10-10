@@ -100,6 +100,13 @@ class NsdDiscoveryManager(
             return
         }
 
+        // Advertising or discovering, never both: asked here so that no
+        // browse in the app can be started around it.
+        if (!DiscoveryGate.enter(this) { cleanup() }) {
+            Log.i(TAG, "Not browsing: the app is advertising itself")
+            return
+        }
+
         // Acquire multicast lock first (required for mDNS)
         acquireMulticastLock()
 
@@ -377,6 +384,7 @@ class NsdDiscoveryManager(
      * in the onDiscoveryStopped callback.
      */
     fun stopDiscovery() {
+        DiscoveryGate.leave(this)
         if (!isDiscovering) {
             Log.d(TAG, "Discovery not running")
             return
@@ -470,6 +478,7 @@ class NsdDiscoveryManager(
      * unconditionally, so neither the lock nor the NSD registration leaks.
      */
     fun cleanup() {
+        DiscoveryGate.leave(this)
         pendingRestart = false
         try {
             discoveryListener?.let { nsdManager?.stopServiceDiscovery(it) }

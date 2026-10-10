@@ -88,6 +88,8 @@ fun SettingsScreen(
 ) {
     val playerName by viewModel.playerName.collectAsStateWithLifecycle()
     val dynamicPairingCodeEnabled by viewModel.dynamicPairingCodeEnabled.collectAsStateWithLifecycle()
+    val pairedServers by viewModel.pairedServers.collectAsStateWithLifecycle()
+    val lastPairingOutcome by viewModel.lastPairingOutcome.collectAsStateWithLifecycle()
     val fullscreenMode by viewModel.fullscreenMode.collectAsStateWithLifecycle()
     val keepScreenOn by viewModel.keepScreenOn.collectAsStateWithLifecycle()
     val layoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
@@ -144,6 +146,12 @@ fun SettingsScreen(
             // Pairing Category
             PreferenceCategory(title = stringResource(R.string.pairing_category))
             PairingTokenPreference(token = viewModel.pairingToken())
+            PairingClientId(clientId = viewModel.clientId)
+            PairedServersSection(
+                servers = pairedServers,
+                lastOutcome = lastPairingOutcome,
+                onForget = { viewModel.forgetPairedServer(it.pskId) }
+            )
             SwitchPreference(
                 title = stringResource(R.string.pref_dynamic_pairing_code_title),
                 summary = stringResource(R.string.pref_dynamic_pairing_code_summary),
@@ -230,9 +238,17 @@ fun SettingsScreen(
                     }
                 )
             }
+            // Waiting for a server needs no default server to start for;
+            // searching connects to the default one.
+            val waitsForServer = !UserSettings.searchForServers
             SwitchPreference(
                 title = stringResource(R.string.pref_auto_start_title),
-                summary = if (!hasDefaultServer) {
+                summary = if (waitsForServer) {
+                    stringResource(
+                        if (autoStartOnBoot) R.string.pref_auto_start_summary_waiting_on
+                        else R.string.pref_auto_start_summary_waiting_off
+                    )
+                } else if (!hasDefaultServer) {
                     stringResource(R.string.pref_auto_start_no_default)
                 } else if (autoStartOnBoot) {
                     stringResource(R.string.pref_auto_start_summary_on, defaultServerName)
@@ -241,7 +257,7 @@ fun SettingsScreen(
                 },
                 checked = autoStartOnBoot,
                 onCheckedChange = {
-                    if (hasDefaultServer) {
+                    if (waitsForServer || hasDefaultServer) {
                         viewModel.setAutoStartOnBoot(it)
                     }
                 }

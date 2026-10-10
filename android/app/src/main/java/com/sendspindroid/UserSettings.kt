@@ -61,6 +61,9 @@ object UserSettings {
     const val KEY_HIGH_POWER_MODE = "high_power_mode"
     const val KEY_LAYOUT_MODE = "layout_mode"
     const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
+    const val KEY_SEARCH_FOR_SERVERS = "search_for_servers"
+    const val KEY_LAST_PLAYBACK_SERVER_ID = "last_playback_server_id"
+    const val KEY_PAIRED_SERVER_NAME_PREFIX = "paired_server_name_"
 
     // Long-term PSK records from pairing (stored in encrypted prefs).
     // Record semantics live in the trust store; this is only the blob.
@@ -501,11 +504,62 @@ object UserSettings {
     /**
      * Whether Auto-Start on Boot is enabled.
      * When enabled, the app starts PlaybackService on device boot and connects
-     * to the default server without launching the UI.
-     * Requires a default server to be set in the server list.
+     * to the default server without launching the UI, which requires a
+     * default server to be set in the server list. While the app advertises
+     * itself instead ([searchForServers] off), the service starts waiting for
+     * a server to connect.
      */
     val autoStartOnBoot: Boolean
         get() = prefs?.getBoolean(KEY_AUTO_START_ON_BOOT, false) ?: false
+
+    /**
+     * How the app meets a server. False, the default: it advertises itself
+     * and waits for a server to connect. True: it searches for servers that
+     * advertise themselves and connects to one. Never both at once
+     * (`connection.md`, "Establishing a Connection").
+     */
+    var searchForServers: Boolean
+        get() = prefs?.getBoolean(KEY_SEARCH_FOR_SERVERS, false) ?: false
+        set(value) { prefs?.edit()?.putBoolean(KEY_SEARCH_FOR_SERVERS, value)?.apply() }
+
+    /**
+     * Settle [searchForServers] the first time it is needed, and only then.
+     *
+     * An install that already has a default server was set up, before the
+     * app could advertise itself, to connect to that server at launch and at
+     * boot; it starts in search mode and goes on doing exactly that. A new
+     * install, or one with no default server, starts advertising. After
+     * this the setting is the user's: adding or removing a default server
+     * later does not move it.
+     */
+    fun chooseConnectionModeOnce(hasDefaultServer: Boolean) {
+        val prefs = prefs ?: return
+        if (prefs.contains(KEY_SEARCH_FOR_SERVERS)) return
+        // commit(): the next read, possibly in the same call stack, must see it.
+        prefs.edit().putBoolean(KEY_SEARCH_FOR_SERVERS, hasDefaultServer).commit()
+    }
+
+    /**
+     * "Clients MUST persistently store the `server_id` of the server that
+     * most recently held the admitted connection while `'playback'` was among
+     * its `activities`." It settles which of two idle servers is kept.
+     */
+    var lastPlaybackServerId: String?
+        get() = prefs?.getString(KEY_LAST_PLAYBACK_SERVER_ID, null)
+        set(value) { prefs?.edit()?.putString(KEY_LAST_PLAYBACK_SERVER_ID, value)?.apply() }
+
+    /**
+     * What a paired server last called itself, by `server_id`, for the list
+     * of paired servers. A pairing record holds no name. Display only, and
+     * not a secret: plain preferences.
+     */
+    fun getPairedServerName(serverId: String): String? =
+        prefs?.getString(KEY_PAIRED_SERVER_NAME_PREFIX + serverId, null)
+
+    /** @param name null forgets it. */
+    fun setPairedServerName(serverId: String, name: String?) {
+        prefs?.edit()?.putString(KEY_PAIRED_SERVER_NAME_PREFIX + serverId, name)?.apply()
+    }
 
     /**
      * Layout mode override for adaptive UI.

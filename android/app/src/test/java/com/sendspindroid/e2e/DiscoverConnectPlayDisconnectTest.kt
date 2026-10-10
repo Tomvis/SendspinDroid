@@ -158,7 +158,8 @@ class DiscoverConnectPlayDisconnectTest : E2ETestBase() {
 
     @Test
     fun `artwork transfers reach the artwork callbacks`() {
-        connectAndHandshake()
+        injectTransportAndConnect()
+        fakeServer.completeHandshake(activeRoles = listOf("player@v1", "artwork@v1"))
         val image = ByteArray(100) { it.toByte() }
 
         // "Servers MUST NOT send artwork messages outside an active artwork

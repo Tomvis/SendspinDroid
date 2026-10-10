@@ -49,6 +49,22 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
+        UserSettings.chooseConnectionModeOnce(UnifiedServerRepository.getDefaultServer() != null)
+
+        if (!UserSettings.searchForServers) {
+            // Advertising is the service's own state: started, it listens
+            // and waits for a server. There is no server to connect to.
+            val serviceIntent = Intent(context, PlaybackService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                Log.i(TAG, "Auto-start on boot: posting tap-to-listen notification")
+                postResumeNotification(context, serviceIntent, context.getString(R.string.boot_tap_to_listen))
+            } else {
+                Log.i(TAG, "Auto-start on boot: waiting for a server to connect")
+                context.startForegroundService(serviceIntent)
+            }
+            return
+        }
+
         val defaultServer = UnifiedServerRepository.getDefaultServer()
         if (defaultServer == null) {
             Log.w(TAG, "Auto-start enabled but no default server configured, skipping")
@@ -62,7 +78,7 @@ class BootReceiver : BroadcastReceiver() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
             Log.i(TAG, "Auto-start on boot: posting tap-to-resume notification for ${defaultServer.name}")
-            postResumeNotification(context, serviceIntent, defaultServer.name)
+            postResumeNotification(context, serviceIntent, "Tap to connect to ${defaultServer.name}")
         } else {
             Log.i(TAG, "Auto-start on boot: connecting to ${defaultServer.name}")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -85,7 +101,7 @@ class BootReceiver : BroadcastReceiver() {
     private fun postResumeNotification(
         context: Context,
         serviceIntent: Intent,
-        serverName: String,
+        text: String,
     ) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
@@ -106,7 +122,7 @@ class BootReceiver : BroadcastReceiver() {
 
         val notification = NotificationCompat.Builder(context, NotificationHelper.BOOT_RESUME_CHANNEL_ID)
             .setContentTitle(context.getString(R.string.app_name))
-            .setContentText("Tap to connect to $serverName")
+            .setContentText(text)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(tapIntent)
             .setAutoCancel(true)

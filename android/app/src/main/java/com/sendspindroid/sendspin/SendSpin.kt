@@ -5,7 +5,12 @@ import android.util.Log
 import com.sendspindroid.UserSettings
 import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.throwableSummary
+import com.sendspindroid.sendspin.pairing.PairAbortReason
+import com.sendspindroid.sendspin.pairing.PairedServers
+import com.sendspindroid.sendspin.pairing.PairingOutcome
+import com.sendspindroid.sendspin.protocol.Activity
 import com.sendspindroid.sendspin.protocol.AdmissionState
+import com.sendspindroid.sendspin.protocol.ConnectionAdmission
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
 import com.sendspindroid.sendspin.protocol.SendSpinProtocol
@@ -78,8 +83,40 @@ import java.util.concurrent.atomic.AtomicLong
  */
 class SendSpin(
     private val deviceName: String,
-    private val callback: Callback
+    callback: Callback
 ) : SendSpinProtocolHandler(TAG) {
+
+    /**
+     * False while this connection is not the one its owner plays from: a
+     * server-initiated connection that is still provisional, or one that
+     * was displaced. Nothing it does reaches the owner then, so a
+     * connection that is refused or times out leaves no trace.
+     */
+    @Volatile
+    var reporting: Boolean = true
+
+    private val callback: Callback = callback
+        get() = if (reporting) field else Silent
+
+    /** Where callbacks go while [reporting] is off. */
+    private object Silent : Callback {
+        override fun onStateChanged(state: String) {}
+        override fun onGroupUpdate(groupId: String, groupName: String, playbackState: String) {}
+        override fun onMetadataUpdate(
+            title: String, artist: String, album: String, artworkUrl: String,
+            durationMs: Long, positionMs: Long, playbackSpeed: Int,
+        ) {}
+        override fun onArtwork(imageData: ByteArray) {}
+        override fun onArtworkCleared() {}
+        override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {}
+        override fun onStreamClear() {}
+        override fun onStreamEnd() {}
+        override fun onAudioChunk(serverTimeMicros: Long, audioData: ByteArray) {}
+        override fun onVolumeChanged(volume: Int) {}
+        override fun onMutedChanged(muted: Boolean) {}
+        override fun onSyncOffsetApplied(offsetMs: Double, source: String) {}
+        override fun onNetworkChanged() {}
+    }
 
     companion object {
         private const val TAG = "SendSpin"
@@ -96,6 +133,9 @@ class SendSpin(
         // the worst-case natural silence; 20s gives 2x headroom while still catching
         // server death. Issue #127.
         private const val IDLE_STALL_TIMEOUT_MS = 20_000L
+
+        // Enough of a 43-character server_id to tell two servers apart.
+        private const val SERVER_ID_LABEL_LENGTH = 12
     }
 
     /**
@@ -213,6 +253,29 @@ class SendSpin(
     private var serverAddress: String? = null
     private var serverPath: String? = null
     private var serverName: String? = null
+
+    /** True when the server opened the current connection ([accept]). */
+    @Volatile
+    var isServerInitiated: Boolean = false
+        private set
+
+    /**
+     * Decides whether this connection is admitted, from the `server_id` and
+     * the activities of each admissible `server/activate`. Set by whoever
+     * accepts connections from servers; a dialled connection has none.
+     */
+    @Volatile
+    var admission: ((serverId: String, activities: Set<Activity>) -> Boolean)? = null
+
+    override fun admitActivation(activities: Set<Activity>): Boolean =
+        admission?.invoke(currentServerId().orEmpty(), activities) ?: true
+
+    /**
+     * A connection that is provisional or was displaced gets no further
+     * than its handshake and activation: whatever else it sends is not
+     * acted on, so it can change no setting and nothing on screen.
+     */
+    override fun isOwnersConnection(): Boolean = reporting
 
     // Time synchronization (Kalman filter)
     private val timeFilter = SendspinTimeFilter().apply {
@@ -473,7 +536,23 @@ class SendSpin(
         // client sends nothing further. The new record is already visible to
         // pskCandidates(), which reads the store on every call.
         Log.i(TAG, "Pairing complete with $serverId - awaiting the server's re-handshake")
+        PairedServers.rememberName(serverId, serverLabel())
+        PairedServers.report(PairingOutcome.Paired(serverLabel()))
     }
+
+    override fun onPairingAborted(reason: String, sentByUs: Boolean) {
+        PairedServers.report(PairingOutcome.Aborted(reason, sentByUs, serverLabel()))
+    }
+
+    /**
+     * What to call the server when telling the user how a pairing ended.
+     *
+     * Those outcomes go to [PairedServers] and not through [callback]: a
+     * pairing changes what this device holds whichever connection it ran on,
+     * including one that is not the connection being played from.
+     */
+    private fun serverLabel(): String =
+        serverName ?: sessionFacts?.serverId?.take(SERVER_ID_LABEL_LENGTH).orEmpty()
 
     override fun onAdmissionStateChanged(state: AdmissionState) {
         Log.i(TAG, "Admission state: $state")
@@ -497,6 +576,8 @@ class SendSpin(
 
     override fun onUnpaired(pskId: String, serverId: String?) {
         Log.i(TAG, "Unpaired by $serverId (psk_id=$pskId)")
+        serverId?.let { UserSettings.setPairedServerName(it, null) }
+        PairedServers.report(PairingOutcome.Unpaired(serverLabel()))
         callback.onUnpaired(serverId)
     }
 
@@ -680,6 +761,11 @@ class SendSpin(
 
     override fun onHandshakeComplete(serverName: String, serverId: String) {
         this.serverName = serverName
+        // A pairing record holds no name, so a paired server's is noted here
+        // for the list of paired servers.
+        if (matchedPsk?.category == PskCategory.LONG_TERM && serverId.isNotEmpty()) {
+            PairedServers.rememberName(serverId, serverName)
+        }
 
         evaluateAndPublishSyncState()
 
@@ -866,8 +952,75 @@ class SendSpin(
 
         serverAddress = address
         serverPath = normalizedPath
+        isServerInitiated = false
 
         createLocalTransport(address, normalizedPath)
+    }
+
+    /**
+     * Take a connection a server opened to us (`connection.md`, "Server
+     * Initiated Connections").
+     *
+     * Who opened the socket is the only thing that differs from
+     * [connectLocal]. This is still the Sendspin client: it sends
+     * `client/init` first, the moment the transport is taken, and it is still
+     * the Noise responder - "the server is the Noise initiator, the client is
+     * the Noise responder, regardless of which side initiated the WebSocket
+     * connection". So everything from [TransportEventListener.onConnected]
+     * on is the dialled path, unchanged.
+     *
+     * @param inbound the accepted socket, not yet taken.
+     * @param remoteAddress the server's "host:port", for display.
+     */
+    fun accept(inbound: SendSpinTransport, remoteAddress: String) {
+        check(transport == null) { "this client already has a connection" }
+        Log.d(TAG, "Accepting connection from $remoteAddress")
+        _connectionState.value = TransportState.Connecting
+
+        timeFilter.reset()
+        resetSyncStateTracking()
+
+        serverAddress = remoteAddress
+        serverPath = null
+        isServerInitiated = true
+
+        synchronized(connectionLock) { transport = inbound }
+        inbound.setListener(TransportEventListener())
+        inbound.connect()
+    }
+
+    /**
+     * Give this connection up for another server's, which the admission rules
+     * preferred: "A displaced connection receives `client/goodbye` reason
+     * `'another_server'` (or `pair/abort` reason `concurrent_attempt` if it
+     * is a pairing handshake). The client then closes the connection."
+     */
+    fun leaveForAnotherServer() {
+        // Encoded and handed to the transport before this returns, like
+        // every goodbye: whoever displaced this connection may close the
+        // listener next.
+        val last = if (ConnectionAdmission.Rank.of(activities) == ConnectionAdmission.Rank.PAIRING) {
+            Log.d(TAG, "Disconnecting (pair/abort concurrent_attempt)")
+            encodeLastMessage(
+                MessageBuilder.buildPairAbort(PairAbortReason.CONCURRENT_ATTEMPT),
+                beforeActivation = true,
+            )
+        } else {
+            Log.d(TAG, "Disconnecting (another_server)")
+            encodeGoodbye(GoodbyeReason.ANOTHER_SERVER, beforeActivation = true)
+        }
+        closeWith(last, GoodbyeReason.ANOTHER_SERVER.wire, reconnect = false)
+    }
+
+    /**
+     * Close without a word: a connection that never got as far as an
+     * activation has nobody to say goodbye to.
+     */
+    fun drop() {
+        endConnection(TransportState.Idle, reconnect = false)?.let {
+            it.close(1000, "dropped")
+            it.destroy()
+        }
     }
 
     /**
@@ -902,6 +1055,18 @@ class SendSpin(
     fun disconnect() = leave(GoodbyeReason.USER_REQUEST, reconnect = false)
 
     /**
+     * The user removed the pairing record [pskId] from this device. If it is
+     * the one that admitted this connection, the connection ends with
+     * `unauthorized`: the server is no longer authorised for what this
+     * session was admitted to do, and should not come straight back for it.
+     * Nobody reconnects from this side either. The record is already gone,
+     * so a server that connects again is met with the Sentinel PSK.
+     */
+    fun leaveIfAdmittedBy(pskId: String) {
+        if (matchedPsk?.pskId == pskId) leave(GoodbyeReason.UNAUTHORIZED, reconnect = false)
+    }
+
+    /**
      * Say why we are leaving, then end the connection: every deliberate
      * disconnect.
      *
@@ -913,16 +1078,20 @@ class SendSpin(
      */
     private fun leave(reason: GoodbyeReason, reconnect: Boolean) {
         Log.d(TAG, "Disconnecting (${reason.wire})")
-        val goodbye = encodeGoodbye(reason)
+        closeWith(encodeGoodbye(reason), reason.wire, reconnect)
+    }
+
+    /** End the connection, with [last] as the final frames on it if there are any. */
+    private fun closeWith(last: List<ByteArray>, why: String, reconnect: Boolean) {
         val closing = endConnection(TransportState.Idle, reconnect) ?: return
-        if (goodbye.isEmpty()) {
+        if (last.isEmpty()) {
             // Nothing to flush: the connection never got as far as an
             // activation, so there is no one to say goodbye to.
-            closing.close(1000, reason.wire)
+            closing.close(1000, why)
             closing.destroy()
         } else {
-            goodbye.forEach { closing.send(it) }
-            closing.closeAfterFlush(1000, reason.wire)
+            last.forEach { closing.send(it) }
+            closing.closeAfterFlush(1000, why)
         }
     }
 
@@ -1096,6 +1265,9 @@ class SendSpin(
      */
     private fun checkStall() {
         if (!handshakeComplete) return
+        // A server that connected to us has 30 seconds to send its first
+        // server/activate, and whoever accepted it keeps that clock.
+        if (isServerInitiated && !activationSeen) return
         val t = transport ?: return
         if (!t.isConnected) return
 

@@ -1,0 +1,180 @@
+package com.sendspindroid.sendspin.transport
+
+import com.sendspindroid.shared.log.Log
+import com.sendspindroid.sendspin.crypto.MAX_NOISE_MESSAGE
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCallPipeline
+import io.ktor.server.application.call
+import io.ktor.server.application.install
+import io.ktor.server.response.respond
+import io.ktor.server.cio.CIO
+import io.ktor.server.engine.EmbeddedServer
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.routing.routing
+import io.ktor.server.websocket.WebSockets
+import io.ktor.server.websocket.webSocket
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.job
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * The listener for server-initiated connections (`connection.md`, "Server
+ * Initiated Connections"): servers that find the client's `_sendspin._tcp`
+ * advertisement connect to it here.
+ *
+ * Plain `ws://` on every interface, so servers on the LAN can reach it, and
+ * only [path] is served. "The WebSocket transport MUST be plain `ws://`":
+ * confidentiality comes from the Noise layer inside it.
+ *
+ * @param onConnection called for each accepted socket, on a Ktor thread. The
+ *   callee takes the connection with [InboundWebSocketTransport.connect] or
+ *   refuses it with [InboundWebSocketTransport.close].
+ */
+class SendspinWebSocketServer(
+    private val path: String = DEFAULT_PATH,
+    private val onConnection: (InboundWebSocketTransport) -> Unit,
+) {
+
+    companion object {
+        private const val TAG = "SendspinWsServer"
+
+        /** "Port: The port the Sendspin client is listening on (recommended: `8928`)". */
+        const val DEFAULT_PORT = 8928
+
+        /** "`path` key specifying the WebSocket endpoint ... (recommended value: `/sendspin`)". */
+        const val DEFAULT_PATH = "/sendspin"
+
+        private const val PING_INTERVAL_MS = 30_000L
+
+        /**
+         * How long the engine may take to release the port. It returns as
+         * soon as it has, which with every connection already ended is at
+         * once, so this only bounds a failure.
+         */
+        private const val STOP_TIMEOUT_MS = 10_000L
+
+        /**
+         * How long [stop] waits for connections whose peers have stopped
+         * reading. A peer that reads is done in milliseconds and is never
+         * cut short by this.
+         */
+        private const val UNRESPONSIVE_PEER_MS = 10_000L
+
+        /** RFC 6455: "an endpoint is going away". */
+        private const val CLOSE_GOING_AWAY = 1001
+    }
+
+    private var server: EmbeddedServer<*, *>? = null
+    private var stopped = false
+
+    /** Connections, each with the job of the handler serving it. */
+    private val open = mutableListOf<Pair<InboundWebSocketTransport, Job>>()
+
+    /**
+     * Start listening, on [preferredPort] if it is free and on a port the
+     * system picks if it is not.
+     *
+     * @return the port actually bound, which is the one to advertise.
+     */
+    @Synchronized
+    fun start(preferredPort: Int = DEFAULT_PORT): Int {
+        check(server == null) { "already listening" }
+        // A listener is used once. Whichever of start() and stop() runs
+        // first, nothing is left bound after stop().
+        check(!stopped) { "stopped" }
+        val (started, port) = try {
+            bind(preferredPort)
+        } catch (e: Exception) {
+            Log.w(TAG, "Port $preferredPort unavailable (${e.message}); letting the system pick one")
+            bind(0)
+        }
+        server = started
+        Log.i(TAG, "Listening on port $port, path $path")
+        return port
+    }
+
+    private fun bind(port: Int): Pair<EmbeddedServer<*, *>, Int> {
+        val candidate = embeddedServer(CIO, port = port, host = "0.0.0.0") {
+            // No Sendspin server is a web page, and a page is the one kind
+            // of peer that always says where it came from. Refused before
+            // the upgrade, so before anything is allocated for it.
+            intercept(ApplicationCallPipeline.Plugins) {
+                if (call.request.headers.contains(HttpHeaders.Origin)) {
+                    Log.w(TAG, "Refusing a connection from a browser (Origin header)")
+                    call.respond(HttpStatusCode.Forbidden)
+                    finish()
+                }
+            }
+            install(WebSockets) {
+                pingPeriodMillis = PING_INTERVAL_MS
+                timeoutMillis = PING_INTERVAL_MS
+                // Ktor's default is unlimited, and the buffer for a frame is
+                // sized from its header: anyone who can reach the port could
+                // ask for gigabytes before the handshake. The largest thing
+                // a server sends is one Noise transport message; the
+                // cleartext handshake frames are a few hundred bytes.
+                maxFrameSize = MAX_NOISE_MESSAGE.toLong()
+            }
+            routing {
+                webSocket(path) {
+                    val remote = call.request.local.let { "${it.remoteAddress}:${it.remotePort}" }
+                    val transport = InboundWebSocketTransport(this, remote)
+                    if (track(transport, coroutineContext.job)) {
+                        onConnection(transport)
+                    } else {
+                        // Accepted while stop() was running: nobody is told.
+                        transport.close(CLOSE_GOING_AWAY, "listener stopped")
+                    }
+                    transport.serve()
+                }
+            }
+        }
+        try {
+            candidate.start(wait = false)
+            return candidate to runBlocking { candidate.engine.resolvedConnectors().first().port }
+        } catch (e: Exception) {
+            candidate.stop(0, STOP_TIMEOUT_MS)
+            throw e
+        }
+    }
+
+    /** False once the listener has stopped: the connection is not one to hand out. */
+    @Synchronized
+    private fun track(transport: InboundWebSocketTransport, handler: Job): Boolean {
+        if (stopped) return false
+        open.removeAll { !it.second.isActive }
+        open += transport to handler
+        return true
+    }
+
+    /**
+     * Stop listening and end every connection.
+     *
+     * The connections are ended here, one by one, and not left to the engine:
+     * all Ktor does when it stops is cancel its coroutines and wait a moment,
+     * and when the socket of a cancelled connection is released is not
+     * something it promises. So each connection that is not already closing
+     * is closed (1001), and all of them are waited for: each writes what it
+     * had queued, then its close frame, and its handler returns, which is
+     * what makes Ktor release the socket. A goodbye queued just before this
+     * is therefore on the wire before the socket goes, and a server that was
+     * connected is told at once and does not go on believing it is.
+     *
+     * Blocks until the port is released, so not for the main thread.
+     */
+    @Synchronized
+    fun stop() {
+        stopped = true
+        val running = server ?: return
+        // A no-op for a connection that is already closing: its own close,
+        // and what it queued ahead of it, stand.
+        open.forEach { it.first.close(CLOSE_GOING_AWAY, "listener stopped") }
+        runBlocking { withTimeoutOrNull(UNRESPONSIVE_PEER_MS) { open.map { it.second }.joinAll() } }
+        open.clear()
+        running.stop(0, STOP_TIMEOUT_MS)
+        server = null
+    }
+}

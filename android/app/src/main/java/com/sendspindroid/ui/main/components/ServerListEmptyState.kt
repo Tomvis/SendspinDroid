@@ -55,9 +55,10 @@ import com.sendspindroid.ui.theme.SendSpinTheme
 /**
  * Welcome / empty state shown when no saved servers are available.
  *
- * Displays a hero card with a prominent "Add Your First Server" CTA,
- * a scanning status indicator, and optionally discovered servers below
- * for quick-connect.
+ * Displays a hero card with a prominent "Add Your First Server" CTA and
+ * the connection mode: waiting for a server to connect, or searching for
+ * one, with a scanning status indicator and the servers found below for
+ * quick-connect.
  */
 @Composable
 fun ServerListEmptyState(
@@ -65,6 +66,7 @@ fun ServerListEmptyState(
     discoveredServers: List<UnifiedServer>,
     onAddServerClick: () -> Unit,
     onQuickConnectClick: (UnifiedServer) -> Unit,
+    mode: ConnectionModeState,
     modifier: Modifier = Modifier
 ) {
     val contentPadding = PaddingValues(horizontal = 16.dp, vertical = 24.dp)
@@ -84,7 +86,8 @@ fun ServerListEmptyState(
                     HeroCard(
                         isScanning = isScanning,
                         discoveredCount = discoveredServers.size,
-                        onAddServerClick = onAddServerClick
+                        onAddServerClick = onAddServerClick,
+                        mode = mode
                     )
                 }
             }
@@ -109,7 +112,8 @@ fun ServerListEmptyState(
             HeroCard(
                 isScanning = isScanning,
                 discoveredCount = discoveredServers.size,
-                onAddServerClick = onAddServerClick
+                onAddServerClick = onAddServerClick,
+                mode = mode
             )
         }
 
@@ -193,6 +197,7 @@ private fun HeroCard(
     isScanning: Boolean,
     discoveredCount: Int,
     onAddServerClick: () -> Unit,
+    mode: ConnectionModeState,
     modifier: Modifier = Modifier
 ) {
     ElevatedCard(
@@ -267,22 +272,21 @@ private fun HeroCard(
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
-            // "or" divider
-            Text(
-                text = stringResource(R.string.welcome_or),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            )
+            // Waiting for a server, or searching for one, and the way to
+            // the other.
+            ConnectionModeCard(mode = mode)
 
-            Spacer(modifier = Modifier.height(12.dp))
+            if (mode.searching) {
+                Spacer(modifier = Modifier.height(12.dp))
 
-            // Scanning status chip
-            DiscoveryStatusChip(
-                isScanning = isScanning,
-                discoveredCount = discoveredCount
-            )
+                // Scanning status chip
+                DiscoveryStatusChip(
+                    isScanning = isScanning,
+                    discoveredCount = discoveredCount
+                )
+            }
         }
     }
 }
@@ -393,13 +397,28 @@ private fun DiscoveryStatusChip(
 
 @Preview(showBackground = true, widthDp = 360, heightDp = 640)
 @Composable
+private fun EmptyStateAdvertisingPreview() {
+    SendSpinTheme {
+        ServerListEmptyState(
+            isScanning = false,
+            discoveredServers = emptyList(),
+            onAddServerClick = {},
+            onQuickConnectClick = {},
+            mode = ConnectionModeState(searching = false, "Kitchen Tablet", 8928) {}
+        )
+    }
+}
+
+@Preview(showBackground = true, widthDp = 360, heightDp = 640)
+@Composable
 private fun EmptyStateScanningPreview() {
     SendSpinTheme {
         ServerListEmptyState(
             isScanning = true,
             discoveredServers = emptyList(),
             onAddServerClick = {},
-            onQuickConnectClick = {}
+            onQuickConnectClick = {},
+            mode = ConnectionModeState(searching = true, "Kitchen Tablet", null) {}
         )
     }
 }
@@ -425,7 +444,8 @@ private fun EmptyStateWithServersPreview() {
                 )
             ),
             onAddServerClick = {},
-            onQuickConnectClick = {}
+            onQuickConnectClick = {},
+            mode = ConnectionModeState(searching = true, "Kitchen Tablet", null) {}
         )
     }
 }
@@ -438,7 +458,8 @@ private fun EmptyStateNoServersFoundPreview() {
             isScanning = false,
             discoveredServers = emptyList(),
             onAddServerClick = {},
-            onQuickConnectClick = {}
+            onQuickConnectClick = {},
+            mode = ConnectionModeState(searching = true, "Kitchen Tablet", null) {}
         )
     }
 }

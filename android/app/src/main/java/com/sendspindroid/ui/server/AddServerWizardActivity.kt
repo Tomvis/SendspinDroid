@@ -15,6 +15,7 @@ import androidx.compose.runtime.getValue
 import androidx.lifecycle.lifecycleScope
 import com.sendspindroid.R
 import com.sendspindroid.UnifiedServerRepository
+import com.sendspindroid.UserSettings
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.model.ConnectionPreference
 import com.sendspindroid.model.LocalConnection
@@ -118,7 +119,8 @@ class AddServerWizardActivity : FragmentActivity() {
                     onBack = { handleBack() },
                     onNext = { handleNext() },
                     onSave = { attemptSave() },
-                    onStepAction = { action -> handleStepAction(action) }
+                    onStepAction = { action -> handleStepAction(action) },
+                    searchAllowed = UserSettings.searchForServers
                 )
             }
         }
@@ -217,6 +219,9 @@ class AddServerWizardActivity : FragmentActivity() {
     }
 
     private fun startDiscovery() {
+        // While the app advertises itself it does not look for servers; the
+        // address is entered by hand.
+        if (!UserSettings.searchForServers) return
         discoveredServers.clear()
         viewModel.updateDiscoveredServers(emptyList())
         discoveryManager?.startDiscovery()

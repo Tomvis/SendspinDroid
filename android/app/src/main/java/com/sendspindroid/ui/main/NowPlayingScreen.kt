@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -39,7 +40,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sendspindroid.R
 import com.sendspindroid.ui.main.components.AdmissionNotice
+import com.sendspindroid.sendspin.pairing.PairedServers
+import com.sendspindroid.sendspin.pairing.PairingOutcome
 import com.sendspindroid.sendspin.protocol.AdmissionState
+import com.sendspindroid.ui.settings.message
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.FormFactor
@@ -106,6 +110,7 @@ fun NowPlayingScreen(
     // zombie clear on the next non-empty metadata emission, and the order
     // of arrivals decided whether the user landed on the idle screen.
     var artworkZombieClear by remember { mutableStateOf(false) }
+    val lastPairingOutcome by PairedServers.lastOutcome.collectAsStateWithLifecycle()
 
     var stickyArtworkSource by remember { mutableStateOf(artworkSource) }
     LaunchedEffect(artworkSource, isActivelyConnected) {
@@ -246,6 +251,8 @@ fun NowPlayingScreen(
             gestureRequested = pairingGestureRequested,
             onOpenPairingClick = onOpenPairingClick,
             onAllowPairingClick = onAllowPairingClick,
+            lastFailure = (lastPairingOutcome as? PairingOutcome.Aborted)
+                ?.message(LocalContext.current.resources),
             modifier = modifier
         )
         return

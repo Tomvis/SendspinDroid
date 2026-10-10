@@ -47,7 +47,9 @@ import com.sendspindroid.MainActivity
 import com.sendspindroid.SyncOffsetPreference
 import com.sendspindroid.ui.settings.SettingsViewModel
 import com.sendspindroid.coordinator.ConnectionCoordinator
+import com.sendspindroid.coordinator.ConnectionMode
 import com.sendspindroid.coordinator.FailureReason
+import com.sendspindroid.coordinator.InboundConnections
 import com.sendspindroid.coordinator.ReconnectStatus
 import com.sendspindroid.coordinator.TransportState
 import com.sendspindroid.diagnostics.HandoffEpisodeRecorder
@@ -59,9 +61,13 @@ import com.sendspindroid.model.PlaybackStateType
 import com.sendspindroid.model.SyncStats
 import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.sendspin.SendSpin
+import com.sendspindroid.sendspin.pairing.PairedServers
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.sendspin.SendSpinEndpoint
+import com.sendspindroid.discovery.DiscoveryGate
+import com.sendspindroid.discovery.NsdAdvertiser
 import com.sendspindroid.discovery.NsdDiscoveryManager
+import com.sendspindroid.sendspin.transport.SendspinWebSocketServer
 import com.sendspindroid.UnifiedServerRepository
 import com.sendspindroid.UserSettings
 import com.sendspindroid.sendspin.SyncAudioPlayer
@@ -92,11 +98,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
 /**
@@ -135,7 +141,13 @@ class PlaybackService : MediaLibraryService() {
     // offset, periodic server/time messages -- and many of those produce
     // identical contents.
     private var lastSessionExtrasFingerprint: Long = Long.MIN_VALUE
+
+    // The client being played from: [dialClient], or the client of a server
+    // that connected to us and was admitted. Swapped only by useClient().
     private var sendSpinClient: SendSpin? = null
+
+    // The client every connection this service dials is made on.
+    private var dialClient: SendSpin? = null
     @Volatile private var syncAudioPlayer: SyncAudioPlayer? = null
     // Owned exclusively by the decode worker coroutine (serialized on
     // decodeDispatcher). Single-writer invariant: all mutations happen
@@ -521,6 +533,10 @@ class PlaybackService : MediaLibraryService() {
         const val COMMAND_GET_STATS = "com.sendspindroid.GET_STATS"
         const val COMMAND_ALLOW_PAIRING = "com.sendspindroid.ALLOW_PAIRING"
 
+        /** Search for servers ([ARG_SEARCH_FOR_SERVERS] true) or advertise and wait for one. */
+        const val COMMAND_SET_SEARCH_FOR_SERVERS = "com.sendspindroid.SET_SEARCH_FOR_SERVERS"
+        const val ARG_SEARCH_FOR_SERVERS = "search_for_servers"
+
         // Intent actions for service start (used by BootReceiver)
         const val ACTION_AUTO_CONNECT = "com.sendspindroid.ACTION_AUTO_CONNECT"
         const val EXTRA_SERVER_ID = "server_id_auto_connect"
@@ -646,6 +662,17 @@ class PlaybackService : MediaLibraryService() {
         // Updated by the service's existing coordinator.reconnectStatus collector.
         private val _reconnectStatusRelay = MutableStateFlow<ReconnectStatus>(ReconnectStatus.Idle)
         val reconnectStatus: StateFlow<ReconnectStatus> = _reconnectStatusRelay.asStateFlow()
+
+        // The port servers can connect to, while the service is advertising
+        // itself and waiting for one; null otherwise. For in-process observers.
+        private val _advertisedPort = MutableStateFlow<Int?>(null)
+        val advertisedPort: StateFlow<Int?> = _advertisedPort.asStateFlow()
+
+        // True while the service is meant to be advertising but servers
+        // cannot find or reach it: no port could be bound, or the mDNS
+        // registration failed.
+        private val _advertisingFailed = MutableStateFlow(false)
+        val advertisingFailed: StateFlow<Boolean> = _advertisingFailed.asStateFlow()
     }
 
 
@@ -758,6 +785,7 @@ class PlaybackService : MediaLibraryService() {
 
         // Initialize UnifiedServerRepository for server lookups
         UnifiedServerRepository.initialize(this)
+        UserSettings.chooseConnectionModeOnce(UnifiedServerRepository.getDefaultServer() != null)
 
         // Register receiver for sync offset changes from settings
         LocalBroadcastManager.getInstance(this).registerReceiver(
@@ -804,7 +832,7 @@ class PlaybackService : MediaLibraryService() {
 
         coordinator = ConnectionCoordinator(
             currentServerFlow = _currentServerFlow,
-            sendSpinStateFlow = sendSpinClient?.connectionState ?: flowOf(TransportState.Idle),
+            sendSpinStateFlow = clientState,
             scope = serviceScope,
             connectAttempt = { lost, method ->
                 // Read again for each attempt: mDNS may have found the server
@@ -843,8 +871,18 @@ class PlaybackService : MediaLibraryService() {
                     stopReconnectDiscovery()
                     mainHandler.removeCallbacks(reconnectLockRelease)
                     releaseIfIdle()
+                    noteDialEnded()
                 }
                 wasAttempting = attempting
+            }
+        }
+
+        // A pairing record was removed in Settings: whichever connection it
+        // admitted ends, dialled or opened by the server.
+        serviceScope.launch {
+            PairedServers.forgotten.collect { pskId ->
+                dialClient?.leaveIfAdmittedBy(pskId)
+                inboundConnections.leaveIfAdmittedBy(pskId)
             }
         }
 
@@ -864,109 +902,19 @@ class PlaybackService : MediaLibraryService() {
                             Log.i(TAG, "Triggering connection reselection for new network")
                             sendSpinClient?.disconnectForReselection()
                         }
+                        advertiseAgainAfterNetworkChange()
                     }
                     is com.sendspindroid.coordinator.NetworkEvent.LinkAddressesChanged -> {
                         Log.i(TAG, "networkEvent: LinkAddressesChanged")
                         sendSpinClient?.onNetworkChanged()
                         browseDiscoveryManager?.refreshMulticastLockIfActive()
+                        advertiseAgainAfterNetworkChange()
                     }
                 }
             }
         }
 
-        // The media session offers only what the server's controller state allows.
-        serviceScope.launch {
-            sendSpinClient?.controllerState?.collect { state ->
-                sendSpinPlayer?.updateControllerState(state)
-            }
-        }
-
-        // Reacts to the client's connection state.
-        var prevSendSpinState: TransportState = TransportState.Idle
-        serviceScope.launch {
-            sendSpinClient?.connectionState?.collect { state ->
-                // No stream survives the connection it was started on.
-                if (state !is TransportState.Ready) activeStreamConfig = null
-                when {
-                    state is TransportState.Ready && prevSendSpinState !is TransportState.Ready -> {
-                        val serverName = sendSpinClient?.getServerName() ?: ""
-                        Log.d(TAG, "Connected to: $serverName")
-                        sendSpinPlayer?.updateConnectionState(true, serverName)
-                        sendSpinPlayer?.clearError()
-
-                        // Refresh browse tree root so "Connect" disappears
-                        mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
-
-                        // Apply saved sync offset from settings
-                        applySyncOffsetFromSettings()
-
-                        // Start foreground service to prevent process from being killed
-                        // but DON'T acquire wake/WiFi locks yet - those drain battery and are
-                        // only needed during active audio streaming (acquired in onStreamStart)
-                        startForegroundServiceWithNotification(serverName)
-
-                        // In High Power Mode, acquire WiFi + CPU locks immediately on connect
-                        // to prevent Android from sleeping the connection between streams
-                        if (com.sendspindroid.UserSettings.highPowerMode) {
-                            acquireHighPowerLocks()
-                        }
-
-                        // Start debug logging session if enabled
-                        val serverAddr = sendSpinClient?.getServerName() ?: ""
-                        AppLog.session.start(serverName, serverAddr)
-                        startDebugLogging()
-
-                        // Broadcast connection state to controllers (MainActivity)
-                        broadcastSessionExtras()
-                    }
-                    state is TransportState.Idle && prevSendSpinState !is TransportState.Idle -> {
-                        Log.d(TAG, "Disconnected from server")
-                        tearDownConnection(error = null, preserveVolume = true)
-                    }
-                    state is TransportState.Failed -> {
-                        val message = failureReasonToMessage(state.reason)
-                        Log.e(TAG, "SendSpin error: $message")
-
-                        // Show error on Android Auto
-                        sendSpinPlayer?.setError(message)
-                        releaseIfIdle()
-
-                        // Broadcast error to controllers (MainActivity). Fork: force
-                        // STATE_ERROR + message when no reconnect loop is running; the
-                        // derived coordinator.sessionState can lag the Failed we hold
-                        // here, and the extras dedup would then suppress the
-                        // correction for good. A running loop reports RECONNECTING.
-                        if (coordinator.reconnectStatus.value is ReconnectStatus.Attempting) {
-                            broadcastSessionExtras()
-                        } else {
-                            broadcastSessionExtras(
-                                forceState = STATE_ERROR,
-                                forceErrorMessage = message,
-                            )
-                        }
-                    }
-                    state is TransportState.Connecting && prevSendSpinState !is TransportState.Connecting -> {
-                        // Fork: clear a stale error so the prior failure string
-                        // is not shown on Android Auto / lock screen during the attempt.
-                        sendSpinPlayer?.clearError()
-                        // Announce the attempt from here, where the transition
-                        // has already happened. The connect* methods used to do
-                        // it on their first line, before anything had left Idle,
-                        // and the publisher reports observed state rather than
-                        // the argument it is handed - so that call announced
-                        // DISCONNECTED at the very moment a connection began.
-                        // Fork: forced (unless the reconnect loop owns the state), so
-                        // it does not depend on which flow has settled.
-                        broadcastSessionExtras(
-                            forceState = STATE_CONNECTING.takeUnless {
-                                coordinator.reconnectStatus.value is ReconnectStatus.Attempting
-                            }
-                        )
-                    }
-                }
-                prevSendSpinState = state
-            }
-        }
+        sendSpinClient?.let { observeClient(it) }
 
         // Launch the single-owner decode worker. Task 3 scaffolding: no
         // callback currently sends into decodeChannel. Task 4 flips the
@@ -985,6 +933,295 @@ class PlaybackService : MediaLibraryService() {
 
         // Stop the sound when the audio output device disconnects.
         registerBecomingNoisyReceiver()
+
+        // Last, with everything a connection needs in place: unless the user
+        // chose to search for servers, start waiting for one to connect.
+        connectionMode.start(searchForServers = UserSettings.searchForServers)
+    }
+
+    // What the connection-state collector last saw of the client being played from.
+    private var prevSendSpinState: TransportState = TransportState.Idle
+
+    // The same, for the coordinator, which outlives any one client.
+    private val clientState = MutableStateFlow<TransportState>(TransportState.Idle)
+
+    private var clientObserver: Job? = null
+
+    /** Follow [client]'s connection and controller state. One client at a time. */
+    private fun observeClient(client: SendSpin) {
+        clientObserver?.cancel()
+        clientObserver = serviceScope.launch {
+            // The media session offers only what the server's controller state allows.
+            launch {
+                client.controllerState.collect { state ->
+                    sendSpinPlayer?.updateControllerState(state)
+                }
+            }
+            client.connectionState.collect { state -> onClientState(state) }
+        }
+    }
+
+    /**
+     * Play from [client] from now on: the dialling client, or the client of
+     * a server that connected to us and was admitted. Whatever the previous
+     * one was playing ends here, as if its connection had.
+     */
+    private fun useClient(client: SendSpin) {
+        if (sendSpinClient === client) return
+        clientObserver?.cancel()
+        if (prevSendSpinState !is TransportState.Idle) onClientState(TransportState.Idle)
+        sendSpinClient = client
+        sendSpinPlayer?.setSendSpinClient(client)
+        admissionState = AdmissionState.READY
+        pairingCode = null
+        pairingGestureRequested = false
+        observeClient(client)
+    }
+
+    /** Reacts to the connection state of the client being played from. */
+    private fun onClientState(state: TransportState) {
+        clientState.value = state
+        // No stream survives the connection it was started on.
+        if (state !is TransportState.Ready) activeStreamConfig = null
+        when {
+            state is TransportState.Ready && prevSendSpinState !is TransportState.Ready -> {
+                val serverName = sendSpinClient?.getServerName() ?: ""
+                Log.d(TAG, "Connected to: $serverName")
+                sendSpinPlayer?.updateConnectionState(true, serverName)
+                sendSpinPlayer?.clearError()
+
+                // Refresh browse tree root so "Connect" disappears
+                mediaSession?.notifyChildrenChanged(MEDIA_ID_ROOT, 0, null)
+
+                // Apply saved sync offset from settings
+                applySyncOffsetFromSettings()
+
+                // Start foreground service to prevent process from being killed
+                // but DON'T acquire wake/WiFi locks yet - those drain battery and are
+                // only needed during active audio streaming (acquired in onStreamStart)
+                startForegroundServiceWithNotification(serverName)
+
+                // In High Power Mode, acquire WiFi + CPU locks immediately on connect
+                // to prevent Android from sleeping the connection between streams
+                if (com.sendspindroid.UserSettings.highPowerMode) {
+                    acquireHighPowerLocks()
+                }
+
+                // Start debug logging session if enabled
+                val serverAddr = sendSpinClient?.getServerName() ?: ""
+                AppLog.session.start(serverName, serverAddr)
+                startDebugLogging()
+
+                // Broadcast connection state to controllers (MainActivity)
+                broadcastSessionExtras()
+            }
+            state is TransportState.Idle && prevSendSpinState !is TransportState.Idle -> {
+                Log.d(TAG, "Disconnected from server")
+                tearDownConnection(error = null, preserveVolume = true)
+            }
+            state is TransportState.Failed -> {
+                val message = failureReasonToMessage(state.reason)
+                Log.e(TAG, "SendSpin error: $message")
+
+                // Show error on Android Auto
+                sendSpinPlayer?.setError(message)
+                releaseIfIdle()
+
+                // Broadcast error to controllers (MainActivity). Fork: force
+                // STATE_ERROR + message when no reconnect loop is running; the
+                // derived coordinator.sessionState can lag the Failed we hold
+                // here, and the extras dedup would then suppress the
+                // correction for good. A running loop reports RECONNECTING.
+                if (coordinator.reconnectStatus.value is ReconnectStatus.Attempting) {
+                    broadcastSessionExtras()
+                } else {
+                    broadcastSessionExtras(
+                        forceState = STATE_ERROR,
+                        forceErrorMessage = message,
+                    )
+                }
+            }
+            state is TransportState.Connecting && prevSendSpinState !is TransportState.Connecting -> {
+                // Fork: clear a stale error so the prior failure string
+                // is not shown on Android Auto / lock screen during the attempt.
+                sendSpinPlayer?.clearError()
+                // Announce the attempt from here, where the transition
+                // has already happened. The connect* methods used to do
+                // it on their first line, before anything had left Idle,
+                // and the publisher reports observed state rather than
+                // the argument it is handed - so that call announced
+                // DISCONNECTED at the very moment a connection began.
+                // Fork: forced (unless the reconnect loop owns the state), so
+                // it does not depend on which flow has settled.
+                broadcastSessionExtras(
+                    forceState = STATE_CONNECTING.takeUnless {
+                        coordinator.reconnectStatus.value is ReconnectStatus.Attempting
+                    }
+                )
+            }
+        }
+        prevSendSpinState = state
+        noteDialEnded()
+    }
+
+    // ========== Server-initiated connections ==========
+
+    /**
+     * Whether the service advertises itself and waits for a server, searches
+     * for servers, or is dialled out to one. See [ConnectionMode].
+     */
+    private val connectionMode = ConnectionMode(
+        object : ConnectionMode.Advertising {
+            override fun start() = startAdvertising()
+            override fun stop(onStopped: () -> Unit) = stopAdvertising(onStopped)
+        },
+        DiscoveryGate,
+    )
+
+    private val inboundConnections = InboundConnections(
+        scope = serviceScope,
+        newClient = ::newInboundClient,
+        onAdmitted = { client -> mainHandler.post { onServerAdmitted(client) } },
+        lastPlaybackServerId = { UserSettings.lastPlaybackServerId },
+        storeLastPlaybackServerId = { UserSettings.lastPlaybackServerId = it },
+    )
+
+    private var listener: SendspinWebSocketServer? = null
+    private var advertiser: NsdAdvertiser? = null
+
+    // Bumped by every start and stop, so a bind that finishes after its
+    // advertising was stopped knows to undo itself.
+    private var advertisingGeneration = 0
+
+    /**
+     * Listen for servers and announce the listener on mDNS. The service
+     * holds the foreground while it waits, so a server can connect with the
+     * app in the background.
+     */
+    private fun startAdvertising() {
+        val generation = ++advertisingGeneration
+        val name = UserSettings.getPlayerName()
+        val server = SendspinWebSocketServer(
+            onConnection = { inboundConnections.onConnection(it, it.remoteAddress) }
+        )
+        listener = server
+        inboundConnections.open()
+        startForegroundServiceWithNotification()
+        serviceScope.launch {
+            // Binding the socket is blocking I/O.
+            val port = withContext(Dispatchers.IO) { runCatching { server.start() } }
+                .getOrElse {
+                    Log.e(TAG, "Cannot listen for servers", it)
+                    if (generation == advertisingGeneration) setAdvertisingFailed(true)
+                    return@launch
+                }
+            if (generation != advertisingGeneration) {
+                withContext(Dispatchers.IO) { server.stop() }
+                return@launch
+            }
+            // "Advertise the port actually bound": 8928 unless it was taken.
+            advertiser = NsdAdvertiser(this@PlaybackService) { registered ->
+                mainHandler.post {
+                    if (generation == advertisingGeneration) setAdvertisingFailed(!registered)
+                }
+            }.also {
+                it.start(name, port, SendspinWebSocketServer.DEFAULT_PATH)
+            }
+            _advertisedPort.value = port
+            Log.i(TAG, "Advertising as '$name' on port $port, waiting for a server")
+        }
+    }
+
+    /**
+     * Servers cannot find or reach the app although it is meant to be
+     * waiting for one: the listener could not be bound, or the mDNS
+     * registration failed. Said on the default screen and in the
+     * notification, so that "waiting" is never shown over nothing.
+     */
+    private fun setAdvertisingFailed(failed: Boolean) {
+        if (_advertisingFailed.value == failed) return
+        _advertisingFailed.value = failed
+        if (connectionMode.isAdvertising && !isConnectedOrReconnecting()) {
+            startForegroundServiceWithNotification()
+        }
+    }
+
+    /**
+     * The network changed while advertising: announce again, and if the
+     * listener never came up, try that again too. No timer retries either;
+     * a change of network is when the outcome can be different.
+     */
+    private fun advertiseAgainAfterNetworkChange() {
+        if (!connectionMode.isAdvertising) return
+        if (_advertisingFailed.value && _advertisedPort.value == null) {
+            startAdvertising()
+        } else {
+            advertiser?.refresh()
+        }
+    }
+
+    /**
+     * Withdraw the announcement, end every connection a server opened to us
+     * and close the listener.
+     *
+     * Closing the listener waits for those connections to get their goodbye
+     * out, so it is done off the main thread; [onStopped] is called back on
+     * it once the port is released. Nothing is dialled before that.
+     */
+    private fun stopAdvertising(onStopped: () -> Unit) {
+        advertisingGeneration++
+        advertiser?.stop()
+        advertiser = null
+        _advertisedPort.value = null
+        _advertisingFailed.value = false
+        // A server being played from is left with the rest.
+        if (!isDestroyed) dialClient?.let { useClient(it) }
+        inboundConnections.close()
+        val server = listener
+        listener = null
+        when {
+            server == null -> onStopped()
+            // The service is going and its scope with it. Nothing waits for
+            // the port, so the listener closes on a thread of its own.
+            isDestroyed -> {
+                thread(name = "SendspinListenerStop") { server.stop() }
+                onStopped()
+            }
+            else -> serviceScope.launch {
+                withContext(Dispatchers.IO) { server.stop() }
+                Log.i(TAG, "No longer advertising")
+                onStopped()
+            }
+        }
+    }
+
+    /** A client for one connection a server opens to us. Not on the main thread. */
+    private fun newInboundClient(): SendSpin =
+        SendSpin(UserSettings.getPlayerName(), SendSpinClientCallback()).also { client ->
+            val am = audioManager ?: return@also
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val percent = ((am.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max) * 100).toInt()
+            client.setInitialVolume(percent, UserSettings.getPlayerMuted())
+        }
+
+    /** A server that connected to us was admitted: play from its connection. */
+    private fun onServerAdmitted(client: SendSpin) {
+        if (isDestroyed || !connectionMode.isAdvertising) return
+        // There is no saved server behind this connection and nothing to
+        // reconnect to: the server comes back to us.
+        _currentServerFlow.value = null
+        useClient(client)
+    }
+
+    /**
+     * Tell [connectionMode] once the dialled connection and its reconnect
+     * loop are both gone, so the app returns to the mode that is selected.
+     */
+    private fun noteDialEnded() {
+        val state = dialClient?.connectionState?.value
+        val alive = state is TransportState.Ready || state is TransportState.Connecting ||
+            coordinator.reconnectStatus.value is ReconnectStatus.Attempting
+        if (!alive) connectionMode.dialEnded()
     }
 
     /**
@@ -1079,10 +1316,11 @@ class PlaybackService : MediaLibraryService() {
             pairingGestureRequested = false
             // Use user-configured player name, falls back to device model
             val playerName = com.sendspindroid.UserSettings.getPlayerName()
-            sendSpinClient = SendSpin(
+            dialClient = SendSpin(
                 deviceName = playerName,
                 callback = SendSpinClientCallback()
             )
+            sendSpinClient = dialClient
             sendSpinPlayer?.setSendSpinClient(sendSpinClient)
             Log.d(TAG, "SendSpin initialized with name: $playerName")
         } catch (e: Exception) {
@@ -2201,6 +2439,7 @@ class PlaybackService : MediaLibraryService() {
         }
 
         val serverName: String? = sessionState.server?.name
+            ?: sendSpinClient?.takeIf { it.isServerInitiated }?.getServerName()
 
         // Same source as connectionStateString above, or STATE_ERROR could be
         // published with a null message when the two copies disagree.
@@ -2327,7 +2566,22 @@ class PlaybackService : MediaLibraryService() {
         openConnection(address, path)
     }
 
+    /**
+     * Every connection this service dials is opened here, once the
+     * advertisement and the listener are gone: at once when nothing is
+     * advertised, which is always so in search mode and in the reconnect
+     * loop, and otherwise as soon as the listener has closed. See
+     * [ConnectionMode].
+     */
     private fun openConnection(address: String, path: String) {
+        connectionMode.dial {
+            dialServer(address, path)
+            // An attempt that failed before it began has ended already.
+            mainHandler.post { noteDialEnded() }
+        }
+    }
+
+    private fun dialServer(address: String, path: String) {
         Log.d(TAG, "Connecting to server: $address path=$path")
 
         // No broadcast here: the coordinator is still Idle at this point, and
@@ -2422,18 +2676,28 @@ class PlaybackService : MediaLibraryService() {
      */
     @OptIn(UnstableApi::class)
     override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
-        val hold = isConnectedOrReconnecting()
+        // Waiting for a server to connect holds it too: the listener has to
+        // stay reachable with the app in the background.
+        val hold = isConnectedOrReconnecting() || connectionMode.isAdvertising
         super.onUpdateNotification(session, startInForegroundRequired || hold)
         // With nothing to show, Media3 has just removed the notification and
         // the foreground with it. Otherwise its media notification holds it.
         val player = session.player
         if (hold && (player.currentTimeline.isEmpty || player.playbackState == Player.STATE_IDLE)) {
             startForegroundServiceWithNotification(
-                _currentServerFlow.value?.name,
+                connectedServerName(),
                 reconnecting = coordinator.reconnectStatus.value is ReconnectStatus.Attempting,
             )
         }
     }
+
+    /**
+     * The server to name as connected or reconnecting: the saved server that
+     * was dialled, or the server that connected to us.
+     */
+    private fun connectedServerName(): String? =
+        _currentServerFlow.value?.name
+            ?: sendSpinClient?.takeIf { it.isServerInitiated && it.isConnected }?.getServerName()
 
     /**
      * Give up the foreground and every lock once nothing is connected and
@@ -2446,7 +2710,12 @@ class PlaybackService : MediaLibraryService() {
         sendSpinPlayer?.updateConnectionState(false)
         releasePlaybackLocks()
         releaseHighPowerLocks()
-        stopForegroundNotification()
+        if (connectionMode.isAdvertising) {
+            // Still waiting for a server: say so, and stay reachable.
+            startForegroundServiceWithNotification()
+        } else {
+            stopForegroundNotification()
+        }
     }
 
     /**
@@ -2728,6 +2997,10 @@ class PlaybackService : MediaLibraryService() {
             val contentText = when {
                 reconnecting -> "Reconnecting to $serverName..."
                 serverName != null -> "Connected to $serverName"
+                connectionMode.isAdvertising && sendSpinClient?.isConnected != true -> getString(
+                    if (_advertisingFailed.value) com.sendspindroid.R.string.notification_cannot_be_found
+                    else com.sendspindroid.R.string.notification_waiting_for_server
+                )
                 else -> "Streaming audio..."
             }
 
@@ -3283,6 +3556,7 @@ class PlaybackService : MediaLibraryService() {
                 .add(SessionCommand(COMMAND_SWITCH_GROUP, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_GET_STATS, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_ALLOW_PAIRING, Bundle.EMPTY))
+                .add(SessionCommand(COMMAND_SET_SEARCH_FOR_SERVERS, Bundle.EMPTY))
                 .build()
 
             // Player commands must include SET_MEDIA_ITEM so the legacy compat bridge
@@ -3397,6 +3671,16 @@ class PlaybackService : MediaLibraryService() {
                     Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
 
+                COMMAND_SET_SEARCH_FOR_SERVERS -> {
+                    val search = args.getBoolean(ARG_SEARCH_FOR_SERVERS)
+                    Log.i(TAG, if (search) "Mode: search for servers" else "Mode: wait for a server to connect")
+                    UserSettings.searchForServers = search
+                    connectionMode.setSearching(search)
+                    // Searching holds no foreground of its own.
+                    releaseIfIdle()
+                    Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                }
+
                 COMMAND_SET_VOLUME -> {
                     val volume = args.getFloat(ARG_VOLUME, -1f)
                     if (volume in 0f..1f) {
@@ -3489,6 +3773,7 @@ class PlaybackService : MediaLibraryService() {
                 is TransportState.Failed -> "Failed"
             }
             bundle.putString("connection_state", stateLabel)
+            bundle.putBoolean("server_initiated", client.isServerInitiated)
             bundle.putString("audio_codec", currentCodec.uppercase())
 
             // What the session negotiated
@@ -3660,6 +3945,9 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun ensureBrowseDiscoveryRunning() {
         if (browseDiscoveryManager != null) return  // Already initialized
+        // Advertising or discovering, never both: saved servers are still
+        // listed, and choosing one stops the advertising first.
+        if (connectionMode.isAdvertising) return
 
         Log.i(TAG, "Starting mDNS discovery for browse tree")
         browseDiscoveryManager = NsdDiscoveryManager(this, object : NsdDiscoveryManager.DiscoveryListener {
@@ -3903,7 +4191,8 @@ class PlaybackService : MediaLibraryService() {
         // idle) or working on getting the connection back
         val autoStartKeepAlive = UserSettings.autoStartOnBoot && (
             coordinator.sessionState.value.sendSpin is TransportState.Ready ||
-                coordinator.reconnectStatus.value is ReconnectStatus.Attempting
+                coordinator.reconnectStatus.value is ReconnectStatus.Attempting ||
+                connectionMode.isAdvertising
             )
 
         Log.d(TAG, "onTaskRemoved (playing=$isPlaying, autoStart=$autoStartKeepAlive, state=$audioPlayerState)")
@@ -3975,6 +4264,11 @@ class PlaybackService : MediaLibraryService() {
         browseDiscoveryManager = null
         stopReconnectDiscovery()
 
+        // A server that connected to us is told the player is shutting down;
+        // then the advertisement and the listener go.
+        sendSpinClient?.takeIf { it !== dialClient }?.destroy()
+        connectionMode.stop()
+
         // Send a final Release through the channel so it runs after any
         // pending decode tasks, then close the channel and wait up to 500 ms
         // for the worker to drain and exit. trySend (not send) because
@@ -4011,7 +4305,8 @@ class PlaybackService : MediaLibraryService() {
         sendSpinPlayer?.release()
         sendSpinPlayer = null
 
-        sendSpinClient?.destroy()
+        dialClient?.destroy()
+        dialClient = null
         sendSpinClient = null
 
         super.onDestroy()

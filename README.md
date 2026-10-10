@@ -34,8 +34,9 @@ A native Android client for [SendSpin](https://www.sendspin-audio.com/). It play
 - Portrait and landscape support
 
 ### Connectivity
-- Automatic server discovery via mDNS/Zeroconf on local networks
-- Manual server entry for direct connections
+- Advertises itself on the local network (mDNS/Zeroconf) and waits for a server to connect, by default
+- Or searches for servers that advertise themselves, and connects to one
+- Manual server entry for direct connections, in either mode
 - Encrypted connection to the server, with pairing by token or QR code
 - Automatic reconnection when the server or the network comes back
 - Works on WiFi and Ethernet, on the same network as the server
@@ -58,15 +59,20 @@ A native Android client for [SendSpin](https://www.sendspin-audio.com/). It play
 ## Getting Started
 
 1. **Install** -- Download the latest APK from [Releases](https://github.com/chrisuthe/SendSpinDroid/releases)
-2. **Open** -- The app searches for SendSpin servers on your network
-3. **Tap** -- Select your server and you're listening
+2. **Open** -- The app advertises itself on your network and waits for a SendSpin server to connect
+3. **Play** -- The player appears in your server (Music Assistant, for example); play something to it
 
 For development and testing guides, see the [Wiki](https://github.com/chrisuthe/SendspinDroid/wiki).
 
 ### Connecting to a Server
 
-- **Local network**: Servers are discovered automatically via mDNS
-- **Manual entry**: Tap "Add Server" and type your server address (e.g., `192.168.1.100:8927`)
+The app and a server find each other in one of two ways, and uses one at a time. A new install waits for a server; an install that already had a default server when it was updated keeps searching and connecting to it, as before.
+
+- **Waiting for a server** (the default): the app advertises itself as `_sendspin._tcp` and listens on port 8928 (or another port if that one is taken; the one in use is shown). A server that finds it connects by itself. A notification says the app is waiting, so a server can connect while the app is in the background. If several servers connect, the one that is playing is kept; a server with nothing to play does not take the player from one that has.
+- **Searching for servers**: tap "Search for servers instead". The app stops advertising and lists the servers it finds; tap one to connect. "Wait for a server to connect instead" goes back.
+- **Manual entry**: tap "Add Server" and type your server address (e.g., `192.168.1.100:8927`). Saved servers are listed in both modes. Connecting to one stops the advertising for as long as that connection lasts.
+
+With Auto-Start on Boot, the app starts waiting for a server when the device boots, or connects to the default server if it is set to search.
 
 The app connects on the local network only. To use it away from home, bring the device onto that network with a VPN.
 
