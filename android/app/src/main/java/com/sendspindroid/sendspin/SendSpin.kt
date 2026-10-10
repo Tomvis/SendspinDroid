@@ -102,10 +102,7 @@ class SendSpin(
     private object Silent : Callback {
         override fun onStateChanged(state: String) {}
         override fun onGroupUpdate(groupId: String, groupName: String, playbackState: String) {}
-        override fun onMetadataUpdate(
-            title: String, artist: String, album: String, artworkUrl: String,
-            durationMs: Long, positionMs: Long, playbackSpeed: Int,
-        ) {}
+        override fun onMetadataUpdate(metadata: TrackMetadata) {}
         override fun onArtwork(imageData: ByteArray) {}
         override fun onArtworkCleared() {}
         override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {}
