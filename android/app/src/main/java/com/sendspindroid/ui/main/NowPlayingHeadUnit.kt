@@ -57,6 +57,7 @@ fun NowPlayingHeadUnit(
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
+    playbackSpeed: Int = 1000,
     onPreviousClick: () -> Unit,
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
@@ -135,7 +136,7 @@ fun NowPlayingHeadUnit(
         TvTrackProgressBar(
             positionMs = positionMs,
             durationMs = durationMs,
-            isPlaying = isPlaying,
+            playbackSpeed = playbackSpeed,
             accentColor = accentColor,
             positionUpdatedAt = positionUpdatedAt,
             modifier = Modifier.fillMaxWidth()

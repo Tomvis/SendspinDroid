@@ -569,6 +569,7 @@ class PlaybackService : MediaLibraryService() {
         const val EXTRA_DURATION_MS = "duration_ms"
         const val EXTRA_POSITION_MS = "position_ms"
         const val EXTRA_POSITION_UPDATED_AT = "position_updated_at"
+        const val EXTRA_PLAYBACK_SPEED = "playback_speed"
         const val EXTRA_ARTWORK_DATA = "artwork_data"
 
         // Session extras keys for connection state
@@ -1664,7 +1665,6 @@ class PlaybackService : MediaLibraryService() {
                 Log.d(TAG, "Group update: id=$groupId name=$groupName state=$playbackState")
 
                 val currentState = _playbackState.value
-                val isGroupChange = groupId.isNotEmpty() && groupId != currentState.groupId
                 val newPlaybackState = PlaybackStateType.fromString(playbackState)
                 if (playbackState.isNotEmpty()) noteServerPlaybackState(newPlaybackState)
 
@@ -1704,33 +1704,16 @@ class PlaybackService : MediaLibraryService() {
                     }
                 }
 
-                val newState = if (isGroupChange) {
-                    // Preserve total_tracks across the metadata clear. It is the
-                    // queue length, delivered ONLY in the connect/subscribe
-                    // server/state snapshot -- which races AHEAD of this
-                    // group/update on initial join (null -> group). A full
-                    // withClearedMetadata() wiped the just-received value and the
-                    // NowPlaying "X of Y" counter never recovered, because the
-                    // server never re-sends total_tracks on subsequent frames
-                    // (withMetadata preserves it, but only if it survives to be
-                    // preserved). A genuine switch to a different queue re-delivers
-                    // it in that queue's own snapshot, overriding the held value.
-                    currentState.withClearedMetadata().copy(
-                        groupId = groupId,
-                        groupName = groupName.ifEmpty { null },
-                        playbackState = newPlaybackState,
-                        totalTracks = currentState.totalTracks
-                    )
-                } else {
-                    currentState.copy(
-                        groupId = groupId.ifEmpty { currentState.groupId },
-                        groupName = groupName.ifEmpty { currentState.groupName },
-                        playbackState = if (playbackState.isNotEmpty())
-                            newPlaybackState
-                        else currentState.playbackState
-                    )
-                }
-                _playbackState.value = newState
+                // The track metadata is left alone, also when the group id is
+                // new: it belongs to server/state, which the server sends
+                // before the first group/update and does not repeat after it.
+                _playbackState.value = currentState.withGroupUpdate(
+                    groupId = groupId.ifEmpty { currentState.groupId },
+                    groupName = groupName.ifEmpty { currentState.groupName },
+                    playbackState = if (playbackState.isNotEmpty())
+                        newPlaybackState
+                    else currentState.playbackState
+                )
 
                 // Broadcast all state including group name to controllers (MainActivity)
                 broadcastSessionExtras()
@@ -1755,7 +1738,8 @@ class PlaybackService : MediaLibraryService() {
             val totalTracks = metadata.totalTracks
             val durationMs = metadata.durationMs
             val positionMs = metadata.positionMs
-            val playbackSpeed = metadata.progress?.playbackSpeed ?: 1000
+            // No progress object means no position, so nothing to advance.
+            val playbackSpeed = metadata.progress?.playbackSpeed ?: 0
             mainHandler.post {
                 if (title == null && artist == null && album == null) {
                     clearTrackMetadata()
@@ -1853,7 +1837,8 @@ class PlaybackService : MediaLibraryService() {
                 sendSpinPlayer?.updatePlaybackState(
                     syncState = null,
                     positionMs = positionMs,
-                    durationMs = durationMs
+                    durationMs = durationMs,
+                    playbackSpeed = playbackSpeed
                 )
 
                 if (artworkUrlOrEmpty.isEmpty()) {
@@ -2486,6 +2471,7 @@ class PlaybackService : MediaLibraryService() {
             putLong(EXTRA_DURATION_MS, playbackState.durationMs)
             putLong(EXTRA_POSITION_MS, playbackState.positionMs)
             putLong(EXTRA_POSITION_UPDATED_AT, playbackState.positionUpdatedAt)
+            putInt(EXTRA_PLAYBACK_SPEED, playbackState.playbackSpeed)
 
             // Group info
             playbackState.groupName?.let { putString(EXTRA_GROUP_NAME, it) }

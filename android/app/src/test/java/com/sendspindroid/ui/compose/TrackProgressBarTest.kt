@@ -1,14 +1,23 @@
 package com.sendspindroid.ui.compose
 
+import android.content.Context
 import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performTouchInput
+import androidx.test.core.app.ApplicationProvider
+import com.sendspindroid.R
 import com.sendspindroid.ui.main.components.TrackProgressBar
+import com.sendspindroid.ui.main.components.formatTime
 import com.sendspindroid.ui.theme.SendSpinTheme
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -37,7 +46,7 @@ class TrackProgressBarTest {
                 TrackProgressBar(
                     positionMs = 0,
                     durationMs = 180_000,
-                    isPlaying = true,
+                    playbackSpeed = 1000,
                     accentColor = null,
                     positionUpdatedAt = positionUpdatedAt
                 )
@@ -49,6 +58,120 @@ class TrackProgressBarTest {
         // The next track reports position 0 as well, received now.
         positionUpdatedAt = SystemClock.elapsedRealtime()
         composeTestRule.mainClock.advanceTimeBy(300)
+
+        composeTestRule.onNodeWithText("0:00 / 3:00").assertIsDisplayed()
+    }
+
+    @Test
+    fun advancesAtTheServerSpeed() {
+        // Position 0 reported 60 s ago at 1.5x: 90 s of the track have played.
+        val reportedAt = SystemClock.elapsedRealtime() - 60_000L
+
+        composeTestRule.setContent {
+            SendSpinTheme {
+                TrackProgressBar(
+                    positionMs = 0,
+                    durationMs = 180_000,
+                    playbackSpeed = 1500,
+                    accentColor = null,
+                    positionUpdatedAt = reportedAt
+                )
+            }
+        }
+        composeTestRule.mainClock.advanceTimeBy(300)
+
+        composeTestRule.onNodeWithText("1:30 / 3:00").assertIsDisplayed()
+    }
+
+    private val seeks = mutableListOf<Long>()
+    private var serverPositionMs by mutableLongStateOf(0L)
+    private var serverPositionUpdatedAt by mutableLongStateOf(1L)
+
+    /** A paused 3:00 track, so the display shows exactly the position it holds. */
+    private fun setPausedBar(seekable: Boolean) {
+        composeTestRule.setContent {
+            SendSpinTheme {
+                TrackProgressBar(
+                    positionMs = serverPositionMs,
+                    durationMs = 180_000,
+                    playbackSpeed = 0,
+                    accentColor = null,
+                    positionUpdatedAt = serverPositionUpdatedAt,
+                    seekable = seekable,
+                    onSeek = { seeks += it }
+                )
+            }
+        }
+    }
+
+    private fun bar() = composeTestRule.onNodeWithContentDescription(
+        ApplicationProvider.getApplicationContext<Context>().getString(R.string.track_position)
+    )
+
+    @Test
+    fun seekable_dragAndRelease_seeksOnceOnRelease() {
+        setPausedBar(seekable = true)
+
+        bar().performTouchInput {
+            down(center)
+            moveBy(Offset(60f, 0f))
+            moveBy(Offset(60f, 0f))
+        }
+        // A seek restarts the stream for the whole group: none while dragging.
+        assertTrue(seeks.isEmpty())
+
+        bar().performTouchInput { up() }
+
+        assertEquals(1, seeks.size)
+        // Dragged right from the middle of a 3:00 track.
+        assertTrue(seeks.single() in 90_001..180_000)
+    }
+
+    @Test
+    fun notSeekable_touch_doesNotSeek() {
+        setPausedBar(seekable = false)
+
+        bar().performTouchInput {
+            down(center)
+            moveBy(Offset(60f, 0f))
+            moveBy(Offset(60f, 0f))
+            up()
+        }
+
+        assertTrue(seeks.isEmpty())
+    }
+
+    @Test
+    fun afterRelease_holdsTheDroppedPosition_untilTheServerReports() {
+        setPausedBar(seekable = true)
+
+        bar().performTouchInput {
+            down(center)
+            moveBy(Offset(60f, 0f))
+            moveBy(Offset(60f, 0f))
+            up()
+        }
+        composeTestRule.mainClock.advanceTimeBy(300)
+        composeTestRule.onNodeWithText("${formatTime(seeks.single())} / 3:00").assertIsDisplayed()
+
+        serverPositionMs = 120_000
+        serverPositionUpdatedAt = 2L
+        composeTestRule.mainClock.advanceTimeBy(300)
+
+        composeTestRule.onNodeWithText("2:00 / 3:00").assertIsDisplayed()
+    }
+
+    @Test
+    fun afterRelease_serverSilent_returnsToTheServerPosition() {
+        setPausedBar(seekable = true)
+
+        bar().performTouchInput {
+            down(center)
+            moveBy(Offset(60f, 0f))
+            moveBy(Offset(60f, 0f))
+            up()
+        }
+        composeTestRule.mainClock.advanceTimeBy(2_500)
 
         composeTestRule.onNodeWithText("0:00 / 3:00").assertIsDisplayed()
     }

@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">SendSpin Player</string>
     <string name="device_volume">Device Volume</string>
+    <string name="track_position">Track position</string>
     <string name="group_label">Group: %s</string>
     <string name="connected">Connected</string>
     <string name="server_address">Server Address</string>

@@ -424,6 +424,17 @@ class PlaybackStateTest {
         assertEquals("Song", updated.title)
     }
 
+    // The server sends the track's server/state before the first group/update
+    // and does not repeat it, so joining a group must not drop the progress.
+    @Test
+    fun withGroupUpdate_firstGroup_keepsTrackProgress() {
+        val state = PlaybackState(title = "Song", durationMs = 160_000, positionMs = 93_290)
+        val updated = state.withGroupUpdate("g1", "Living Room", PlaybackStateType.PLAYING)
+
+        assertEquals(160_000L, updated.durationMs)
+        assertEquals(93_290L, updated.positionMs)
+    }
+
     // --- interpolatedPositionMs ---
 
     @Test
@@ -432,7 +443,9 @@ class PlaybackStateTest {
             playbackState = PlaybackStateType.PAUSED,
             positionMs = 5000,
             positionUpdatedAt = 8_000L,
-            durationMs = 180000
+            durationMs = 180000,
+            // The server reports a pause as playback_speed 0.
+            playbackSpeed = 0
         )
         assertEquals(5000L, state.interpolatedPositionMs)
     }

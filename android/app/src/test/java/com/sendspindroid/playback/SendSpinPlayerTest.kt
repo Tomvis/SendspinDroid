@@ -163,4 +163,60 @@ class SendSpinPlayerTest {
             offending
         )
     }
+
+    // =========================================================================
+    // Position follows the server's reported progress and speed
+    // =========================================================================
+
+    @Test
+    fun `position advances at the server speed`() {
+        player.updatePlaybackState(null, positionMs = 60_000, durationMs = 240_000, playbackSpeed = 1500)
+
+        every { SystemClock.elapsedRealtime() } returns 11_000L
+
+        assertEquals(75_000L, player.currentPosition)
+    }
+
+    @Test
+    fun `position advances while local audio is not playing`() {
+        // The group plays on while this device buffers.
+        player.updatePlaybackState(null, positionMs = 60_000, durationMs = 240_000, playbackSpeed = 1000)
+
+        every { SystemClock.elapsedRealtime() } returns 11_000L
+
+        assertFalse(player.isPlaying)
+        assertEquals(70_000L, player.currentPosition)
+    }
+
+    @Test
+    fun `speed zero holds the position while local audio plays`() {
+        player.updatePlaybackState(
+            com.sendspindroid.sendspin.PlaybackState.PLAYING,
+            positionMs = 60_000, durationMs = 240_000, playbackSpeed = 0
+        )
+
+        every { SystemClock.elapsedRealtime() } returns 11_000L
+
+        assertTrue(player.isPlaying)
+        assertEquals(60_000L, player.currentPosition)
+    }
+
+    @Test
+    fun `playback parameters report the server speed`() {
+        val listener = mockk<Player.Listener>(relaxed = true)
+        player.addListener(listener)
+
+        player.updatePlaybackState(null, positionMs = 0, durationMs = 240_000, playbackSpeed = 1500)
+
+        assertEquals(1.5f, player.playbackParameters.speed, 0.0f)
+        verify(exactly = 1) { listener.onPlaybackParametersChanged(any()) }
+    }
+
+    @Test
+    fun `speed zero leaves the playback parameters at normal speed`() {
+        // Media3 rejects a speed of 0; paused is carried by the position not moving.
+        player.updatePlaybackState(null, positionMs = 0, durationMs = 240_000, playbackSpeed = 0)
+
+        assertEquals(1.0f, player.playbackParameters.speed, 0.0f)
+    }
 }

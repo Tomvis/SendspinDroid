@@ -40,11 +40,13 @@ data class PlaybackState(
 
     val interpolatedPositionMs: Long
         get() {
-            if (playbackState != PlaybackStateType.PLAYING || positionUpdatedAt == 0L) {
-                return positionMs
-            }
-            val elapsedMs = Platform.elapsedRealtimeMs() - positionUpdatedAt
-            return minOf(durationMs, positionMs + elapsedMs)
+            if (positionUpdatedAt == 0L) return positionMs
+            return trackPositionMs(
+                anchorPositionMs = positionMs,
+                elapsedMs = Platform.elapsedRealtimeMs() - positionUpdatedAt,
+                playbackSpeed = playbackSpeed,
+                durationMs = durationMs
+            )
         }
 
     /**
@@ -189,6 +191,17 @@ data class PlaybackState(
         groupName = groupName,
         playbackState = playbackState
     )
+}
+
+/**
+ * Current track position per the spec's "Calculating current track position":
+ * the reported position plus the time since it was reported, scaled by
+ * playback_speed (1000 = normal, 0 = paused). Capped at the duration when it
+ * is known (non-zero).
+ */
+fun trackPositionMs(anchorPositionMs: Long, elapsedMs: Long, playbackSpeed: Int, durationMs: Long): Long {
+    val calculated = anchorPositionMs + elapsedMs * playbackSpeed / 1000
+    return if (durationMs != 0L) calculated.coerceIn(0L, durationMs) else calculated.coerceAtLeast(0L)
 }
 
 enum class PlaybackStateType {

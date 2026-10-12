@@ -22,6 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
 import android.os.SystemClock
+import com.sendspindroid.model.trackPositionMs
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.SyncAudioPlayer
 import com.sendspindroid.sendspin.PlaybackState as SyncPlaybackState
@@ -72,11 +73,14 @@ class SendSpinPlayer : Player {
     private var currentError: PlaybackException? = null
 
     // Position and duration tracking (in milliseconds)
-    // These are anchor values from the server. getCurrentPosition() interpolates
-    // forward from the anchor when playing, so Android Auto/MediaSession gets a
-    // smoothly advancing position without needing discontinuity notifications.
+    // These are anchor values from the server. getCurrentPosition() extrapolates
+    // forward from the anchor at the server's playback speed, so Android
+    // Auto/MediaSession gets a smoothly advancing position without needing
+    // discontinuity notifications. Whether this device's own audio is playing
+    // does not enter into it: the position is the group's.
     private var anchorPositionMs = 0L
     private var anchorElapsedRealtime = 0L
+    private var anchorPlaybackSpeed = 1000
     private var currentDurationMs = 0L
     private var currentBufferedPositionMs = 0L
 
@@ -170,11 +174,6 @@ class SendSpinPlayer : Player {
                 updatePlaybackStateInternal(Player.STATE_BUFFERING, playWhenReady)
             }
             SyncPlaybackState.PLAYING -> {
-                // Re-anchor the interpolation timestamp when transitioning to playing,
-                // so getCurrentPosition() doesn't include pause duration in its elapsed calc
-                if (!currentlyPlaying) {
-                    anchorElapsedRealtime = SystemClock.elapsedRealtime()
-                }
                 // Sync playWhenReady to true: audio is physically playing, so the UI
                 // must reflect that. This corrects any stale playWhenReady=false from
                 // a server "stopped" state that arrived before audio actually resumed.
@@ -202,7 +201,12 @@ class SendSpinPlayer : Player {
      * @param positionMs Current playback position in milliseconds
      * @param durationMs Total duration in milliseconds
      */
-    fun updatePlaybackState(syncState: SyncPlaybackState?, positionMs: Long, durationMs: Long) {
+    fun updatePlaybackState(
+        syncState: SyncPlaybackState?,
+        positionMs: Long,
+        durationMs: Long,
+        playbackSpeed: Int = 1000
+    ) {
         val previousInterpolatedMs = currentPosition
 
         // Update the anchor point for position interpolation
@@ -216,6 +220,7 @@ class SendSpinPlayer : Player {
             currentDurationMs = durationMs
         }
         currentBufferedPositionMs = positionMs
+        setAnchorPlaybackSpeed(playbackSpeed)
 
         if (syncState != null) {
             when (syncState) {
@@ -265,6 +270,7 @@ class SendSpinPlayer : Player {
             if (!reconnecting) playWhenReady = false
             anchorPositionMs = 0
             anchorElapsedRealtime = 0
+            setAnchorPlaybackSpeed(1000)
             currentDurationMs = 0
             currentBufferedPositionMs = 0
             currentMediaItem = null
@@ -565,12 +571,14 @@ class SendSpinPlayer : Player {
     // ========================================================================
 
     override fun getCurrentPosition(): Long {
-        if (!currentlyPlaying || currentDurationMs <= 0) {
-            return anchorPositionMs
-        }
-        // Interpolate forward from the last server position update
-        val elapsed = SystemClock.elapsedRealtime() - anchorElapsedRealtime
-        return minOf(currentDurationMs, anchorPositionMs + elapsed)
+        // No position has been reported: nothing to extrapolate from.
+        if (anchorElapsedRealtime == 0L) return anchorPositionMs
+        return trackPositionMs(
+            anchorPositionMs = anchorPositionMs,
+            elapsedMs = SystemClock.elapsedRealtime() - anchorElapsedRealtime,
+            playbackSpeed = anchorPlaybackSpeed,
+            durationMs = currentDurationMs
+        )
     }
 
     override fun getDuration(): Long = currentDurationMs
@@ -749,7 +757,20 @@ class SendSpinPlayer : Player {
     // Player Interface - Playback Parameters
     // ========================================================================
 
-    override fun getPlaybackParameters(): PlaybackParameters = PlaybackParameters.DEFAULT
+    // Media3 rejects a speed of 0. The server's 0 means paused, which shows as
+    // a position that does not move, so the parameters stay at normal speed.
+    override fun getPlaybackParameters(): PlaybackParameters =
+        if (anchorPlaybackSpeed > 0) PlaybackParameters(anchorPlaybackSpeed / 1000f)
+        else PlaybackParameters.DEFAULT
+
+    private fun setAnchorPlaybackSpeed(playbackSpeed: Int) {
+        val previous = playbackParameters
+        anchorPlaybackSpeed = playbackSpeed
+        val current = playbackParameters
+        if (current != previous) {
+            listeners.forEach { it.onPlaybackParametersChanged(current) }
+        }
+    }
 
     override fun setPlaybackParameters(playbackParameters: PlaybackParameters) {
         // No-op - speed changes not supported for synced playback

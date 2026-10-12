@@ -212,14 +212,15 @@ a beta cannot share a code with anything else. Current practice is `base + N` fo
 | `2.0.0-Beta17` | 20017 |
 | `2.0.0-Beta18` | 20018 |
 | `2.0.0-Beta19` | 20019 |
+| `2.0.0-Beta20` | 20020 |
 
 Beta1 through Beta3 used `base + (N-1)` (20000, 20001, 20002). `20003` was skipped once,
 which realigned the series; from Beta4 onward it has been `base + N`, and that is the only
 rule to apply going forward.
 
-**Trap: 2.0.0 stable cannot be 20000.** The base is already spent -- Beta19 shipped as
-20019 -- and anything lower is a downgrade Android will not install over it. The first
-stable `2.0.0` needs at least 20020. Choose that number deliberately when the time comes
+**Trap: 2.0.0 stable cannot be 20000.** The base is already spent -- Beta20 shipped as
+20020 -- and anything lower is a downgrade Android will not install over it. The first
+stable `2.0.0` needs at least 20021. Choose that number deliberately when the time comes
 instead of reading it off the base formula.
 
 ## License

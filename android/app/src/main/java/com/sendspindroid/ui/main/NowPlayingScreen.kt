@@ -73,6 +73,7 @@ fun NowPlayingScreen(
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
+    onSeek: (Long) -> Unit,
     onOpenPairingClick: () -> Unit,
     onAllowPairingClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -90,6 +91,8 @@ fun NowPlayingScreen(
     val positionMs by viewModel.positionMs.collectAsStateWithLifecycle()
     val durationMs by viewModel.durationMs.collectAsStateWithLifecycle()
     val positionUpdatedAt by viewModel.positionUpdatedAt.collectAsStateWithLifecycle()
+    val playbackSpeed by viewModel.playbackSpeed.collectAsStateWithLifecycle()
+    val seekable by viewModel.seekable.collectAsStateWithLifecycle()
     val admissionState by viewModel.admissionState.collectAsStateWithLifecycle()
     val pairingCode by viewModel.pairingCode.collectAsStateWithLifecycle()
     val pairingGestureRequested by viewModel.pairingGestureRequested.collectAsStateWithLifecycle()
@@ -300,6 +303,7 @@ fun NowPlayingScreen(
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
+                    playbackSpeed = playbackSpeed,
                     onPreviousClick = onPreviousClick,
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
@@ -335,11 +339,14 @@ fun NowPlayingScreen(
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
+                    playbackSpeed = playbackSpeed,
                     onPreviousClick = onPreviousClick,
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
                     onSwitchGroupClick = onSwitchGroupClick,
-                    onVolumeChange = onVolumeChange
+                    onVolumeChange = onVolumeChange,
+                    seekable = seekable && controlsEnabled,
+                    onSeek = onSeek
                 )
             }
             else -> {
@@ -355,11 +362,14 @@ fun NowPlayingScreen(
                     positionMs = positionMs,
                     durationMs = durationMs,
                     positionUpdatedAt = positionUpdatedAt,
+                    playbackSpeed = playbackSpeed,
                     onPreviousClick = onPreviousClick,
                     onPlayPauseClick = onPlayPauseClick,
                     onNextClick = onNextClick,
                     onSwitchGroupClick = onSwitchGroupClick,
-                    onVolumeChange = onVolumeChange
+                    onVolumeChange = onVolumeChange,
+                    seekable = seekable && controlsEnabled,
+                    onSeek = onSeek
                 )
             }
         }
@@ -396,11 +406,14 @@ private fun NowPlayingPortrait(
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
+    playbackSpeed: Int = 1000,
     onPreviousClick: () -> Unit,
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
+    seekable: Boolean = false,
+    onSeek: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -477,9 +490,11 @@ private fun NowPlayingPortrait(
             TrackProgressBar(
                 positionMs = positionMs,
                 durationMs = durationMs,
-                isPlaying = isPlaying,
+                playbackSpeed = playbackSpeed,
                 accentColor = accentColor,
-                positionUpdatedAt = positionUpdatedAt
+                positionUpdatedAt = positionUpdatedAt,
+                seekable = seekable,
+                onSeek = onSeek
             )
         }
 
@@ -530,11 +545,14 @@ private fun NowPlayingLandscape(
     positionMs: Long,
     durationMs: Long,
     positionUpdatedAt: Long = 0L,
+    playbackSpeed: Int = 1000,
     onPreviousClick: () -> Unit,
     onPlayPauseClick: () -> Unit,
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
+    seekable: Boolean = false,
+    onSeek: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -615,9 +633,11 @@ private fun NowPlayingLandscape(
                 TrackProgressBar(
                     positionMs = positionMs,
                     durationMs = durationMs,
-                    isPlaying = isPlaying,
+                    playbackSpeed = playbackSpeed,
                     accentColor = accentColor,
-                    positionUpdatedAt = positionUpdatedAt
+                    positionUpdatedAt = positionUpdatedAt,
+                    seekable = seekable,
+                    onSeek = onSeek
                 )
             }
 
