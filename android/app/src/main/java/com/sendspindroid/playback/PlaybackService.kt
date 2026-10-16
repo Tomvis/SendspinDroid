@@ -1946,10 +1946,14 @@ class PlaybackService : MediaLibraryService() {
         // null-as-preserve semantics would keep the old track's artwork on the
         // lock screen until a new bitmap arrives, contradicting the
         // titleChanged invalidation that onMetadataUpdate already performed.
+        //
+        // The state holds the metadata role's full state (messaging.md,
+        // server/state), so a null text field is one the track has none of.
+        // It goes on as "", which clears it; null would keep the last track's.
         forwardingPlayer?.updateMetadata(
-            title = state.title,
-            artist = state.artist,
-            album = state.album,
+            title = state.title.orEmpty(),
+            artist = state.artist.orEmpty(),
+            album = state.album.orEmpty(),
             artwork = effectiveArtwork,
             artworkUri = externalArtworkUri(state.artworkUrl),
             clearArtwork = effectiveArtwork == null,

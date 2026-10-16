@@ -39,6 +39,12 @@ import org.robolectric.annotation.Config
  * update, so the service's call into it (fork: updateMediaMetadata only)
  * must pass them: one that leaves them out wipes them from the session.
  *
+ * Title, artist and album it keeps when given null, so for one the track
+ * has none of the service must pass "": server/state carries the role's full
+ * state (messaging.md), and the last track's must not stay on the lock
+ * screen. The platform session reads the forwarding player's
+ * getMediaMetadata, which is what these tests read too.
+ *
  * The callback, the forwarding player and the URL artwork path are private
  * to the service, so they are reached by reflection.
  */
@@ -103,11 +109,11 @@ class PlaybackServiceMetadataTest {
         idle()
     }
 
-    private fun sessionMetadata(): MediaMetadata {
-        val player = PlaybackService::class.java.getDeclaredField("forwardingPlayer")
+    private fun forwardingPlayer(): MetadataForwardingPlayer =
+        PlaybackService::class.java.getDeclaredField("forwardingPlayer")
             .apply { isAccessible = true }.get(service) as MetadataForwardingPlayer
-        return player.mediaMetadata
-    }
+
+    private fun sessionMetadata(): MediaMetadata = forwardingPlayer().mediaMetadata
 
     /**
      * The image fetched from the track's artwork URL reaches the session.
@@ -168,6 +174,64 @@ class PlaybackServiceMetadataTest {
         assertNull(session.releaseYear)
         assertNull(session.recordingYear)
         assertNull(session.trackNumber)
+    }
+
+    @Test
+    fun `a track without an album shows none of the last track's`() {
+        metadataArrives(bareTrack)
+
+        metadataArrives(TrackMetadata(timestamp = 3, title = "Live Aid", artist = "Queen"))
+
+        val session = sessionMetadata()
+        assertNull(session.albumTitle)
+        // Android Auto's second line is the artist alone.
+        assertEquals("Queen", session.subtitle?.toString())
+    }
+
+    @Test
+    fun `a track without an artist shows none of the last track's`() {
+        metadataArrives(bareTrack)
+
+        metadataArrives(TrackMetadata(timestamp = 3, title = "Interlude", album = "Singles"))
+
+        val session = sessionMetadata()
+        assertNull(session.artist)
+        // The track artist stood in for the album artist, so it goes too.
+        assertNull(session.albumArtist)
+        assertEquals("Singles", session.subtitle?.toString())
+    }
+
+    @Test
+    fun `a track without a title shows none of the last track's`() {
+        metadataArrives(bareTrack)
+
+        metadataArrives(TrackMetadata(timestamp = 3, artist = "Queen", album = "Singles"))
+
+        val session = sessionMetadata()
+        assertNull(session.title)
+        assertNull(session.displayTitle)
+    }
+
+    @Test
+    fun `a cleared track leaves none of the last track's text on the session`() {
+        metadataArrives(bareTrack)
+
+        // A metadata object with only a timestamp: the server has no track.
+        metadataArrives(TrackMetadata(timestamp = 3))
+
+        // With no title and no artist the session shows SendSpinPlayer's
+        // item, which never carries a subtitle. The " - " guard for the
+        // subtitle built from the track is in the no-album and no-artist tests.
+        val session = sessionMetadata()
+        assertNull(session.title)
+        assertNull(session.artist)
+        assertNull(session.albumTitle)
+        assertNull(session.albumArtist)
+        assertNull(session.subtitle)
+        val item = forwardingPlayer().currentMediaItem
+        assertNotNull(item)
+        assertNull(item!!.mediaMetadata.title)
+        assertNull(item.mediaMetadata.subtitle)
     }
 
     @Test
