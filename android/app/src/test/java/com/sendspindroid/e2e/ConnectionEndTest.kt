@@ -13,6 +13,7 @@ import io.mockk.mockk
 import io.mockk.verify
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.SocketException
@@ -42,7 +43,7 @@ class ConnectionEndTest : E2ETestBase() {
             "advertisedFormats", "preferredFormat",
             "_streamActive", "_currentStreamConfig", "outputStarted",
             "artworkStreamActive", "artworkChannelConfig", "pendingArtwork",
-            "pendingMetadata", "currentControllerState",
+            "pendingMetadata", "pendingColor", "currentControllerState",
             "lastPlaybackState", "lastGroupInfo",
             "activePairingMethod", "dynamicPairingFlow", "pairingIndex",
             "pairingAborted", "unpairHandled",
@@ -56,23 +57,27 @@ class ConnectionEndTest : E2ETestBase() {
         return handlerFields + clientFields + mapOf(
             "timeSyncRunning" to timeSync.isRunning.toString(),
             "controllerState" to client.controllerState.value.toString(),
+            "colorState" to client.colorState.value.toString(),
         )
     }
 
     private lateinit var pristine: Map<String, String>
 
-    /** A paired connection with a stream, metadata, controller and group state on it. */
+    /** A paired connection with a stream, metadata, colors and group state on it. */
     private fun connectedAndBusy() {
         pristine = connectionState()
         every { UserSettings.getOrCreateTrustStore() } returns mockk(relaxed = true)
 
-        connectAndHandshake()
+        injectTransportAndConnect()
+        fakeServer.completeHandshake(listOf("player@v1", "controller@v1", "metadata@v1", "color@v1"))
         setField(client, "matchedPsk", Psk(ByteArray(32) { 7 }, PskCategory.LONG_TERM, "server-id"))
         fakeServer.sendStreamStart()
         fakeServer.sendServerState()
+        fakeServer.sendColorState()
         fakeServer.sendGroupUpdate()
 
         assertEquals(TransportState.Ready, client.connectionState.value)
+        assertNotNull("the color state reached the client", client.colorState.value)
         assertTrue("time sync runs once activated", connectionState()["timeSyncRunning"] == "true")
         assertTrue("the connection left state behind to clear", connectionState() != pristine)
     }

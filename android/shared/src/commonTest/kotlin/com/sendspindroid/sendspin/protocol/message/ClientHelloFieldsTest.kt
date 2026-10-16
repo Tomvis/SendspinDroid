@@ -35,6 +35,7 @@ class ClientHelloFieldsTest {
         lowMemoryMode: Boolean = false,
         pairMethods: List<MessageBuilder.PairMethodDescriptor> =
             listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK),
+        colorRole: Boolean = true,
     ) = MessageBuilder.buildClientHello(
         deviceName = "Tablet",
         bufferCapacity = 1_680_000,
@@ -44,6 +45,7 @@ class ClientHelloFieldsTest {
         softwareVersion = "2.0.0",
         unpairedAccessEnabled = unpairedAccess,
         supportedPairMethods = pairMethods,
+        colorRole = colorRole,
     )
 
     private fun hello(
@@ -51,8 +53,12 @@ class ClientHelloFieldsTest {
         lowMemoryMode: Boolean = false,
         pairMethods: List<MessageBuilder.PairMethodDescriptor> =
             listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK),
-    ): JsonObject = Json.parseToJsonElement(helloText(unpairedAccess, lowMemoryMode, pairMethods))
+        colorRole: Boolean = true,
+    ): JsonObject = Json.parseToJsonElement(helloText(unpairedAccess, lowMemoryMode, pairMethods, colorRole))
         .jsonObject["payload"]!!.jsonObject
+
+    private fun roles(payload: JsonObject) =
+        payload["supported_roles"]!!.jsonArray.map { it.jsonPrimitive.content }
 
     @Test
     fun theWholeMessageIsExactlyTheRc1Shape() {
@@ -62,7 +68,7 @@ class ClientHelloFieldsTest {
         // artwork_support, player supported_commands all None).
         assertEquals(
             """{"type":"client/hello","payload":{"name":"Tablet",""" +
-                """"supported_roles":["player@v1","controller@v1","metadata@v1","artwork@v1"],""" +
+                """"supported_roles":["player@v1","controller@v1","metadata@v1","artwork@v1","color@v1"],""" +
                 """"device_info":{"product_name":"SendSpinDroid","manufacturer":"test",""" +
                 """"software_version":"2.0.0"},""" +
                 """"player@v1_support":{"supported_formats":[{"codec":"pcm","sample_rate":48000,""" +
@@ -139,10 +145,29 @@ class ClientHelloFieldsTest {
     }
 
     @Test
+    fun hasNoColorSupportObject() {
+        // messaging.md defines support objects for player@v1, source@v1 and
+        // visualizer@v1 only, and color has no client/state object either.
+        val payload = hello()
+        assertTrue("color@v1" in roles(payload))
+        assertFalse(payload.containsKey("color@v1_support"))
+    }
+
+    @Test
     fun lowMemoryModeDoesNotListTheArtworkRole() {
-        val roles = hello(lowMemoryMode = true)["supported_roles"]!!.jsonArray
-            .map { it.jsonPrimitive.content }
-        assertEquals(listOf("player@v1", "controller@v1", "metadata@v1"), roles)
+        // The color role stays: it costs a few hundred bytes of JSON a track.
+        assertEquals(
+            listOf("player@v1", "controller@v1", "metadata@v1", "color@v1"),
+            roles(hello(lowMemoryMode = true)),
+        )
+    }
+
+    @Test
+    fun theColorRoleCanBeLeftOut() {
+        assertEquals(
+            listOf("player@v1", "controller@v1", "metadata@v1", "artwork@v1"),
+            roles(hello(colorRole = false)),
+        )
     }
 
     @Test

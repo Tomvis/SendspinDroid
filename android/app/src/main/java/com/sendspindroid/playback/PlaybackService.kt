@@ -19,6 +19,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.Process
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -65,6 +66,8 @@ import com.sendspindroid.model.UnifiedServer
 import com.sendspindroid.sendspin.SendSpin
 import com.sendspindroid.sendspin.pairing.PairedServers
 import com.sendspindroid.sendspin.protocol.AdmissionState
+import com.sendspindroid.sendspin.protocol.ColorState
+import com.sendspindroid.sendspin.protocol.TrackMetadata
 import com.sendspindroid.sendspin.SendSpinEndpoint
 import com.sendspindroid.discovery.DiscoveryGate
 import com.sendspindroid.discovery.NsdAdvertiser
@@ -74,7 +77,6 @@ import com.sendspindroid.UnifiedServerRepository
 import com.sendspindroid.UserSettings
 import com.sendspindroid.sendspin.SyncAudioPlayer
 import com.sendspindroid.sendspin.PlaybackState as SyncPlaybackState
-import com.sendspindroid.sendspin.protocol.TrackMetadata
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.NetworkEvaluator
@@ -446,7 +448,7 @@ class PlaybackService : MediaLibraryService() {
     private var volumeObserverRegistered: Boolean = false  // Track registration state to prevent leaks
     private var lastKnownVolume: Int = -1  // Track to detect external volume changes
     private var lastOutputType: Int? = null  // The output lastKnownVolume was set or synced on
-    private val fullVolumeOutputs = mutableSetOf<Int>()  // Outputs setVolume found holding the index at max
+    private val fullVolumeOutputs = mutableSetOf<Int>()  // Outputs setVolume found holding the index at max, kept in UserSettings
 
     // Audio focus management - required for Android Auto to hand over audio output.
     // requestAudioFocus() / abandonAudioFocus() can run on the Media3 session
@@ -505,6 +507,11 @@ class PlaybackService : MediaLibraryService() {
         // metadata.
         private val _artistArtwork = MutableStateFlow<ByteArray?>(null)
         val artistArtwork: StateFlow<ByteArray?> = _artistArtwork.asStateFlow()
+
+        // The colors the server sends for the current audio (color@v1).
+        // In-process, like the artist image: only the activity reads them.
+        private val _serverColors = MutableStateFlow<ColorState?>(null)
+        val serverColors: StateFlow<ColorState?> = _serverColors.asStateFlow()
 
         private const val TAG = "PlaybackService"
 
@@ -906,7 +913,7 @@ class PlaybackService : MediaLibraryService() {
 
     private var clientObserver: Job? = null
 
-    /** Follow [client]'s connection and controller state. One client at a time. */
+    /** Follow [client]'s connection, controller state and colors. One client at a time. */
     private fun observeClient(client: SendSpin) {
         clientObserver?.cancel()
         clientObserver = serviceScope.launch {
@@ -916,6 +923,7 @@ class PlaybackService : MediaLibraryService() {
                     sendSpinPlayer?.updateControllerState(state)
                 }
             }
+            launch { client.colorState.collect { _serverColors.value = it } }
             client.connectionState.collect { state -> onClientState(state) }
         }
     }
@@ -1218,13 +1226,20 @@ class PlaybackService : MediaLibraryService() {
         }
 
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        fullVolumeOutputs += UserSettings.getFullVolumeOutputs()
 
         // Track current volume to detect external changes
         lastKnownVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
         lastOutputType = audioManager?.let { mediaOutputType(it) }
 
-        // Initialize playback state with actual device volume (not default 100%)
-        val volumePercent = audioManager?.let { deviceVolumePercent(it, lastKnownVolume) } ?: 0
+        // Initialize playback state with actual device volume (not default 100%),
+        // or, where the index cannot hold one, the volume last set on the output
+        val restored = audioManager?.let { restoredVolume(it, lastKnownVolume, mediaOutputType(it)) }
+        restored?.let {
+            Log.i(TAG, "Volume $it restored as track gain on output type $lastOutputType")
+            engine.setTrackGain(VolumeLaw.amplitude(it))
+        }
+        val volumePercent = restored ?: audioManager?.let { deviceVolumePercent(it, lastKnownVolume) } ?: 0
         _playbackState.value = _playbackState.value.copy(volume = volumePercent)
 
         // Create observer to detect volume changes from hardware buttons
@@ -1471,12 +1486,13 @@ class PlaybackService : MediaLibraryService() {
         }
 
         @OptIn(UnstableApi::class)
-        override fun onMetadataUpdate(metadata: TrackMetadata) {
+        override fun onMetadataUpdate(metadata: TrackMetadata, positionMs: Long) {
             // Unpack the value object into the raw locals the body below was
             // written against, so the downstream withMetadata / updateMediaItem /
-            // artwork-generation logic is unchanged. durationMs / positionMs are
-            // TrackMetadata convenience props (progress.trackDuration /
-            // progress.trackProgress); playbackSpeed lives on progress.
+            // artwork-generation logic is unchanged. durationMs is a
+            // TrackMetadata convenience prop (progress.trackDuration);
+            // positionMs comes extrapolated to now from SendSpin;
+            // playbackSpeed lives on progress.
             val title = metadata.title
             val artist = metadata.artist
             val albumArtist = metadata.albumArtist
@@ -1487,7 +1503,6 @@ class PlaybackService : MediaLibraryService() {
             val queueTrack = metadata.queueTrack
             val totalTracks = metadata.totalTracks
             val durationMs = metadata.durationMs
-            val positionMs = metadata.positionMs
             // No progress object means no position, so nothing to advance.
             val playbackSpeed = metadata.progress?.playbackSpeed ?: 0
             mainHandler.post {
@@ -1896,6 +1911,7 @@ class PlaybackService : MediaLibraryService() {
         // KDoc above for why ordering matters).
         clearAudioStreamSpec()
         _artistArtwork.value = null
+        _serverColors.value = null
         _playbackState.value = if (preserveVolume) {
             PlaybackState(
                 volume = _playbackState.value.volume,
@@ -1920,12 +1936,9 @@ class PlaybackService : MediaLibraryService() {
     private fun updateMediaMetadata() {
         val state = _playbackState.value
 
-        // Ancillary fields use the "" / 0 clear sentinel rather than null when
-        // syncing the cache to state. MetadataForwardingPlayer treats null as
-        // "preserve prior value" (useful for partial track updates), but here we
-        // want it to mirror state exactly -- null in state means "the new track
-        // has no value for this field" and the cache must clear, not leak the
-        // previous track's albumArtist / year / albumTrack.
+        // albumArtist / year / trackNumber replace the cache on every call
+        // (null = none), so it mirrors state exactly: the merge semantics
+        // (same-track preserve, new-track clear) live in withMetadata.
         //
         // clearArtwork = (effectiveArtwork == null) so a track change that has
         // wiped urlArtwork / binaryArtwork actually drops the prior bitmap from
@@ -1940,9 +1953,9 @@ class PlaybackService : MediaLibraryService() {
             artwork = effectiveArtwork,
             artworkUri = externalArtworkUri(state.artworkUrl),
             clearArtwork = effectiveArtwork == null,
-            albumArtist = state.albumArtist ?: "",
-            year = state.year ?: 0,
-            albumTrack = state.albumTrack ?: 0
+            albumArtist = state.albumArtist,
+            year = state.year,
+            trackNumber = state.albumTrack
         )
 
         broadcastSessionExtras()
@@ -2384,7 +2397,8 @@ class PlaybackService : MediaLibraryService() {
      * The spec asks for `amplitude = (volume / 100)^1.5` (roles/player/v1.md),
      * so the index is picked from the device's own curve and the rest is gain
      * on the track ([VolumeLaw]). On a fixed-volume or full-volume output the
-     * whole of it is track gain.
+     * whole of it is track gain, and it is kept for that output
+     * ([UserSettings.getOutputVolume]), as Android keeps none there.
      *
      * Main thread only.
      *
@@ -2401,6 +2415,7 @@ class PlaybackService : MediaLibraryService() {
         if (am.isVolumeFixed) {
             Log.d(TAG, "Fixed-volume output: volume $percent as track gain")
             engine.setTrackGain(VolumeLaw.amplitude(percent))
+            UserSettings.setOutputVolume(mediaOutputType(am), percent)
             return
         }
 
@@ -2429,16 +2444,17 @@ class PlaybackService : MediaLibraryService() {
         // the index is read back.
         val applied = am.getStreamVolume(AudioManager.STREAM_MUSIC)
         when {
-            applied == newVolume ->
-                engine.setTrackGain(curve?.let { VolumeLaw.trackGainFor(percent, newVolume, it) } ?: 1f)
-            VolumeLaw.isFullVolumeOutput(newVolume, applied, maxVolume) -> {
+            VolumeLaw.isFullVolumeSet(output in fullVolumeOutputs, newVolume, applied, maxVolume) -> {
                 // The index stays at max: the whole volume is track gain, as
                 // on a fixed-volume output, and the volume asked for plays.
                 Log.d(TAG, "Full-volume output: volume $percent as track gain")
                 lastKnownVolume = applied
-                fullVolumeOutputs += output
+                if (fullVolumeOutputs.add(output)) UserSettings.setFullVolumeOutputs(fullVolumeOutputs)
                 engine.setTrackGain(VolumeLaw.amplitude(percent))
+                UserSettings.setOutputVolume(output, percent)
             }
+            applied == newVolume ->
+                engine.setTrackGain(curve?.let { VolumeLaw.trackGainFor(percent, newVolume, it) } ?: 1f)
             else -> {
                 // The platform holds the index below what was asked (the safe
                 // media volume warning): report what actually plays.
@@ -2499,6 +2515,21 @@ class PlaybackService : MediaLibraryService() {
         return if (index == lastKnownVolume) _playbackState.value.volume else deviceVolumePercent(am, index)
     }
 
+    /**
+     * Media plays on an output setVolume found to be full-volume (its type
+     * from the same mediaOutputType, so below API 33 too), with the index
+     * still at max.
+     */
+    private fun isFullVolume(am: AudioManager, output: Int, index: Int): Boolean =
+        output in fullVolumeOutputs && index == am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+
+    /**
+     * The volume last set on [output], where media plays on it at STREAM_MUSIC
+     * [index] and that index cannot hold one ([VolumeLaw.restoredVolume]).
+     */
+    private fun restoredVolume(am: AudioManager, index: Int, output: Int): Int? =
+        VolumeLaw.restoredVolume(am.isVolumeFixed, isFullVolume(am, output, index), UserSettings.getOutputVolume(output))
+
     /** The protocol volume (0-100) that STREAM_MUSIC [index] stands for on the current output. */
     private fun deviceVolumePercent(am: AudioManager, index: Int): Int {
         val curve = deviceVolumeCurve(am)
@@ -2544,14 +2575,20 @@ class PlaybackService : MediaLibraryService() {
         val am = audioManager ?: return@Runnable
         val index = am.getStreamVolume(AudioManager.STREAM_MUSIC)
         val output = mediaOutputType(am)
-        // An output setVolume found to be full-volume (its type from the same
-        // mediaOutputType, so below API 33 too), with the index still at max
-        val fullVolume = output in fullVolumeOutputs && index == am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val fullVolume = isFullVolume(am, output, index)
         when (VolumeLaw.outputChange(am.isVolumeFixed, fullVolume, index, lastKnownVolume, output, lastOutputType)) {
             VolumeLaw.OutputChange.KEEP_VOLUME -> {
                 lastKnownVolume = index
                 lastOutputType = output
-                setVolume(_playbackState.value.volume / 100f)
+                // The volume last set on this output, else the one playing
+                val playing = _playbackState.value.volume
+                val volume = restoredVolume(am, index, output) ?: playing
+                setVolume(volume / 100f)
+                if (volume != playing) {
+                    Log.i(TAG, "Volume $volume restored as track gain on output type $output")
+                    sendSpinClient?.setVolume(volume / 100.0)
+                    broadcastSessionExtras()
+                }
             }
             VolumeLaw.OutputChange.NONE -> Unit
             VolumeLaw.OutputChange.DEVICE_VOLUME -> {
@@ -3172,7 +3209,7 @@ class PlaybackService : MediaLibraryService() {
         Log.d(TAG, "MediaLibrarySession initialized with browse tree support")
     }
 
-    private inner class LibraryCallback : MediaLibrarySession.Callback {
+    internal inner class LibraryCallback : MediaLibrarySession.Callback {
 
         override fun onGetLibraryRoot(
             session: MediaLibrarySession,
@@ -3354,7 +3391,7 @@ class PlaybackService : MediaLibraryService() {
                 .add(SessionCommand(COMMAND_PREVIOUS, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_SWITCH_GROUP, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_GET_STATS, Bundle.EMPTY))
-                .add(SessionCommand(COMMAND_ALLOW_PAIRING, Bundle.EMPTY))
+                .apply { if (isOwnApp(controller)) add(SessionCommand(COMMAND_ALLOW_PAIRING, Bundle.EMPTY)) }
                 .add(SessionCommand(COMMAND_SET_SEARCH_FOR_SERVERS, Bundle.EMPTY))
                 .build()
 
@@ -3436,6 +3473,17 @@ class PlaybackService : MediaLibraryService() {
             Log.i(TAG, "Suppressing media button from ${controllerInfo.packageName} (app not in foreground)")
             return true
         }
+
+        /**
+         * Whether [controller] is this app's own UI, the only one allowed to
+         * send [COMMAND_ALLOW_PAIRING]. That command lifts the round limit's
+         * hold-back and resets the count, which `pairing.md#rounds` asks to
+         * be "a deliberate, manufacturer-defined operator action". This
+         * service is exported, so any other app could otherwise press it and
+         * guess pairing codes without limit.
+         */
+        private fun isOwnApp(controller: MediaSession.ControllerInfo): Boolean =
+            controller.uid == Process.myUid()
 
         override fun onCustomCommand(
             session: MediaSession,
@@ -3544,6 +3592,12 @@ class PlaybackService : MediaLibraryService() {
                 }
 
                 COMMAND_ALLOW_PAIRING -> {
+                    // Never offered to another app (onConnect), and refused
+                    // here too should one send it anyway.
+                    if (!isOwnApp(controller)) {
+                        Log.w(TAG, "Allow pairing refused from ${controller.packageName} (uid=${controller.uid})")
+                        return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
+                    }
                     Log.d(TAG, "Allow pairing gesture confirmed")
                     // Cleared here, at the operator's tap, rather than waiting on a
                     // round trip through the flow: the gate is a local UI concern,

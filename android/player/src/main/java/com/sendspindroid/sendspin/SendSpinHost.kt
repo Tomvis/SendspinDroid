@@ -40,7 +40,7 @@ interface SendSpinHost {
     /** The pairing PSK and the pairing options. Read once per client. */
     fun pairingConfigStore(): PairingConfigStore
 
-    /** Failed Dynamic Pairing Code attempts, for the brute-force gate. */
+    /** Dynamic Pairing Code rounds since the last verified `server_kc`, for the round limit. */
     fun pairingCodeFailures(): Int
 
     fun setPairingCodeFailures(value: Int)

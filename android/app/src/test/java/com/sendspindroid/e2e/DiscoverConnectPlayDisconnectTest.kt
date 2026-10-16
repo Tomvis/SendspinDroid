@@ -64,9 +64,9 @@ class DiscoverConnectPlayDisconnectTest : E2ETestBase() {
                         it.queueTrack == null &&
                         it.totalTracks == null &&
                         it.durationMs == 180000L &&
-                        it.positionMs == 5000L &&
                         it.progress?.playbackSpeed == 1000
-                }
+                },
+                5000L
             )
         }
         verify { mockCallback.onStateChanged("playing") }
@@ -186,6 +186,31 @@ class DiscoverConnectPlayDisconnectTest : E2ETestBase() {
         fakeServer.sendStreamStart()
         fakeServer.sendAudioChunk(timestampMicros = 1000000L, audioData = fakeServer.generateSilence(20))
         verify { mockCallback.onAudioChunk(1000000L, any()) }
+    }
+
+    @Test
+    fun `server state album artist, year and track reach the callback`() {
+        connectAndHandshake()
+
+        fakeServer.sendServerState(
+            title = "Bohemian Rhapsody",
+            artist = "Queen",
+            album = "Now 44",
+            albumArtist = "Various Artists",
+            year = 1999,
+            track = 7
+        )
+
+        verify {
+            mockCallback.onMetadataUpdate(
+                match {
+                    it.albumArtist == "Various Artists" && it.year == 1999 && it.track == 7 &&
+                        // Fork: albumTrack falls back to the spec's track.
+                        it.albumTrack == 7
+                },
+                any()
+            )
+        }
     }
 
     @Test

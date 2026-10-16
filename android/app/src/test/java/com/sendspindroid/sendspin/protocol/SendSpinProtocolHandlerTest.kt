@@ -703,6 +703,7 @@ class TestProtocolHandler(
     val sentMessages = mutableListOf<String>()
     val metadataUpdates = mutableListOf<TrackMetadata>()
     val controllerStateUpdates = mutableListOf<ControllerState>()
+    val colorStateUpdates = mutableListOf<ColorState?>()
     val playbackStateChanges = mutableListOf<String>()
     val groupUpdates = mutableListOf<GroupInfo>()
     val streamStarts = mutableListOf<StreamConfig>()
@@ -731,6 +732,7 @@ class TestProtocolHandler(
 
     var matchedCategory: PskCategory = PskCategory.SENTINEL
     var unpairedAccess = true
+    var colorRole = true
     var formats: List<MessageBuilder.FormatEntry> = emptyList()
 
     /** What reached the wire and when the connection was closed, in order. */
@@ -746,6 +748,8 @@ class TestProtocolHandler(
     override fun matchedPskCategory(): PskCategory = matchedCategory
 
     override fun isUnpairedAccessEnabled(): Boolean = unpairedAccess
+
+    override fun claimsColorRole(): Boolean = colorRole
 
     override fun currentServerId(): String = "srv1"
 
@@ -825,6 +829,10 @@ class TestProtocolHandler(
 
     override fun onControllerStateUpdate(state: ControllerState) {
         controllerStateUpdates.add(state)
+    }
+
+    override fun onColorStateUpdate(state: ColorState?) {
+        colorStateUpdates.add(state)
     }
 
     override fun onPlaybackStateChanged(state: String) {

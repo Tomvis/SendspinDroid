@@ -61,7 +61,7 @@ class AddServerWizardActivity : AppCompatActivity() {
     private val noopSendSpinCallback = object : SendSpin.Callback {
         override fun onStateChanged(state: String) {}
         override fun onGroupUpdate(groupId: String, groupName: String, playbackState: String) {}
-        override fun onMetadataUpdate(metadata: TrackMetadata) {}
+        override fun onMetadataUpdate(metadata: TrackMetadata, positionMs: Long) {}
         override fun onArtwork(imageData: ByteArray) {}
         override fun onArtworkCleared() {}
         override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {}

@@ -81,6 +81,8 @@ object UserSettings {
     const val KEY_PAIRING_CODE_FAILURES = "pairing_code_failures"
     const val KEY_OUTPUT_DELAY_MS = "output_delay_ms"
     const val KEY_PLAYER_MUTED = "player_muted"
+    const val KEY_OUTPUT_VOLUME_PREFIX = "output_volume_"
+    const val KEY_FULL_VOLUME_OUTPUTS = "full_volume_outputs"
 
     // Sync offset range limits (milliseconds)
     const val SYNC_OFFSET_MIN = -5000
@@ -376,14 +378,46 @@ object UserSettings {
 
     /**
      * The player's `muted` state. roles/player/v1.md: "Persisting volume and
-     * muted across reboots is RECOMMENDED". Volume needs no entry here - it is
-     * the device media volume, which Android persists.
+     * muted across reboots is RECOMMENDED". Volume is the device media
+     * volume, which Android persists, except where its index cannot hold
+     * one ([getOutputVolume]).
      */
     fun getPlayerMuted(): Boolean =
         prefs?.getBoolean(KEY_PLAYER_MUTED, false) ?: false
 
     fun setPlayerMuted(muted: Boolean): Boolean =
         prefs?.edit()?.putBoolean(KEY_PLAYER_MUTED, muted)?.commit() ?: false
+
+    /**
+     * The player's `volume` last set on a fixed-volume or full-volume output,
+     * by AudioDeviceInfo type, or null if none was. There the media index
+     * cannot hold a volume and the whole of it is track gain, which Android
+     * does not keep. roles/player/v1.md, "Volume and mute": "Persisting
+     * `volume` and `muted` across reboots is RECOMMENDED for players."
+     */
+    fun getOutputVolume(outputType: Int): Int? {
+        val key = KEY_OUTPUT_VOLUME_PREFIX + outputType
+        val p = prefs?.takeIf { it.contains(key) } ?: return null
+        return p.getInt(key, 100).coerceIn(0, 100)
+    }
+
+    /** `apply()`: written on the main thread, for every volume set on such an output. */
+    fun setOutputVolume(outputType: Int, volume: Int) {
+        prefs?.edit()?.putInt(KEY_OUTPUT_VOLUME_PREFIX + outputType, volume.coerceIn(0, 100))?.apply()
+    }
+
+    /**
+     * The output types (AudioDeviceInfo) found to be full-volume: the media
+     * index held at max whatever is set, which AudioManager.isVolumeFixed
+     * does not report. Kept so that a restart knows them before the first
+     * volume set, and plays the volume kept for them ([getOutputVolume]).
+     */
+    fun getFullVolumeOutputs(): Set<Int> =
+        prefs?.getStringSet(KEY_FULL_VOLUME_OUTPUTS, null)?.mapNotNull { it.toIntOrNull() }?.toSet() ?: emptySet()
+
+    fun setFullVolumeOutputs(outputTypes: Set<Int>) {
+        prefs?.edit()?.putStringSet(KEY_FULL_VOLUME_OUTPUTS, outputTypes.map { it.toString() }.toSet())?.apply()
+    }
 
     fun getPairingCodeFailures(): Int =
         sensitivePrefs?.getInt(KEY_PAIRING_CODE_FAILURES, 0) ?: 0

@@ -147,4 +147,82 @@ class MetadataForwardingPlayerTest {
         assertEquals("Song", metadata.title?.toString())
         assertEquals("New Artist", metadata.artist?.toString())
     }
+
+    // =========================================================================
+    // Album artist, year and track number (metadata@v1)
+    // =========================================================================
+
+    @Test
+    fun updateMetadata_albumArtist_isTheServersNotTheTrackArtist() {
+        forwardingPlayer.updateMetadata(
+            title = "Bohemian Rhapsody", artist = "Queen", album = "Now 44",
+            albumArtist = "Various Artists"
+        )
+
+        assertEquals("Various Artists", forwardingPlayer.mediaMetadata.albumArtist?.toString())
+    }
+
+    @Test
+    fun updateMetadata_noAlbumArtist_hasNoAlbumArtist() {
+        // Fork: no fallback to the track artist. MainActivity reads the album
+        // artist back into the VM, which must keep "none" distinct.
+        forwardingPlayer.updateMetadata(title = "Radio Edit", artist = "Queen", album = "Singles")
+
+        assertNull(forwardingPlayer.mediaMetadata.albumArtist)
+    }
+
+    @Test
+    fun updateMetadata_yearAndTrackNumber_areSetWhenPresent() {
+        forwardingPlayer.updateMetadata(
+            title = "Bohemian Rhapsody", artist = "Queen", album = "Now 44",
+            year = 1999, trackNumber = 7
+        )
+
+        val metadata = forwardingPlayer.mediaMetadata
+        assertEquals(1999, metadata.releaseYear)
+        assertEquals(1999, metadata.recordingYear)
+        assertEquals(7, metadata.trackNumber)
+    }
+
+    @Test
+    fun updateMetadata_noYearOrTrackNumber_leavesThemUnset() {
+        forwardingPlayer.updateMetadata(title = "Radio Edit", artist = "Queen", album = "Singles")
+
+        val metadata = forwardingPlayer.mediaMetadata
+        assertNull(metadata.releaseYear)
+        assertNull(metadata.recordingYear)
+        assertNull(metadata.trackNumber)
+    }
+
+    @Test
+    fun updateMetadata_trackWithoutAlbumArtistYearOrTrackNumber_doesNotInheritThePreviousTracks() {
+        // Unlike title, artist and album, these are replaced on every update.
+        forwardingPlayer.updateMetadata(
+            title = "Bohemian Rhapsody", artist = "Queen", album = "Now 44",
+            albumArtist = "Various Artists", year = 1999, trackNumber = 7
+        )
+        forwardingPlayer.updateMetadata(title = "Radio Edit", artist = "Queen", album = "Singles")
+
+        val metadata = forwardingPlayer.mediaMetadata
+        assertNull(metadata.albumArtist)
+        assertNull(metadata.releaseYear)
+        assertNull(metadata.recordingYear)
+        assertNull(metadata.trackNumber)
+    }
+
+    @Test
+    fun clearMetadata_thenANewTrack_hasNoAlbumArtistYearOrTrackNumber() {
+        forwardingPlayer.updateMetadata(
+            title = "Bohemian Rhapsody", artist = "Queen", album = "Now 44",
+            albumArtist = "Various Artists", year = 1999, trackNumber = 7
+        )
+        forwardingPlayer.clearMetadata()
+        forwardingPlayer.updateMetadata(title = "Next", artist = null, album = null)
+
+        val metadata = forwardingPlayer.mediaMetadata
+        assertNull(metadata.albumArtist)
+        assertNull(metadata.releaseYear)
+        assertNull(metadata.recordingYear)
+        assertNull(metadata.trackNumber)
+    }
 }

@@ -180,7 +180,7 @@ class InboundConnectionsTest : E2ETestBase() {
         val b = Server("b").connect().activate()
 
         assertTrue(b.toldGoodbye("concurrent_attempt"))
-        assertTrue(b.transport.closed)
+        assertTrue(b.transport.awaitClosed())
         assertEquals(listOf(a.client), admitted)
         assertFalse(a.transport.closed)
         assertEquals(emptyList<String>(), a.goodbyes())

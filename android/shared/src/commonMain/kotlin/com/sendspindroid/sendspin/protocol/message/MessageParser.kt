@@ -1,7 +1,9 @@
 package com.sendspindroid.sendspin.protocol.message
 
 import com.sendspindroid.sendspin.crypto.Base64Url
+import com.sendspindroid.sendspin.protocol.ColorState
 import com.sendspindroid.sendspin.protocol.ControllerState
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonArray
@@ -74,14 +76,35 @@ object MessageParser {
         return TimeMeasurement(offset, rtt, clientReceivedMicros)
     }
 
+    /** `nonce_A` from a well-formed `server/pair-init`. */
+    sealed interface ServerPairInitNonce {
+        /** The message carries none, as it must after `client/pair-retry`. */
+        object Absent : ServerPairInitNonce
+
+        /** The first round's 32-byte nonce. */
+        class Present(val nonceA: ByteArray) : ServerPairInitNonce
+    }
+
     /**
      * Parse `server/pair-init` for the Dynamic Pairing Code flow.
      *
-     * @return `nonce_A`, or null if the field is missing or not a 32-byte
-     *   base64url value. Both are protocol errors for the caller to raise.
+     * `pairing.md#server--client-serverpair-init`: `nonce_A` is "Present in
+     * the first round only", so an absent (or JSON null) field is not
+     * malformed here; whether it is right for the round is the flow's to
+     * judge.
+     *
+     * @return null if the payload is missing, or `nonce_A` is there but is
+     *   not a 32-byte base64url string. Both are protocol errors for the
+     *   caller to raise.
      */
-    fun parseServerPairInit(payload: JsonObject?): ByteArray? =
-        decodeFixed(payload, "nonce_A", 32)
+    fun parseServerPairInit(payload: JsonObject?): ServerPairInitNonce? {
+        if (payload == null) return null
+        val value = payload["nonce_A"] ?: return ServerPairInitNonce.Absent
+        if (value is JsonNull) return ServerPairInitNonce.Absent
+        val text = (value as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+        val bytes = Base64Url.decodeOrNull(text)?.takeIf { it.size == 32 } ?: return null
+        return ServerPairInitNonce.Present(bytes)
+    }
 
     /**
      * Parse `server/pair-auth` for the Dynamic Pairing Code flow.
@@ -123,6 +146,7 @@ object MessageParser {
         metadata = (payload?.get("metadata") as? JsonObject)?.let(::parseMetadata),
         playbackState = payload?.stringOrDefault("state", "")?.takeIf { it.isNotEmpty() },
         controller = (payload?.get("controller") as? JsonObject)?.let(::parseController),
+        color = (payload?.get("color") as? JsonObject)?.let(::parseColor),
     )
 
     private fun parseMetadata(obj: JsonObject): TrackMetadata = TrackMetadata(
@@ -167,6 +191,32 @@ object MessageParser {
         shuffle = obj["shuffle"]?.booleanOrNull(),
         seekMaxMs = obj["seek_max_ms"]?.longOrNull(),
     )
+
+    private fun parseColor(obj: JsonObject): ColorState = ColorState(
+        timestamp = obj["timestamp"]?.longOrNull(),
+        backgroundDark = obj["background_dark"]?.rgbOrNull(),
+        backgroundLight = obj["background_light"]?.rgbOrNull(),
+        primary = obj["primary"]?.rgbOrNull(),
+        accent = obj["accent"]?.rgbOrNull(),
+        onDark = obj["on_dark"]?.rgbOrNull(),
+        onLight = obj["on_light"]?.rgbOrNull(),
+    )
+
+    /**
+     * roles/color/v1.md gives every color as "integer[] ... `[R, G, B]` with
+     * values 0-255", packed here as 0xFFRRGGBB. Anything else has no value. A
+     * string is not an integer, though intOrNull would read "12" as one.
+     */
+    private fun JsonElement.rgbOrNull(): Int? {
+        val channels = (this as? JsonArray)?.takeIf { it.size == 3 } ?: return null
+        var argb = 0xFF
+        for (channel in channels) {
+            val value = (channel as? JsonPrimitive)?.takeUnless { it.isString }?.intOrNull
+            if (value == null || value !in 0..255) return null
+            argb = (argb shl 8) or value
+        }
+        return argb
+    }
 
     /**
      * Music Assistant sends the four-character string "null" for an absent

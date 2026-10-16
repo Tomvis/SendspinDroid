@@ -6,6 +6,7 @@ import kotlin.math.abs
 import kotlin.math.log10
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -91,6 +92,36 @@ class VolumeLawTest {
         assertFalse(VolumeLaw.isFullVolumeOutput(asked = 13, applied = 10, maxIndex = maxIndex))
         // Volume 0 mutes, which reads back as index 0
         assertFalse(VolumeLaw.isFullVolumeOutput(asked = 0, applied = 0, maxIndex = maxIndex))
+    }
+
+    @Test
+    fun `a volume set on a full-volume output is track gain alone`() {
+        // Found so by this set
+        assertTrue(VolumeLaw.isFullVolumeSet(knownFullVolume = false, asked = 8, applied = maxIndex, maxIndex = maxIndex))
+        // Found before: a volume near the top asks for max, which reads back as asked
+        val asked = VolumeLaw.indexFor(90, maxIndex, dbAt)
+        assertEquals(maxIndex, asked)
+        assertTrue(VolumeLaw.isFullVolumeSet(knownFullVolume = true, asked = asked, applied = maxIndex, maxIndex = maxIndex))
+        // Not found before, the same set tells nothing
+        assertFalse(VolumeLaw.isFullVolumeSet(knownFullVolume = false, asked = asked, applied = maxIndex, maxIndex = maxIndex))
+        // A variable sink of a type found full-volume before holds the index it is given
+        assertFalse(VolumeLaw.isFullVolumeSet(knownFullVolume = true, asked = 8, applied = 8, maxIndex = maxIndex))
+    }
+
+    @Test
+    fun `a fixed-volume or full-volume output starts at the volume last set there`() {
+        assertEquals(30, VolumeLaw.restoredVolume(volumeFixed = true, fullVolume = false, stored = 30))
+        assertEquals(30, VolumeLaw.restoredVolume(volumeFixed = false, fullVolume = true, stored = 30))
+        // None set there yet
+        assertNull(VolumeLaw.restoredVolume(volumeFixed = true, fullVolume = false, stored = null))
+        assertNull(VolumeLaw.restoredVolume(volumeFixed = false, fullVolume = true, stored = null))
+    }
+
+    @Test
+    fun `a variable output starts from its own index`() {
+        // Its index stands for the volume, and Android keeps it, even where a
+        // volume was kept for a full-volume output of the same type
+        assertNull(VolumeLaw.restoredVolume(volumeFixed = false, fullVolume = false, stored = 30))
     }
 
     @Test

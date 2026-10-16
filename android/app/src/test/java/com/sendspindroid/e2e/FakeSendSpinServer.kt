@@ -128,7 +128,10 @@ class FakeSendSpinServer(
         album: String = "Test Album",
         durationMs: Long = 240000,
         positionMs: Long = 0,
-        artworkUrl: String = ""
+        artworkUrl: String = "",
+        albumArtist: String? = null,
+        year: Int? = null,
+        track: Int? = null
     ) {
         val msg = buildJsonObject {
             put("type", "server/state")
@@ -139,11 +142,33 @@ class FakeSendSpinServer(
                     put("artist", artist)
                     put("album", album)
                     put("artwork_url", artworkUrl)
+                    // Optional fields: a track without them leaves them out.
+                    albumArtist?.let { put("album_artist", it) }
+                    year?.let { put("year", it) }
+                    track?.let { put("track", it) }
                     put("timestamp", 0)
                     put("progress", buildJsonObject {
                         put("track_progress", positionMs)
                         put("track_duration", durationMs)
                         put("playback_speed", 1000)
+                    })
+                })
+            })
+        }
+        transport.simulateTextMessage(msg.toString())
+    }
+
+    /**
+     * Send a server/state carrying only a `color` object, current at once.
+     */
+    fun sendColorState() {
+        val msg = buildJsonObject {
+            put("type", "server/state")
+            put("payload", buildJsonObject {
+                put("color", buildJsonObject {
+                    put("timestamp", 0)
+                    put("background_dark", buildJsonArray {
+                        listOf(18, 52, 86).forEach { add(JsonPrimitive(it)) }
                     })
                 })
             })

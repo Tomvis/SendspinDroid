@@ -2,7 +2,6 @@ package com.sendspindroid.sendspin.protocol
 
 import com.sendspindroid.sendspin.crypto.Base64Url
 import com.sendspindroid.sendspin.crypto.PskCategory
-import com.sendspindroid.sendspin.pairing.PairingFailureCounter
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -64,14 +63,36 @@ class PairingAttemptTest {
     private fun serverPairConfirm() =
         """{"type":"server/pair-confirm","payload":{"server_kc":"${Base64Url.encode(ByteArray(64))}"}}"""
 
+    /** After `client/pair-retry`, `server/pair-init` "is sent without" a nonce. */
+    private val serverPairInitNextRound = """{"type":"server/pair-init","payload":{}}"""
+
     private val serverPairFinalize = """{"type":"server/pair-finalize","payload":{}}"""
 
-    /** A dynamic attempt driven up to a failed `server_kc`. */
+    /** One round whose code was entered wrong: the server's init, its share and a tag that fails. */
+    private fun CrossTerminationTestHandler.failRound(first: Boolean) {
+        receive(if (first) serverPairInit() else serverPairInitNextRound)
+        receive(serverPairAuth())
+        receive(serverPairConfirm())
+    }
+
+    /** A dynamic attempt driven up to a failed `server_kc` in its first round. */
     private fun mismatchedAttempt(): CrossTerminationTestHandler {
         val handler = handler(PskCategory.SENTINEL)
         handler.receive(pairingActivateJson(dynamic))
         handler.receive(serverPairInit())
         assertNotNull("the code is shown once server/pair-init arrives", handler.shownCode)
+        handler.receive(serverPairAuth())
+        handler.clearEvents()
+        handler.receive(serverPairConfirm())
+        return handler
+    }
+
+    /** A dynamic attempt whose every round fails, through the last failure the round limit allows. */
+    private fun attemptAtRoundLimit(): CrossTerminationTestHandler {
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic))
+        repeat(ROUND_LIMIT - 1) { handler.failRound(first = it == 0) }
+        handler.receive(serverPairInitNextRound)
         handler.receive(serverPairAuth())
         handler.clearEvents()
         handler.receive(serverPairConfirm())
@@ -218,11 +239,78 @@ class PairingAttemptTest {
         assertEquals(1, handler.protocolFailures.size)
     }
 
-    // ========== server_kc mismatch ==========
+    // ========== Rounds ==========
 
     @Test
-    fun `a server_kc mismatch aborts, stops showing the code and cancels the attempt timer`() {
+    fun `a wrong code asks for another round and keeps showing the code`() {
+        // pairing.md "Rounds": "The client SHOULD retry", and "A retry keeps
+        // the attempt, its pairing code, and its running attempt timeout in
+        // place".
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic))
+        handler.receive(serverPairInit())
+        val code = handler.shownCode
+        handler.receive(serverPairAuth())
+        handler.clearEvents()
+
+        handler.receive(serverPairConfirm())
+
+        assertEquals(listOf("send:client/pair-retry"), handler.pairingEvents())
+        assertEquals("{}", handler.sentPayloads("client/pair-retry").single().toString())
+        assertEquals(code, handler.shownCode)
+        assertEquals(emptyList<String>(), handler.protocolFailures)
+    }
+
+    @Test
+    fun `the next round's server pair-init without a nonce shows the same code and runs the round`() {
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic))
+        handler.receive(serverPairInit())
+        val code = handler.shownCode
+        handler.receive(serverPairAuth())
+        handler.receive(serverPairConfirm())
+        handler.clearEvents()
+
+        handler.receive(serverPairInitNextRound)
+        handler.receive(serverPairAuth())
+
+        assertEquals(emptyList<String>(), handler.protocolFailures)
+        assertEquals(code, handler.shownCode)
+        assertEquals(listOf("send:client/pair-auth"), handler.pairingEvents())
+    }
+
+    @Test
+    fun `a nonce in the next round's server pair-init is a protocol error`() {
+        // nonce_A: "Present in the first round only."
         val handler = mismatchedAttempt()
+
+        handler.receive(serverPairInit())
+
+        assertEquals(1, handler.protocolFailures.size)
+    }
+
+    @Test
+    fun `a retry keeps the attempt timer running from client pair-init`() {
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic))
+        handler.scope.advanceTimeBy(SendSpinProtocol.PAIR_ATTEMPT_TIMEOUT_MS / 2)
+        handler.failRound(first = true)
+        handler.clearEvents()
+
+        handler.scope.advanceTimeBy(SendSpinProtocol.PAIR_ATTEMPT_TIMEOUT_MS / 2 - 1)
+        handler.scope.runCurrent()
+        assertEquals("not restarted by the retry, nor yet due", emptyList<String>(), handler.abortReasons())
+
+        handler.scope.advanceTimeBy(1)
+        handler.scope.runCurrent()
+        assertEquals(listOf("attempt_timeout"), handler.abortReasons())
+        assertNull("the code must leave the screen", handler.shownCode)
+    }
+
+    @Test
+    fun `at the round limit a wrong code aborts, stops showing the code and cancels the attempt timer`() {
+        // "The client SHOULD retry, and MUST abort instead at the round limit."
+        val handler = attemptAtRoundLimit()
 
         assertEquals(listOf("send:pair/abort"), handler.pairingEvents())
         assertEquals(listOf("pairing_code_mismatch"), handler.abortReasons())
@@ -237,19 +325,32 @@ class PairingAttemptTest {
     }
 
     @Test
-    fun `the connection survives a mismatch and pairs on the next activation`() {
-        val handler = mismatchedAttempt()
+    fun `after the round limit the next attempt is held back until Allow pairing, which resets the count`() {
+        // "hold attempts back until a deliberate, manufacturer-defined
+        // operator action, which also resets the count."
+        val handler = attemptAtRoundLimit()
         handler.clearEvents()
 
         // In flight from before the server saw the abort: discarded.
-        handler.receive(serverPairInit())
+        handler.receive(serverPairInitNextRound)
         assertEquals(emptyList<String>(), handler.protocolFailures)
-        assertNull(handler.shownCode)
 
         handler.receive(pairingActivateJson(dynamic))
+        assertEquals(listOf("send:client/pair-pending"), handler.pairingEvents())
+        assertNull(handler.shownCode)
+
+        handler.clearEvents()
+        handler.confirmDynamicPairingGesture()
+        handler.scope.runCurrent()
         assertEquals(listOf(2), handler.pairInitIndexes())
+
+        // The count starts again: a wrong code is retried, not aborted.
         handler.receive(serverPairInit())
         assertNotNull("the new attempt shows its own code", handler.shownCode)
+        handler.receive(serverPairAuth())
+        handler.clearEvents()
+        handler.receive(serverPairConfirm())
+        assertEquals(listOf("send:client/pair-retry"), handler.pairingEvents())
         assertFalse(handler.events.contains("close"))
     }
 
@@ -284,14 +385,20 @@ class PairingAttemptTest {
     }
 
     @Test
+    fun `an activation while waiting for the next round abandons the attempt`() {
+        // The retry kept the attempt in progress.
+        val handler = mismatchedAttempt()
+
+        handler.receive(leavePairing)
+
+        assertEquals(1, handler.abandonments)
+        assertNull("the code must leave the screen", handler.shownCode)
+    }
+
+    @Test
     fun `an activation that ends a wait for the gesture abandons it`() {
-        val handler = handler(PskCategory.SENTINEL)
-        // Each code emitted counts towards escalation, after which an
-        // attempt waits for the operator's gesture.
-        repeat(PairingFailureCounter.ESCALATION_THRESHOLD) {
-            handler.receive(pairingActivateJson(dynamic))
-            handler.receive(serverPairInit())
-        }
+        // At the round limit the next attempt waits for the operator's gesture.
+        val handler = attemptAtRoundLimit()
         handler.clearEvents()
         handler.receive(pairingActivateJson(dynamic))
         assertEquals(listOf("send:client/pair-pending"), handler.pairingEvents())
@@ -303,9 +410,9 @@ class PairingAttemptTest {
 
     @Test
     fun `an activation after our own abort of a dynamic attempt does not abandon it`() {
-        // The abort already ended the attempt and said why: "The code
-        // entered on ... did not match" must not be replaced.
-        val handler = mismatchedAttempt()
+        // The abort already ended the attempt and said why: "Too many wrong
+        // codes were entered on ..." must not be replaced.
+        val handler = attemptAtRoundLimit()
 
         handler.receive(leavePairing)
 
@@ -361,5 +468,8 @@ class PairingAttemptTest {
     private companion object {
         /** A valid, non-low-order CPace share (draft-irtf-cfrg-cpace B.1.10, u6). */
         val VALID_SHARE = ByteArray(32) { 0xff.toByte() }.also { it[0] = 0xda.toByte() }
+
+        /** pairing.md "Rounds": "After 20 rounds since its last verified `server_kc` - the round limit". */
+        const val ROUND_LIMIT = 20
     }
 }

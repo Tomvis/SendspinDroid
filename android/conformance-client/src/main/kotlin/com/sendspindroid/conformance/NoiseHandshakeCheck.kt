@@ -65,8 +65,8 @@ import java.util.concurrent.TimeUnit
  *
  * Usage: `NoiseHandshakeCheck <ws://host:port/sendspin> [identity-file]
  *   [--hold | --hold-seconds=N] [--expect-audio] [--expect-artwork]
- *   [--expect-rehandshake] [--pair] [--expect-mismatches=N] [--expect-paired]
- *   [--seek]`
+ *   [--expect-rehandshake] [--pair] [--expect-retries=N] [--expect-mismatches=N]
+ *   [--auto-allow] [--expect-paired] [--seek]`
  *
  * With `--seek` it sends one `seek` and one `seek_relative`, built by the real
  * `MessageBuilder.buildCommand`, once the server's controller state offers
@@ -88,6 +88,12 @@ import java.util.concurrent.TimeUnit
  * passes once the record is persisted, the server has re-handshaken to it and
  * a `server/activate` has followed. `--expect-paired` instead fails unless the
  * initial handshake itself matched a stored record.
+ *
+ * A wrong code is answered with `client/pair-retry`, and the next round shows
+ * the same code; `--expect-retries=N` requires exactly N of them. The round
+ * count is the run's own, starting at 0. Once it reaches the round limit the
+ * next attempt is held back with `client/pair-pending` until the operator
+ * allows pairing, which `--auto-allow` does at once.
  *
  * What `--pair` does NOT drive is `SendSpinProtocolHandler`, which lives in
  * the Android module: counting `pairing_index`, routing a message to the flow
@@ -120,10 +126,17 @@ object NoiseHandshakeCheck {
         val expectRehandshake = args.contains("--expect-rehandshake")
         // Run a pairing to completion instead of declining it.
         val pair = args.contains("--pair")
+        // With --pair: the number of client/pair-retry sent for wrong codes.
+        val expectRetries = args.firstOrNull { it.startsWith("--expect-retries=") }
+            ?.substringAfter('=')?.toIntOrNull()
         // With --pair: the number of attempts that must end in our own
-        // pair/abort pairing_code_mismatch before one succeeds.
+        // pair/abort pairing_code_mismatch, at the round limit, before one
+        // succeeds.
         val expectMismatches = args.firstOrNull { it.startsWith("--expect-mismatches=") }
             ?.substringAfter('=')?.toIntOrNull()
+        // With --pair: lift a round-limit hold-back at once, as the operator's
+        // "Allow pairing" tap would.
+        val autoAllow = args.contains("--auto-allow")
         // Fail unless the initial handshake matched a stored pairing record.
         val expectPaired = args.contains("--expect-paired")
         // Send a seek and a seek_relative once the server offers both.
@@ -197,6 +210,7 @@ object NoiseHandshakeCheck {
         val pskFlow = PairingPskFlow()
         var dynamicFlow: DynamicPairingCodeFlow? = null
         var recordsPersisted = 0
+        var retries = 0
         var mismatches = 0
         val abortsSent = mutableListOf<String>()
         val counterStore = object : PairingCounterStore {
@@ -285,13 +299,21 @@ object NoiseHandshakeCheck {
                         "client/pair-finalize (wrapped_psk)",
                     )
                     is DynamicPairingAction.SendPairAbort -> sendPairAbort(action.reason)
+                    DynamicPairingAction.SendPairRetry -> {
+                        retries++
+                        sendEncrypted(MessageBuilder.buildClientPairRetry(), "client/pair-retry")
+                    }
                     is DynamicPairingAction.PersistRecord -> persistRecord(action.psk)
                     DynamicPairingAction.StopEmittingCode -> if (codeFile.delete()) {
                         println("         pairing code cleared")
                     }
                     DynamicPairingAction.ProtocolError -> fail("dynamic pairing protocol error")
-                    // No gesture UI and no timer: the run is bounded by its own timeout.
-                    DynamicPairingAction.RequestGesture, DynamicPairingAction.StartAttemptTimeout -> Unit
+                    DynamicPairingAction.RequestGesture -> if (autoAllow) {
+                        println("         held back at the round limit; allowing pairing (--auto-allow)")
+                        runDynamicActions(DynamicPairingEvent.WindowOpened)
+                    }
+                    // No timer: the run is bounded by its own timeout.
+                    DynamicPairingAction.StartAttemptTimeout -> Unit
                 }
             }
         }
@@ -516,9 +538,14 @@ object NoiseHandshakeCheck {
                             }
 
                             SendSpinProtocol.MessageType.SERVER_PAIR_INIT ->
-                                MessageParser.parseServerPairInit(payload)
-                                    ?.let { runDynamicActions(DynamicPairingEvent.ServerPairInit(it)) }
-                                    ?: fail("malformed server/pair-init")
+                                when (val nonce = MessageParser.parseServerPairInit(payload)) {
+                                    null -> fail("malformed server/pair-init")
+                                    else -> runDynamicActions(
+                                        DynamicPairingEvent.ServerPairInit(
+                                            (nonce as? MessageParser.ServerPairInitNonce.Present)?.nonceA,
+                                        )
+                                    )
+                                }
 
                             SendSpinProtocol.MessageType.SERVER_PAIR_AUTH ->
                                 MessageParser.parseServerPairAuth(payload)
@@ -637,7 +664,8 @@ object NoiseHandshakeCheck {
         println("  initial psk    : $initialCategory")
         if (pair) {
             println("  pairing        : $recordsPersisted record(s) persisted, " +
-                "${store.listRecords().size} stored; pair/abort sent: $abortsSent")
+                "${store.listRecords().size} stored; client/pair-retry sent: $retries; " +
+                "pair/abort sent: $abortsSent")
         }
         audio.report().forEach { println("  $it") }
         artwork.report().forEach { println("  $it") }
@@ -663,11 +691,14 @@ object NoiseHandshakeCheck {
                 exitFail("server/hello was sent $serverHellos times; a re-handshake re-sends neither hello")
             pair && store.listRecords().size != 1 ->
                 exitFail("${store.listRecords().size} records stored for one server; a new record replaces the old")
+            expectRetries != null && retries != expectRetries ->
+                exitFail("sent $retries client/pair-retry, expected $expectRetries")
             expectMismatches != null && mismatches != expectMismatches ->
                 exitFail("sent $mismatches pairing_code_mismatch aborts, expected $expectMismatches")
             pair -> println(
                 "PASS: paired, re-handshook to the long-term PSK and activated" +
-                    (expectMismatches?.let { " after $it pairing_code_mismatch" } ?: "")
+                    (expectRetries?.let { " after $it client/pair-retry" } ?: "") +
+                    (expectMismatches?.let { " and $it pairing_code_mismatch" } ?: "")
             )
             expectPaired -> println("PASS: authenticated with the stored pairing record")
             expectRehandshake && rehandshakes == 0 -> exitFail("the server never re-handshook")

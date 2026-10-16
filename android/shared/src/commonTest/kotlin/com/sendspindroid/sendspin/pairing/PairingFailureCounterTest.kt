@@ -4,63 +4,71 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * pairing.md "Failure counter": one counter for the method, persisted across
- * reboots, NOT partitioned by server_id or source IP. It increments when the
- * client starts emitting the code, at most once per attempt, and "no other
- * event increments it". It resets when server_kc verification succeeds,
- * whether or not the attempt finalizes. At 5 the method escalates.
- *
- * Note the divergence recorded in the design doc: the aiosendspin 9.1.1
- * reference increments on a server_kc MISMATCH instead. We follow the spec,
- * so five attempts escalate even when each reached a valid server_kc.
+ * pairing.md "Rounds": "After 20 rounds since its last verified `server_kc` -
+ * the round limit - the client MUST abort rather than retry and hold attempts
+ * back until a deliberate, manufacturer-defined operator action, which also
+ * resets the count. The count is not partitioned by `server_id` or source
+ * address."
  */
 class PairingFailureCounterTest {
 
     private class FakeStore(var value: Int = 0) : PairingCounterStore {
-        var saves = 0
         override fun load(): Int = value
-        override fun save(v: Int) { value = v; saves++ }
+        override fun save(v: Int) { value = v }
     }
 
     @Test
-    fun `starts unescalated`() {
-        assertEquals(false, PairingFailureCounter(FakeStore()).isEscalated)
+    fun `starts below the round limit`() {
+        assertEquals(false, PairingFailureCounter(FakeStore()).roundLimitReached)
     }
 
     @Test
-    fun `escalates on the fifth emission`() {
-        val counter = PairingFailureCounter(FakeStore())
-        repeat(4) { counter.onEmissionStarted() }
-        assertEquals(false, counter.isEscalated)
-        counter.onEmissionStarted()
-        assertEquals(true, counter.isEscalated)
-    }
-
-    @Test
-    fun `a verified server_kc de-escalates`() {
-        val counter = PairingFailureCounter(FakeStore())
-        repeat(5) { counter.onEmissionStarted() }
-        counter.onServerKcVerified()
-        assertEquals(false, counter.isEscalated)
-    }
-
-    @Test
-    fun `the counter persists through the store`() {
+    fun `each round started adds exactly one`() {
         val store = FakeStore()
-        PairingFailureCounter(store).onEmissionStarted()
+        val counter = PairingFailureCounter(store)
+        counter.onRoundStarted()
         assertEquals(1, store.value)
-        assertEquals(1, PairingFailureCounter(store).let { it.onEmissionStarted(); store.value } - 1)
+        counter.onRoundStarted()
+        assertEquals(2, store.value)
     }
 
     @Test
-    fun `a stored value above the threshold is already escalated`() {
-        assertEquals(true, PairingFailureCounter(FakeStore(9)).isEscalated)
+    fun `the limit is reached at the twentieth round`() {
+        val counter = PairingFailureCounter(FakeStore())
+        repeat(19) { counter.onRoundStarted() }
+        assertEquals(false, counter.roundLimitReached)
+        counter.onRoundStarted()
+        assertEquals(true, counter.roundLimitReached)
     }
 
     @Test
-    fun `reset writes zero even when already zero is not required`() {
-        val store = FakeStore(3)
-        PairingFailureCounter(store).onServerKcVerified()
+    fun `a verified server_kc resets the count`() {
+        val store = FakeStore(20)
+        val counter = PairingFailureCounter(store)
+        counter.onServerKcVerified()
         assertEquals(0, store.value)
+        assertEquals(false, counter.roundLimitReached)
+    }
+
+    @Test
+    fun `the operator action resets the count`() {
+        val store = FakeStore(20)
+        val counter = PairingFailureCounter(store)
+        counter.onOperatorAllowed()
+        assertEquals(0, store.value)
+        assertEquals(false, counter.roundLimitReached)
+    }
+
+    @Test
+    fun `the count persists through the store`() {
+        val store = FakeStore()
+        PairingFailureCounter(store).onRoundStarted()
+        PairingFailureCounter(store).onRoundStarted()
+        assertEquals(2, store.value)
+    }
+
+    @Test
+    fun `a stored value past the limit is at the limit`() {
+        assertEquals(true, PairingFailureCounter(FakeStore(25)).roundLimitReached)
     }
 }

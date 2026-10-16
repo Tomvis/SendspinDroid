@@ -38,8 +38,10 @@ try:
         PairMethod,
     )
     from aiosendspin.noise.pairing_token import decode_psk_token
-    from aiosendspin.noise.trust_store import FileServerPairingStore
+    from aiosendspin.noise.trust_store import PAIRING_ROUND_LIMIT, FileServerPairingStore
+    from aiosendspin.server.roles.color import Color
     from aiosendspin.server.roles.controller.events import ControllerEvent
+    from aiosendspin.server.roles.metadata import Metadata
     from aiosendspin.server.server import SendspinServer
     from PIL import Image
 except ImportError:  # pragma: no cover - environment guidance, not logic
@@ -58,6 +60,27 @@ DEFAULT_PORT = 8927
 # --play-test-audio: 16-bit stereo at 48 kHz, in 100 ms chunks.
 TEST_AUDIO_FORMAT = AudioFormat(sample_rate=48000, bit_depth=16, channels=2)
 TEST_AUDIO_CHUNK_FRAMES = 4800
+
+# --send-test-colors: two palettes with every field set, blue then red. Color
+# refuses a palette that misses one of the spec's 4.5:1 contrast pairs.
+TEST_COLORS = (
+    Color(
+        background_dark=(18, 52, 86),
+        background_light=(220, 232, 245),
+        primary=(40, 100, 180),
+        accent=(230, 140, 40),
+        on_dark=(170, 210, 250),
+        on_light=(20, 60, 110),
+    ),
+    Color(
+        background_dark=(90, 20, 30),
+        background_light=(250, 225, 225),
+        primary=(200, 40, 50),
+        accent=(40, 160, 150),
+        on_dark=(255, 200, 200),
+        on_light=(110, 20, 30),
+    ),
+)
 
 
 def test_audio_chunk(first_frame: int) -> bytes:
@@ -127,6 +150,34 @@ async def _prompt_pairing_code() -> str:
     print("Enter the pairing code shown on the device: ", end="", flush=True)
     line = await loop.run_in_executor(None, sys.stdin.readline)
     return line.strip()
+
+
+# Entered by `pair-dynamic wrong=N`. Wrong unless the device happens to show it.
+WRONG_PAIRING_CODE = "000000"
+
+
+def _console_pairing_code(wrong: int):
+    """A `PairingCodeProvider` that enters `wrong` wrong codes, then prompts.
+
+    aiosendspin calls the provider once per round, so each wrong code is one
+    round, which the client answers with client/pair-retry.
+    """
+    left = wrong
+
+    async def provider() -> str:
+        nonlocal left
+        if left > 0:
+            left -= 1
+            LOGGER.info("entering the wrong pairing code %s (%d more to come)", WRONG_PAIRING_CODE, left)
+            return WRONG_PAIRING_CODE
+        return await _prompt_pairing_code()
+
+    return provider
+
+
+def log_pair_pending(message: str | None) -> None:
+    """Log a client/pair-pending: the client holds the attempt back, e.g. at its round limit."""
+    LOGGER.info("client held the attempt back (client/pair-pending): %r", message)
 
 
 def describe_client(client) -> str:
@@ -379,6 +430,103 @@ class DevServer:
             await asyncio.sleep(2.0)
         LOGGER.info("test artwork: done")
 
+    async def send_test_metadata(self) -> None:
+        """Send three tracks' metadata to the first metadata client, then clear it.
+
+        A compilation track, whose album artist differs from its artist; an
+        album by the track's own artist; and a track without album_artist,
+        year or track, which aiosendspin then leaves out of the message. Each
+        step is held for 15 s, so a device can be inspected at every one.
+        """
+        assert self._server is not None
+        while True:
+            target = next(
+                (
+                    client
+                    for client in self._server.connected_clients
+                    if client.roles_by_family("metadata")
+                ),
+                None,
+            )
+            if target is not None:
+                break
+            await asyncio.sleep(0.5)
+        metadata = target.group.group_role("metadata")
+        for step in (
+            Metadata(
+                title="Bohemian Rhapsody", artist="Queen", album_artist="Various Artists",
+                album="Now 44", year=1999, track=7,
+                track_progress=0, track_duration=354000, playback_speed=1000,
+            ),
+            Metadata(
+                title="Love of My Life", artist="Queen", album_artist="Queen",
+                album="A Night at the Opera", year=1975, track=9,
+                track_progress=0, track_duration=219000, playback_speed=1000,
+            ),
+            Metadata(
+                title="Radio Edit", artist="Queen", album="Singles",
+                track_progress=0, track_duration=180000, playback_speed=1000,
+            ),
+            None,
+        ):
+            LOGGER.info(
+                "test metadata: %s",
+                "clear"
+                if step is None
+                else f"title={step.title!r} artist={step.artist!r} "
+                f"album_artist={step.album_artist!r} album={step.album!r} "
+                f"year={step.year} track={step.track}",
+            )
+            metadata.set_metadata(step)
+            await asyncio.sleep(15.0)
+        LOGGER.info("test metadata: done")
+
+    async def send_test_colors(self) -> None:
+        """Send a palette to the first color client, schedule a second, then clear.
+
+        The first applies at once. The second is scheduled ten seconds ahead,
+        inside the 20 seconds a server may send it early, so it goes out now: a
+        client that follows roles/color/v1.md holds it as its pending update
+        and applies it ten seconds after the "scheduled" line, not on receipt.
+        The clear is a color object with only a timestamp. Each color object
+        this sends is logged as JSON. The one the role sends when it is
+        activated, with only a timestamp, goes out before the role is listed
+        here, so it is not logged; only the client shows it.
+        """
+        assert self._server is not None
+        while True:
+            target = next(
+                (
+                    (client, role)
+                    for client in self._server.connected_clients
+                    for role in client.roles_by_family("color")
+                ),
+                None,
+            )
+            if target is not None:
+                break
+            await asyncio.sleep(0.5)
+        client, role = target
+
+        send_message = role.send_message
+
+        def logged_send_message(message) -> None:
+            LOGGER.info("test colors: sent %s", message.to_json())
+            send_message(message)
+
+        role.send_message = logged_send_message
+        color = client.group.group_role("color")
+        # The activation's own current state goes out first.
+        await asyncio.sleep(1.0)
+        color.set_color(TEST_COLORS[0])
+        LOGGER.info("test colors: palette A current")
+        await asyncio.sleep(3.0)
+        color.set_color(TEST_COLORS[1], timestamp_us=self._server.clock.now_us() + 10_000_000)
+        LOGGER.info("test colors: palette B scheduled for +10s")
+        await asyncio.sleep(14.0)
+        color.clear()
+        LOGGER.info("test colors: done")
+
     async def pair_with_token(self, token_file: Path) -> None:
         """Pair, by Pairing PSK, with the client whose token is in `token_file`.
 
@@ -417,8 +565,12 @@ class DevServer:
 
         Stands in for the operator: the code is read from `code_file`, where
         NoiseHandshakeCheck --pair writes the one it is showing. The first
-        `wrong_codes` attempts enter a different code instead, which the client
-        answers with pair/abort pairing_code_mismatch.
+        `wrong_codes` rounds, counted across attempts, enter a different code
+        instead. The client answers each with client/pair-retry and shows the
+        same code again, up to its round limit, where it aborts with
+        pair/abort pairing_code_mismatch. Another attempt then follows, which
+        the client holds back with client/pair-pending until pairing is
+        allowed (NoiseHandshakeCheck --auto-allow).
         """
         assert self._server is not None
         while True:
@@ -434,21 +586,26 @@ class DevServer:
                 break
             await asyncio.sleep(0.5)
 
-        for attempt in range(wrong_codes + 1):
-            wrong = attempt < wrong_codes
+        wrong_left = wrong_codes
 
-            async def entered_code(wrong: bool = wrong) -> str:
-                while True:
-                    with contextlib.suppress(FileNotFoundError):
-                        code = code_file.read_text(encoding="utf-8").strip()
-                        if len(code) == 6:
-                            break
-                    await asyncio.sleep(0.1)
-                if wrong:
-                    code = f"{(int(code) + 1) % 1_000_000:06d}"
-                LOGGER.info("entering %s pairing code", "a wrong" if wrong else "the client's")
-                return code
+        # aiosendspin calls this once per round.
+        async def entered_code() -> str:
+            nonlocal wrong_left
+            while True:
+                with contextlib.suppress(FileNotFoundError):
+                    code = code_file.read_text(encoding="utf-8").strip()
+                    if len(code) == 6:
+                        break
+                await asyncio.sleep(0.1)
+            wrong = wrong_left > 0
+            if wrong:
+                wrong_left -= 1
+                code = f"{(int(code) + 1) % 1_000_000:06d}"
+            LOGGER.info("entering %s pairing code", "a wrong" if wrong else "the client's")
+            return code
 
+        # An attempt runs at most the client's round limit of rounds.
+        for _ in range(wrong_codes // PAIRING_ROUND_LIMIT + 2):
             # A code left over from an earlier attempt is not this attempt's.
             code_file.unlink(missing_ok=True)
             LOGGER.info("pairing %s by dynamic pairing code", client.client_id)
@@ -459,12 +616,15 @@ class DevServer:
                         PairMethod.DYNAMIC_PAIRING_CODE,
                         pairing_code_provider=entered_code,
                         pairing_format=PairingCodeFormat.DIGITS,
+                        on_pair_pending=log_pair_pending,
                     ),
                 )
             except Exception as err:
                 LOGGER.info("pairing attempt ended: %s: %s", type(err).__name__, err)
             else:
                 LOGGER.info("pairing attempt completed")
+                return
+        LOGGER.error("no dynamic pairing attempt completed")
 
     # -- console -----------------------------------------------------------
 
@@ -537,7 +697,8 @@ class DevServer:
             )
             print("pairing initiated")
         elif cmd in ("pair-dynamic", "pd"):
-            client_id = self._resolve(rest)
+            wrong = next((int(arg.removeprefix("wrong=")) for arg in rest if arg.startswith("wrong=")), 0)
+            client_id = self._resolve([arg for arg in rest if not arg.startswith("wrong=")])
             if server.get_client(client_id) is None:
                 raise ValueError(
                     f"no connected client with id {client_id}; the device must be "
@@ -548,8 +709,9 @@ class DevServer:
                 client_id,
                 PairingAttempt(
                     PairMethod.DYNAMIC_PAIRING_CODE,
-                    pairing_code_provider=_prompt_pairing_code,
+                    pairing_code_provider=_console_pairing_code(wrong),
                     pairing_format=PairingCodeFormat.DIGITS,
+                    on_pair_pending=log_pair_pending,
                 ),
             )
             print("pairing initiated")
@@ -574,7 +736,9 @@ class DevServer:
             "  trust [id]         allow an unpaired client to play (Sentinel PSK)\n"
             "  untrust [id]       revoke unpaired playback\n"
             "  pair <token>       pair using a SP:0... pairing token from the device\n"
-            "  pair-dynamic [id]  pair using the six-digit dynamic pairing code\n"
+            "  pair-dynamic [id] [wrong=N]\n"
+            "                     pair using the six-digit dynamic pairing code; with\n"
+            f"                     wrong=N the first N rounds enter {WRONG_PAIRING_CODE}\n"
             "  unpair [id]        drop the pairing record and tell the client\n"
             "  quit               stop the server\n"
             "id defaults to the only connected client when omitted.\n"
@@ -637,6 +801,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="send two album artwork images, then a clear, to the first artwork client",
     )
     parser.add_argument(
+        "--send-test-metadata",
+        action="store_true",
+        help="send three tracks' metadata, 15 s apart, then a clear, to the first "
+        "metadata client",
+    )
+    parser.add_argument(
+        "--send-test-colors",
+        action="store_true",
+        help="send a color palette to the first color client, schedule a second "
+        "for 10s later, then clear the colors",
+    )
+    parser.add_argument(
         "--offer-seek",
         type=int,
         default=None,
@@ -663,7 +839,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         metavar="N",
-        help="with --pair-dynamic-code-file: enter a wrong code for the first N attempts",
+        help="with --pair-dynamic-code-file: enter a wrong code in the first N rounds, "
+        "counted across attempts",
     )
     parser.add_argument(
         "--no-console",
@@ -698,6 +875,10 @@ async def run(args: argparse.Namespace) -> int:
             await server.offer_seek(args.offer_seek)
         if args.send_test_artwork:
             await server.send_test_artwork()
+        if args.send_test_metadata:
+            await server.send_test_metadata()
+        if args.send_test_colors:
+            await server.send_test_colors()
         if args.play_test_audio:
             await server.play_test_audio(args.play_test_audio)
         if args.pair_token_file:
@@ -708,8 +889,9 @@ async def run(args: argparse.Namespace) -> int:
             )
 
     test_audio = None
-    if (args.offer_seek is not None or args.send_test_artwork or args.play_test_audio
-            or args.pair_token_file or args.pair_dynamic_code_file):
+    if (args.offer_seek is not None or args.send_test_artwork or args.send_test_metadata
+            or args.send_test_colors or args.play_test_audio or args.pair_token_file
+            or args.pair_dynamic_code_file):
         test_audio = asyncio.create_task(scripted())
         test_audio.add_done_callback(
             lambda task: task.cancelled() or task.exception() is None

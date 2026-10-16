@@ -59,6 +59,30 @@ class MetadataMediaSessionChainTest {
     }
 
     @Test
+    fun `metadata update reaches listener with album artist, year and track number`() {
+        val listener = mockk<Player.Listener>(relaxed = true)
+        forwardingPlayer.addListener(listener)
+
+        forwardingPlayer.updateMetadata(
+            title = "Bohemian Rhapsody",
+            artist = "Queen",
+            album = "Now 44",
+            albumArtist = "Various Artists",
+            year = 1999,
+            trackNumber = 7
+        )
+
+        val slot = slot<MediaMetadata>()
+        verify(exactly = 1) { listener.onMediaMetadataChanged(capture(slot)) }
+
+        val captured = slot.captured
+        assertEquals("Various Artists", captured.albumArtist?.toString())
+        assertEquals(1999, captured.releaseYear)
+        assertEquals(1999, captured.recordingYear)
+        assertEquals(7, captured.trackNumber)
+    }
+
+    @Test
     fun `getMediaMetadata returns updated metadata after updateMetadata`() {
         forwardingPlayer.updateMetadata(
             title = "Song Title",

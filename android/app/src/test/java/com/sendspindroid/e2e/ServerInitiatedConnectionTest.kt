@@ -116,6 +116,7 @@ class ServerInitiatedConnectionTest : E2ETestBase() {
             listOf("""{"type":"client/goodbye","payload":{"reason":"concurrent_attempt"}}"""),
             goodbyes(),
         )
+        assertTrue(fakeTransport.awaitClosed())
         assertTrue("the close must let the goodbye out first", fakeTransport.flushedBeforeClose)
         assertEquals(listOf(setOf(Activity.PLAYBACK)), asked)
         assertEquals(listOf("client/init", "client/hello", "client/goodbye"), sentTypes())

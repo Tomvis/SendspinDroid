@@ -54,17 +54,20 @@ data class PlaybackState(
      * Fork: artwork and total tracks survive an empty value, ancillaries clear
      * on a new track, and a new track's position 0 leaves positionUpdatedAt 0
      * (the "no anchor yet" sentinel the TV progress rail reads).
+     *
+     * [albumTrack] is the spec's `track` (roles/metadata/v1.md, the track
+     * number on the album); the fork wire's `album_track` takes precedence.
      */
     fun withMetadata(
         title: String?,
         artist: String?,
-        albumArtist: String?,
+        albumArtist: String? = null,
         album: String?,
         artworkUrl: String?,
-        year: Int?,
-        albumTrack: Int?,
-        queueTrack: Int?,
-        totalTracks: Int?,
+        year: Int? = null,
+        albumTrack: Int? = null,
+        queueTrack: Int? = null,
+        totalTracks: Int? = null,
         durationMs: Long,
         positionMs: Long,
         playbackSpeed: Int = this.playbackSpeed

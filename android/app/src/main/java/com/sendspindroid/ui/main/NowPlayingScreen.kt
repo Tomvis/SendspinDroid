@@ -246,11 +246,25 @@ fun NowPlayingScreen(
     // act on, so replace them with what the operator has to do instead. Only
     // while actually connected: the reconnect and error states have their own
     // messaging, and a stale notice on top of those would contradict them.
+    //
+    // A pairing code or the Allow pairing prompt replaces them too, with
+    // roles live. "Pairing can run alongside playback": a pairing
+    // server/activate "does not by itself affect active_roles", so a player
+    // with roles keeps them, and stays READY, all through the attempt. The
+    // code goes out on the display, and "the display showing artwork" is an
+    // output the client "suspends ... locally for the duration of the
+    // attempt" (pairing.md, Entering and leaving pairing). The audio plays
+    // on: only the display is advertised as an out-channel. Now Playing
+    // returns whenever both are clear: at the attempt's end, and for the
+    // round trip from the Allow pairing tap, which clears the prompt, to the
+    // code.
+    val pairingPrompt = pairingCode != null || pairingGestureRequested
     if (connectionState is AppConnectionState.Connected &&
-        admissionState != AdmissionState.READY
+        (admissionState != AdmissionState.READY || pairingPrompt)
     ) {
         AdmissionNotice(
-            state = admissionState,
+            // READY gets here only with a prompt, which is PAIRING's to show
+            state = if (admissionState == AdmissionState.READY) AdmissionState.PAIRING else admissionState,
             serverName = serverName,
             pairingCode = pairingCode,
             gestureRequested = pairingGestureRequested,

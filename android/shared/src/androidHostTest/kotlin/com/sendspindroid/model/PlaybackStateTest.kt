@@ -132,6 +132,7 @@ class PlaybackStateTest {
         val state = PlaybackState(
             groupId = "g1", groupName = "Kitchen", playbackState = PlaybackStateType.PLAYING,
             title = "Song", artist = "Artist", album = "Album", artworkUrl = "https://art.jpg",
+            albumArtist = "Various Artists", year = 1999, albumTrack = 7,
             durationMs = 180000, positionMs = 5000, positionUpdatedAt = 10_000L,
             volume = 26, muted = true
         )
@@ -385,6 +386,44 @@ class PlaybackStateTest {
         assertEquals(9, updated.totalTracks)
     }
 
+    @Test
+    fun withMetadata_carriesAlbumArtistYearAndTrack() {
+        val updated = PlaybackState().withMetadata(
+            title = "Bohemian Rhapsody", artist = "Queen", album = "Now 44", artworkUrl = "",
+            durationMs = 354000, positionMs = 0,
+            albumArtist = "Various Artists", year = 1999, albumTrack = 7
+        )
+        assertEquals("Various Artists", updated.albumArtist)
+        assertEquals(1999, updated.year)
+        assertEquals(7, updated.albumTrack)
+    }
+
+    @Test
+    fun withMetadata_trackWithoutAlbumArtistYearOrTrack_doesNotInheritThePreviousTracks() {
+        // messaging.md, server/state: "Every message MUST carry the full state
+        // of each role object it includes", so a track that comes without
+        // them has none.
+        val state = PlaybackState(
+            title = "Old Song", albumArtist = "Various Artists", year = 1999, albumTrack = 7
+        )
+        val updated = state.withMetadata(
+            title = "Radio Stream", artist = "", album = "", artworkUrl = "",
+            durationMs = 0, positionMs = 0
+        )
+        assertNull(updated.albumArtist)
+        assertNull(updated.year)
+        assertNull(updated.albumTrack)
+    }
+
+    @Test
+    fun withMetadata_emptyAlbumArtist_isNull() {
+        val updated = PlaybackState(albumArtist = "Various Artists").withMetadata(
+            title = "Song", artist = "", album = "", artworkUrl = "",
+            durationMs = 0, positionMs = 0, albumArtist = ""
+        )
+        assertNull(updated.albumArtist)
+    }
+
     // --- withClearedMetadata ---
 
     @Test
@@ -409,6 +448,16 @@ class PlaybackStateTest {
         assertEquals(0, cleared.durationMs)
         assertEquals(0, cleared.positionMs)
         assertEquals("group1", cleared.groupId)
+    }
+
+    @Test
+    fun withClearedMetadata_clearsAlbumArtistYearAndTrack() {
+        val state = PlaybackState(albumArtist = "Various Artists", year = 1999, albumTrack = 7)
+        val cleared = state.withClearedMetadata()
+
+        assertNull(cleared.albumArtist)
+        assertNull(cleared.year)
+        assertNull(cleared.albumTrack)
     }
 
     // --- withGroupUpdate ---

@@ -7,6 +7,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -57,6 +58,15 @@ class PairingMessageTest {
         assertTrue(Regex("\"wrapped_nonce_B\":\"[A-Za-z0-9_-]{64}\"").containsMatchIn(json))
     }
 
+    @Test
+    fun `pair-retry has an empty payload`() {
+        // client/pair-retry: "payload: {}"
+        assertEquals(
+            """{"type":"client/pair-retry","payload":{}}""",
+            MessageBuilder.buildClientPairRetry(),
+        )
+    }
+
     // ---- server parsers ----
     //
     // A malformed frame here comes from an unauthenticated peer, so the
@@ -88,18 +98,43 @@ class PairingMessageTest {
     private val INVALID_BASE64 = "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 
     @Test
-    fun `server pair-init parses nonce_A`() {
+    fun `server pair-init parses nonce_A, which only the first round carries`() {
+        // nonce_A: "Present in the first round only." Whether its absence is
+        // right for the round is the flow's to judge; a value that is there
+        // but malformed is a protocol error whatever the round.
         val nonce = ByteArray(32) { it.toByte() }
-        runCases(
-            MessageParser::parseServerPairInit,
-            listOf(
-                Case("well-formed", payloadOf("nonce_A", Base64Url.encode(nonce)), nonce),
-                Case("missing field", buildJsonObject { put("other", "x") }, null),
-                Case("decodes to 31 bytes", payloadOf("nonce_A", Base64Url.encode(ByteArray(31))), null),
-                Case("decodes to 33 bytes", payloadOf("nonce_A", Base64Url.encode(ByteArray(33))), null),
-                Case("invalid base64", payloadOf("nonce_A", INVALID_BASE64), null),
-            ),
+        val cases = listOf<Pair<String, JsonObject?>>(
+            "well-formed" to payloadOf("nonce_A", Base64Url.encode(nonce)),
+            "absent" to buildJsonObject { },
+            "absent among other fields" to buildJsonObject { put("other", "x") },
+            "JSON null" to buildJsonObject { put("nonce_A", JsonNull) },
+            "decodes to 31 bytes" to payloadOf("nonce_A", Base64Url.encode(ByteArray(31))),
+            "decodes to 33 bytes" to payloadOf("nonce_A", Base64Url.encode(ByteArray(33))),
+            "invalid base64" to payloadOf("nonce_A", INVALID_BASE64),
+            "a number" to buildJsonObject { put("nonce_A", 7) },
+            "an object" to buildJsonObject { put("nonce_A", buildJsonObject { }) },
+            "no payload" to null,
         )
+        val parsed = cases.associate { (name, payload) ->
+            name to try {
+                MessageParser.parseServerPairInit(payload)
+            } catch (e: Throwable) {
+                fail("case '$name' threw ${e::class.simpleName}: ${e.message}")
+            }
+        }
+
+        assertContentEquals(
+            nonce,
+            (parsed["well-formed"] as? MessageParser.ServerPairInitNonce.Present)?.nonceA,
+        )
+        for (name in listOf("absent", "absent among other fields", "JSON null")) {
+            assertEquals(MessageParser.ServerPairInitNonce.Absent, parsed[name], "case '$name'")
+        }
+        for (name in listOf(
+            "decodes to 31 bytes", "decodes to 33 bytes", "invalid base64", "a number", "an object", "no payload",
+        )) {
+            assertNull(parsed[name], "case '$name' is malformed")
+        }
     }
 
     @Test

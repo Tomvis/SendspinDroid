@@ -198,7 +198,7 @@
     <string name="pairing_outcome_attempt_timeout">Pairing with %1$s timed out: the server did not finish in time. Start pairing again on the server.</string>
     <string name="pairing_outcome_concurrent_attempt">%1$s was turned away because this player was already pairing or connected to another server. Try again once that has finished.</string>
     <string name="pairing_outcome_method_not_supported">%1$s asked to pair in a way this player does not accept on this connection. To pair with the token, enter the pairing token from this device on the server. To pair with a code, turn on Dynamic pairing code in Settings.</string>
-    <string name="pairing_outcome_code_mismatch_sent">The code entered on %1$s did not match the one shown here. Start pairing again and enter the new code.</string>
+    <string name="pairing_outcome_code_mismatch_sent">Too many wrong codes were entered on %1$s. Start pairing again on the server, then tap Allow pairing on this device.</string>
     <string name="pairing_outcome_code_mismatch_received">%1$s could not confirm the pairing code. Start pairing again and enter the code exactly as shown here.</string>
     <string name="pairing_outcome_cancelled_sent">Pairing with %1$s was cancelled on this device.</string>
     <string name="pairing_outcome_cancelled_received">Pairing was cancelled on %1$s.</string>

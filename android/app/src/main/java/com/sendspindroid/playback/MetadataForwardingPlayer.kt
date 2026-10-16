@@ -52,7 +52,7 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
     private var currentYear: Int? = null
 
     @Volatile
-    private var currentAlbumTrack: Int? = null
+    private var currentTrackNumber: Int? = null
 
     @Volatile
     private var currentArtworkData: ByteArray? = null
@@ -88,6 +88,14 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
      * @param artwork Album artwork bitmap (null = preserve existing)
      * @param artworkUri Artwork URL (null = preserve, empty = clear)
      * @param clearArtwork If true, clears artwork even when bitmap is null
+     * @param albumArtist Album artist (null or empty = none)
+     * @param year Release year (null = none)
+     * @param trackNumber Track number on the album (null = none)
+     *
+     * Unlike the fields above, [albumArtist], [year] and [trackNumber] replace
+     * the previous values on every call, so a caller that leaves them out
+     * clears them. messaging.md, server/state: "Every message MUST carry the
+     * full state of each role object it includes."
      */
     fun updateMetadata(
         title: String?,
@@ -98,7 +106,7 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         clearArtwork: Boolean = false,
         albumArtist: String? = null,
         year: Int? = null,
-        albumTrack: Int? = null
+        trackNumber: Int? = null
     ) {
         // null = preserve, empty = clear, value = update
         if (title != null) {
@@ -107,21 +115,15 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         if (artist != null) {
             currentArtist = artist.ifEmpty { null }
         }
-        if (albumArtist != null) {
-            currentAlbumArtist = albumArtist.ifEmpty { null }
-        }
         if (album != null) {
             currentAlbum = album.ifEmpty { null }
-        }
-        if (year != null) {
-            currentYear = year.takeIf { it > 0 }
-        }
-        if (albumTrack != null) {
-            currentAlbumTrack = albumTrack.takeIf { it > 0 }
         }
         if (artworkUri != null) {
             currentArtworkUri = if (artworkUri.toString().isEmpty()) null else artworkUri
         }
+        currentAlbumArtist = albumArtist?.ifEmpty { null }
+        currentYear = year?.takeIf { it > 0 }
+        currentTrackNumber = trackNumber?.takeIf { it > 0 }
 
         // Handle artwork bitmap
         if (artwork != null) {
@@ -168,17 +170,21 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
             .setSubtitle(subtitle)  // Android Auto uses DISPLAY_SUBTITLE for second line
             .setArtist(currentArtist)
             .setAlbumTitle(currentAlbum)
-            // No fallback to currentArtist: MainActivity reads this back into
-            // the VM, which must keep "no real album artist" distinct.
+            // Fork: no fallback to currentArtist. MainActivity reads this back
+            // into the VM, which must keep "no real album artist" distinct.
             .setAlbumArtist(currentAlbumArtist)
+            // roles/metadata/v1.md: "`year?`: integer - release year". Media3
+            // 1.9.0 hands only recordingYear on to the platform session (as
+            // METADATA_KEY_YEAR), so it is set as well.
+            .setReleaseYear(currentYear)
+            .setRecordingYear(currentYear)
+            .setTrackNumber(currentTrackNumber)
             .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC)
             .setIsPlayable(true)
             .apply {
                 // Set both artworkData (for notifications) and artworkUri (for Android Auto)
                 currentArtworkData?.let { setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) }
                 currentArtworkUri?.let { setArtworkUri(it) }
-                currentYear?.let { setReleaseYear(it) }
-                currentAlbumTrack?.let { setTrackNumber(it) }
             }
             .build()
     }
@@ -192,7 +198,7 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         currentAlbumArtist = null
         currentAlbum = null
         currentYear = null
-        currentAlbumTrack = null
+        currentTrackNumber = null
         currentArtworkData = null
         currentArtworkUri = null
         lastCompressedSource = null
@@ -213,7 +219,7 @@ class MetadataForwardingPlayer(player: Player) : ForwardingPlayer(player) {
         // Any populated field serves the cache, so a partial update (album
         // artist or year only) is not lost to the wrapped player's empty one.
         return if (currentTitle != null || currentArtist != null || currentAlbum != null ||
-            currentAlbumArtist != null || currentYear != null || currentAlbumTrack != null ||
+            currentAlbumArtist != null || currentYear != null || currentTrackNumber != null ||
             currentArtworkData != null || currentArtworkUri != null) {
             cachedMetadata
         } else {

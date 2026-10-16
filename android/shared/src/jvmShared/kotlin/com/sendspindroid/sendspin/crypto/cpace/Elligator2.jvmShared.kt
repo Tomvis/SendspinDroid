@@ -9,9 +9,10 @@ private const val CURVE_A = 486662
  * Timing note. `sqrtRatioVar` is variable-time and its input derives from the
  * pairing code. That is acceptable HERE only because the dynamic pairing code
  * is not a long-term secret: it is displayed openly on the device screen for
- * the duration of the attempt, is single-use per session, and attempts are
- * rate-limited by the failure counter's escalation to a gesture gate. Do not
- * carry this reasoning over to the Pairing PSK path, whose secret is
+ * the duration of the attempt, is used within that one attempt only (one
+ * CPace run per round, each under its own sid), and rounds are capped by the
+ * round limit, which then holds attempts back until an operator action. Do
+ * not carry this reasoning over to the Pairing PSK path, whose secret is
  * long-lived.
  */
 actual fun mapToCurveElligator2(u: ByteArray): ByteArray {

@@ -64,6 +64,29 @@ internal object VolumeLaw {
     fun isFullVolumeOutput(asked: Int, applied: Int, maxIndex: Int): Boolean =
         applied == maxIndex && asked < maxIndex
 
+    /**
+     * Whether a volume just set plays as track gain alone, on a full-volume
+     * output: one this set found to be so ([isFullVolumeOutput]), or one
+     * found so before ([knownFullVolume]) with the index read back at max.
+     * A volume near the top asks for max on most curves, and a full-volume
+     * output then reads back as asked, so only one known before tells.
+     */
+    fun isFullVolumeSet(knownFullVolume: Boolean, asked: Int, applied: Int, maxIndex: Int): Boolean =
+        isFullVolumeOutput(asked, applied, maxIndex) || (knownFullVolume && applied == maxIndex)
+
+    /**
+     * The volume to restore when the volume control starts on an output, or
+     * media moves to it. On a fixed-volume output, or a full-volume one
+     * ([fullVolume], as for [outputChange]), the whole volume is track gain
+     * and Android keeps none of it the way it keeps an index, so it is the
+     * one last set on that output ([stored]). Null where none was set, and
+     * on any other output, whose index stands for its volume.
+     * roles/player/v1.md, "Volume and mute": "Persisting `volume` and
+     * `muted` across reboots is RECOMMENDED for players."
+     */
+    fun restoredVolume(volumeFixed: Boolean, fullVolume: Boolean, stored: Int?): Int? =
+        if (volumeFixed || fullVolume) stored else null
+
     /** What a change in the outputs connected means for the volume ([outputChange]). */
     enum class OutputChange {
         /** A fixed-volume or full-volume output: no index to set, the track gain is the whole volume. */

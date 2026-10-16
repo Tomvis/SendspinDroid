@@ -177,6 +177,7 @@ object SendSpinProtocol {
         const val SERVER_PAIR_AUTH = "server/pair-auth"
         const val CLIENT_PAIR_CONFIRM = "client/pair-confirm"
         const val SERVER_PAIR_CONFIRM = "server/pair-confirm"
+        const val CLIENT_PAIR_RETRY = "client/pair-retry"
         const val CLIENT_PAIR_FINALIZE = "client/pair-finalize"
         const val SERVER_PAIR_FINALIZE = "server/pair-finalize"
         const val CLIENT_TIME = "client/time"
@@ -204,6 +205,7 @@ object SendSpinProtocol {
         const val CONTROLLER = "controller@v1"
         const val METADATA = "metadata@v1"
         const val ARTWORK = "artwork@v1"
+        const val COLOR = "color@v1"
     }
 
     /**
@@ -390,13 +392,45 @@ data class ControllerState(
 )
 
 /**
+ * The server/state `color` object (roles/color/v1.md): colors derived from the
+ * current audio.
+ *
+ * Each color is packed as 0xFFRRGGBB. Null means the state has no value for
+ * that color: every `server/state` carries the role's full state, so a color
+ * it omits is gone.
+ *
+ * @param timestamp Server clock time in microseconds at which these colors
+ *   take effect
+ * @param backgroundDark Background for dark mode, at least 4.5:1 against white
+ *   text and [onDark]
+ * @param backgroundLight Background for light mode, at least 4.5:1 against
+ *   black text and [onLight]
+ * @param primary The dominant color. Not adjusted for contrast
+ * @param accent A secondary or complementary color. Not adjusted for contrast
+ * @param onDark A light color for dark backgrounds, at least 4.5:1 against
+ *   black text
+ * @param onLight A dark color for light backgrounds, at least 4.5:1 against
+ *   white text
+ */
+data class ColorState(
+    val timestamp: Long? = null,
+    val backgroundDark: Int? = null,
+    val backgroundLight: Int? = null,
+    val primary: Int? = null,
+    val accent: Int? = null,
+    val onDark: Int? = null,
+    val onLight: Int? = null
+)
+
+/**
  * Result of parsing a server/state message. A null role object was not in the
  * message, which leaves that role's state unchanged.
  */
 data class ServerStateResult(
     val metadata: TrackMetadata?,
     val playbackState: String?,
-    val controller: ControllerState?
+    val controller: ControllerState?,
+    val color: ColorState?
 )
 
 /**

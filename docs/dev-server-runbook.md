@@ -128,11 +128,26 @@ CPace exchange keyed by that code -- never by transmitting the code itself.
      without closing the WebSocket. Confirm the tablet's connection stays
      healthy across that transition rather than dropping.
 
-A wrong code makes the client send `pair/abort` with reason
-`pairing_code_mismatch` and stop showing the code. The attempt is over (the
-client runs a single round and does not send `client/pair-retry`); the
-connection stays open, and `pair-dynamic` again starts a new attempt with a new
-code.
+A wrong code makes the client send `client/pair-retry` and keep showing the
+same code: the console prompts again within the same attempt, and the right
+code then pairs. The attempt timeout (two minutes from `client/pair-init`)
+keeps running across these rounds.
+
+After 20 rounds since the last code that verified - the round limit - the
+client sends `pair/abort` with reason `pairing_code_mismatch` instead, and
+stops showing the code. The connection stays open, but the next `pair-dynamic`
+is held back: the server logs `client held the attempt back
+(client/pair-pending)` and the device shows Allow pairing. Tapping it resets
+the count and shows a new code. aiosendspin waits six minutes for that tap
+before it gives the attempt up.
+
+`pair-dynamic wrong=N` enters `000000` in the first N rounds without
+prompting, so from a count of 0 `pair-dynamic wrong=20` reaches the round
+limit at once. A round counts when it begins, as the code is shown and
+before anything is entered, so the round the console is left prompting in
+has already counted: `pair-dynamic wrong=10` abandoned at its prompt has
+used 11 of the 20. The count survives an app restart; only a code that
+verifies, or Allow pairing, resets it.
 
 ## Verifying the wire end to end
 
@@ -163,6 +178,19 @@ client: it reassembles them with the app's `ArtworkReceiver` and passes only if
 an image arrived in more than one part and the last one was cleared. Both sides
 print each image's SHA-256, which must match.
 
+`--send-test-colors` makes the server send a color palette to the first client
+with the color role, then, three seconds later, a second palette scheduled ten
+seconds ahead, and then clear the colors. Each color object the option sends is
+logged as a `test colors: sent` line. The one the server sends when it
+activates the role, with only a `timestamp`, goes out before logging starts,
+so only the client shows it. The second palette goes out at once with a
+future `timestamp`, so a client that follows roles/color/v1.md holds it as its
+pending update: the app logs `Color pending for` about 10000ms when it arrives,
+and should show it ten seconds after the server's `palette B scheduled` line,
+not on receipt. The clear is a color object with only a `timestamp`.
+NoiseHandshakeCheck prints what it receives but does not check colors; the
+check is the app's.
+
 To exercise the in-band re-handshake as well, add
 `--pair-token-file <identity-file>.token` to the server and
 `--expect-rehandshake` to the client. The tool writes its pairing token to that
@@ -177,6 +205,28 @@ for every command it accepts. Add `--seek` to the client: once the controller
 state offers both, it sends one of each, built by the app's
 `MessageBuilder.buildCommand`. The server log must then show a
 `ControllerSeekEvent` and a `ControllerSeekRelativeEvent`.
+
+`--send-test-metadata` makes the server send three tracks' metadata to the
+first client with a metadata role, 15 s apart, and then clear it, logging a
+`test metadata:` line for each step:
+
+1. A compilation track: artist "Queen", album artist "Various Artists",
+   album "Now 44", year 1999, track 7.
+2. An album by the track's own artist: album artist "Queen", album "A Night
+   at the Opera", year 1975, track 9.
+3. "Radio Edit" by Queen on "Singles", with no `album_artist`, `year` or
+   `track`, which the server then leaves out of the message.
+4. A clear: a metadata object with only a timestamp.
+
+It is for checking a device, which has 15 s at each step to be inspected,
+for example with `adb shell dumpsys media_session`. At step 3 the app must
+keep no year or track number from step 2; on its media session the album
+artist then falls back to the track artist. The steps run before the
+`--play-test-audio` stream when both are given. `NoiseHandshakeCheck` does not
+check metadata, but with `--hold-seconds=70` it prints each `server/state` as
+it arrives, cut at 140 characters: for steps 1 and 2 that is before `year` and
+`track`. The server's `test metadata:` lines show what each step sends, and
+`dumpsys` on a device shows what the app made of it.
 
 ### Pairing without an operator
 
@@ -198,14 +248,27 @@ python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
 $CHECK --pair && $CHECK --expect-paired
 
 # Dynamic pairing code: the server enters the code the tool writes to $ID.code.
-# --pair-dynamic-wrong-codes 1 enters a wrong code first; the tool answers
-# pair/abort pairing_code_mismatch, stays connected and pairs on the next
-# attempt, which --expect-mismatches=1 requires.
+# --pair-dynamic-wrong-codes 1 enters a wrong code in the first round; the tool
+# answers client/pair-retry, shows the same code and pairs in the second round
+# of the same attempt, which --expect-retries=1 requires.
 python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
     --trust-all-unpaired --no-console --debug \
     --pair-dynamic-code-file $ID.code --pair-dynamic-wrong-codes 1
-$CHECK --pair --expect-mismatches=1 && $CHECK --expect-paired
+$CHECK --pair --expect-retries=1 && $CHECK --expect-paired
+
+# The round limit: 20 wrong rounds. The tool retries 19 times and answers the
+# 20th with pair/abort pairing_code_mismatch. The server then starts another
+# attempt, which the tool holds back with client/pair-pending until
+# --auto-allow lifts it, as the Allow pairing tap would; that attempt pairs.
+python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
+    --trust-all-unpaired --no-console --debug \
+    --pair-dynamic-code-file $ID.code --pair-dynamic-wrong-codes 20
+$CHECK --pair --auto-allow --expect-retries=19 --expect-mismatches=1 && $CHECK --expect-paired
 ```
+
+The server logs one `entering ... pairing code` line per round, and
+`client held the attempt back (client/pair-pending)` before the held-back
+attempt. It must log no `non-compliant client` line.
 
 Use a fresh `--state-dir` and identity file per run. `--pair` does not drive
 `SendSpinProtocolHandler`, which is Android-only: the `pairing_index` count,
@@ -289,13 +352,27 @@ during device acceptance and record the result of each:
   `MainActivity.onAllowPairingClicked()`** -- confirm the gesture-gated
   "Allow pairing" button actually reaches the service via the MediaSession
   custom command and unblocks the pending pairing attempt.
-- **A wrong code producing `pair/abort` with `pairing_code_mismatch` and the
-  UI recovering** -- see step 4 in the plan; confirm the app shows a clear
-  failure state and lets the operator retry rather than getting stuck.
-- **Five failed attempts escalating the sixth to the gesture gate, and a
-  success de-escalating** -- confirm the attempt counter is per-pairing-
-  session state that a subsequent success actually clears, not a counter
-  that stays escalated forever once tripped.
+- **A wrong code producing `client/pair-retry` with the same code still
+  shown** -- confirm the code stays on screen through the retry and the
+  right code then pairs in the same attempt.
+- **The round limit: 20 wrong codes producing `pair/abort` with
+  `pairing_code_mismatch`, the next attempt held back, and Allow pairing
+  resetting the count** -- from a count of 0 (straight after a code that
+  verified, or after Allow pairing), confirm the app shows a clear failure
+  state, then the Allow pairing button, and that one wrong code after the tap
+  is retried rather than aborted (`pair-dynamic wrong=20`, then
+  `pair-dynamic wrong=1`).
+- **The count surviving an app restart** -- once the round limit has ended
+  an attempt, force-stop the app (`adb shell am force-stop
+  com.sendspindroid`), relaunch it and, once it has reconnected, run
+  `pair-dynamic`: confirm the attempt is still held back.
+- **Allow pairing refused to other apps** -- connect a media controller to
+  the service from another app (a small Media3 test app will do) and confirm
+  `com.sendspindroid.ALLOW_PAIRING` is not among its available session
+  commands, and that sending it anyway returns `ERROR_PERMISSION_DENIED`
+  with no `Allow pairing gesture confirmed` in logcat. Media3 refuses a
+  command it never granted before the service sees it. The app's own Allow
+  pairing button must keep working.
 - **MediaSession IPC delivery, TalkBack announcing the code, and on-screen
   legibility across a room** -- confirm the six digits reach the UI promptly
   over the MediaSession IPC boundary, that TalkBack reads the code aloud

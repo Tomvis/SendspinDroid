@@ -8,6 +8,7 @@ import com.sendspindroid.sendspin.pairing.PairAbortReason
 import com.sendspindroid.sendspin.pairing.PairingOutcome
 import com.sendspindroid.sendspin.protocol.Activity
 import com.sendspindroid.sendspin.protocol.AdmissionState
+import com.sendspindroid.sendspin.protocol.ColorState
 import com.sendspindroid.sendspin.protocol.ConnectionAdmission
 import com.sendspindroid.sendspin.protocol.ControllerState
 import com.sendspindroid.sendspin.protocol.GroupInfo
@@ -112,7 +113,7 @@ class SendSpin(
     private object Silent : Callback {
         override fun onStateChanged(state: String) {}
         override fun onGroupUpdate(groupId: String, groupName: String, playbackState: String) {}
-        override fun onMetadataUpdate(metadata: TrackMetadata) {}
+        override fun onMetadataUpdate(metadata: TrackMetadata, positionMs: Long) {}
         override fun onArtwork(imageData: ByteArray) {}
         override fun onArtworkCleared() {}
         override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {}
@@ -153,10 +154,18 @@ class SendSpin(
     interface Callback {
         fun onStateChanged(state: String)
         fun onGroupUpdate(groupId: String, groupName: String, playbackState: String)
-        // Fork: the whole object, so the now-playing UI gets album artist,
-        // year and queue position. Each server/state carries the role's full
-        // state, so a null field means the track has none.
-        fun onMetadataUpdate(metadata: TrackMetadata)
+
+        /**
+         * The metadata role's current state: roles/metadata/v1.md, "Scheduled
+         * metadata updates", "the most recently applied `metadata` object".
+         * It is the role's full state (messaging.md, server/state), so a null
+         * field has no value. [positionMs] is the track position extrapolated
+         * to now ("Calculating current track position"), or the position as
+         * reported, at the metadata's timestamp, until the clock has converged.
+         * Fork: [metadata] also carries the trackfields extension
+         * (albumTrack, queueTrack, totalTracks).
+         */
+        fun onMetadataUpdate(metadata: TrackMetadata, positionMs: Long)
         fun onArtwork(imageData: ByteArray)
         fun onArtworkCleared()
 
@@ -255,6 +264,11 @@ class SendSpin(
     // server/state controller object.
     private val _controllerState = MutableStateFlow<ControllerState?>(null)
     val controllerState: StateFlow<ControllerState?> = _controllerState.asStateFlow()
+
+    // The current server/state color object (roles/color/v1.md). Null until
+    // the first one, after the role is removed, and after the connection ends.
+    private val _colorState = MutableStateFlow<ColorState?>(null)
+    val colorState: StateFlow<ColorState?> = _colorState.asStateFlow()
 
     // Transport abstraction - WebSocket. Assigned and cleared under
     // connectionLock; read from the timer thread.
@@ -716,7 +730,7 @@ class SendSpin(
         }
     }
 
-    /** Backs the Dynamic Pairing Code flow's brute-force counter (item 3.2's escalation gate). */
+    /** Backs the Dynamic Pairing Code flow's round count (`pairing.md#rounds`, the round limit). */
     private val dynamicPairingCounterStore = object : PairingCounterStore {
         override fun load(): Int = host.pairingCodeFailures()
         override fun save(value: Int) {
@@ -832,13 +846,12 @@ class SendSpin(
         // snapshot sat on the server (and downstream anchors interpolate
         // from receive time). Requires a converged clock; fall back to the
         // raw value until then.
-        val published = if (timeFilter.isReady) {
-            val pos = metadata.progressAtServerTime(timeFilter.clientToServer(System.nanoTime() / 1000))
-            metadata.progress?.let { metadata.copy(progress = it.copy(trackProgress = pos)) } ?: metadata
+        val positionMs = if (timeFilter.isReady) {
+            metadata.progressAtServerTime(timeFilter.clientToServer(System.nanoTime() / 1000))
         } else {
-            metadata
+            metadata.positionMs
         }
-        callback.onMetadataUpdate(published)
+        callback.onMetadataUpdate(metadata, positionMs)
     }
 
     override fun onPlaybackStateChanged(state: String) {
@@ -906,6 +919,10 @@ class SendSpin(
     override fun onControllerStateUpdate(state: ControllerState) {
         _controllerState.value = state
         callback.onControllerStateUpdate(state)
+    }
+
+    override fun onColorStateUpdate(state: ColorState?) {
+        _colorState.value = state
     }
 
     // ========== Public API ==========
@@ -1197,6 +1214,7 @@ class SendSpin(
             matchedPsk = null
             sessionFacts = null
             _controllerState.value = null
+            _colorState.value = null
             connectedAtMs = null
 
             // Before the state changes, so whoever reacts to the new state

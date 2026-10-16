@@ -329,6 +329,28 @@ class InboundWebSocketTransportTest {
     }
 
     @Test
+    fun `a taken port is not an uncaught exception`() {
+        val uncaught = CopyOnWriteArrayList<Throwable>()
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, e -> uncaught += e }
+        try {
+            ServerSocket().use { occupied ->
+                occupied.reuseAddress = false
+                occupied.bind(InetSocketAddress("0.0.0.0", 0))
+
+                val port = listen(preferredPort = occupied.localPort)
+
+                assertNotEquals(occupied.localPort, port)
+                // On Android it ends the process, before or after the
+                // fallback port is bound.
+                assertEquals(emptyList<Throwable>(), uncaught.toList())
+            }
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
+    }
+
+    @Test
     fun `stopping tells every connected server and frees the port`() {
         val port = listen()
         val connected = dial(port)

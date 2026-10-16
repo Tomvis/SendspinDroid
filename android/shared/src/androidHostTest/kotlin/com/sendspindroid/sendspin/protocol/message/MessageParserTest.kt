@@ -1,15 +1,18 @@
 package com.sendspindroid.sendspin.protocol.message
 
+import com.sendspindroid.sendspin.protocol.ColorState
 import com.sendspindroid.sendspin.protocol.ServerCommandResult
 import com.sendspindroid.shared.log.Log
 import com.sendspindroid.shared.platform.Platform
 import io.mockk.every
 import io.mockk.mockkObject
 import io.mockk.unmockkAll
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.*
@@ -212,6 +215,7 @@ class MessageParserTest {
         assertNull(result.metadata)
         assertNull(result.playbackState)
         assertNull(result.controller)
+        assertNull(result.color)
     }
 
     @Test
@@ -221,6 +225,7 @@ class MessageParserTest {
 
         assertNull(result.metadata)
         assertNull(result.controller)
+        assertNull(result.color)
         assertEquals("paused", result.playbackState)
     }
 
@@ -237,8 +242,12 @@ class MessageParserTest {
         assertEquals(42L, metadata!!.timestamp)
         assertNull(metadata.title)
         assertNull(metadata.artist)
+        assertNull(metadata.albumArtist)
         assertNull(metadata.album)
         assertNull(metadata.artworkUrl)
+        // No 0 or "" stands in for an absent year or track number.
+        assertNull(metadata.year)
+        assertNull(metadata.track)
         assertNull("omitting progress clears the position", metadata.progress)
     }
 
@@ -265,8 +274,29 @@ class MessageParserTest {
         assertEquals(9730008767707L, metadata!!.timestamp)
         assertNull(metadata.title)
         assertNull(metadata.artist)
+        assertNull(metadata.albumArtist)
         assertNull(metadata.year)
+        assertNull(metadata.track)
         assertNull(metadata.progress)
+    }
+
+    @Test
+    fun parseServerState_fractionalOrNonNumericYearAndTrack_readAsNoValue() {
+        // roles/metadata/v1.md: "`year?`: integer" and "`track?`: integer".
+        val payload = buildJsonObject {
+            put("metadata", buildJsonObject {
+                put("timestamp", 1L)
+                put("title", "Song")
+                put("year", 1975.5)
+                put("track", "five")
+            })
+        }
+
+        val metadata = MessageParser.parseServerState(payload).metadata
+
+        assertEquals("Song", metadata!!.title)
+        assertNull(metadata.year)
+        assertNull(metadata.track)
     }
 
     @Test
@@ -276,11 +306,13 @@ class MessageParserTest {
         val payload = buildJsonObject {
             put("metadata", JsonPrimitive(null as String?))
             put("controller", JsonPrimitive(null as String?))
+            put("color", JsonPrimitive(null as String?))
         }
         val result = MessageParser.parseServerState(payload)
 
         assertNull(result.metadata)
         assertNull(result.controller)
+        assertNull(result.color)
     }
 
     @Test
@@ -323,6 +355,61 @@ class MessageParserTest {
         }
 
         assertNull(MessageParser.parseServerState(payload).controller!!.seekMaxMs)
+    }
+
+    private fun color(fields: String): ColorState? = MessageParser.parseServerState(
+        Json.parseToJsonElement("""{"color":{$fields}}""").jsonObject
+    ).color
+
+    @Test
+    fun parseServerState_colorObject_packsEachColorAsArgb() {
+        val color = color(
+            """"timestamp":1234567890,"background_dark":[18,52,86],"background_light":[250,240,230],""" +
+                """"primary":[255,0,0],"accent":[0,128,0],"on_dark":[255,255,255],"on_light":[0,0,0]"""
+        )
+
+        assertEquals(
+            ColorState(
+                timestamp = 1234567890L,
+                backgroundDark = 0xFF123456.toInt(),
+                backgroundLight = 0xFFFAF0E6.toInt(),
+                primary = 0xFFFF0000.toInt(),
+                accent = 0xFF008000.toInt(),
+                onDark = 0xFFFFFFFF.toInt(),
+                onLight = 0xFF000000.toInt(),
+            ),
+            color,
+        )
+    }
+
+    @Test
+    fun parseServerState_colorWithOnlyATimestamp_hasNoColors() {
+        // What aiosendspin sends for a cleared or empty palette. The object is
+        // the role's full state, so every color it omits has no value.
+        assertEquals(ColorState(timestamp = 42L), color(""""timestamp":42"""))
+    }
+
+    @Test
+    fun parseServerState_malformedColor_hasNoValueForThatColorOnly() {
+        // Each is "integer[] ... as [R, G, B] with values 0-255", or no value.
+        // "12" is a string, which intOrNull alone would read as a number.
+        val malformed = listOf(
+            "[1,2]", "[1,2,3,4]", "[]", "[300,0,0]", "[-1,0,0]", "[\"1\",\"2\",\"3\"]",
+            "[1.5,2,3]", "[null,0,0]", "[true,0,0]", "[[1],2,3]", "\"red\"", "{}", "null", "7",
+        )
+        for (value in malformed) {
+            val color = color(""""timestamp":1,"primary":$value,"accent":[1,2,3]""")
+            assertEquals(value, ColorState(timestamp = 1L, accent = 0xFF010203.toInt()), color)
+        }
+    }
+
+    @Test
+    fun parseServerState_unknownColorField_isIgnored() {
+        // messaging.md: "MUST ignore unrecognized payload fields".
+        assertEquals(
+            ColorState(timestamp = 1L, backgroundDark = 0xFF010203.toInt()),
+            color(""""timestamp":1,"background_dark":[1,2,3],"glow":[9,9,9]"""),
+        )
     }
 
     @Test

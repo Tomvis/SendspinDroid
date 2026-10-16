@@ -5,6 +5,8 @@ import com.sendspindroid.sendspin.protocol.jsonFrameText
 import com.sendspindroid.sendspin.transport.SendSpinTransport
 import com.sendspindroid.sendspin.transport.TransportState
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Fake SendSpinTransport for E2E tests.
@@ -75,7 +77,21 @@ class FakeTransport : SendSpinTransport {
         val wasLive = _state == TransportState.Connected || _state == TransportState.Connecting
         _state = TransportState.Closed
         if (wasLive) listener?.onClosed(code, reason)
+        closeCalled.countDown()
     }
+
+    private val closeCalled = CountDownLatch(1)
+
+    /**
+     * Whether close() was called, waiting briefly for it.
+     *
+     * The client says goodbye and then closes from its own timer thread when
+     * it refuses or rejects an activation, or on `server/unpair`: the goodbye
+     * lands first, so a test that has seen it cannot check the close yet.
+     * Once this returns true, everything the client did before closing is
+     * visible as well.
+     */
+    fun awaitClosed(): Boolean = closeCalled.await(CLOSE_WAIT_MS, TimeUnit.MILLISECONDS)
 
     /** Whether the close was asked to let queued frames out first. */
     var flushedBeforeClose = false
@@ -199,5 +215,6 @@ class FakeTransport : SendSpinTransport {
 
     private companion object {
         const val SEND_WAIT_NANOS = 1_000_000_000L
+        const val CLOSE_WAIT_MS = 2_000L
     }
 }

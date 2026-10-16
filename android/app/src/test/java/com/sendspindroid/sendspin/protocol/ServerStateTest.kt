@@ -1,6 +1,7 @@
 package com.sendspindroid.sendspin.protocol
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -9,7 +10,8 @@ import org.junit.Test
 /**
  * `server/state` as Sendspin 1.0.0-rc1 defines it: each role object a message
  * includes is that role's full state, a future `timestamp` schedules a
- * metadata update, and a role removed by `server/activate` loses its state.
+ * metadata or color update, and a role removed by `server/activate` loses its
+ * state.
  */
 class ServerStateTest {
 
@@ -20,7 +22,7 @@ class ServerStateTest {
     private fun activate(roles: String) =
         """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":[$roles]}}"""
 
-    private val allRoles = "\"player@v1\",\"controller@v1\",\"metadata@v1\",\"artwork@v1\""
+    private val allRoles = "\"player@v1\",\"controller@v1\",\"metadata@v1\",\"artwork@v1\",\"color@v1\""
 
     private fun serverState(roleObjects: String) =
         handler.handleTextMessageForTest("""{"type":"server/state","payload":{$roleObjects}}""")
@@ -33,6 +35,12 @@ class ServerStateTest {
 
     private val controller = """"controller":{"supported_commands":["play","seek"],""" +
         """"volume":60,"muted":false,"repeat":"all","shuffle":true,"seek_max_ms":9000}"""
+
+    /** A palette told apart by its gray `background_dark`. */
+    private fun color(timestampMicros: Long, gray: Int) = serverState(
+        """"color":{"timestamp":$timestampMicros,"background_dark":[$gray,$gray,$gray],""" +
+            """"on_dark":[250,250,250]}"""
+    )
 
     /** A timestamp the time filter places this far from now, once [syncClock] ran. */
     private fun serverTime(offsetSeconds: Long) = System.nanoTime() / 1000 + offsetSeconds * 1_000_000
@@ -55,6 +63,9 @@ class ServerStateTest {
     }
 
     private fun titles() = handler.metadataUpdates.map { it.title }
+
+    /** Each color state made current, by its gray; null once the role is gone. */
+    private fun grays() = handler.colorStateUpdates.map { it?.backgroundDark?.and(0xFF) }
 
     @Before
     fun setUp() {
@@ -120,6 +131,25 @@ class ServerStateTest {
         assertEquals(80, current.volume)
         assertEquals(listOf("play"), current.supportedCommands)
         assertNull("seek is no longer offered, so its range is gone", current.seekMaxMs)
+    }
+
+    @Test
+    fun `a color object replaces the previous one instead of merging into it`() {
+        color(0, 10)
+        serverState(""""color":{"timestamp":1,"background_dark":[20,20,20]}""")
+
+        val current = handler.colorStateUpdates.last()!!
+        assertEquals(0xFF141414.toInt(), current.backgroundDark)
+        assertNull("on_dark was not in the new state", current.onDark)
+    }
+
+    @Test
+    fun `a color object with only a timestamp has no colors`() {
+        // What aiosendspin sends for a cleared palette.
+        color(0, 10)
+        serverState(""""color":{"timestamp":1}""")
+
+        assertEquals(ColorState(timestamp = 1), handler.colorStateUpdates.last())
     }
 
     // ========== scheduled metadata ==========
@@ -195,6 +225,95 @@ class ServerStateTest {
         assertEquals(emptyList<String?>(), titles())
     }
 
+    // ========== scheduled colors ==========
+
+    @Test
+    fun `a future color stays pending until it is reached`() {
+        syncClock()
+        color(past, 10)
+
+        color(future, 20)
+        assertEquals(listOf<Int?>(10), grays())
+        advance(14)
+        assertEquals(listOf<Int?>(10), grays())
+        advance(2)
+
+        assertEquals(listOf<Int?>(10, 20), grays())
+    }
+
+    @Test
+    fun `a new scheduled color replaces the pending one`() {
+        syncClock()
+        color(past, 10)
+
+        color(future, 20)
+        color(serverTime(30), 30)
+        advance(20)
+        assertEquals(listOf<Int?>(10), grays())
+        advance(11)
+
+        assertEquals(listOf<Int?>(10, 30), grays())
+    }
+
+    @Test
+    fun `a current color cancels the pending one`() {
+        // "To cancel a scheduled update, resend the current state with a past
+        // or present timestamp."
+        syncClock()
+        color(past, 10)
+        color(future, 20)
+
+        color(past, 10)
+        advance(60)
+
+        assertEquals(listOf<Int?>(10, 10), grays())
+    }
+
+    @Test
+    fun `a message without color leaves the pending color in place`() {
+        syncClock()
+        color(future, 20)
+
+        metadata(past, "Now")
+        serverState(controller)
+        advance(16)
+
+        assertEquals(listOf<Int?>(20), grays())
+    }
+
+    @Test
+    fun `a color is applied at once while the time filter has no estimate`() {
+        color(Long.MAX_VALUE / 2, 20)
+
+        assertEquals(listOf<Int?>(20), grays())
+    }
+
+    @Test
+    fun `a pending color does not survive the connection`() {
+        syncClock()
+        color(future, 20)
+
+        handler.resetConnectionStateForTest()
+        advance(60)
+
+        assertEquals(emptyList<Int?>(), grays())
+    }
+
+    @Test
+    fun `pending metadata and a pending color both come due`() {
+        syncClock()
+        metadata(future, "Next")
+        color(serverTime(10), 20)
+
+        advance(11)
+        assertEquals(emptyList<String?>(), titles())
+        assertEquals(listOf<Int?>(20), grays())
+        advance(5)
+
+        assertEquals(listOf<String?>("Next"), titles())
+        assertEquals(listOf<Int?>(20), grays())
+    }
+
     // ========== roles removed by server/activate ==========
 
     @Test
@@ -208,6 +327,27 @@ class ServerStateTest {
 
         assertEquals(listOf<String?>("Now", null), titles())
         assertEquals(TrackMetadata(), handler.metadataUpdates.last())
+    }
+
+    @Test
+    fun `removing the color role discards its state and its pending update`() {
+        syncClock()
+        color(past, 10)
+        color(future, 20)
+
+        handler.handleTextMessageForTest(
+            activate("\"player@v1\",\"controller@v1\",\"metadata@v1\",\"artwork@v1\"")
+        )
+        advance(60)
+
+        assertEquals(listOf(10, null), grays())
+        // A color object is carried "only if the color role is active", so
+        // one for the removed role is not taken up.
+        color(past, 30)
+        assertEquals(listOf(10, null), grays())
+        handler.handleTextMessageForTest(activate(allRoles))
+        color(past, 30)
+        assertEquals(listOf(10, null, 30), grays())
     }
 
     @Test
@@ -277,6 +417,8 @@ class ServerStateTest {
         metadata(past, "Now")
         metadata(future, "Next")
         serverState(controller)
+        color(past, 10)
+        color(future, 20)
 
         // The same roles again, and an activation that omits them.
         handler.handleTextMessageForTest(activate(allRoles))
@@ -285,6 +427,7 @@ class ServerStateTest {
 
         assertEquals(listOf<String?>("Now", "Next"), titles())
         assertEquals(1, handler.controllerStateUpdates.size)
+        assertEquals(listOf<Int?>(10, 20), grays())
         assertEquals(0, handler.streamEnds)
     }
 
@@ -295,11 +438,31 @@ class ServerStateTest {
         // roles, even though the activation did not mention them.
         metadata(0, "Now")
         serverState(controller)
+        color(0, 10)
         handler.unpairedAccess = false
 
         handler.handleTextMessageForTest("""{"type":"server/activate","payload":{"activities":[]}}""")
 
         assertEquals(TrackMetadata(), handler.metadataUpdates.last())
         assertEquals(ControllerState(), handler.controllerStateUpdates.last())
+        assertNull(handler.colorStateUpdates.last())
+    }
+
+    // ========== claiming the color role ==========
+
+    private fun helloFrom(handler: TestProtocolHandler): String {
+        handler.handleTextMessageForTest(serverHello)
+        return handler.sentMessages.single { it.contains("client/hello") }
+    }
+
+    @Test
+    fun `client hello claims the color role, in low memory mode too`() {
+        assertTrue(helloFrom(TestProtocolHandler()).contains("\"color@v1\""))
+        assertTrue(helloFrom(TestProtocolHandler().apply { lowMemoryMode = true }).contains("\"color@v1\""))
+    }
+
+    @Test
+    fun `a handler that does not claim the color role leaves it out of client hello`() {
+        assertFalse(helloFrom(TestProtocolHandler().apply { colorRole = false }).contains("color@v1"))
     }
 }
