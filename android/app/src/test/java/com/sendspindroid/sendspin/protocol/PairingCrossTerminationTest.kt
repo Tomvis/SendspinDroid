@@ -7,6 +7,7 @@ import com.sendspindroid.sendspin.crypto.PskCategory
 import com.sendspindroid.sendspin.crypto.PskId
 import com.sendspindroid.sendspin.crypto.PskRecord
 import com.sendspindroid.sendspin.crypto.TrustStore
+import com.sendspindroid.sendspin.pairing.PairingCodeFormat
 import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import kotlinx.coroutines.CoroutineScope
@@ -132,6 +133,9 @@ class CrossTerminationTestHandler : SendSpinProtocolHandler("CrossTerminationTes
 
     /** The code on screen, or null when none is shown. */
     var shownCode: String? = null
+
+    /** The emission format of the last code shown. */
+    var shownFormat: PairingCodeFormat? = null
     val protocolFailures = mutableListOf<String>()
     var abandonments = 0
 
@@ -150,8 +154,9 @@ class CrossTerminationTestHandler : SendSpinProtocolHandler("CrossTerminationTes
         sent.clear()
     }
 
-    override fun onDynamicPairingCodeEmitted(code: String) {
+    override fun onDynamicPairingCodeEmitted(code: String, format: PairingCodeFormat) {
         shownCode = code
+        shownFormat = format
     }
 
     override fun onDynamicPairingCodeCleared() {

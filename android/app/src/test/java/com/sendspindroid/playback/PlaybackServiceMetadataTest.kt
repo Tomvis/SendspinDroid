@@ -2,8 +2,10 @@ package com.sendspindroid.playback
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Bundle
 import android.os.Looper
 import androidx.media3.common.MediaMetadata
+import androidx.media3.session.MediaSession
 import androidx.preference.PreferenceManager
 import com.sendspindroid.UnifiedServerRepository
 import com.sendspindroid.UserSettings
@@ -114,6 +116,13 @@ class PlaybackServiceMetadataTest {
             .apply { isAccessible = true }.get(service) as MetadataForwardingPlayer
 
     private fun sessionMetadata(): MediaMetadata = forwardingPlayer().mediaMetadata
+
+    /** What the service last published to its controllers, MainActivity among them. */
+    private fun sessionExtras(): Bundle {
+        val session = PlaybackService::class.java.getDeclaredField("mediaSession")
+            .apply { isAccessible = true }.get(service) as MediaSession
+        return session.sessionExtras
+    }
 
     /**
      * The image fetched from the track's artwork URL reaches the session.
@@ -232,6 +241,28 @@ class PlaybackServiceMetadataTest {
         assertNotNull(item)
         assertNull(item!!.mediaMetadata.title)
         assertNull(item.mediaMetadata.subtitle)
+    }
+
+    @Test
+    fun `the session extras carry the album artist and year`() {
+        metadataArrives(compilationTrack)
+
+        val extras = sessionExtras()
+        assertEquals("Various Artists", extras.getString(PlaybackService.EXTRA_ALBUM_ARTIST))
+        assertEquals(1999, extras.getInt(PlaybackService.EXTRA_YEAR))
+    }
+
+    @Test
+    fun `the session extras leave out the album artist and year of a track without them`() {
+        metadataArrives(compilationTrack)
+
+        metadataArrives(bareTrack)
+
+        // Fork: the extras carry "" and 0 for "none" (MainActivity reads them so)
+        val extras = sessionExtras()
+        assertEquals("", extras.getString(PlaybackService.EXTRA_ALBUM_ARTIST))
+        assertEquals(0, extras.getInt(PlaybackService.EXTRA_YEAR, -1))
+        assertEquals("Radio Edit", extras.getString(PlaybackService.EXTRA_TITLE))
     }
 
     @Test

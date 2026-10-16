@@ -13,6 +13,7 @@ object AppSendSpinHost : SendSpinHost {
     override val softwareVersion: String get() = BuildConfig.VERSION_NAME
     override val lowMemoryMode: Boolean get() = UserSettings.lowMemoryMode
     override val highPowerMode: Boolean get() = UserSettings.highPowerMode
+    override val serverColors: Boolean get() = UserSettings.serverColors
 
     override fun preferredCodec(): String = UserSettings.getPreferredCodec()
     override fun outputDelayMs(): Int = UserSettings.getOutputDelayMs()

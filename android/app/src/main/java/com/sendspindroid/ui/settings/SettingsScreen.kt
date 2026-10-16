@@ -124,6 +124,7 @@ fun SettingsScreen(
     val keepScreenOn by viewModel.keepScreenOn.collectAsStateWithLifecycle()
     val layoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    val serverColors by viewModel.serverColors.collectAsStateWithLifecycle()
     val syncOffset by viewModel.syncOffset.collectAsStateWithLifecycle()
     val preferredCodec by viewModel.preferredCodec.collectAsStateWithLifecycle()
     val supportedCodecs by viewModel.supportedCodecs.collectAsStateWithLifecycle()
@@ -247,6 +248,12 @@ fun SettingsScreen(
                 ),
                 selectedOption = themeMode,
                 onOptionSelected = { viewModel.setThemeMode(it) }
+            )
+            SwitchPreference(
+                title = stringResource(R.string.pref_server_colors_title),
+                summary = stringResource(R.string.pref_server_colors_summary),
+                checked = serverColors,
+                onCheckedChange = { viewModel.setServerColors(it) }
             )
 
             // Audio Category

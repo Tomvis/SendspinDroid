@@ -46,12 +46,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
 import com.sendspindroid.model.AppConnectionState
+import com.sendspindroid.sendspin.protocol.ColorState
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.main.MainActivityViewModel
 import com.sendspindroid.ui.main.NowPlayingScreen
 import com.sendspindroid.ui.main.components.ConnectionStatusDot
 import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.theme.ServerColorTheme
 
 /**
  * Root Compose shell for the entire app.
@@ -75,6 +77,8 @@ import com.sendspindroid.ui.adaptive.FormFactor
  * @param onAddServerClick TV: the side menu's Add Server entry
  * @param canEditServer TV: whether the connection is to a saved server, which Edit Server opens
  * @param onLeaveApp TV: Back pressed in the side menu, to leave the app
+ * @param serverColors The server's palette for the current audio, which colors
+ *   Now Playing and its frame while connected; null for the Material colors
  */
 @Composable
 fun AppShell(
@@ -96,6 +100,7 @@ fun AppShell(
     modifier: Modifier = Modifier,
     canEditServer: Boolean = true,
     onLeaveApp: () -> Unit = {},
+    serverColors: ColorState? = null,
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
 
@@ -124,6 +129,7 @@ fun AppShell(
             onEditServerClick = onEditServerClick.takeIf { canEditServer },
             onExitAppClick = onExitAppClick,
             onLeaveApp = onLeaveApp,
+            serverColors = serverColors,
             modifier = modifier
         )
         return
@@ -156,6 +162,7 @@ fun AppShell(
                 onSettingsClick = onSettingsClick,
                 onEditServerClick = onEditServerClick,
                 onExitAppClick = onExitAppClick,
+                serverColors = serverColors,
                 modifier = modifier
             )
         }
@@ -212,6 +219,9 @@ private fun ServerListShell(
  *
  * Uses Scaffold (TopAppBar + overflow menu). Now Playing is the only destination;
  * SendSpin defines no browse surface.
+ *
+ * [serverColors] color the whole Scaffold, so the top bar is on the same
+ * background as Now Playing. The overflow menu keeps its Material container.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -229,6 +239,7 @@ private fun ConnectedShell(
     onSettingsClick: () -> Unit,
     onEditServerClick: () -> Unit,
     onExitAppClick: () -> Unit,
+    serverColors: ColorState?,
     modifier: Modifier = Modifier
 ) {
     val formFactor = LocalFormFactor.current
@@ -361,11 +372,13 @@ private fun ConnectedShell(
         )
     }
 
-    Scaffold(
-        modifier = modifier,
-        topBar = topBar,
-        content = contentArea
-    )
+    ServerColorTheme(serverColors) {
+        Scaffold(
+            modifier = modifier,
+            topBar = topBar,
+            content = contentArea
+        )
+    }
 }
 
 /**
@@ -374,6 +387,11 @@ private fun ConnectedShell(
  *
  * The connection status the phone shows in its top bar is at the top of the
  * menu: a dot while it is collapsed, the server's name with it when open.
+ *
+ * [serverColors] color the frame while connected, so the collapsed menu's
+ * rail is on the same background as Now Playing. The open menu, a panel over
+ * the screen, keeps the Material colors, as menus do: the spec's contrast for
+ * `on_X` holds only on the server's background.
  *
  * @param onEditServerClick Null when the connection is not to a saved server.
  */
@@ -389,6 +407,7 @@ private fun TvAppShell(
     onEditServerClick: (() -> Unit)?,
     onExitAppClick: () -> Unit,
     onLeaveApp: () -> Unit,
+    serverColors: ColorState?,
     modifier: Modifier = Modifier
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
@@ -415,19 +434,24 @@ private fun TvAppShell(
         entries = listOf(TvMenuEntry(stringResource(R.string.add_server), Icons.Default.Add, onAddServerClick))
     }
 
-    Surface(
-        modifier = modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background,
-        contentColor = MaterialTheme.colorScheme.onBackground
-    ) {
-        TvShell(
-            home = home,
-            entries = entries,
-            footerEntries = listOf(settings, exit),
-            onLeave = onLeaveApp,
-            header = { open -> TvMenuHeader(connectionState, open) }
+    val material = MaterialTheme.colorScheme
+    // Not blended out of when leaving: the server list keeps the Material colors
+    ServerColorTheme(serverColors.takeIf { connected }, blend = connected) {
+        Surface(
+            modifier = modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background,
+            contentColor = MaterialTheme.colorScheme.onBackground
         ) {
-            if (connected) nowPlaying() else serverListContent()
+            TvShell(
+                home = home,
+                entries = entries,
+                footerEntries = listOf(settings, exit),
+                onLeave = onLeaveApp,
+                header = { open -> TvMenuHeader(connectionState, open) },
+                menuColorScheme = material
+            ) {
+                if (connected) nowPlaying() else serverListContent()
+            }
         }
     }
 }

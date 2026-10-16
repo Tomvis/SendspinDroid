@@ -32,16 +32,18 @@ object MessageBuilder {
             val PAIRING_PSK = PairMethodDescriptor("pairing_psk", locations = listOf("device"))
 
             /**
-             * `out_channels: ["display"]`, `formats: ["digits"]`. The code is
-             * shown on screen, never spoken, and no QR rendering exists yet. A
-             * `dynamic_pairing_code` descriptor has no `locations`. "At most
-             * one" pairing-code method may be offered, so advertising this one
-             * forecloses `static_pairing_code`.
+             * `out_channels: ["display"]`, `formats: ["digits", "qr_code"]`.
+             * The code is shown on screen, never spoken. "Clients whose
+             * display can render a QR code should also offer the `qr_code`
+             * emission format" (pairing.md, "Methods"), and every form factor
+             * draws one. A `dynamic_pairing_code` descriptor has no
+             * `locations`. "At most one" pairing-code method may be offered,
+             * so advertising this one forecloses `static_pairing_code`.
              */
             val DYNAMIC_PAIRING_CODE = PairMethodDescriptor(
                 wireName = "dynamic_pairing_code",
                 outChannels = listOf("display"),
-                formats = listOf("digits"),
+                formats = listOf("digits", "qr_code"),
             )
         }
     }

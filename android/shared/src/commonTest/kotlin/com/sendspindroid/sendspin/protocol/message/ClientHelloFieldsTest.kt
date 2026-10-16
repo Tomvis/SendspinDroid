@@ -74,7 +74,7 @@ class ClientHelloFieldsTest {
                 """"player@v1_support":{"supported_formats":[{"codec":"pcm","sample_rate":48000,""" +
                 """"channels":2,"bit_depth":16}],"buffer_capacity":1680000},""" +
                 """"supported_pair_methods":{"pairing_psk":{"locations":["device"]},""" +
-                """"dynamic_pairing_code":{"out_channels":["display"],"formats":["digits"]}},""" +
+                """"dynamic_pairing_code":{"out_channels":["display"],"formats":["digits","qr_code"]}},""" +
                 """"unpaired_access":{"enabled":true}}}""",
             helloText(
                 pairMethods = listOf(
@@ -196,7 +196,7 @@ class ClientHelloFieldsTest {
         val dynamic = methods["dynamic_pairing_code"]!!.jsonObject
         assertEquals(setOf("out_channels", "formats"), dynamic.keys)
         assertEquals(listOf("display"), dynamic["out_channels"]!!.jsonArray.map { it.jsonPrimitive.content })
-        assertEquals(listOf("digits"), dynamic["formats"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf("digits", "qr_code"), dynamic["formats"]!!.jsonArray.map { it.jsonPrimitive.content })
         // The method identifier is the key, never a "method" field.
         assertFalse(dynamic.containsKey("method"))
         assertFalse(methods["pairing_psk"]!!.jsonObject.containsKey("method"))

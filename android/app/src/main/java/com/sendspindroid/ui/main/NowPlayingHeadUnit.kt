@@ -227,7 +227,7 @@ private fun HeadUnitControls(
             shape = CircleShape,
             colors = IconButtonDefaults.filledIconButtonColors(
                 containerColor = buttonAccent,
-                contentColor = Color.Black
+                contentColor = MaterialTheme.colorScheme.onPrimary
             )
         ) {
             Icon(

@@ -18,6 +18,7 @@ import com.sendspindroid.sendspin.pairing.DynamicPairingEvent
 import com.sendspindroid.sendspin.pairing.PairAbortReason
 import com.sendspindroid.sendspin.pairing.PairMethod
 import com.sendspindroid.sendspin.pairing.PairingAction
+import com.sendspindroid.sendspin.pairing.PairingCodeFormat
 import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import com.sendspindroid.sendspin.pairing.PairingEvent
 import com.sendspindroid.sendspin.pairing.PairingFailureCounter
@@ -84,7 +85,8 @@ import java.util.concurrent.TimeUnit
  * picks through the app's own `PairingPskFlow` / `DynamicPairingCodeFlow`. The
  * record lands in `<identity-file>.records` and is a handshake candidate on
  * the next run; a dynamic pairing code is written to `<identity-file>.code`
- * while it is being shown (`dev_server.py --pair-dynamic-code-file`). The run
+ * while it is being shown (`dev_server.py --pair-dynamic-code-file`): six
+ * digits, or in the `qr_code` format the `SP:1` pairing token. The run
  * passes once the record is persisted, the server has re-handshaken to it and
  * a `server/activate` has followed. `--expect-paired` instead fails unless the
  * initial handshake itself matched a stored record.
@@ -284,7 +286,8 @@ object NoiseHandshakeCheck {
                         "client/pair-pending pairing_index=${action.pairingIndex}",
                     )
                     is DynamicPairingAction.EmitPairingCode -> {
-                        println("PAIRING CODE  ${action.code}  (written to ${codeFile.path})")
+                        println("PAIRING CODE  ${action.code}  (${action.format.wire}, " +
+                            "written to ${codeFile.path})")
                         codeFile.writeText(action.code)
                     }
                     is DynamicPairingAction.SendPairAuth -> sendEncrypted(
@@ -471,8 +474,12 @@ object NoiseHandshakeCheck {
                                                         SendSpinHandshakeDriver.DEFAULT_SUITE,
                                                     )
                                                 }
+                                                // Accepted, so the format is
+                                                // one the descriptor offers.
+                                                val format = PairingCodeFormat.fromWire(activate.pairingFormat)
+                                                    ?: return fail("unknown pairing format ${activate.pairingFormat}")
                                                 runDynamicActions(
-                                                    DynamicPairingEvent.PairingActivation(pairingIndex)
+                                                    DynamicPairingEvent.PairingActivation(pairingIndex, format)
                                                 )
                                             }
                                             else -> {

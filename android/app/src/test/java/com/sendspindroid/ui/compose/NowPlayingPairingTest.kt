@@ -7,10 +7,13 @@ import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import com.sendspindroid.model.AppConnectionState
+import com.sendspindroid.sendspin.pairing.PairingCodeFormat
+import com.sendspindroid.sendspin.pairing.PairingToken
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.ui.adaptive.FormFactor
 import com.sendspindroid.ui.adaptive.LocalFormFactor
@@ -47,7 +50,7 @@ class NowPlayingPairingTest {
     private fun show(formFactor: FormFactor = FormFactor.PHONE) {
         viewModel.updateConnectionState(AppConnectionState.Connected("Kitchen", "192.168.1.4:8927"))
         viewModel.updatePlaybackState(true, PlaybackState.READY)
-        viewModel.updateMetadata("Highway Star", "Deep Purple", "Machine Head")
+        viewModel.updateMetadata("Highway Star", "Deep Purple", "Machine Head", null, null)
         viewModel.updateAdmissionState(AdmissionState.READY)
         composeTestRule.setContent {
             CompositionLocalProvider(LocalFormFactor provides formFactor) {
@@ -96,6 +99,22 @@ class NowPlayingPairingTest {
         update { updatePairingCode("123456") }
 
         assertCodeShown()
+    }
+
+    @Test
+    fun `a qr_code emission alongside playback is shown as a QR code in place of Now Playing`() {
+        val token = PairingToken.encodePairingCode(ByteArray(24) { (0xe0 + it).toByte() })
+        show()
+
+        update { updatePairingCode(token, PairingCodeFormat.QR_CODE) }
+
+        composeTestRule.onNodeWithText("Scan this code on the server").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("QR code to pair this player").assertIsDisplayed()
+        composeTestRule.onNodeWithText(token, substring = true).assertDoesNotExist()
+        composeTestRule.onNodeWithText("Highway Star").assertDoesNotExist()
+
+        update { updatePairingCode(null) }
+        assertNowPlaying()
     }
 
     @Test

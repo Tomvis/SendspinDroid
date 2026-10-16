@@ -2,6 +2,7 @@ package com.sendspindroid.sendspin.protocol
 
 import com.sendspindroid.sendspin.crypto.Base64Url
 import com.sendspindroid.sendspin.crypto.PskCategory
+import com.sendspindroid.sendspin.pairing.PairingCodeFormat
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -189,8 +190,49 @@ class PairingAttemptTest {
     // ========== pairing.format ==========
 
     @Test
+    fun `a qr_code activation shows the code as a version-1 pairing token`() {
+        // pairing.md, "QR-code emission": "the client presents the pairing
+        // code as a version-1 pairing token with the 24-byte code as its
+        // payload (39 body characters), rendered as a QR code on its display".
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic, format = "qr_code"))
+        assertEquals(listOf("send:client/pair-init"), handler.pairingEvents())
+
+        handler.receive(serverPairInit())
+
+        assertEquals(PairingCodeFormat.QR_CODE, handler.shownFormat)
+        val token = handler.shownCode!!
+        assertEquals(43, token.length)
+        assertTrue(token, token.startsWith("SP:1"))
+        assertEquals(emptyList<String>(), handler.abortReasons())
+        assertEquals(emptyList<String>(), handler.protocolFailures)
+    }
+
+    @Test
+    fun `a wrong qr_code asks for another round and keeps showing the same token`() {
+        // "a client that displays it keeps showing it" (pairing.md, "Client
+        // verification").
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic, format = "qr_code"))
+        handler.receive(serverPairInit())
+        val token = handler.shownCode
+        handler.receive(serverPairAuth())
+        handler.clearEvents()
+
+        handler.receive(serverPairConfirm())
+        handler.receive(serverPairInitNextRound)
+
+        assertEquals(listOf("send:client/pair-retry"), handler.pairingEvents())
+        assertEquals(token, handler.shownCode)
+        assertEquals(PairingCodeFormat.QR_CODE, handler.shownFormat)
+        assertEquals(emptyList<String>(), handler.protocolFailures)
+    }
+
+    @Test
     fun `an emission format the client does not offer is method_not_supported`() {
-        for (format in listOf("qr_code", null)) {
+        // "... or a pairing.format the client does not currently offer";
+        // `format` is required for this method, so absent is not offered.
+        for (format in listOf("bogus", null)) {
             val handler = handler(PskCategory.SENTINEL)
 
             handler.receive(pairingActivateJson(dynamic, format = format))

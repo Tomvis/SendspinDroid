@@ -37,7 +37,11 @@ try:
         PairingCodeFormat,
         PairMethod,
     )
-    from aiosendspin.noise.pairing_token import decode_psk_token
+    from aiosendspin.noise.pairing_token import (
+        decode_pairing_code_token,
+        decode_psk_token,
+        encode_pairing_code_token,
+    )
     from aiosendspin.noise.trust_store import PAIRING_ROUND_LIMIT, FileServerPairingStore
     from aiosendspin.server.roles.color import Color
     from aiosendspin.server.roles.controller.events import ControllerEvent
@@ -139,40 +143,59 @@ def load_or_create_identity(path: Path) -> Identity:
     return identity
 
 
-async def _prompt_pairing_code() -> str:
-    """Read the six-digit dynamic pairing code the operator typed at the console.
-
-    Passed to aiosendspin as a `PairingCodeProvider`: it calls this with no
-    arguments and awaits the result, so this must not take a client_id or any
-    other argument the library does not pass.
-    """
+async def _prompt_pairing_code(prompt: str) -> str:
+    """Read the dynamic pairing code, or the token, the operator typed at the console."""
     loop = asyncio.get_running_loop()
-    print("Enter the pairing code shown on the device: ", end="", flush=True)
+    print(prompt, end="", flush=True)
     line = await loop.run_in_executor(None, sys.stdin.readline)
     return line.strip()
 
 
-# Entered by `pair-dynamic wrong=N`. Wrong unless the device happens to show it.
+# Entered by `pair-dynamic wrong=N` and `pair-dynamic-qr wrong=N`. Wrong
+# unless the device happens to show it.
 WRONG_PAIRING_CODE = "000000"
+WRONG_PAIRING_TOKEN = encode_pairing_code_token(bytes(24))
+
+CONSOLE_PROMPTS = {
+    PairingCodeFormat.DIGITS: "Enter the pairing code shown on the device: ",
+    PairingCodeFormat.QR_CODE: "Enter the SP:1 pairing token scanned from the device: ",
+}
 
 
-def _console_pairing_code(wrong: int):
+def _console_pairing_code(wrong: int, pairing_format: PairingCodeFormat):
     """A `PairingCodeProvider` that enters `wrong` wrong codes, then prompts.
 
-    aiosendspin calls the provider once per round, so each wrong code is one
-    round, which the client answers with client/pair-retry.
+    aiosendspin calls the provider once per round, with no arguments, so each
+    wrong code is one round, which the client answers with client/pair-retry.
     """
     left = wrong
+    wrong_code = WRONG_PAIRING_TOKEN if pairing_format is PairingCodeFormat.QR_CODE else WRONG_PAIRING_CODE
 
     async def provider() -> str:
         nonlocal left
         if left > 0:
             left -= 1
-            LOGGER.info("entering the wrong pairing code %s (%d more to come)", WRONG_PAIRING_CODE, left)
-            return WRONG_PAIRING_CODE
-        return await _prompt_pairing_code()
+            LOGGER.info("entering the wrong pairing code %s (%d more to come)", wrong_code, left)
+            return wrong_code
+        return await _prompt_pairing_code(CONSOLE_PROMPTS[pairing_format])
 
     return provider
+
+
+def _wrong_code(code: str, pairing_format: PairingCodeFormat) -> str:
+    """A code that differs from `code`: the next six digits, or a token with one payload bit flipped."""
+    if pairing_format is PairingCodeFormat.DIGITS:
+        return f"{(int(code) + 1) % 1_000_000:06d}"
+    payload = bytearray(decode_pairing_code_token(code))
+    payload[0] ^= 0x01
+    return encode_pairing_code_token(bytes(payload))
+
+
+def _shown_code(code: str, pairing_format: PairingCodeFormat) -> bool:
+    """Whether `code` is a whole code as the client shows it, not a partly written file."""
+    if pairing_format is PairingCodeFormat.DIGITS:
+        return len(code) == 6
+    return len(code) == 43 and code.startswith("SP:1")
 
 
 def log_pair_pending(message: str | None) -> None:
@@ -560,11 +583,14 @@ class DevServer:
         else:
             LOGGER.info("pairing attempt completed")
 
-    async def pair_with_code_file(self, code_file: Path, wrong_codes: int) -> None:
+    async def pair_with_code_file(
+        self, code_file: Path, wrong_codes: int, pairing_format: PairingCodeFormat
+    ) -> None:
         """Pair, by dynamic pairing code, with the first client that gets a role.
 
         Stands in for the operator: the code is read from `code_file`, where
-        NoiseHandshakeCheck --pair writes the one it is showing. The first
+        NoiseHandshakeCheck --pair writes the one it is showing - six digits,
+        or in the qr_code format the SP:1 token a scan would read. The first
         `wrong_codes` rounds, counted across attempts, enter a different code
         instead. The client answers each with client/pair-retry and shows the
         same code again, up to its round limit, where it aborts with
@@ -594,14 +620,16 @@ class DevServer:
             while True:
                 with contextlib.suppress(FileNotFoundError):
                     code = code_file.read_text(encoding="utf-8").strip()
-                    if len(code) == 6:
+                    if _shown_code(code, pairing_format):
                         break
                 await asyncio.sleep(0.1)
             wrong = wrong_left > 0
             if wrong:
                 wrong_left -= 1
-                code = f"{(int(code) + 1) % 1_000_000:06d}"
-            LOGGER.info("entering %s pairing code", "a wrong" if wrong else "the client's")
+                code = _wrong_code(code, pairing_format)
+            LOGGER.info(
+                "entering %s pairing code (%s)", "a wrong" if wrong else "the client's", pairing_format.value
+            )
             return code
 
         # An attempt runs at most the client's round limit of rounds.
@@ -615,7 +643,7 @@ class DevServer:
                     PairingAttempt(
                         PairMethod.DYNAMIC_PAIRING_CODE,
                         pairing_code_provider=entered_code,
-                        pairing_format=PairingCodeFormat.DIGITS,
+                        pairing_format=pairing_format,
                         on_pair_pending=log_pair_pending,
                     ),
                 )
@@ -696,7 +724,10 @@ class DevServer:
                 ),
             )
             print("pairing initiated")
-        elif cmd in ("pair-dynamic", "pd"):
+        elif cmd in ("pair-dynamic", "pd", "pair-dynamic-qr", "pdq"):
+            pairing_format = (
+                PairingCodeFormat.QR_CODE if cmd in ("pair-dynamic-qr", "pdq") else PairingCodeFormat.DIGITS
+            )
             wrong = next((int(arg.removeprefix("wrong=")) for arg in rest if arg.startswith("wrong=")), 0)
             client_id = self._resolve([arg for arg in rest if not arg.startswith("wrong=")])
             if server.get_client(client_id) is None:
@@ -704,13 +735,16 @@ class DevServer:
                     f"no connected client with id {client_id}; the device must be "
                     f"connected before it can be paired"
                 )
-            print("initiating dynamic pairing; read the six digits off the device screen")
+            if pairing_format is PairingCodeFormat.QR_CODE:
+                print("initiating dynamic pairing; scan the QR code on the device screen")
+            else:
+                print("initiating dynamic pairing; read the six digits off the device screen")
             await server.initiate_pairing(
                 client_id,
                 PairingAttempt(
                     PairMethod.DYNAMIC_PAIRING_CODE,
-                    pairing_code_provider=_console_pairing_code(wrong),
-                    pairing_format=PairingCodeFormat.DIGITS,
+                    pairing_code_provider=_console_pairing_code(wrong, pairing_format),
+                    pairing_format=pairing_format,
                     on_pair_pending=log_pair_pending,
                 ),
             )
@@ -739,6 +773,10 @@ class DevServer:
             "  pair-dynamic [id] [wrong=N]\n"
             "                     pair using the six-digit dynamic pairing code; with\n"
             f"                     wrong=N the first N rounds enter {WRONG_PAIRING_CODE}\n"
+            "  pair-dynamic-qr [id] [wrong=N]\n"
+            "                     the same in the qr_code format: paste the SP:1 token\n"
+            "                     scanned from the device's QR code; wrong=N enters an\n"
+            "                     all-zero code's token\n"
             "  unpair [id]        drop the pairing record and tell the client\n"
             "  quit               stop the server\n"
             "id defaults to the only connected client when omitted.\n"
@@ -843,6 +881,13 @@ def build_parser() -> argparse.ArgumentParser:
         "counted across attempts",
     )
     parser.add_argument(
+        "--pair-dynamic-format",
+        choices=[f.value for f in PairingCodeFormat],
+        default=PairingCodeFormat.DIGITS.value,
+        help="with --pair-dynamic-code-file: the emission format to select; with "
+        "qr_code the file holds the SP:1 token the device renders as a QR code",
+    )
+    parser.add_argument(
         "--no-console",
         action="store_true",
         help="do not read commands from stdin; serve until killed",
@@ -885,7 +930,9 @@ async def run(args: argparse.Namespace) -> int:
             await server.pair_with_token(Path(args.pair_token_file))
         if args.pair_dynamic_code_file:
             await server.pair_with_code_file(
-                Path(args.pair_dynamic_code_file), args.pair_dynamic_wrong_codes
+                Path(args.pair_dynamic_code_file),
+                args.pair_dynamic_wrong_codes,
+                PairingCodeFormat(args.pair_dynamic_format),
             )
 
     test_audio = None

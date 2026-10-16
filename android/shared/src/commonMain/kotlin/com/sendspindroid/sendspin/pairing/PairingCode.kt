@@ -16,6 +16,9 @@ object PairingCode {
     const val NONCE_SIZE = 32
     const val DIGITS = 6
 
+    /** The pairing code's length in bytes in the `qr_code` emission format. */
+    const val QR_CODE_SIZE = 24
+
     private val COMMIT_LABEL = "sendspin-pair-commit-v1".encodeToByteArray()
     private val DERIVE_LABEL = "sendspin-pairing-code-derive-v1".encodeToByteArray()
 
@@ -50,6 +53,14 @@ object PairingCode {
         }
         return remainder.toString().padStart(DIGITS, '0')
     }
+
+    /**
+     * The `qr_code` code: "the first 24 bytes of the digest"
+     * (`pairing.md`, "Pairing code derivation"). Binary, so it is fed into
+     * CPace as these raw bytes and shown as a version-1 [PairingToken].
+     */
+    fun deriveQrCode(handshakeHash: ByteArray, nonceA: ByteArray, nonceB: ByteArray): ByteArray =
+        deriveDigest(handshakeHash, nonceA, nonceB).copyOfRange(0, QR_CODE_SIZE)
 
     /** Presentation grouping only; separators never enter derivation or PRS. */
     fun group(code: String): String =

@@ -4,6 +4,7 @@
     <string name="device_volume">Device Volume</string>
     <string name="track_position">Track position</string>
     <string name="group_label">Group: %s</string>
+    <string name="album_artist_label">Album artist: %s</string>
     <string name="connected">Connected</string>
     <string name="server_address">Server Address</string>
     <string name="album_art">Album artwork</string>
@@ -119,6 +120,8 @@
     <string name="pref_theme_mode_system">System</string>
     <string name="pref_theme_mode_light">Light</string>
     <string name="pref_theme_mode_dark">Dark</string>
+    <string name="pref_server_colors_title">Album colors</string>
+    <string name="pref_server_colors_summary">Color Now Playing with the palette the server sends for the current track</string>
     <string name="pref_player_name_title">Player Name</string>
     <string name="pref_player_name_summary">Name shown to SendSpin server</string>
     <string name="pref_category_audio">Audio Sync</string>
@@ -210,7 +213,7 @@
     <string name="paired_server_forget_title">Forget %1$s?</string>
     <string name="paired_server_forget_message">This removes the pairing on this device only. The server will still list this player and will not connect until you pair again. If this server is connected now, the connection ends.</string>
     <string name="pref_dynamic_pairing_code_title">Dynamic pairing code</string>
-    <string name="pref_dynamic_pairing_code_summary">Also lets a server pair using a 6-digit code shown on this device, which you type into the server. The pairing token keeps working. Experimental.</string>
+    <string name="pref_dynamic_pairing_code_summary">Also lets a server pair using a 6-digit code or a QR code shown on this device, which you type or scan into the server. The pairing token keeps working. Experimental.</string>
     <string name="debug_share_chooser_title">Share Debug Log</string>
     <string name="debug_log_exported">Debug log exported</string>
     <string name="debug_log_export_failed">Failed to export debug log</string>
@@ -345,6 +348,9 @@
     <string name="admission_open_pairing">Open settings</string>
     <string name="pairing_code_title">Enter this code on the server</string>
     <string name="pairing_code_body">Type this code into %1$s to pair this player.</string>
+    <string name="pairing_qr_title">Scan this code on the server</string>
+    <string name="pairing_qr_body">Scan this code with %1$s to pair this player.</string>
+    <string name="pairing_code_qr_description">QR code to pair this player</string>
     <string name="pairing_allow_title">Allow pairing</string>
     <string name="pairing_allow_body">Too many recent pairing attempts. Tap Allow pairing on this device to continue.</string>
     <string name="pairing_allow_button">Allow pairing</string>

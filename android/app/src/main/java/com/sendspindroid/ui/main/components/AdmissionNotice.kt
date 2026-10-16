@@ -3,9 +3,11 @@ package com.sendspindroid.ui.main.components
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -24,12 +26,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
+import com.sendspindroid.sendspin.pairing.PairingCodeFormat
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.FormFactor
 import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.adaptive.TvOverscanHorizontal
 import com.sendspindroid.ui.adaptive.tvFocusRing
+import com.sendspindroid.ui.settings.PairingQrImage
 import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
@@ -50,6 +54,9 @@ import com.sendspindroid.ui.theme.SendSpinTheme
  * for a prompt alongside playback, and otherwise returns early on it - so
  * this takes only the two blocked states and has no third branch to render.
  *
+ * @param pairingCodeFormat the emission format of [pairingCode]. In
+ *   [PairingCodeFormat.QR_CODE] the code is a pairing token, shown as a QR
+ *   code only.
  * @param lastFailure what happened to the last pairing attempt, if it did
  *   not finish. Not shown while a new attempt's code or gesture prompt is.
  */
@@ -59,6 +66,7 @@ fun AdmissionNotice(
     serverName: String,
     onOpenPairingClick: () -> Unit,
     pairingCode: String? = null,
+    pairingCodeFormat: PairingCodeFormat = PairingCodeFormat.DIGITS,
     gestureRequested: Boolean = false,
     onAllowPairingClick: () -> Unit = {},
     lastFailure: String? = null,
@@ -68,15 +76,18 @@ fun AdmissionNotice(
     // confirm, or (absent both) the Pairing PSK token guidance this branch
     // has always shown. AWAITING_APPROVAL takes none of them.
     val showingCode = state == AdmissionState.PAIRING && pairingCode != null
+    val showingQr = showingCode && pairingCodeFormat == PairingCodeFormat.QR_CODE
     val showingGesture = state == AdmissionState.PAIRING && pairingCode == null && gestureRequested
 
     val titleRes = when {
+        showingQr -> R.string.pairing_qr_title
         showingCode -> R.string.pairing_code_title
         showingGesture -> R.string.pairing_allow_title
         state == AdmissionState.PAIRING -> R.string.admission_pairing_title
         else -> R.string.admission_awaiting_approval_title
     }
     val bodyRes = when {
+        showingQr -> R.string.pairing_qr_body
         showingCode -> R.string.pairing_code_body
         showingGesture -> R.string.pairing_allow_body
         state == AdmissionState.PAIRING -> R.string.admission_pairing_body
@@ -148,7 +159,24 @@ fun AdmissionNotice(
             )
         }
 
-        if (showingCode) {
+        if (showingQr) {
+            Spacer(modifier = Modifier.height(24.dp))
+            // The token is "rendered as a QR code on its display" (pairing.md,
+            // "QR-code emission"), and never as text: the server chose
+            // qr_code because its operator scans. Square, and as large as
+            // the screen leaves room for up to qrSize, which a phone in
+            // landscape does not.
+            val qrSize = if (isTv) 300.dp else 240.dp
+            PairingQrImage(
+                token = requireNotNull(pairingCode),
+                size = qrSize,
+                contentDescription = stringResource(R.string.pairing_code_qr_description),
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .sizeIn(maxWidth = qrSize, maxHeight = qrSize)
+                    .aspectRatio(1f)
+            )
+        } else if (showingCode) {
             Spacer(modifier = Modifier.height(24.dp))
             PairingCodeDisplay(code = requireNotNull(pairingCode))
         } else if (showingGesture) {
@@ -204,6 +232,21 @@ private fun AdmissionNoticePairingCodePreview() {
             serverName = "Living Room",
             onOpenPairingClick = {},
             pairingCode = "123456"
+        )
+    }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun AdmissionNoticePairingQrPreview() {
+    SendSpinTheme {
+        AdmissionNotice(
+            state = AdmissionState.PAIRING,
+            serverName = "Living Room",
+            onOpenPairingClick = {},
+            // pairing.md's QR-code emission reference vector
+            pairingCode = "SP:14DQ6FY7E4XTOP9HJ5LV6Z3PO57YPD4XT6T97N5Y",
+            pairingCodeFormat = PairingCodeFormat.QR_CODE
         )
     }
 }

@@ -71,6 +71,7 @@ The server reads commands on stdin while running:
 | `untrust [id]` | revoke that |
 | `pair <token>` | pair using a `SP:0...` pairing token from the device (Phase 2) |
 | `pair-dynamic [id]` | pair using the six-digit dynamic pairing code shown on the device |
+| `pair-dynamic-qr [id]` | the same in the `qr_code` format: paste the `SP:1` token scanned from the device's QR code |
 | `unpair [id]` | drop the record and send `server/unpair` (exercises item 2.7) |
 | `quit` | stop |
 
@@ -148,6 +149,36 @@ before anything is entered, so the round the console is left prompting in
 has already counted: `pair-dynamic wrong=10` abandoned at its prompt has
 used 11 of the 20. The count survives an app restart; only a code that
 verifies, or Allow pairing, resets it.
+
+### The `qr_code` format
+
+The app offers the dynamic pairing code in two emission formats, `digits` and
+`qr_code`. Music Assistant always selects `digits`, so `pair-dynamic-qr` is
+the only way to see the other. In `qr_code` the code is 24 bytes, and the app
+shows it as a QR code of its version-1 pairing token (`SP:1` and 39
+characters) with no text: the server picked `qr_code` because its operator
+scans. CPace is keyed with the 24 raw bytes, never the token's characters.
+
+1. Run `pair-dynamic-qr` (or `pair-dynamic-qr <client_id>`). The console
+   prints "initiating dynamic pairing; scan the QR code on the device screen"
+   and then prompts:
+   ```
+   Enter the SP:1 pairing token scanned from the device:
+   ```
+2. The device shows "Scan this code on the server" and a QR code. TalkBack
+   reads it as "QR code to pair this player", never the token.
+3. Scan it with a phone and paste the text at the prompt. On an emulator,
+   capture the screen and decode it in a separate venv instead:
+   ```bash
+   adb -s <avd> exec-out screencap -p > qr.png
+   python -m venv .dev/qr-venv && .dev/qr-venv/Scripts/pip install zxing-cpp pillow
+   .dev/qr-venv/Scripts/python -I -c "import sys, zxingcpp; from PIL import Image; print(zxingcpp.read_barcodes(Image.open(sys.argv[1]))[0].text)" qr.png
+   ```
+   It prints the 43-character `SP:1...` token. Paste that.
+
+Rounds and the round limit work as above. `pair-dynamic-qr wrong=N` enters the
+token of an all-zero code in the first N rounds, and the device keeps showing
+the same QR code through each retry.
 
 ## Verifying the wire end to end
 
@@ -264,9 +295,17 @@ python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
     --trust-all-unpaired --no-console --debug \
     --pair-dynamic-code-file $ID.code --pair-dynamic-wrong-codes 20
 $CHECK --pair --auto-allow --expect-retries=19 --expect-mismatches=1 && $CHECK --expect-paired
+
+# The qr_code format: the tool writes the SP:1 token it would render as a QR
+# code to $ID.code, and the server enters it as a scan would. A wrong code is
+# the token with one payload bit flipped.
+python ci/conformance/dev_server.py --host 127.0.0.1 --port 18931 \
+    --trust-all-unpaired --no-console --debug \
+    --pair-dynamic-code-file $ID.code --pair-dynamic-wrong-codes 1 --pair-dynamic-format qr_code
+$CHECK --pair --expect-retries=1 && $CHECK --expect-paired
 ```
 
-The server logs one `entering ... pairing code` line per round, and
+The server logs one `entering ... pairing code (<format>)` line per round, and
 `client held the attempt back (client/pair-pending)` before the held-back
 attempt. It must log no `non-compliant client` line.
 
@@ -378,6 +417,11 @@ during device acceptance and record the result of each:
   over the MediaSession IPC boundary, that TalkBack reads the code aloud
   usably, and that the digits are legible at a normal viewing distance (not
   just readable in a close-up screenshot).
+- **The `qr_code` QR scanning from a real phone camera** -- with
+  `pair-dynamic-qr`, confirm a phone scans the QR off the device screen at
+  arm's length (across a room on a TV), that no token text is shown, that
+  TalkBack says "QR code to pair this player" and nothing of the token, and
+  that `adb logcat -d` holds no `SP:1`.
 
 ## Resetting state
 

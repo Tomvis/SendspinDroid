@@ -8,6 +8,10 @@ package that aiosendspin - and therefore the reference server - depends on.
 A lv_cat mistake changes every byte below, so this doubles as the interop
 guard for the whole CPace core.
 
+Three vectors: the six-digit code in round 1, the same code in round 2, and a
+qr_code PRS - 24 raw bytes, whose length changes the generator string's
+padding - in round 1.
+
 Usage:  pip install cpace && python ci/conformance/cpace_oracle.py
 """
 
@@ -16,20 +20,25 @@ import secrets
 
 from cpace import CPace, CPaceRole
 
-# Sendspin instantiation: PRS is the six-digit code as ASCII; sid is the
-# label, the 32-byte Noise handshake hash, and the pairing index and the round
-# number as big-endian uint32s; CI is empty; ADa is "server" and ADb is
-# "client".
-PRS = b"123456"
+# Sendspin instantiation: PRS is the six-digit code as ASCII, or in the
+# qr_code format the raw 24-byte code; sid is the label, the 32-byte Noise
+# handshake hash, and the pairing index and the round number as big-endian
+# uint32s; CI is empty; ADa is "server" and ADb is "client".
+DIGITS_PRS = b"123456"
+# The code of pairing.md's QR-code emission reference vector.
+QR_CODE_PRS = bytes(range(0xE0, 0xF8))
 HANDSHAKE_HASH = bytes(range(32))
 PAIRING_INDEX = 1
-ROUND = 1
-SID = (
-    b"sendspin-pair-pake-v1"
-    + HANDSHAKE_HASH
-    + PAIRING_INDEX.to_bytes(4, "big")
-    + ROUND.to_bytes(4, "big")
-)
+
+
+def sid(round_number: int) -> bytes:
+    return (
+        b"sendspin-pair-pake-v1"
+        + HANDSHAKE_HASH
+        + PAIRING_INDEX.to_bytes(4, "big")
+        + round_number.to_bytes(4, "big")
+    )
+
 
 # Where the reference server is installed, hold the sid to its own derivation.
 try:
@@ -37,7 +46,8 @@ try:
 except ImportError:
     pass
 else:
-    assert SID == _pake_sid(HANDSHAKE_HASH, PAIRING_INDEX, ROUND)
+    for _round in (1, 2):
+        assert sid(_round) == _pake_sid(HANDSHAKE_HASH, PAIRING_INDEX, _round)
 
 # The library draws each scalar from `secrets` inside start(), so an unpatched
 # run is random and cannot reproduce a previously published vector. Pinning the
@@ -50,40 +60,50 @@ FIXED_SCALARS = [
 ]
 
 _real_token_bytes = secrets.token_bytes
-_pending = list(FIXED_SCALARS)
 
 
-def _deterministic_token_bytes(n: int) -> bytes:
-    if n == 32 and _pending:
-        return _pending.pop(0)
-    return _real_token_bytes(n)
+def vector(prs: bytes, round_number: int) -> dict[str, str]:
+    """One CPace run, initiator and responder, under the fixed scalars."""
+    pending = list(FIXED_SCALARS)
 
+    def deterministic_token_bytes(n: int) -> bytes:
+        if n == 32 and pending:
+            return pending.pop(0)
+        return _real_token_bytes(n)
 
-secrets.token_bytes = _deterministic_token_bytes
-try:
-    initiator = CPace.start(role=CPaceRole.INITIATOR, prs=PRS, sid=SID, ad=b"server")
-    responder = CPace.start(role=CPaceRole.RESPONDER, prs=PRS, sid=SID, ad=b"client")
-finally:
-    secrets.token_bytes = _real_token_bytes
+    session_id = sid(round_number)
+    secrets.token_bytes = deterministic_token_bytes
+    try:
+        initiator = CPace.start(role=CPaceRole.INITIATOR, prs=prs, sid=session_id, ad=b"server")
+        responder = CPace.start(role=CPaceRole.RESPONDER, prs=prs, sid=session_id, ad=b"client")
+    finally:
+        secrets.token_bytes = _real_token_bytes
 
-ya = initiator.public_share
-yb = responder.public_share
+    ya = initiator.public_share
+    yb = responder.public_share
 
-# Captured before derive(): the library zeroizes the scalar once the shared
-# secret is computed. Injecting it is what makes `yb` reproducible in the
-# Kotlin test rather than random per run.
-scalar = responder._scalar  # noqa: SLF001
+    # Captured before derive(): the library zeroizes the scalar once the shared
+    # secret is computed. Injecting it is what makes `yb` reproducible in the
+    # Kotlin test rather than random per run.
+    scalar = responder._scalar  # noqa: SLF001
 
-initiator.derive(yb, b"client")
-responder.derive(ya, b"server")
+    initiator.derive(yb, b"client")
+    responder.derive(ya, b"server")
+
+    return {
+        "prs": prs.hex(),
+        "sid": session_id.hex(),
+        "ya": ya.hex(),
+        "yb": yb.hex(),
+        "yb_scalar": bytes(scalar).hex(),
+        "isk": responder.isk.hex(),
+        "server_kc": initiator.tag().hex(),
+        "client_kc": responder.tag().hex(),
+    }
+
 
 print(json.dumps({
-    "prs": PRS.decode(),
-    "sid": SID.hex(),
-    "ya": ya.hex(),
-    "yb": yb.hex(),
-    "yb_scalar": bytes(scalar).hex(),
-    "isk": responder.isk.hex(),
-    "server_kc": initiator.tag().hex(),
-    "client_kc": responder.tag().hex(),
+    "digits_round_1": vector(DIGITS_PRS, 1),
+    "digits_round_2": vector(DIGITS_PRS, 2),
+    "qr_code_round_1": vector(QR_CODE_PRS, 1),
 }, indent=2))

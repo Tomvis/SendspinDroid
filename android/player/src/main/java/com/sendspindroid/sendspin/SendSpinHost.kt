@@ -22,6 +22,9 @@ interface SendSpinHost {
     /** Poll the connection more often when idle (15 s rather than 30 s). */
     val highPowerMode: Boolean
 
+    /** List `color@v1` in `client/hello`, for the server's colors for the current audio. */
+    val serverColors: Boolean
+
     /** The codec to list first in `client/hello`. */
     fun preferredCodec(): String
 

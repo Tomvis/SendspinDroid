@@ -38,4 +38,14 @@ class PairingQrImageTest {
             .single()
         assertFalse(description, token in description)
     }
+
+    @Test
+    fun aCallerCanSayWhatItsQrIs() {
+        // The dynamic pairing code's QR is not the pairing token's.
+        composeTestRule.setContent {
+            PairingQrImage(token = token, contentDescription = "QR code to pair this player")
+        }
+
+        composeTestRule.onNodeWithContentDescription("QR code to pair this player").assertExists()
+    }
 }

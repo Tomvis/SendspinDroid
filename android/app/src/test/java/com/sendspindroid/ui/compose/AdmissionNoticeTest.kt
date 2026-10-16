@@ -1,13 +1,19 @@
 package com.sendspindroid.ui.compose
 
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import com.sendspindroid.sendspin.pairing.PairingCodeFormat
+import com.sendspindroid.sendspin.pairing.PairingToken
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.ui.main.components.AdmissionNotice
 import com.sendspindroid.ui.theme.SendSpinTheme
+import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -32,6 +38,7 @@ class AdmissionNoticeTest {
         lastFailure: String?,
         pairingCode: String? = null,
         gestureRequested: Boolean = false,
+        pairingCodeFormat: PairingCodeFormat = PairingCodeFormat.DIGITS,
     ) {
         composeTestRule.setContent {
             SendSpinTheme {
@@ -40,11 +47,58 @@ class AdmissionNoticeTest {
                     serverName = "Kitchen",
                     onOpenPairingClick = {},
                     pairingCode = pairingCode,
+                    pairingCodeFormat = pairingCodeFormat,
                     gestureRequested = gestureRequested,
                     lastFailure = lastFailure
                 )
             }
         }
+    }
+
+    /** The spec's reference token for the code 0xe0..0xf7. */
+    private val qrToken = PairingToken.encodePairingCode(ByteArray(24) { (0xe0 + it).toByte() })
+
+    @Test
+    fun aQrCodeEmissionIsShownAsAQrCodeOnly() {
+        // pairing.md, "QR-code emission": the token is "rendered as a QR code
+        // on its display". The owner chose the QR alone, with no token text.
+        show(AdmissionState.PAIRING, null, pairingCode = qrToken, pairingCodeFormat = PairingCodeFormat.QR_CODE)
+
+        composeTestRule.onNodeWithText("Scan this code on the server").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Scan this code with Kitchen to pair this player.").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("QR code to pair this player").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText(qrToken, substring = true).assertCountEquals(0)
+        composeTestRule.onAllNodesWithText("Enter this code on the server").assertCountEquals(0)
+    }
+
+    @Test
+    fun theQrCodesDescriptionSaysWhatItIs_withoutTheToken() {
+        // A description is read aloud, and the token is the pairing secret.
+        show(AdmissionState.PAIRING, null, pairingCode = qrToken, pairingCodeFormat = PairingCodeFormat.QR_CODE)
+
+        val description = composeTestRule
+            .onNodeWithContentDescription("QR code to pair this player")
+            .fetchSemanticsNode()
+            .config[SemanticsProperties.ContentDescription]
+            .single()
+        assertFalse(description, qrToken in description || qrToken.removePrefix("SP:1") in description)
+    }
+
+    @Test
+    fun digitsAreStillShownAsDigits() {
+        show(AdmissionState.PAIRING, null, pairingCode = "123456")
+
+        composeTestRule.onNodeWithText("Enter this code on the server").assertIsDisplayed()
+        composeTestRule.onNodeWithText("123-456").assertIsDisplayed()
+        composeTestRule.onAllNodesWithContentDescription("QR code to pair this player").assertCountEquals(0)
+    }
+
+    @Test
+    fun aNewAttemptsQrCodeIsNotShownUnderTheLastOnesFailure() {
+        show(AdmissionState.PAIRING, failure, pairingCode = qrToken, pairingCodeFormat = PairingCodeFormat.QR_CODE)
+
+        composeTestRule.onNodeWithText("Scan this code on the server").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText(failure).assertCountEquals(0)
     }
 
     @Test

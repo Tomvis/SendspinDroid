@@ -14,6 +14,10 @@ import com.sendspindroid.sendspin.crypto.Psk
  * `0-9`, `A-Z` and `:` so the whole thing fits the QR alphanumeric set and
  * survives being read aloud or retyped.
  *
+ * Version `1` carries "a per-session dynamic pairing code in the `qr_code`
+ * emission format": `SP:` + `1` + base32 of the 24-byte code, 43 characters.
+ * The client only ever encodes that one, to show it as a QR code.
+ *
  * The `2`->`9` substitution is not cosmetic: base32's alphabet includes `2`,
  * but the QR alphanumeric mode's does not overlap it the way this needs, so the
  * spec rewrites it. The server applies the inverse before decoding.
@@ -27,6 +31,7 @@ object PairingToken {
 
     private const val PREFIX = "SP:"
     private const val VERSION = '0'
+    private const val PAIRING_CODE_VERSION = '1'
     private const val LENGTH = 107
 
     /** RFC 4648 base32, uppercase, no padding. */
@@ -46,6 +51,19 @@ object PairingToken {
         }
         val body = base32(clientKey + pairingPsk).replace('2', '9')
         return "$PREFIX$VERSION$body"
+    }
+
+    /**
+     * The `qr_code` emission: "a version-1 pairing token with the 24-byte
+     * code as its payload (39 body characters)" (`pairing.md`, "QR-code
+     * emission").
+     */
+    fun encodePairingCode(code: ByteArray): String {
+        require(code.size == PairingCode.QR_CODE_SIZE) {
+            "a qr_code pairing code is ${PairingCode.QR_CODE_SIZE} bytes, got ${code.size}"
+        }
+        val body = base32(code).replace('2', '9')
+        return "$PREFIX$PAIRING_CODE_VERSION$body"
     }
 
     /**

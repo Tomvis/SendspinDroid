@@ -364,14 +364,17 @@ class ServerActivateRulesTest {
     @Test
     fun aDynamicActivationNeedsAnEmissionFormatTheClientOffers() {
         // "... or a pairing.format the client does not currently offer - reply
-        // with pair/abort reason method_not_supported". Only `digits` is
-        // advertised; `format` is required for this method, so absent is not
-        // an offered format either.
-        assertEquals(
-            ActivationOutcome.Accept(emptyList()),
-            evaluate(activate(pairing, method = "dynamic_pairing_code", format = "digits")),
-        )
-        for (format in listOf("qr_code", "semaphore", null)) {
+        // with pair/abort reason method_not_supported". Both `digits` and
+        // `qr_code` are advertised; `format` is required for this method, so
+        // absent is not an offered format either.
+        for (format in listOf("digits", "qr_code")) {
+            assertEquals(
+                ActivationOutcome.Accept(emptyList()),
+                evaluate(activate(pairing, method = "dynamic_pairing_code", format = format)),
+                "format $format",
+            )
+        }
+        for (format in listOf("semaphore", "QR_CODE", null)) {
             assertEquals(
                 methodNotSupported,
                 evaluate(activate(pairing, method = "dynamic_pairing_code", format = format)),

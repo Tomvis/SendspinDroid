@@ -14,8 +14,12 @@ sealed interface DynamicPairingEvent {
      * @param pairingIndex the number of pairing activations received since the
      *   last Noise handshake, as sent in `client/pair-init` and
      *   `client/pair-pending` and folded into the CPace `sid`.
+     * @param format the activation's emission format, one this client offers.
      */
-    data class PairingActivation(val pairingIndex: Int) : DynamicPairingEvent
+    data class PairingActivation(
+        val pairingIndex: Int,
+        val format: PairingCodeFormat,
+    ) : DynamicPairingEvent
 
     /** The local pairing window opened, ending a gesture-gated wait. */
     object WindowOpened : DynamicPairingEvent
@@ -66,8 +70,11 @@ sealed interface DynamicPairingAction {
 
     object StartAttemptTimeout : DynamicPairingAction
 
-    /** Show the code to the operator. */
-    data class EmitPairingCode(val code: String) : DynamicPairingAction
+    /**
+     * Show the code to the operator: six digits, or in [PairingCodeFormat.QR_CODE]
+     * the version-1 pairing token to render as a QR code.
+     */
+    data class EmitPairingCode(val code: String, val format: PairingCodeFormat) : DynamicPairingAction
 
     /** Send `client/pair-auth` carrying the CPace public share `Yb`. */
     data class SendPairAuth(val yb: ByteArray) : DynamicPairingAction
@@ -177,11 +184,16 @@ class DynamicPairingCodeFlow(
 
     private var pairingIndex: Int = 0
 
+    private var format: PairingCodeFormat = PairingCodeFormat.DIGITS
+
     /** The client's nonce contribution. Discarded on every exit path. */
     private var nonceB: ByteArray? = null
 
     /** The attempt's pairing code, derived in the first round and emitted again in each. */
     private var code: String? = null
+
+    /** The CPace `PRS` for [code], the same in every round. Discarded on every exit path. */
+    private var prs: ByteArray? = null
 
     /** The round within the attempt, 1 for the first. It goes into the CPace `sid`. */
     private var round: Int = 0
@@ -214,6 +226,7 @@ class DynamicPairingCodeFlow(
         val abandoning = state.inAttempt
         discard()
         pairingIndex = event.pairingIndex
+        format = event.format
 
         val actions = mutableListOf<DynamicPairingAction>()
         if (abandoning) actions.add(DynamicPairingAction.StopEmittingCode)
@@ -260,18 +273,19 @@ class DynamicPairingCodeFlow(
         // nonce_A is "Present in the first round only", so a first round
         // without one and a later round with one are both out of sequence.
         val nonceA = event.nonceA
-        val roundCode = when (state) {
+        val (roundCode, roundPrs) = when (state) {
             State.AWAITING_SERVER_INIT -> {
                 val nonce = nonceB
                 if (nonceA == null || nonce == null) return protocolError()
                 round = 1
-                PairingCode.deriveDigits(handshakeHash, nonceA, nonce).also { code = it }
+                derive(nonceA, nonce).also { (c, p) -> code = c; prs = p }
             }
             State.AWAITING_NEXT_ROUND -> {
                 val current = code
-                if (nonceA != null || current == null) return protocolError()
+                val currentPrs = prs
+                if (nonceA != null || current == null || currentPrs == null) return protocolError()
                 round += 1
-                current
+                current to currentPrs
             }
             else -> return protocolError()
         }
@@ -280,9 +294,27 @@ class DynamicPairingCodeFlow(
         // attempt then ends.
         counter.onRoundStarted()
         // "a separate CPace run - fresh scalars, its own sid".
-        responder = CPaceResponder(prs = roundCode.encodeToByteArray(), sid = sidFor(pairingIndex, round))
+        responder = CPaceResponder(prs = roundPrs, sid = sidFor(pairingIndex, round))
         state = State.AWAITING_AUTH
-        return listOf(DynamicPairingAction.EmitPairingCode(roundCode))
+        return listOf(DynamicPairingAction.EmitPairingCode(roundCode, format))
+    }
+
+    /**
+     * The code to emit and the CPace `PRS`, per `pairing.md`, "Pairing code
+     * derivation". In `digits` the `PRS` is "these 6 ASCII digits". In
+     * `qr_code` it is "these 24 raw bytes", while the code is emitted as the
+     * version-1 pairing token that carries them ("QR-code emission"): the
+     * token's own characters never enter CPace.
+     */
+    private fun derive(nonceA: ByteArray, nonceB: ByteArray): Pair<String, ByteArray> = when (format) {
+        PairingCodeFormat.DIGITS -> {
+            val digits = PairingCode.deriveDigits(handshakeHash, nonceA, nonceB)
+            digits to digits.encodeToByteArray()
+        }
+        PairingCodeFormat.QR_CODE -> {
+            val raw = PairingCode.deriveQrCode(handshakeHash, nonceA, nonceB)
+            PairingToken.encodePairingCode(raw) to raw
+        }
     }
 
     private fun onServerPairAuth(event: DynamicPairingEvent.ServerPairAuth): List<DynamicPairingAction> {
@@ -391,6 +423,8 @@ class DynamicPairingCodeFlow(
         nonceB?.fill(0)
         nonceB = null
         code = null
+        prs?.fill(0)
+        prs = null
         round = 0
         responder = null
         pendingPsk?.fill(0)

@@ -62,6 +62,7 @@ object UserSettings {
     const val KEY_HIGH_POWER_MODE = "high_power_mode"
     const val KEY_LAYOUT_MODE = "layout_mode"
     const val KEY_THEME_MODE = "theme_mode"
+    const val KEY_SERVER_COLORS = "server_colors"
     const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
     const val KEY_SEARCH_FOR_SERVERS = "search_for_servers"
     const val KEY_LAST_PLAYBACK_SERVER_ID = "last_playback_server_id"
@@ -654,6 +655,16 @@ object UserSettings {
             return ThemeMode.entries.firstOrNull { it.name == value } ?: ThemeMode.SYSTEM
         }
         set(value) { prefs?.edit()?.putString(KEY_THEME_MODE, value.name)?.apply() }
+
+    /**
+     * Whether Now Playing takes the colors the server sends for the current
+     * track (Settings, "Album colors"). On by default. Off, the app keeps its
+     * Material colors at once and leaves `color@v1` out of `client/hello`
+     * from the next connection, through AppSendSpinHost.
+     */
+    var serverColors: Boolean
+        get() = prefs?.getBoolean(KEY_SERVER_COLORS, true) ?: true
+        set(value) { prefs?.edit()?.putBoolean(KEY_SERVER_COLORS, value)?.apply() }
 
     /**
      * Gets the preferred audio codec for streaming.

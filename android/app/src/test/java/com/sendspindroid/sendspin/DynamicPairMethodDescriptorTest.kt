@@ -1,7 +1,9 @@
 package com.sendspindroid.sendspin
 
+import com.sendspindroid.sendspin.pairing.PairingCodeFormat
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -19,14 +21,27 @@ class DynamicPairMethodDescriptorTest {
         supportedPairMethods = methods,
     )
 
+    /**
+     * pairing.md, "Methods": "Clients whose display can render a QR code
+     * should also offer the qr_code emission format". Every form factor
+     * draws one, so the one descriptor offers both.
+     */
     @Test
-    fun `dynamic descriptor advertises display and digits`() {
+    fun `dynamic descriptor advertises the display, digits and qr_code`() {
         val json = hello(
             listOf(MessageBuilder.PairMethodDescriptor.PAIRING_PSK, MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE)
         )
         assertTrue(json.contains("dynamic_pairing_code"))
         assertTrue(json.contains("\"out_channels\":[\"display\"]"))
-        assertTrue(json.contains("\"formats\":[\"digits\"]"))
+        assertTrue(json, json.contains("\"formats\":[\"digits\",\"qr_code\"]"))
+    }
+
+    /** An activation may select any advertised format, so the flow must know each one. */
+    @Test
+    fun `every advertised format is one the flow runs`() {
+        for (format in MessageBuilder.PairMethodDescriptor.DYNAMIC_PAIRING_CODE.formats) {
+            assertNotNull(format, PairingCodeFormat.fromWire(format))
+        }
     }
 
     /** pairing.md: `locations` belongs to the secret-based methods only. */

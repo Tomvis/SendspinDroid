@@ -253,3 +253,20 @@ object PairMethod {
     const val PAIRING_PSK = "pairing_psk"
     const val DYNAMIC_PAIRING_CODE = "dynamic_pairing_code"
 }
+
+/**
+ * The dynamic pairing code's emission formats, selected by the pairing
+ * activation's `format` (`pairing.md#dynamic-pairing-code-flow`).
+ */
+enum class PairingCodeFormat(val wire: String) {
+    /** "a decimal code the operator types into the server". */
+    DIGITS("digits"),
+
+    /** "a code rendered as a QR code that the operator scans into the server". */
+    QR_CODE("qr_code");
+
+    companion object {
+        /** Null for a format this client does not know, or none. */
+        fun fromWire(wire: String?): PairingCodeFormat? = entries.firstOrNull { it.wire == wire }
+    }
+}

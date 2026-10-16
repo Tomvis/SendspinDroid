@@ -56,6 +56,32 @@ class PairingCodeTest {
         assertEquals(false, first.hex() == PairingCode.generateNonce().hex())
     }
 
+    /** pairing.md, "Pairing code derivation": `qr_code: code = digest[0..23]`. */
+    @Test
+    fun `the qr code is the first 24 bytes of the digest`() {
+        assertEquals(DIGEST_VECTOR.take(48), PairingCode.deriveQrCode(h, nonceA, nonceB).hex())
+    }
+
+    /**
+     * Cross-checked against aiosendspin 10.0.0, the reference implementation,
+     * rather than against the construction re-done here:
+     *
+     *   from aiosendspin.noise import pairing_code as pc
+     *   h, a, b = bytes(range(0, 32)), bytes(range(32, 64)), bytes(range(64, 96))
+     *   print(pc.derive_qr_code(h, a, b).hex(), pc.derive_digits(h, a, b))
+     */
+    @Test
+    fun `both formats match aiosendspin`() {
+        val h = ByteArray(32) { it.toByte() }
+        val nonceA = ByteArray(32) { (it + 0x20).toByte() }
+        val nonceB = ByteArray(32) { (it + 0x40).toByte() }
+        assertEquals(
+            "9f26c48e69443b7fab8d1be2052017a0f69b4a1f0e49033d",
+            PairingCode.deriveQrCode(h, nonceA, nonceB).hex(),
+        )
+        assertEquals("806729", PairingCode.deriveDigits(h, nonceA, nonceB))
+    }
+
     /** Presentation only: grouping never enters derivation or PRS. */
     @Test
     fun `grouping is three and three`() {

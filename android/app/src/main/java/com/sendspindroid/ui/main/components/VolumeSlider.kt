@@ -28,6 +28,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sendspindroid.R
+import com.sendspindroid.ui.theme.LocalServerColors
 import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
@@ -44,6 +45,9 @@ fun VolumeSlider(
 ) {
     val activeTrackColor = accentColor ?: MaterialTheme.colorScheme.primary
     val thumbColor = accentColor ?: MaterialTheme.colorScheme.primary
+    // Dimmed, but not on a server's palette, whose contrast holds only opaque
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+        .copy(alpha = if (LocalServerColors.current) 1f else 0.7f)
     val focusManager = LocalFocusManager.current
     val view = LocalView.current
 
@@ -56,7 +60,7 @@ fun VolumeSlider(
         Text(
             text = stringResource(R.string.device_volume),
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+            color = labelColor,
             fontSize = 11.sp,
             modifier = Modifier.padding(start = 32.dp, bottom = 2.dp)
         )
@@ -70,7 +74,7 @@ fun VolumeSlider(
                 painter = painterResource(R.drawable.ic_volume_down),
                 contentDescription = null,
                 modifier = Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                tint = labelColor
             )
 
             Spacer(modifier = Modifier.width(12.dp))
@@ -96,7 +100,7 @@ fun VolumeSlider(
                 painter = painterResource(R.drawable.ic_volume_up),
                 contentDescription = null,
                 modifier = Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                tint = labelColor
             )
         }
     }

@@ -9,6 +9,9 @@ import androidx.compose.ui.test.assertIsNotFocused
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import com.sendspindroid.sendspin.pairing.PairingCodeFormat
+import com.sendspindroid.sendspin.pairing.PairingToken
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.ui.adaptive.FormFactor
 import com.sendspindroid.ui.adaptive.LocalFormFactor
@@ -33,6 +36,7 @@ class AdmissionNoticeTvTest {
 
     private var noticeShown by mutableStateOf(false)
     private var pairingCode by mutableStateOf<String?>(null)
+    private var pairingCodeFormat by mutableStateOf(PairingCodeFormat.DIGITS)
     private var gestureRequested by mutableStateOf(false)
 
     /**
@@ -49,6 +53,7 @@ class AdmissionNoticeTvTest {
                             serverName = "Kitchen",
                             onOpenPairingClick = {},
                             pairingCode = pairingCode,
+                            pairingCodeFormat = pairingCodeFormat,
                             gestureRequested = gestureRequested
                         )
                     }
@@ -72,6 +77,20 @@ class AdmissionNoticeTvTest {
     fun onATv_allowPairingTakesFocusWhenItReplacesTheCode() {
         pairingCode = "123456"
         show(FormFactor.TV)
+
+        pairingCode = null
+        gestureRequested = true
+        composeTestRule.waitForIdle()
+
+        button("Allow pairing").assertIsFocused()
+    }
+
+    @Test
+    fun onATv_allowPairingTakesFocusWhenItReplacesAQrCode() {
+        pairingCode = PairingToken.encodePairingCode(ByteArray(24) { (0xe0 + it).toByte() })
+        pairingCodeFormat = PairingCodeFormat.QR_CODE
+        show(FormFactor.TV)
+        composeTestRule.onNodeWithContentDescription("QR code to pair this player").assertExists()
 
         pairingCode = null
         gestureRequested = true

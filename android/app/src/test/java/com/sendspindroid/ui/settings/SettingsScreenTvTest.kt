@@ -34,7 +34,8 @@ import org.robolectric.annotation.Config
 
 /**
  * Settings driven by a remote: where focus starts, that Down from the Theme
- * row reaches the sync offset, and which controls are focus stops at all.
+ * row reaches Album colors and then the sync offset, and which controls are
+ * focus stops at all.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], qualifiers = "w960dp-h540dp")
@@ -88,14 +89,17 @@ class SettingsScreenTvTest {
     }
 
     @Test
-    fun `on a TV Down from the Theme row reaches the sync offset row`() {
+    fun `on a TV Down from the Theme row reaches Album colors, then the sync offset row`() {
         show(FormFactor.TV)
         // The rightmost segment: the one Down used to carry past the - value + buttons.
         val dark = composeTestRule.onNodeWithText("Dark")
         dark.requestFocus()
 
         dark.performKeyInput { pressKey(Key.DirectionDown) }
+        val albumColors = composeTestRule.onNodeWithText("Album colors")
+        albumColors.assertIsFocused()
 
+        albumColors.performKeyInput { pressKey(Key.DirectionDown) }
         composeTestRule.onNodeWithText("Manual Sync Offset").assertIsFocused()
     }
 

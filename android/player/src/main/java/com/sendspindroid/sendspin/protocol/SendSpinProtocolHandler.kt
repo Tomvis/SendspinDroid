@@ -23,6 +23,7 @@ import com.sendspindroid.sendspin.pairing.DynamicPairingEvent
 import com.sendspindroid.sendspin.pairing.PairAbortReason
 import com.sendspindroid.sendspin.pairing.PairMethod
 import com.sendspindroid.sendspin.pairing.PairingAction
+import com.sendspindroid.sendspin.pairing.PairingCodeFormat
 import com.sendspindroid.sendspin.pairing.PairingCounterStore
 import com.sendspindroid.sendspin.pairing.PairingEvent
 import com.sendspindroid.sendspin.pairing.PairingFailureCounter
@@ -1315,7 +1316,11 @@ abstract class SendSpinProtocolHandler(
 
                     PairMethod.DYNAMIC_PAIRING_CODE -> {
                         runPairingActions(PairingEvent.NonPairingActivation)
-                        runDynamicPairingActions(DynamicPairingEvent.PairingActivation(pairingIndex))
+                        // Accepted, so pairing.format is one this client
+                        // offers: the activation's format is "drawn from the
+                        // client's dynamic_pairing_code descriptor".
+                        val format = checkNotNull(PairingCodeFormat.fromWire(activate.pairingFormat))
+                        runDynamicPairingActions(DynamicPairingEvent.PairingActivation(pairingIndex, format))
                     }
 
                     else -> {
@@ -1740,8 +1745,13 @@ abstract class SendSpinProtocolHandler(
      */
     protected open fun negotiatedCipherSuite(): NoiseCipherSuite? = null
 
-    /** Surfaced for the pairing UI: show this code to the operator. */
-    protected open fun onDynamicPairingCodeEmitted(code: String) {}
+    /**
+     * Surfaced for the pairing UI: show this code to the operator, in its
+     * emission [format]. In [PairingCodeFormat.QR_CODE] the code is a
+     * version-1 pairing token, "rendered as a QR code on its display"
+     * (pairing.md, "QR-code emission").
+     */
+    protected open fun onDynamicPairingCodeEmitted(code: String, format: PairingCodeFormat) {}
 
     /** Surfaced for the pairing UI: stop showing a code (attempt ended, one way or another). */
     protected open fun onDynamicPairingCodeCleared() {}
@@ -1839,7 +1849,7 @@ abstract class SendSpinProtocolHandler(
                     }
                 }
 
-                is DynamicPairingAction.EmitPairingCode -> onDynamicPairingCodeEmitted(action.code)
+                is DynamicPairingAction.EmitPairingCode -> onDynamicPairingCodeEmitted(action.code, action.format)
 
                 is DynamicPairingAction.SendPairAuth ->
                     sendProtocolMessage(MessageBuilder.buildClientPairAuth(action.yb))

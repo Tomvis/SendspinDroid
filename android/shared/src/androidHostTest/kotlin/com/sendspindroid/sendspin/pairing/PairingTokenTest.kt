@@ -120,6 +120,54 @@ class PairingTokenTest {
         assertNull(PairingToken.decode("SP:0" + "A".repeat(10)))   // too short
     }
 
+    // ---- version 1: the dynamic pairing code in the qr_code format ----
+
+    /**
+     * The spec's reference vector, `pairing.md`, "QR-code emission": "The
+     * reference vector for `code = 0xe0 0xe1 ... 0xf7`".
+     */
+    @Test
+    fun aPairingCodeEncodesToTheSpecReferenceVector() {
+        assertEquals(
+            "SP:14DQ6FY7E4XTOP9HJ5LV6Z3PO57YPD4XT6T97N5Y",
+            PairingToken.encodePairingCode(ByteArray(24) { (0xe0 + it).toByte() }),
+        )
+    }
+
+    /**
+     * aiosendspin 10.0.0's `encode_pairing_code_token` over the code its
+     * `derive_qr_code` gives for h = 0x00..0x1f, nonce_A = 0x20..0x3f and
+     * nonce_B = 0x40..0x5f (`PairingCodeTest`).
+     */
+    @Test
+    fun aPairingCodeEncodesAsAiosendspinDoes() {
+        val code = "9f26c48e69443b7fab8d1be2052017a0f69b4a1f0e49033d"
+            .chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        assertEquals("SP:1T4TMJDTJIQ5X7K4NDPRAKIAXUD3JWSQ7BZEQGPI", PairingToken.encodePairingCode(code))
+    }
+
+    @Test
+    fun aPairingCodeTokenIs43CharactersOfTheQrAlphanumericSet() {
+        // "the 24-byte code as its payload (39 body characters)", after
+        // `SP:` and the version.
+        val token = PairingToken.encodePairingCode(ByteArray(24) { (it * 37 + 11).toByte() })
+        assertEquals(43, token.length)
+        assertTrue(token.startsWith("SP:1"))
+        assertTrue(
+            "token must use only 0-9, A-Z and ':' - got $token",
+            token.all { it in '0'..'9' || it in 'A'..'Z' || it == ':' },
+        )
+    }
+
+    @Test
+    fun aPairingCodeMustBe24Bytes() {
+        for (size in listOf(0, 23, 25, 32)) {
+            assertThrows(IllegalArgumentException::class.java) {
+                PairingToken.encodePairingCode(ByteArray(size))
+            }
+        }
+    }
+
     @Test
     fun requiresBothHalvesToBeTheRightLength() {
         assertThrows(IllegalArgumentException::class.java) {

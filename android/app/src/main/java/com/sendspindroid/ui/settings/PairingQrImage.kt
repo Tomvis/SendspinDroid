@@ -33,12 +33,16 @@ import com.sendspindroid.R
  *
  * The white background extends past the symbol via [Modifier.padding] inside
  * [Modifier.background] so the quiet zone stays white in dark theme too.
+ *
+ * @param contentDescription what the QR is, read aloud by a screen reader.
+ *   Never the token.
  */
 @Composable
 fun PairingQrImage(
     token: String,
     modifier: Modifier = Modifier,
     size: Dp = 220.dp,
+    contentDescription: String = stringResource(R.string.pairing_token_qr_description),
 ) {
     // Keyed on the token: encoding is cheap, but recomposition is frequent and
     // this allocates a bitmap.
@@ -58,7 +62,7 @@ fun PairingQrImage(
     Image(
         bitmap = bitmap,
         // What it is, never the token: a description is read aloud.
-        contentDescription = stringResource(R.string.pairing_token_qr_description),
+        contentDescription = contentDescription,
         filterQuality = FilterQuality.None,
         contentScale = ContentScale.Fit,
         modifier = modifier
