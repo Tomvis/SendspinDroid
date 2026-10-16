@@ -1,6 +1,5 @@
 package com.sendspindroid.ui.main.components
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,11 +12,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -30,13 +32,17 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sendspindroid.R
 import com.sendspindroid.model.ConnectionType
 import com.sendspindroid.model.LocalConnection
 import com.sendspindroid.model.UnifiedServer
-import com.sendspindroid.ui.adaptive.tvFocusable
+import com.sendspindroid.ui.adaptive.AdaptiveDefaults
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.tvFocusRing
 import com.sendspindroid.ui.theme.SendSpinTheme
 import com.sendspindroid.ui.theme.statusOnline
 import com.sendspindroid.ui.theme.statusWarning
@@ -55,116 +61,155 @@ enum class ServerItemStatus {
 
 /**
  * A server list item card showing server info and connection methods.
+ *
+ * A long press opens the server's menu. On a TV, holding OK does too, but
+ * nothing tells the user so, and remote apps send each press's down and up
+ * back to back, so there a More options button beside the card opens it as
+ * well, one D-pad step to the right of the card.
+ *
+ * @param onLongClick opens the menu. Null for a card that has none: a long
+ *   press, or OK held down, is then a click, and a TV shows no More button.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ServerListItem(
     server: UnifiedServer,
     status: ServerItemStatus,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
     modifier: Modifier = Modifier,
     onQuickConnectClick: (() -> Unit)? = null,
     reconnectAttempt: Int? = null,
     reconnectMaxAttempts: Int? = null
 ) {
-    Card(
+    val formFactor = LocalFormFactor.current
+    val isTv = formFactor == FormFactor.TV
+    // A TV is read from across the room; elsewhere the styles' own sizes.
+    val nameSize = if (isTv) AdaptiveDefaults.bodyTextSize(formFactor) else TextUnit.Unspecified
+    val detailSize = if (isTv) AdaptiveDefaults.captionTextSize(formFactor) else TextUnit.Unspecified
+
+    Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .tvFocusable()
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            ),
-        shape = RoundedCornerShape(12.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(
+        Card(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
+                .weight(1f)
+                // Less than the usual focus scale: the card is wide, and the
+                // More options button sits beside it.
+                .tvFocusRing(focusScale = 1.05f)
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = onLongClick
+                ),
+            shape = RoundedCornerShape(12.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
         ) {
-            // Top row: Status indicator, Name, Default star, Connection icons
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
             ) {
-                // Status indicator dot
-                StatusIndicator(status = status)
+                // Top row: Status indicator, Name, Default star, Connection icons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Status indicator dot
+                    StatusIndicator(status = status)
 
-                Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
 
-                // Server name
-                Text(
-                    text = server.name,
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
+                    // Server name
+                    Text(
+                        text = server.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontSize = nameSize,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
 
-                // Default server star
-                if (server.isDefaultServer) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_star),
-                        contentDescription = stringResource(R.string.accessibility_default_server),
+                    // Default server star
+                    if (server.isDefaultServer) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_star),
+                            contentDescription = stringResource(R.string.accessibility_default_server),
+                            modifier = Modifier
+                                .padding(horizontal = 8.dp)
+                                .size(16.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    // Connection method icons
+                    ConnectionMethodIcons(server = server)
+                }
+
+                Spacer(modifier = Modifier.size(4.dp))
+
+                // Bottom row: Subtitle and Quick Connect chip
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Subtitle (status text or last connected)
+                    val subtitleText = when {
+                        status == ServerItemStatus.CONNECTING -> stringResource(R.string.connecting)
+                        status == ServerItemStatus.RECONNECTING && reconnectAttempt != null && reconnectMaxAttempts != null ->
+                            stringResource(R.string.reconnecting_progress, reconnectAttempt, reconnectMaxAttempts)
+                        status == ServerItemStatus.CONNECTED -> stringResource(R.string.connected)
+                        server.isDiscovered -> server.local?.address ?: ""
+                        else -> server.formattedLastConnected
+                    }
+
+                    Text(
+                        text = subtitleText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontSize = detailSize,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .padding(horizontal = 8.dp)
-                            .size(16.dp),
-                        tint = MaterialTheme.colorScheme.primary
+                            .weight(1f)
+                            .padding(start = 24.dp) // Align with server name (after status dot)
                     )
-                }
 
-                // Connection method icons
-                ConnectionMethodIcons(server = server)
+                    // Quick Connect chip (for discovered servers). Not on a
+                    // TV: inside the card's focus target the D-pad cannot
+                    // reach it, and OK on the card connects already.
+                    if (!isTv && server.isDiscovered && onQuickConnectClick != null && status != ServerItemStatus.CONNECTING) {
+                        AssistChip(
+                            onClick = onQuickConnectClick,
+                            label = { Text(stringResource(R.string.quick_connect)) },
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                labelColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            ),
+                            border = null
+                        )
+                    }
+                }
             }
+        }
 
-            Spacer(modifier = Modifier.size(4.dp))
-
-            // Bottom row: Subtitle and Quick Connect chip
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+        // Beside the card, not inside it, so that each is one D-pad stop.
+        if (isTv && onLongClick != null) {
+            Spacer(modifier = Modifier.width(16.dp))
+            IconButton(
+                onClick = onLongClick,
+                modifier = Modifier.tvFocusRing(shape = CircleShape)
             ) {
-                // Subtitle (status text or last connected)
-                val subtitleText = when {
-                    status == ServerItemStatus.CONNECTING -> stringResource(R.string.connecting)
-                    status == ServerItemStatus.RECONNECTING && reconnectAttempt != null && reconnectMaxAttempts != null ->
-                        stringResource(R.string.reconnecting_progress, reconnectAttempt, reconnectMaxAttempts)
-                    status == ServerItemStatus.CONNECTED -> stringResource(R.string.connected)
-                    server.isDiscovered -> server.local?.address ?: ""
-                    else -> server.formattedLastConnected
-                }
-
-                Text(
-                    text = subtitleText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(start = 24.dp) // Align with server name (after status dot)
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = stringResource(R.string.accessibility_server_options, server.name)
                 )
-
-                // Quick Connect chip (for discovered servers)
-                if (server.isDiscovered && onQuickConnectClick != null && status != ServerItemStatus.CONNECTING) {
-                    AssistChip(
-                        onClick = onQuickConnectClick,
-                        label = { Text(stringResource(R.string.quick_connect)) },
-                        colors = AssistChipDefaults.assistChipColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                            labelColor = MaterialTheme.colorScheme.onSecondaryContainer
-                        ),
-                        border = null
-                    )
-                }
             }
         }
     }

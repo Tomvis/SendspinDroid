@@ -32,6 +32,8 @@
     <string name="action_edit_server">Edit Server</string>
     <string name="action_app_settings">App Settings</string>
     <string name="action_exit_app">Exit App</string>
+    <!-- TV side menu: the entry for the server list -->
+    <string name="tv_menu_servers">Servers</string>
 
     <!-- Success messages -->
     <string name="server_added">Server added: %s</string>
@@ -41,8 +43,8 @@
 
     <!-- Onboarding -->
     <string name="onboarding_title">Welcome to SendSpin Player</string>
-    <string name="onboarding_message">This app connects to SendSpin servers on your local network to play synchronized audio.\n\n• The app will automatically search for servers\n• You can also add servers manually by address\n• Control playback and volume from anywhere\n\nMake sure your device is connected to the same WiFi network as your SendSpin server.</string>
-    <string name="onboarding_got_it">Got it</string>
+    <string name="onboarding_message">Plays audio from a SendSpin or Music Assistant server, in sync with your other speakers.\n\nServers on your network will find this player by the name below. You can change it later in Settings.</string>
+    <string name="onboarding_continue">Continue</string>
 
     <!-- Stats for Nerds -->
     <string name="stats_title">Stats for Nerds</string>
@@ -112,6 +114,11 @@
     <string name="pref_layout_mode_summary">Override automatic layout detection for specialized displays</string>
     <string name="pref_layout_mode_auto">Auto</string>
     <string name="pref_layout_mode_headunit">Head Unit</string>
+    <string name="pref_theme_mode_title">Theme</string>
+    <string name="pref_theme_mode_summary">Light or dark appearance</string>
+    <string name="pref_theme_mode_system">System</string>
+    <string name="pref_theme_mode_light">Light</string>
+    <string name="pref_theme_mode_dark">Dark</string>
     <string name="pref_player_name_title">Player Name</string>
     <string name="pref_player_name_summary">Name shown to SendSpin server</string>
     <string name="pref_category_audio">Audio Sync</string>
@@ -144,6 +151,7 @@
     <string name="pref_high_power_mode_summary">For always-on devices. Keeps WiFi, CPU, and screen active while connected to prevent disconnections. Uses more power.</string>
     <string name="pref_battery_opt_exempt">Battery optimization is disabled for SendSpin (recommended)</string>
     <string name="pref_battery_opt_not_exempt">Battery optimization is active -- tap to disable for better reliability</string>
+    <string name="pref_battery_opt_unavailable">This device has no battery optimization settings to open</string>
     <string name="pref_auto_start_title">Auto-Start on Boot</string>
     <string name="pref_auto_start_summary_off">Disabled. When enabled, connects to the default server automatically on device boot.</string>
     <string name="pref_auto_start_summary_on">Connects to %1$s automatically on device boot.</string>
@@ -175,6 +183,8 @@
     <string name="pairing_token_title">Pairing token</string>
     <string name="pairing_token_summary">Paste this into your server to pair this device. Copy it whole, without spaces or dashes.</string>
     <string name="pairing_token_qr_hint">Scan to copy the token to another device</string>
+    <string name="pairing_token_qr_hint_tv">Scan with your phone to get the token, then paste it into your server</string>
+    <string name="pairing_token_qr_description">QR code of this device\'s pairing token</string>
     <string name="pairing_token_copy">Copy pairing token</string>
     <string name="pairing_token_copied">Pairing token copied</string>
     <string name="pairing_token_secret_warning">Treat this like a password: anyone who has it can pair with this device.</string>
@@ -183,6 +193,7 @@
     <string name="pairing_client_id_summary">How servers identify this device. If a server says the token does not match the client, compare this with the ID it shows for this player.</string>
     <string name="pairing_last_outcome_title">Last pairing attempt</string>
     <string name="pairing_outcome_paired">Paired with %1$s.</string>
+    <string name="pairing_outcome_abandoned">%1$s stopped pairing before it finished. Start pairing again on the server.</string>
     <string name="pairing_outcome_unpaired">%1$s removed its pairing with this player. Pair again to use this player with that server.</string>
     <string name="pairing_outcome_attempt_timeout">Pairing with %1$s timed out: the server did not finish in time. Start pairing again on the server.</string>
     <string name="pairing_outcome_concurrent_attempt">%1$s was turned away because this player was already pairing or connected to another server. Try again once that has finished.</string>
@@ -199,7 +210,7 @@
     <string name="paired_server_forget_title">Forget %1$s?</string>
     <string name="paired_server_forget_message">This removes the pairing on this device only. The server will still list this player and will not connect until you pair again. If this server is connected now, the connection ends.</string>
     <string name="pref_dynamic_pairing_code_title">Dynamic pairing code</string>
-    <string name="pref_dynamic_pairing_code_summary">Most servers do not support this pairing method yet. Turning it on may prevent connecting to older servers.</string>
+    <string name="pref_dynamic_pairing_code_summary">Also lets a server pair using a 6-digit code shown on this device, which you type into the server. The pairing token keeps working. Experimental.</string>
     <string name="debug_share_chooser_title">Share Debug Log</string>
     <string name="debug_log_exported">Debug log exported</string>
     <string name="debug_log_export_failed">Failed to export debug log</string>
@@ -241,6 +252,7 @@
 
     <!-- Accessibility - Unified Server -->
     <string name="accessibility_connection_local">Local connection available</string>
+    <string name="accessibility_server_options">More options for %1$s</string>
 
     <!-- Default Server -->
     <string name="set_as_default">Set as default</string>

@@ -16,15 +16,25 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -36,6 +46,7 @@ import com.sendspindroid.model.trackPositionMs
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.FormFactor
 import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.tvFocusable
 import com.sendspindroid.ui.theme.SendSpinTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -45,7 +56,9 @@ import java.util.Locale
  * Track progress bar with elapsed / total timestamps beneath it.
  *
  * When [seekable], the bar is a slider: dragging previews the position and
- * releasing calls [onSeek] once. Otherwise it is a read-only bar.
+ * releasing calls [onSeek] once. Left and Right on the focused slider step
+ * as on [TvTrackProgressBar], with one [onSeek] once the presses stop.
+ * Otherwise it is a read-only bar.
  *
  * Advances the position at the server's [playbackSpeed] (1000 = normal,
  * 0 = paused) from the last server position update. Hidden when duration is
@@ -65,51 +78,37 @@ fun TrackProgressBar(
     if (durationMs <= 0) return
     val displayPositionMs =
         rememberTrackPositionMs(positionMs, durationMs, playbackSpeed, positionUpdatedAt)
+    // Where the user dragged to
+    val seek = rememberPendingSeek(positionMs, positionUpdatedAt)
 
-    // Where the user dragged to. Shown instead of the interpolated position
-    // during the drag and, after release, until the server reports the result.
-    var scrubPositionMs by remember { mutableStateOf<Long?>(null) }
-    var awaitingServer by remember { mutableStateOf(false) }
-
-    LaunchedEffect(positionMs, positionUpdatedAt) {
-        if (awaitingServer) {
-            scrubPositionMs = null
-            awaitingServer = false
-        }
-    }
-
-    // A server that ignores the seek sends nothing: go back to its position.
-    LaunchedEffect(awaitingServer) {
-        if (awaitingServer) {
-            delay(SEEK_HOLD_MS)
-            scrubPositionMs = null
-            awaitingServer = false
-        }
-    }
-
-    val shownPositionMs = scrubPositionMs ?: displayPositionMs
+    val shownPositionMs = seek.positionMs ?: displayPositionMs
     val barColor = accentColor ?: MaterialTheme.colorScheme.primary
     val barDescription = stringResource(R.string.track_position)
+    val focusManager = LocalFocusManager.current
+    val view = LocalView.current
+    val stepOnArrows = rememberArrowKeySeek(seek, displayPositionMs, durationMs, onSeek)
 
     Column(modifier = modifier.fillMaxWidth()) {
         if (seekable) {
             Slider(
                 value = shownPositionMs.toFloat(),
                 onValueChange = {
-                    scrubPositionMs = it.toLong()
-                    awaitingServer = false
+                    seek.positionMs = it.toLong()
+                    seek.awaitingServer = false
                 },
                 // One seek on release: each one restarts the stream for the group.
                 onValueChangeFinished = {
-                    scrubPositionMs?.let { target ->
+                    seek.positionMs?.let { target ->
                         onSeek(target)
-                        awaitingServer = true
+                        seek.awaitingServer = true
                     }
                 },
                 valueRange = 0f..durationMs.toFloat(),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .semantics { contentDescription = barDescription },
+                    .semantics { contentDescription = barDescription }
+                    .upDownMovesFocus(focusManager, view)
+                    .then(stepOnArrows),
                 colors = SliderDefaults.colors(
                     thumbColor = barColor,
                     activeTrackColor = barColor,
@@ -148,8 +147,25 @@ fun TrackProgressBar(
 private const val SEEK_HOLD_MS = 2000L
 
 /**
+ * How far one press of Left or Right on a progress bar, or of the remote's
+ * fast-forward or rewind key, moves the track.
+ */
+internal const val SEEK_STEP_MS = 10_000L
+
+/**
+ * How long a progress bar waits after the last Left or Right press before it
+ * sends the seek.
+ */
+private const val SEEK_STEP_SETTLE_MS = 800L
+
+/**
  * TV variant with visual LinearProgressIndicator + timestamps below.
  * Provides at-a-glance progress for the 10-foot viewing experience.
+ *
+ * When [seekable], the bar takes focus and Left and Right move the position
+ * by [SEEK_STEP_MS]. The steps add up while the user keeps pressing, and
+ * [onSeek] is called once when they stop. Otherwise the bar is read-only and
+ * the D-pad passes over it.
  */
 @Composable
 fun TvTrackProgressBar(
@@ -158,17 +174,32 @@ fun TvTrackProgressBar(
     playbackSpeed: Int,
     accentColor: Color?,
     positionUpdatedAt: Long = SystemClock.elapsedRealtime(),
+    seekable: Boolean = false,
+    onSeek: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     if (durationMs <= 0) return
     val displayPositionMs =
         rememberTrackPositionMs(positionMs, durationMs, playbackSpeed, positionUpdatedAt)
+    // Where the user stepped to
+    val seek = rememberPendingSeek(positionMs, positionUpdatedAt)
+    val stepOnArrows = rememberArrowKeySeek(seek, displayPositionMs, durationMs, onSeek)
 
-    val progress = (displayPositionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+    val shownPositionMs = seek.positionMs ?: displayPositionMs
+    val progress = (shownPositionMs.toFloat() / durationMs).coerceIn(0f, 1f)
     val trackColor = accentColor ?: MaterialTheme.colorScheme.primary
     val formFactor = LocalFormFactor.current
     val barHeight = AdaptiveDefaults.progressBarHeight(formFactor)
     val barCornerRadius = AdaptiveDefaults.progressBarCornerRadius(formFactor)
+    val barDescription = stringResource(R.string.track_position)
+
+    val stepOnDpad = if (seekable) {
+        stepOnArrows
+            // Not scaled: a full-width bar would grow past the timestamps.
+            .tvFocusable(shape = RoundedCornerShape(barCornerRadius), focusScale = 1f)
+    } else {
+        Modifier
+    }
 
     Column(modifier = modifier.fillMaxWidth()) {
         LinearProgressIndicator(
@@ -176,7 +207,9 @@ fun TvTrackProgressBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(barHeight)
-                .clip(RoundedCornerShape(barCornerRadius)),
+                .then(stepOnDpad)
+                .clip(RoundedCornerShape(barCornerRadius))
+                .semantics { contentDescription = barDescription },
             color = trackColor,
             trackColor = MaterialTheme.colorScheme.surfaceVariant
         )
@@ -188,7 +221,7 @@ fun TvTrackProgressBar(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = formatTime(displayPositionMs),
+                text = formatTime(shownPositionMs),
                 fontSize = 16.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -198,6 +231,92 @@ fun TvTrackProgressBar(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+/**
+ * A position the user picked on the bar. It is shown in place of the track
+ * position while they pick it and, once sent, until the server reports the
+ * result.
+ */
+@Stable
+private class PendingSeek {
+    var positionMs by mutableStateOf<Long?>(null)
+
+    /** [positionMs] went to the server, which has not reported since. */
+    var awaitingServer by mutableStateOf(false)
+}
+
+@Composable
+private fun rememberPendingSeek(positionMs: Long, positionUpdatedAt: Long): PendingSeek {
+    val seek = remember { PendingSeek() }
+
+    LaunchedEffect(positionMs, positionUpdatedAt) {
+        if (seek.awaitingServer) {
+            seek.positionMs = null
+            seek.awaitingServer = false
+        }
+    }
+
+    // A server that ignores the seek sends nothing: go back to its position.
+    LaunchedEffect(seek.awaitingServer) {
+        if (seek.awaitingServer) {
+            delay(SEEK_HOLD_MS)
+            seek.positionMs = null
+            seek.awaitingServer = false
+        }
+    }
+    return seek
+}
+
+/**
+ * Left and Right move [seek] by [SEEK_STEP_MS]. The steps add up while the
+ * user keeps pressing, and [onSeek] is called once when they stop.
+ *
+ * Put the returned modifier on the bar, before its focus target. It takes
+ * both keys on key down and on key up, so a material3 Slider, which from 1.4
+ * steps on them and finishes its change on each key up, never sees them.
+ */
+@Composable
+private fun rememberArrowKeySeek(
+    seek: PendingSeek,
+    displayPositionMs: Long,
+    durationMs: Long,
+    onSeek: (Long) -> Unit
+): Modifier {
+    val currentOnSeek by rememberUpdatedState(onSeek)
+    var steps by remember { mutableIntStateOf(0) }
+
+    // A press restarts the wait, so a run of presses is one seek: each seek
+    // restarts the stream for the group. Keyed on the presses, not the
+    // position: presses can bring it back to the one that already went out.
+    LaunchedEffect(steps) {
+        if (steps == 0) return@LaunchedEffect
+        delay(SEEK_STEP_SETTLE_MS)
+        val target = seek.positionMs ?: return@LaunchedEffect
+        currentOnSeek(target)
+        seek.awaitingServer = true
+    }
+
+    return Modifier.onPreviewKeyEvent { event ->
+        val step = when (event.key) {
+            Key.DirectionRight -> SEEK_STEP_MS
+            Key.DirectionLeft -> -SEEK_STEP_MS
+            else -> return@onPreviewKeyEvent false
+        }
+        if (event.type == KeyEventType.KeyDown) {
+            val from = seek.positionMs ?: displayPositionMs
+            val to = (from + step).coerceIn(0L, durationMs)
+            // A press against the start or the end moves nothing, so it
+            // sends nothing and leaves a seek that went out waiting for the
+            // server's answer.
+            if (to != from) {
+                seek.positionMs = to
+                seek.awaitingServer = false
+                steps++
+            }
+        }
+        true
     }
 }
 

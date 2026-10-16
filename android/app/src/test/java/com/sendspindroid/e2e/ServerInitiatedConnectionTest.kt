@@ -214,12 +214,12 @@ class ServerInitiatedConnectionTest : E2ETestBase() {
 
         // Longer than the idle threshold, shorter than the 30 seconds the
         // server has to activate.
-        lastByte.set(System.currentTimeMillis() - 25_000)
+        lastByte.set(System.nanoTime() / 1_000_000 - 25_000)
         checkStall.invoke(client)
         assertFalse("a provisional connection is not the watchdog's to close", fakeTransport.closed)
 
         fakeServer.sendServerActivate(listOf("playback"), activeRoles = listOf("player@v1"))
-        lastByte.set(System.currentTimeMillis() - 25_000)
+        lastByte.set(System.nanoTime() / 1_000_000 - 25_000)
         checkStall.invoke(client)
         assertTrue("an activated connection is", fakeTransport.closed)
     }

@@ -99,7 +99,8 @@ internal class LogFileWriter(
 
             val combined = File(dir, "sendspin-log-combined.txt")
             return try {
-                // Header is device/version only (intentionally shared, not redacted).
+                // Header is device/version and recent process exits only (intentionally
+                // shared, not redacted).
                 combined.writeText(buildShareHeader(context))
                 // Optional diagnostic snapshot, redacted like the log bodies.
                 if (prepend.isNotBlank()) {
@@ -154,6 +155,8 @@ internal class LogFileWriter(
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
             appendLine("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
             appendLine("Generated: ${dateFormat.format(Date())}")
+            appendLine()
+            appendLine(ProcessExits.describe(context, dateFormat))
         }
     }
 

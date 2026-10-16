@@ -4,6 +4,8 @@ import com.sendspindroid.sendspin.SendspinTimeFilter
 import com.sendspindroid.sendspin.crypto.PskCategory
 import com.sendspindroid.sendspin.protocol.message.MessageBuilder
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -117,7 +119,64 @@ class SendSpinProtocolHandlerTest {
         assertEquals("Song B", handler.metadataUpdates[1].title)
     }
 
+    // ========== Deep sleep ==========
+
+    @Test
+    fun `a frame after a deep sleep starts time sync over before it is handled`() {
+        var suspendedUs = 0L
+        handler.startTimeSyncForTest { suspendedUs }
+        val filter = handler.exposedTimeFilter()
+        filter.addMeasurement(10_000L, 2_000L, 1_000_000L)
+        filter.addMeasurement(10_000L, 2_000L, 2_000_000L)
+        assertTrue(filter.isReady)
+
+        suspendedUs += 5_000_000L  // the server's frame woke the device
+        handler.handleBinaryMessageForTest(byteArrayOf(0) + "{\"type\":\"group/update\",\"payload\":{}}".toByteArray())
+
+        assertFalse(filter.isReady)
+    }
+
     // ========== External Source Tests ==========
+
+    /** One audio chunk as the transport delivers it: `[4][timestamp][send_ahead][data]`. */
+    private fun audioFrame(timestampUs: Long): ByteArray =
+        java.nio.ByteBuffer.allocate(1 + 8 + 4 + 4).put(4.toByte()).putLong(timestampUs).putInt(0)
+            .put(byteArrayOf(1, 2, 3, 4)).array()
+
+    @Test
+    fun `a new connection keeps reporting the output another app holds`() {
+        handler.setExternalSource(true)
+        handler.resetSyncStateTrackingForTest()  // what a dial runs, reconnects included
+        val filter = handler.exposedTimeFilter()
+        for (i in 1..30) filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
+        handler.sentMessages.clear()
+        handler.evaluateAndPublishSyncStateForTest()
+
+        assertTrue(handler.isExternalSourceActive)
+        assertFalse(handler.exposedIsAvailable())
+    }
+
+    @Test
+    fun `audio is discarded while another app owns the output`() {
+        handler.handleTextMessageForTest(buildStreamStartJson(codec = "pcm", sampleRate = 48000, channels = 2, bitDepth = 16))
+        handler.handleBinaryMessageForTest(audioFrame(1_000L))
+        handler.setExternalSource(true)
+        handler.handleBinaryMessageForTest(audioFrame(2_000L))
+        handler.setExternalSource(false)
+        handler.handleBinaryMessageForTest(audioFrame(3_000L))
+
+        assertEquals(listOf(1_000L, 3_000L), handler.audioChunks.map { it.first })
+    }
+
+    @Test
+    fun `losing and regaining the player role is reported`() {
+        handler.playerRoleChanges.clear()  // the activation in setUp added it
+        activateRoles("\"controller@v1\"")
+        activateRoles("\"controller@v1\"")
+        activateRoles("\"player@v1\",\"controller@v1\"")
+
+        assertEquals(listOf(false, true), handler.playerRoleChanges)
+    }
 
     @Test
     fun `setExternalSource true reports available false`() {
@@ -507,6 +566,69 @@ class SendSpinProtocolHandlerTest {
         assertTrue(handler.sentMessages.isEmpty())
     }
 
+    @Test
+    fun `a negative sync offset is added to both timing parameters`() {
+        activateRoles("\"${SendSpinProtocol.Roles.PLAYER}\"")
+        handler.filter.setUserSyncOffsetMs(-120.0)
+
+        handler.sentMessages.clear()
+        handler.setExternalSource(true)
+
+        val state = handler.sentMessages.last()
+        assertTrue(state, state.contains("\"required_lead_time_ms\":${SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS + 120},"))
+        assertTrue(state, state.contains("\"min_buffer_ms\":${SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS + 120},"))
+        // Not output_delay_ms: the server applies that one itself
+        assertTrue(state, state.contains("\"output_delay_ms\":0,"))
+    }
+
+    @Test
+    fun `a positive sync offset changes neither timing parameter`() {
+        activateRoles("\"${SendSpinProtocol.Roles.PLAYER}\"")
+        handler.filter.setUserSyncOffsetMs(200.0)
+
+        handler.sentMessages.clear()
+        handler.setExternalSource(true)
+
+        val state = handler.sentMessages.last()
+        assertTrue(state, state.contains("\"required_lead_time_ms\":${SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS},"))
+        assertTrue(state, state.contains("\"min_buffer_ms\":${SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS},"))
+    }
+
+    @Test
+    fun `a server's sync offset is reported in the timing parameters at once`() {
+        activateRoles("\"${SendSpinProtocol.Roles.PLAYER}\"")
+        handler.sentMessages.clear()
+
+        handler.handleTextMessageForTest(
+            """{"type":"client/sync_offset","payload":{"player_id":"p","offset_ms":-80,"source":"test"}}"""
+        )
+
+        val state = handler.sentMessages.last { it.contains("client/state") }
+        assertTrue(state, state.contains("\"min_buffer_ms\":${SendSpinProtocol.PlayerTiming.MIN_BUFFER_MS + 80},"))
+    }
+
+    @Test
+    fun `client state carries the state when it is sent, not when it was asked for`() {
+        // Sends wait for the test to run them, as they wait for another
+        // thread on a device.
+        val queued = TestProtocolHandler(StandardTestDispatcher())
+        queued.setHandshakeCompleteForTest()
+        queued.handleTextMessageForTest(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["${SendSpinProtocol.Roles.PLAYER}"]}}"""
+        )
+        queued.testScheduler.runCurrent()
+        queued.sentMessages.clear()
+
+        queued.setExternalSource(true)
+        // A change with no send of its own, made while that send is queued.
+        queued.filter.setUserSyncOffsetMs(-120.0)
+        queued.testScheduler.runCurrent()
+
+        val states = queued.sentMessages.filter { it.contains("client/state") }
+        assertEquals(1, states.size)
+        assertTrue(states[0], states[0].contains("\"required_lead_time_ms\":${SendSpinProtocol.PlayerTiming.REQUIRED_LEAD_TIME_MS + 120},"))
+    }
+
     // ========== Helpers ==========
 
     private fun buildServerStateJson(
@@ -565,16 +687,19 @@ class SendSpinProtocolHandlerTest {
  * Concrete test implementation of SendSpinProtocolHandler.
  * Records all callback invocations for assertion.
  */
-class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
+class TestProtocolHandler(
+    // Unconfined by default, so a send the handler launches has reached
+    // sendBinaryFrame by the time the call that triggered it returns. A
+    // StandardTestDispatcher holds it until the test runs the scheduler.
+    private val testDispatcher: TestDispatcher = UnconfinedTestDispatcher(),
+) : SendSpinProtocolHandler("TestHandler") {
 
-    // Unconfined, so a send the handler launches has reached sendBinaryFrame
-    // by the time the call that triggered it returns.
-    private val testDispatcher = UnconfinedTestDispatcher()
     private val testScope = CoroutineScope(testDispatcher)
 
     /** Virtual time for whatever the handler has scheduled with `delay`. */
     val testScheduler get() = testDispatcher.scheduler
     private val timeFilter = SendspinTimeFilter()
+    val filter: SendspinTimeFilter get() = timeFilter
     val sentMessages = mutableListOf<String>()
     val metadataUpdates = mutableListOf<TrackMetadata>()
     val controllerStateUpdates = mutableListOf<ControllerState>()
@@ -611,6 +736,11 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
     /** What reached the wire and when the connection was closed, in order. */
     val events = mutableListOf<String>()
     val audioChunks = mutableListOf<Pair<Long, ByteArray>>()
+    val playerRoleChanges = mutableListOf<Boolean>()
+
+    override fun onPlayerRoleChanged(active: Boolean) {
+        playerRoleChanges += active
+    }
     val protocolFailures = mutableListOf<String>()
 
     override fun matchedPskCategory(): PskCategory = matchedCategory
@@ -659,8 +789,8 @@ class TestProtocolHandler : SendSpinProtocolHandler("TestHandler") {
 
     fun sendClientTimeForTest() = sendClientTime()
     /** Time sync running, with nothing sent until the test asks or virtual time advances. */
-    fun startTimeSyncForTest() {
-        initTimeSyncManager(timeFilter)
+    fun startTimeSyncForTest(suspendedTimeMicros: () -> Long = { 0L }) {
+        initTimeSyncManager(timeFilter, suspendedTimeMicros)
         startTimeSync()
     }
 

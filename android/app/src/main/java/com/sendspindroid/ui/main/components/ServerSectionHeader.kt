@@ -14,8 +14,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sendspindroid.ui.adaptive.AdaptiveDefaults
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
@@ -28,6 +32,14 @@ fun ServerSectionHeader(
     showScanning: Boolean = false,
     emptyHint: String? = null
 ) {
+    val formFactor = LocalFormFactor.current
+    // A TV is read from across the room; elsewhere the styles' own sizes.
+    val textSize = if (formFactor == FormFactor.TV) {
+        AdaptiveDefaults.captionTextSize(formFactor)
+    } else {
+        TextUnit.Unspecified
+    }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -37,6 +49,7 @@ fun ServerSectionHeader(
         Text(
             text = title,
             style = MaterialTheme.typography.titleSmall,
+            fontSize = textSize,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -56,6 +69,7 @@ fun ServerSectionHeader(
             Text(
                 text = emptyHint,
                 style = MaterialTheme.typography.bodySmall,
+                fontSize = textSize,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
             )
         }

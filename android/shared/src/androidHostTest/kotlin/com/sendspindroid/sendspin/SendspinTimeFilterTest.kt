@@ -290,39 +290,44 @@ class SendspinTimeFilterTest {
         assertEquals(10.5, filter.staticDelayMs, 0.01)
     }
 
-    // --- Outlier rejection ---
+    // --- Samples the reference skips ---
 
     @Test
-    fun addMeasurement_outlier_isRejected() {
-        // Build history with consistent measurements
+    fun addMeasurement_nonPositiveMaxError_isSkipped() {
+        filter.addMeasurement(10_000L, 3000L, 1_000_000L)
+        filter.addMeasurement(10_000L, 3000L, 2_000_000L)
+        val offsetBefore = filter.offsetMicros
+        val errorBefore = filter.errorMicros
+
+        assertFalse(filter.addMeasurement(900_000L, 0L, 3_000_000L))
+        assertFalse(filter.addMeasurement(900_000L, -5L, 4_000_000L))
+
+        assertEquals(offsetBefore, filter.offsetMicros)
+        assertEquals(errorBefore, filter.errorMicros)
+        assertEquals(2, filter.measurementCountValue)
+        // Nor does it move the time of the last update
+        assertTrue(filter.addMeasurement(10_000L, 3000L, 2_500_000L))
+    }
+
+    @Test
+    fun addMeasurement_notLaterThanTheLast_isSkipped() {
+        filter.addMeasurement(10_000L, 3000L, 2_000_000L)
+        assertFalse(filter.addMeasurement(10_000L, 3000L, 2_000_000L))
+        assertFalse(filter.addMeasurement(10_000L, 3000L, 1_000_000L))
+        assertEquals(1, filter.measurementCountValue)
+    }
+
+    @Test
+    fun addMeasurement_anOutlierIsWeighedNotRejected() {
+        // Upstream has no outlier gate: a wild sample goes into the update,
+        // weighed by its own max_error
         for (i in 1..10) {
             filter.addMeasurement(10_000L, 5000L, i * 1_000_000L)
         }
         val offsetBefore = filter.offsetMicros
 
-        // Send a wild outlier
-        val accepted = filter.addMeasurement(1_000_000L, 5000L, 11_000_000L)
-
-        assertFalse("Outlier should be rejected", accepted)
-        // Offset should not have changed significantly
-        assertEquals(offsetBefore, filter.offsetMicros)
-    }
-
-    @Test
-    fun addMeasurement_forceAcceptAfterThreeRejections() {
-        // Build history
-        for (i in 1..10) {
-            filter.addMeasurement(10_000L, 5000L, i * 1_000_000L)
-        }
-
-        // Send 3 outliers (rejected), then 4th should be force-accepted
-        val outlierOffset = 500_000L
-        filter.addMeasurement(outlierOffset, 5000L, 11_000_000L)
-        filter.addMeasurement(outlierOffset, 5000L, 12_000_000L)
-        filter.addMeasurement(outlierOffset, 5000L, 13_000_000L)
-        val accepted = filter.addMeasurement(outlierOffset, 5000L, 14_000_000L)
-
-        assertTrue("4th consecutive outlier should be force-accepted", accepted)
+        assertTrue(filter.addMeasurement(1_000_000L, 5000L, 11_000_000L))
+        assertTrue(filter.offsetMicros > offsetBefore)
     }
 
     // --- Reset ---
@@ -350,20 +355,47 @@ class SendspinTimeFilterTest {
         assertEquals(0.0, filter.driftPpm, 0.01)
     }
 
+    // --- Where the port is shaped differently from the C++ ---
+
+    private fun offsetOf(f: SendspinTimeFilter): Double =
+        SendspinTimeFilter::class.java.getDeclaredField("offset").apply { isAccessible = true }.get(f) as Double
+
+    /** A 50 ms step as sample [n], after n - 1 samples at 0. Values from scratchpad gen_golden.py. */
+    private fun offsetAfterStepAt(n: Int): Double {
+        val f = SendspinTimeFilter()
+        for (i in 1 until n) f.addMeasurement(0L, 3000L, i * 1_000_000L)
+        f.addMeasurement(50_000L, 3000L, n * 1_000_000L)
+        return offsetOf(f)
+    }
+
     @Test
-    fun drift_isBoundedToMaxDrift() {
-        // Feed measurements with extreme increasing offset to push drift
-        filter.addMeasurement(0L, 5000L, 1_000_000L)
-        filter.addMeasurement(0L, 5000L, 2_000_000L)
-        for (i in 3..30) {
-            // Each measurement is 1 second worth of drift at extreme rate
-            filter.addMeasurement((i * 100_000).toLong(), 5000L, i * 1_000_000L)
+    fun forgetting_isNotAppliedToSample100() {
+        // C++: count_ < min_samples (100) only counts, so sample 100 cannot forget
+        assertEquals(1989.9092298842145, offsetAfterStepAt(100), 0.0)
+    }
+
+    @Test
+    fun forgetting_isAppliedFromSample101() {
+        assertEquals(7048.0259298426, offsetAfterStepAt(101), 0.0)
+    }
+
+    @Test
+    fun clientToServer_roundsHalfwayCasesAwayFromZero() {
+        val f = SendspinTimeFilter()
+        f.addMeasurement(0L, 2L, 1_000_000L)
+        f.addMeasurement(0L, 2L, 2_000_000L)
+        f.addMeasurement(-2L, 2L, 3_000_000L)  // offset exactly -1.5, drift not significant
+        assertEquals(-1.5, offsetOf(f), 0.0)
+        assertEquals("std::round(-1.5) is -2", 9_999_998L, f.clientToServer(10_000_000L))
+    }
+
+    @Test
+    fun drift_isNotBounded() {
+        // Upstream has no drift cap: a 1000 ppm rate difference is tracked
+        for (i in 1..30) {
+            filter.addMeasurement(i * 1_000L, 500L, i * 1_000_000L)
         }
-        // MAX_DRIFT is 5e-4, which is 500 ppm
-        assertTrue(
-            "Drift should be bounded to 500 ppm, was ${filter.driftPpm}",
-            kotlin.math.abs(filter.driftPpm) <= 500.0 + 1.0
-        )
+        assertEquals(1000.0, filter.driftPpm, 10.0)
     }
 
     // --- Error decreases with measurements ---
@@ -399,10 +431,9 @@ class SendspinTimeFilterTest {
     @Test
     fun stepChange_afterConvergence_recoversViaForgetting() {
         // Drive the filter through MIN_SAMPLES_FOR_FORGETTING (=100) at offset=0,
-        // then introduce a sustained 50ms step change. The filter must adopt
-        // the new offset given enough measurements; the IQR pre-rejection plus
-        // force-accept-after-3 mechanism gates the rate at which the step
-        // reaches the Kalman update, so allow a generous recovery window.
+        // then introduce a sustained 50ms step change. Forgetting inflates the
+        // covariance while the residual is large, so the step is adopted
+        // quickly; the drift it picks up on the way overshoots for a while.
         for (i in 1..100) {
             filter.addMeasurement(0L, 3000L, i * 1_000_000L)
         }
@@ -432,16 +463,14 @@ class SendspinTimeFilterTest {
         for (i in 1..10) {
             filter.addMeasurement(10_000L, 3000L, i * 1_000_000L)
         }
-        // Drive a single outlier through the IQR pre-rejection by exhausting
-        // the rejected-count force-accept path: 3 IQR-rejected outliers, then
-        // the 4th is force-accepted into the Kalman update. Since count is
-        // still well under MIN_SAMPLES_FOR_FORGETTING, forgetting must stay off.
+        // Count is still well under MIN_SAMPLES_FOR_FORGETTING, so forgetting
+        // must stay off for these.
         for (i in 11..14) {
             filter.addMeasurement(500_000L, 3000L, i * 1_000_000L)
         }
-        // Filter should still produce a finite, reasonable error rather than
-        // an inflated value from premature forgetting.
-        assertTrue("Filter must remain numerically sane", filter.errorMicros.toLong() < 10_000_000L)
+        // Without forgetting the error is 785 us; premature forgetting
+        // leaves it at 1366 us
+        assertEquals(785L, filter.errorMicros)
     }
 
     // --- H-01: Thread safety ---
@@ -540,7 +569,7 @@ class SendspinTimeFilterTest {
         assertFalse("Concurrent reset and read should not cause exceptions", failed.get())
     }
 
-    // --- Static delay: user slider and server sync offset share one field ---
+    // --- Static delay: the user's sync offset, or a server's in its place ---
 
     @Test
     fun `staticDelayMs is the user sync offset`() {
@@ -550,22 +579,63 @@ class SendspinTimeFilterTest {
     }
 
     @Test
-    fun `server sync_offset adds to the user sync offset`() {
-        // Fork: the two are kept apart so neither clobbers the other.
+    fun `server sync_offset replaces the user sync offset`() {
         val f = SendspinTimeFilter()
         f.setUserSyncOffsetMs(25.0)
         f.setServerSyncOffsetMs(-40.0)
-        assertEquals(-15.0, f.staticDelayMs, 0.0001)
-        assertEquals(-40.0, f.serverSyncOffsetMs, 0.0001)
+        assertEquals(-40.0, f.staticDelayMs, 0.0001)
     }
 
     @Test
-    fun `reset drops the server sync offset but keeps the user one`() {
+    fun `a server's sync offset ends with its connection and the user's comes back`() {
         val f = SendspinTimeFilter()
         f.setUserSyncOffsetMs(25.0)
         f.setServerSyncOffsetMs(-40.0)
-        f.reset()
+
+        f.clearServerSyncOffset()
+
         assertEquals(25.0, f.staticDelayMs, 0.0001)
+    }
+
+    @Test
+    fun `a server's sync offset ends with its connection even with no user offset`() {
+        val f = SendspinTimeFilter()
+        f.setServerSyncOffsetMs(-40.0)
+
+        f.clearServerSyncOffset()
+
+        assertEquals(0.0, f.staticDelayMs, 0.0001)
+    }
+
+    @Test
+    fun `a reset keeps a server's sync offset`() {
+        // A reset also runs mid-connection, when the network changes.
+        val f = SendspinTimeFilter()
+        f.setServerSyncOffsetMs(-40.0)
+
+        f.reset()
+
+        assertEquals(-40.0, f.staticDelayMs, 0.0001)
+    }
+
+    @Test
+    fun `the user setting an offset takes over from a server's`() {
+        val f = SendspinTimeFilter()
+        f.setServerSyncOffsetMs(-40.0)
+        f.setUserSyncOffsetMs(10.0)
+        assertEquals(10.0, f.staticDelayMs, 0.0001)
+    }
+
+    @Test
+    fun `restoring the user's offset leaves a server's in force`() {
+        val f = SendspinTimeFilter()
+        f.setServerSyncOffsetMs(-40.0)
+
+        f.setUserSyncOffsetMs(10.0, overrideServer = false)
+
+        assertEquals(-40.0, f.staticDelayMs, 0.0001)
+        f.clearServerSyncOffset()
+        assertEquals(10.0, f.staticDelayMs, 0.0001)
     }
 
     @Test

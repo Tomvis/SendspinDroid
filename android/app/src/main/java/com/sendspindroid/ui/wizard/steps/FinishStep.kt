@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -19,17 +20,25 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.tvFocusRing
 import com.sendspindroid.ui.theme.SendSpinTheme
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
 import com.sendspindroid.ui.wizard.keepVisibleWhenFocused
+import com.sendspindroid.ui.adaptive.rememberTvKeyboardGate
 
 /**
  * Final wizard step — name the server, set as default, and show a summary
@@ -42,8 +51,14 @@ fun FinishStep(
     connectionSummary: List<String>,
     onNameChange: (String) -> Unit,
     onDefaultChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    saveEnabled: Boolean = false,
+    onSave: () -> Unit = {},
+    nameFocusRequester: FocusRequester = remember { FocusRequester() }
 ) {
+    val isTv = LocalFormFactor.current == FormFactor.TV
+    val keyboardGate = rememberTvKeyboardGate()
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -60,11 +75,15 @@ fun FinishStep(
             tint = MaterialTheme.colorScheme.primary
         )
 
-        Text(
-            text = stringResource(R.string.wizard_save_title),
-            style = MaterialTheme.typography.titleLarge
-        )
-        Spacer(modifier = Modifier.height(4.dp))
+        // A TV keeps the title in the top bar even while typing, so the step
+        // does not repeat it there.
+        if (!isTv) {
+            Text(
+                text = stringResource(R.string.wizard_save_title),
+                style = MaterialTheme.typography.titleLarge
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+        }
         Text(
             text = stringResource(R.string.wizard_save_description),
             style = MaterialTheme.typography.bodyMedium,
@@ -77,12 +96,21 @@ fun FinishStep(
         OutlinedTextField(
             value = serverName,
             onValueChange = onNameChange,
-            modifier = Modifier.fillMaxWidth().keepVisibleWhenFocused(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .keepVisibleWhenFocused()
+                .focusRequester(nameFocusRequester)
+                .then(keyboardGate.modifier),
+            readOnly = keyboardGate.readOnly,
             label = { Text(stringResource(R.string.wizard_name_title)) },
             placeholder = { Text(stringResource(R.string.wizard_name_hint)) },
             singleLine = true,
-            // Done closes the keyboard, which brings Save back into reach.
+            // Done saves, as Save would. Until there is something to save it
+            // only closes the keyboard, which brings Save back into reach.
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = {
+                if (saveEnabled) onSave() else defaultKeyboardAction(ImeAction.Done)
+            }),
             supportingText = {
                 Text(stringResource(R.string.wizard_name_description))
             }
@@ -105,7 +133,8 @@ fun FinishStep(
             ) {
                 Checkbox(
                     checked = isDefault,
-                    onCheckedChange = onDefaultChange
+                    onCheckedChange = onDefaultChange,
+                    modifier = Modifier.tvFocusRing(shape = CircleShape)
                 )
 
                 Column(

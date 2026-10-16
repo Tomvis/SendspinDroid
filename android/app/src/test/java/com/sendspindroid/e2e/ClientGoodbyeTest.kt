@@ -37,6 +37,27 @@ class ClientGoodbyeTest : E2ETestBase() {
     }
 
     @Test
+    fun `a user disconnect reports the goodbye flushed only once the transport has`() {
+        connectAndHandshake()
+        var flushed = false
+
+        client.disconnect { flushed = true }
+
+        assertFalse("not before the transport is done", flushed)
+        fakeTransport.finishFlush()
+        assertTrue(flushed)
+    }
+
+    @Test
+    fun `a disconnect with nothing connected reports flushed at once`() {
+        var flushed = false
+
+        client.disconnect { flushed = true }
+
+        assertTrue(flushed)
+    }
+
+    @Test
     fun `leaving one server for another says another_server`() {
         connectAndHandshake(serverAddress = "192.168.1.100:8927")
 

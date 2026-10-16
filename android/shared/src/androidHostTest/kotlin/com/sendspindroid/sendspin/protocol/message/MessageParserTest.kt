@@ -508,6 +508,21 @@ class MessageParserTest {
     }
 
     @Test
+    fun parseStreamStart_opusBitDepthIsIgnored() {
+        // "bit_depth ... ignored for opus": the decoder puts out 16-bit PCM
+        val payload = buildJsonObject {
+            put("player", buildJsonObject {
+                put("codec", "opus")
+                put("sample_rate", 48000)
+                put("channels", 2)
+                put("bit_depth", 24)
+            })
+        }
+
+        assertEquals(16, MessageParser.parseStreamStart(payload)!!.bitDepth)
+    }
+
+    @Test
     fun parseStreamStart_withCodecHeader_decodesBase64() {
         val headerBytes = byteArrayOf(0x66, 0x4C, 0x61, 0x43) // "fLaC"
         val headerBase64 = java.util.Base64.getEncoder().encodeToString(headerBytes)

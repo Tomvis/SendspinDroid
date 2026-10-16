@@ -1,6 +1,5 @@
 package com.sendspindroid.ui.wizard
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.relocation.BringIntoViewRequester
@@ -20,7 +19,6 @@ import androidx.compose.ui.platform.LocalDensity
  * moving. In landscape the keyboard leaves only a strip of the form showing,
  * and without this the field being typed into can end up outside it.
  */
-@OptIn(ExperimentalFoundationApi::class)
 fun Modifier.keepVisibleWhenFocused(): Modifier = composed {
     val requester = remember { BringIntoViewRequester() }
     var focused by remember { mutableStateOf(false) }

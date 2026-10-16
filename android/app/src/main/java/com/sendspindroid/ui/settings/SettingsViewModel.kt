@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.PowerManager
 import android.util.Log
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
@@ -20,6 +21,7 @@ import com.sendspindroid.sendspin.pairing.PairedServers
 import com.sendspindroid.sendspin.pairing.PairingOutcome
 import com.sendspindroid.sendspin.pairing.PairingToken
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
+import com.sendspindroid.ui.adaptive.isTvDevice
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -46,6 +48,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         const val ACTION_HIGH_POWER_MODE_CHANGED = "com.sendspindroid.ACTION_HIGH_POWER_MODE_CHANGED"
         const val EXTRA_HIGH_POWER_MODE_ENABLED = "high_power_mode_enabled"
         const val ACTION_PREFERRED_CODEC_CHANGED = "com.sendspindroid.ACTION_PREFERRED_CODEC_CHANGED"
+        const val ACTION_PLAYER_NAME_CHANGED = "com.sendspindroid.ACTION_PLAYER_NAME_CHANGED"
         const val EXTRA_PREFERRED_CODEC = "preferred_codec"
     }
 
@@ -101,6 +104,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _layoutMode = MutableStateFlow(UserSettings.layoutMode)
     val layoutMode: StateFlow<UserSettings.LayoutMode> = _layoutMode.asStateFlow()
+
+    private val _themeMode = MutableStateFlow(UserSettings.themeMode)
+    val themeMode: StateFlow<UserSettings.ThemeMode> = _themeMode.asStateFlow()
 
     // Audio settings
     private val _syncOffset = MutableStateFlow(UserSettings.getSyncOffsetMs())
@@ -172,6 +178,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setPlayerName(name: String) {
         UserSettings.setPlayerName(name)
         _playerName.value = UserSettings.getPlayerName()
+
+        // Tell PlaybackService, so the server hears the new name now
+        LocalBroadcastManager.getInstance(getApplication())
+            .sendBroadcast(Intent(ACTION_PLAYER_NAME_CHANGED))
     }
 
     // Display settings
@@ -188,6 +198,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setLayoutMode(mode: UserSettings.LayoutMode) {
         UserSettings.layoutMode = mode
         _layoutMode.value = mode
+    }
+
+    fun setThemeMode(mode: UserSettings.ThemeMode) {
+        UserSettings.themeMode = mode
+        _themeMode.value = mode
+        // Recreates the running activities in the new theme.
+        AppCompatDelegate.setDefaultNightMode(mode.nightMode(getApplication<Application>().isTvDevice()))
     }
 
     // Audio settings

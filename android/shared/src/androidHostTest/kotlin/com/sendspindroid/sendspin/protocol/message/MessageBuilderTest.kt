@@ -309,8 +309,8 @@ class MessageBuilderTest {
             preferredCodec = "pcm",
             isCodecSupported = { it == "pcm" }
         )
-        // Pin the dedup: pcm stereo + pcm mono = 2, not 4.
-        assertEquals(2, formats.size)
+        // Pin the dedup: pcm once, not twice.
+        assertEquals(1, formats.size)
         assertTrue(formats.all { it.codec == "pcm" })
     }
 
@@ -324,8 +324,8 @@ class MessageBuilderTest {
         )
         val codecsAdvertised = formats.map { it.codec }.toSet()
         assertEquals(setOf("pcm"), codecsAdvertised)
-        // Default supportedBitDepths = [16], so pcm stereo + pcm mono = 2.
-        assertEquals(2, formats.size)
+        // Default supportedBitDepths = [16], so pcm stereo only.
+        assertEquals(1, formats.size)
     }
 
     @Test
@@ -342,17 +342,15 @@ class MessageBuilderTest {
     }
 
     @Test
-    fun buildSupportedFormats_stereoAndMonoForEachCodec() {
+    fun buildSupportedFormats_stereoOnlyForEachCodec() {
         val formats = MessageBuilder.buildSupportedFormats(
             preferredCodec = "flac",
             isCodecSupported = { it in listOf("flac", "pcm") }
         )
-        // flac at 16-bit stereo + mono = 2
-        // pcm at 16-bit stereo + mono = 2 (default supportedBitDepths = [16])
-        // total = 4
-        assertEquals(4, formats.size)
-        val channelSet = formats.map { it.channels }.toSet()
-        assertEquals(setOf(2, 1), channelSet)
+        // flac at 16-bit stereo, pcm at 16-bit stereo: one channel count, as
+        // the player cannot switch between channel counts without a gap
+        assertEquals(2, formats.size)
+        assertEquals(setOf(2), formats.map { it.channels }.toSet())
     }
 
     @Test
@@ -362,15 +360,15 @@ class MessageBuilderTest {
             isCodecSupported = { it in listOf("flac", "pcm") },
             supportedBitDepths = listOf(16, 32)
         )
-        // flac: 16-bit only (stereo + mono) = 2
-        // pcm:  32-bit stereo/mono + 16-bit stereo/mono = 4 (higher depths first)
-        assertEquals(6, formats.size)
+        // flac: 16-bit only = 1
+        // pcm:  32-bit + 16-bit = 2 (higher depths first)
+        assertEquals(3, formats.size)
         assertEquals("flac", formats[0].codec)
         assertEquals(16, formats[0].bitDepth)
+        assertEquals("pcm", formats[1].codec)
+        assertEquals(32, formats[1].bitDepth)
         assertEquals("pcm", formats[2].codec)
-        assertEquals(32, formats[2].bitDepth)
-        assertEquals("pcm", formats[4].codec)
-        assertEquals(16, formats[4].bitDepth)
+        assertEquals(16, formats[2].bitDepth)
     }
 
     @Test
@@ -379,7 +377,7 @@ class MessageBuilderTest {
             preferredCodec = "pcm",
             isCodecSupported = { it == "pcm" }
         )
-        assertEquals(2, formats.size)
+        assertEquals(1, formats.size)
         assertTrue(formats.all { it.bitDepth == 16 })
     }
 

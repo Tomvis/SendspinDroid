@@ -2,17 +2,28 @@ package com.sendspindroid.ui.compose
 
 import android.content.Context
 import android.os.SystemClock
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.test.requestFocus
 import androidx.test.core.app.ApplicationProvider
 import com.sendspindroid.R
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.main.components.TrackProgressBar
 import com.sendspindroid.ui.main.components.formatTime
 import com.sendspindroid.ui.theme.SendSpinTheme
@@ -174,5 +185,62 @@ class TrackProgressBarTest {
         composeTestRule.mainClock.advanceTimeBy(2_500)
 
         composeTestRule.onNodeWithText("0:00 / 3:00").assertIsDisplayed()
+    }
+
+    @Test
+    fun seekable_upAndDown_moveFocusOff_withoutSeeking() {
+        serverPositionMs = 90_000
+        composeTestRule.setContent {
+            CompositionLocalProvider(LocalFormFactor provides FormFactor.PHONE) {
+                SendSpinTheme {
+                    Column {
+                        Button(onClick = {}) { Text("Above") }
+                        TrackProgressBar(
+                            positionMs = serverPositionMs,
+                            durationMs = 180_000,
+                            playbackSpeed = 0,
+                            accentColor = null,
+                            positionUpdatedAt = serverPositionUpdatedAt,
+                            seekable = true,
+                            onSeek = { seeks += it }
+                        )
+                        Button(onClick = {}) { Text("Below") }
+                    }
+                }
+            }
+        }
+
+        bar().requestFocus()
+        bar().performKeyInput { pressKey(Key.DirectionDown) }
+        composeTestRule.onNodeWithText("Below").assertIsFocused()
+        composeTestRule.onNodeWithText("1:30 / 3:00").assertIsDisplayed()
+
+        bar().requestFocus()
+        bar().performKeyInput { pressKey(Key.DirectionUp) }
+        composeTestRule.onNodeWithText("Above").assertIsFocused()
+        composeTestRule.onNodeWithText("1:30 / 3:00").assertIsDisplayed()
+
+        assertTrue(seeks.isEmpty())
+    }
+
+    @Test
+    fun seekable_aRunOfLeftAndRightPresses_seeksOnceWhenTheyStop() {
+        serverPositionMs = 90_000
+        setPausedBar(seekable = true)
+        bar().requestFocus()
+
+        // A keyboard on a phone or tablet: the Slider alone would seek on
+        // each key up.
+        for (key in listOf(Key.DirectionRight, Key.DirectionRight, Key.DirectionRight, Key.DirectionLeft)) {
+            bar().performKeyInput { pressKey(key) }
+            composeTestRule.waitForIdle()
+            composeTestRule.mainClock.advanceTimeBy(300)
+        }
+        // Each seek restarts the stream for the group: none while stepping.
+        assertTrue(seeks.isEmpty())
+        composeTestRule.onNodeWithText("1:50 / 3:00").assertIsDisplayed()
+
+        composeTestRule.mainClock.advanceTimeBy(600)
+        assertEquals(listOf(110_000L), seeks)
     }
 }

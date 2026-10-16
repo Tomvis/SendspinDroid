@@ -2,6 +2,7 @@ package com.sendspindroid.sendspin.protocol
 
 import com.sendspindroid.sendspin.crypto.Base64Url
 import com.sendspindroid.sendspin.crypto.PskCategory
+import com.sendspindroid.sendspin.pairing.PairingFailureCounter
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -250,6 +251,89 @@ class PairingAttemptTest {
         handler.receive(serverPairInit())
         assertNotNull("the new attempt shows its own code", handler.shownCode)
         assertFalse(handler.events.contains("close"))
+    }
+
+    // ========== Abandoned by the server ==========
+
+    private val leavePairing = """{"type":"server/activate","payload":{"activities":[],"active_roles":[]}}"""
+
+    @Test
+    fun `an activation that ends a dynamic attempt abandons it and clears the code`() {
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic))
+        handler.receive(serverPairInit())
+        handler.clearEvents()
+
+        handler.receive(leavePairing)
+
+        assertEquals(1, handler.abandonments)
+        assertNull("the code must leave the screen", handler.shownCode)
+        // The server ended it: nothing is sent back.
+        assertEquals(emptyList<String>(), handler.pairingEvents())
+    }
+
+    @Test
+    fun `a pairing activation supersedes the attempt without abandoning pairing`() {
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic))
+        handler.receive(serverPairInit())
+
+        handler.receive(pairingActivateJson(dynamic))
+
+        assertEquals(0, handler.abandonments)
+    }
+
+    @Test
+    fun `an activation that ends a wait for the gesture abandons it`() {
+        val handler = handler(PskCategory.SENTINEL)
+        // Each code emitted counts towards escalation, after which an
+        // attempt waits for the operator's gesture.
+        repeat(PairingFailureCounter.ESCALATION_THRESHOLD) {
+            handler.receive(pairingActivateJson(dynamic))
+            handler.receive(serverPairInit())
+        }
+        handler.clearEvents()
+        handler.receive(pairingActivateJson(dynamic))
+        assertEquals(listOf("send:client/pair-pending"), handler.pairingEvents())
+
+        handler.receive(leavePairing)
+
+        assertEquals(1, handler.abandonments)
+    }
+
+    @Test
+    fun `an activation after our own abort of a dynamic attempt does not abandon it`() {
+        // The abort already ended the attempt and said why: "The code
+        // entered on ... did not match" must not be replaced.
+        val handler = mismatchedAttempt()
+
+        handler.receive(leavePairing)
+
+        assertEquals(0, handler.abandonments)
+    }
+
+    @Test
+    fun `an activation after the server's abort of a dynamic attempt does not abandon it`() {
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic))
+        handler.receive(serverPairInit())
+        handler.receive("""{"type":"pair/abort","payload":{"reason":"user_cancelled"}}""")
+
+        handler.receive(leavePairing)
+
+        assertEquals(0, handler.abandonments)
+    }
+
+    @Test
+    fun `a dynamic attempt is abandoned once, not again by a later activation`() {
+        val handler = handler(PskCategory.SENTINEL)
+        handler.receive(pairingActivateJson(dynamic))
+        handler.receive(serverPairInit())
+        handler.receive(leavePairing)
+
+        handler.receive(leavePairing)
+
+        assertEquals(1, handler.abandonments)
     }
 
     // ========== Local cancel ==========

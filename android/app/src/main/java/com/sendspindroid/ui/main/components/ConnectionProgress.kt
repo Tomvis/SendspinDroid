@@ -20,10 +20,15 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
  * Connection progress indicator shown while connecting to a server.
+ *
+ * It offers nothing to press. On a TV, the side menu's Switch server is the
+ * way out of a connection that does not come up.
  */
 @Composable
 fun ConnectionProgress(
@@ -47,7 +52,12 @@ fun ConnectionProgress(
 
         Text(
             text = stringResource(R.string.connecting_to, serverName),
-            style = MaterialTheme.typography.bodyLarge,
+            // The only words on the screen, read from across the room on a TV
+            style = if (LocalFormFactor.current == FormFactor.TV) {
+                MaterialTheme.typography.headlineSmall
+            } else {
+                MaterialTheme.typography.bodyLarge
+            },
             color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.semantics {
                 liveRegion = LiveRegionMode.Polite

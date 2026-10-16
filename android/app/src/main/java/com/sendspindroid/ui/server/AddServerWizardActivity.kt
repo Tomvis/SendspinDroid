@@ -8,11 +8,10 @@ import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.fragment.app.FragmentActivity
+import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
-import androidx.lifecycle.lifecycleScope
 import com.sendspindroid.R
 import com.sendspindroid.UnifiedServerRepository
 import com.sendspindroid.UserSettings
@@ -30,11 +29,10 @@ import com.sendspindroid.ui.wizard.ConnectionTestState
 import com.sendspindroid.ui.wizard.DiscoveredServerUi
 import com.sendspindroid.ui.wizard.WizardStep
 import com.sendspindroid.ui.wizard.WizardStepAction
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
+import com.sendspindroid.ui.adaptive.ProvideTvFormFactor
 
 /**
  * Full-screen wizard Activity for adding or editing unified servers.
@@ -42,7 +40,7 @@ import java.io.IOException
  * Uses Jetpack Compose for UI via AddServerWizardScreen.
  * Handles lifecycle-aware operations like mDNS discovery and connection testing.
  */
-class AddServerWizardActivity : FragmentActivity() {
+class AddServerWizardActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "AddServerWizardActivity"
@@ -104,24 +102,26 @@ class AddServerWizardActivity : FragmentActivity() {
 
         setContent {
             SendSpinTheme {
-                val state by viewModel.wizardState.collectAsStateWithLifecycle()
+                ProvideTvFormFactor {
+                    val state by viewModel.wizardState.collectAsStateWithLifecycle()
 
-                // Auto-start discovery when entering the FindServer step
-                LaunchedEffect(state.currentStep) {
-                    if (state.currentStep == WizardStep.SS_FindServer && !state.isSearching) {
-                        startDiscovery()
+                    // Auto-start discovery when entering the FindServer step
+                    LaunchedEffect(state.currentStep) {
+                        if (state.currentStep == WizardStep.SS_FindServer && !state.isSearching) {
+                            startDiscovery()
+                        }
                     }
-                }
 
-                AddServerWizardScreen(
-                    state = state,
-                    onClose = { finish() },
-                    onBack = { handleBack() },
-                    onNext = { handleNext() },
-                    onSave = { attemptSave() },
-                    onStepAction = { action -> handleStepAction(action) },
-                    searchAllowed = UserSettings.searchForServers
-                )
+                    AddServerWizardScreen(
+                        state = state,
+                        onClose = { finish() },
+                        onBack = { handleBack() },
+                        onNext = { handleNext() },
+                        onSave = { attemptSave() },
+                        onStepAction = { action -> handleStepAction(action) },
+                        searchAllowed = UserSettings.searchForServers
+                    )
+                }
             }
         }
     }
@@ -253,33 +253,20 @@ class AddServerWizardActivity : FragmentActivity() {
     // ========================================================================
 
     private fun startLocalConnectionTest() {
-        // Navigate to the testing step
-        if (viewModel.currentStep.value != WizardStep.SS_FindServer) return
-        viewModel.navigateTo(WizardStep.SS_TestLocal)
-
-        lifecycleScope.launch {
-            delay(500) // Brief delay for UI to show
-
-            val result = testLocalConnection(viewModel.localAddress)
-
-            result.fold(
-                onSuccess = { responseCode ->
-                    delay(500) // Brief success display
-                    viewModel.onLocalTestSuccess("Connected (HTTP $responseCode)")
-                },
-                onFailure = { error ->
-                    Log.e(TAG, "Local connection test failed", error)
-                    viewModel.onLocalTestFailed(error.message ?: "Unknown error")
-                }
-            )
+        viewModel.startLocalTest { address ->
+            testLocalConnection(address).onFailure { error ->
+                Log.e(TAG, "Local connection test failed", error)
+            }
         }
     }
 
     private suspend fun testLocalConnection(address: String): Result<Int> {
         Log.d(TAG, "Testing local connection to: $address")
+        // A full handshake: the server meets this device under its name here
         val transient = SendSpin(
-            deviceName = android.os.Build.MODEL,
+            deviceName = com.sendspindroid.UserSettings.getPlayerName(),
             callback = noopSendSpinCallback,
+            host = com.sendspindroid.AppSendSpinHost,
         )
         transient.connect(SendSpinEndpoint.Local(address))
         return try {

@@ -208,6 +208,59 @@ class PairingStatusTest : E2ETestBase() {
     }
 
     @Test
+    fun `an attempt the server ends with an activation alone is reported as abandoned`() {
+        connectAndHandshake()
+        setField(client, "matchedPsk", Psk(ByteArray(Psk.PSK_SIZE) { 1 }, PskCategory.PAIRING))
+        fakeTransport.simulateTextMessage(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"pairing_psk"}}}"""
+        )
+
+        // In place of server/pair-finalize, with no pair/abort before it.
+        fakeTransport.simulateTextMessage("""{"type":"server/activate","payload":{"activities":[]}}""")
+
+        val outcome = PairedServers.lastOutcome.value
+        assertTrue("$outcome", outcome is PairingOutcome.Abandoned)
+        assertEquals(fakeServer.serverName, outcome?.server)
+    }
+
+    @Test
+    fun `the activation after the server's abort does not replace its reason`() {
+        connectAndHandshake()
+        setField(client, "matchedPsk", Psk(ByteArray(Psk.PSK_SIZE) { 1 }, PskCategory.PAIRING))
+        fakeTransport.simulateTextMessage(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"pairing_psk"}}}"""
+        )
+        // "A server cancelling on operator action SHOULD first send pair/abort
+        // with reason user_cancelled, so the client can surface why the
+        // attempt ended."
+        fakeTransport.simulateTextMessage(
+            """{"type":"pair/abort","payload":{"reason":"user_cancelled"}}"""
+        )
+
+        fakeTransport.simulateTextMessage("""{"type":"server/activate","payload":{"activities":[]}}""")
+
+        assertEquals(
+            "user_cancelled",
+            (PairedServers.lastOutcome.value as PairingOutcome.Aborted).reason,
+        )
+    }
+
+    @Test
+    fun `the activation after a completed pairing is not an abandonment`() {
+        connectAndHandshake()
+        setField(client, "matchedPsk", Psk(ByteArray(Psk.PSK_SIZE) { 1 }, PskCategory.PAIRING))
+        setField(client, "sessionFacts", sessionFacts(serverId))
+        fakeTransport.simulateTextMessage(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"pairing_psk"}}}"""
+        )
+        fakeTransport.simulateTextMessage("""{"type":"server/pair-finalize"}""")
+
+        fakeTransport.simulateTextMessage("""{"type":"server/activate","payload":{"activities":[]}}""")
+
+        assertEquals(PairingOutcome.Paired::class, PairedServers.lastOutcome.value!!::class)
+    }
+
+    @Test
     fun `a completed pairing adds the row under the server's name`() {
         val names = mutableMapOf<String, String?>()
         every { UserSettings.getPairedServerName(any()) } answers { names[firstArg()] }

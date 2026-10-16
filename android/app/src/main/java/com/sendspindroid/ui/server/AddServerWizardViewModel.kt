@@ -8,12 +8,15 @@ import com.sendspindroid.ui.wizard.DiscoveredServerUi
 import com.sendspindroid.ui.wizard.WizardState
 import com.sendspindroid.ui.wizard.WizardStep
 import com.sendspindroid.ui.wizard.WizardStepAction
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.launch
 
 /**
  * ViewModel for the Add Server Wizard Activity.
@@ -31,6 +34,9 @@ class AddServerWizardViewModel : ViewModel() {
     // Connection test state
     private val _localTestState = MutableStateFlow<ConnectionTestState>(ConnectionTestState.Idle)
     val localTestState: StateFlow<ConnectionTestState> = _localTestState.asStateFlow()
+
+    // The connection test under way, which stepping back from the testing step cancels
+    private var localTestJob: Job? = null
 
     // Discovered servers from mDNS
     private val _discoveredServers = MutableStateFlow<List<DiscoveredServerUi>>(emptyList())
@@ -162,7 +168,14 @@ class AddServerWizardViewModel : ViewModel() {
     fun onBack(): WizardStep? {
         val previous = when (_currentStep.value) {
             WizardStep.SS_FindServer -> null // Close wizard
-            WizardStep.SS_TestLocal -> WizardStep.SS_FindServer
+            WizardStep.SS_TestLocal -> {
+                // Left running, the test would still move the wizard on to Finish,
+                // or show its error, after the user has stepped back from it.
+                localTestJob?.cancel()
+                localTestJob = null
+                resetLocalTest()
+                WizardStep.SS_FindServer
+            }
             WizardStep.SS_Finish -> WizardStep.SS_FindServer
         }
         previous?.let { _currentStep.value = it }
@@ -172,6 +185,34 @@ class AddServerWizardViewModel : ViewModel() {
     // ========================================================================
     // Connection Testing
     // ========================================================================
+
+    /**
+     * Go to the testing step and test the connection to [localAddress] with
+     * [tester], then move on to Finish or back to the address with the error.
+     *
+     * The test runs here rather than in the Activity so that it outlives a
+     * rotation and [onBack] can cancel it.
+     */
+    fun startLocalTest(tester: suspend (address: String) -> Result<Int>) {
+        if (_currentStep.value != WizardStep.SS_FindServer) return
+        // A failure shown from the last test does not belong to this one
+        resetLocalTest()
+        _currentStep.value = WizardStep.SS_TestLocal
+
+        localTestJob = viewModelScope.launch {
+            delay(500) // Brief delay for UI to show
+
+            tester(localAddress).fold(
+                onSuccess = { responseCode ->
+                    delay(500) // Brief success display
+                    onLocalTestSuccess("Connected (HTTP $responseCode)")
+                },
+                onFailure = { error ->
+                    onLocalTestFailed(error.message ?: "Unknown error")
+                }
+            )
+        }
+    }
 
     /**
      * Called when local connection test completes successfully.
@@ -257,12 +298,16 @@ class AddServerWizardViewModel : ViewModel() {
     fun handleStepAction(action: WizardStepAction): Boolean {
         return when (action) {
             // Find server step
+            // A failed test's error is about the address it tried, so it
+            // goes once the address changes.
             is WizardStepAction.UpdateLocalAddress -> {
                 localAddress = action.address
+                resetLocalTest()
                 false
             }
             is WizardStepAction.SelectDiscoveredServer -> {
                 applyDiscoveredServer(action.server.name, action.server.address)
+                resetLocalTest()
                 false
             }
             WizardStepAction.StartDiscovery -> {

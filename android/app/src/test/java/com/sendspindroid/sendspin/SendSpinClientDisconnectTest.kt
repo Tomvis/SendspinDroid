@@ -74,7 +74,7 @@ class SendSpinDisconnectTest {
 
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin("TestDevice", mockCallback)
+        client = SendSpin("TestDevice", mockCallback, com.sendspindroid.AppSendSpinHost)
     }
 
     @After

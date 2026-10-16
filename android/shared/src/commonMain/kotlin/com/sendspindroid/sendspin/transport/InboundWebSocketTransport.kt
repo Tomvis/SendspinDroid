@@ -57,6 +57,9 @@ class InboundWebSocketTransport internal constructor(
     /** True once the owner has taken the connection, false if it refused it. */
     private val taken = CompletableDeferred<Boolean>()
 
+    /** Completes when [serve] returns: nothing more will be written. */
+    private val served = CompletableDeferred<Unit>()
+
     // The first close asked for. A later one changes nothing: a destroy()
     // that follows closeAfterFlush() must not turn the flush into a discard.
     private val closeRequest = AtomicReference<CloseRequest?>(null)
@@ -87,25 +90,29 @@ class InboundWebSocketTransport internal constructor(
      * close ahead of a frame that was queued before it.
      */
     internal suspend fun serve() {
-        if (!taken.await()) {
-            sayWhyAndClose()
-            return
-        }
         try {
-            pump()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "WebSocket failure from $remoteAddress: ${e.message}")
-            if (endConnection(TransportState.Failed)) listener?.onFailure(e, true)
-        } finally {
-            // A connection reset reaches here as a cancellation, of the
-            // frame channel or of this handler, with nothing reported yet.
-            // Whatever ended the pump, the connection is over.
-            if (endConnection(TransportState.Closed)) {
-                Log.d(TAG, "WebSocket from $remoteAddress lost")
-                listener?.onClosed(CLOSE_ABNORMAL, "connection lost")
+            if (!taken.await()) {
+                sayWhyAndClose()
+                return
             }
+            try {
+                pump()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "WebSocket failure from $remoteAddress: ${e.message}")
+                if (endConnection(TransportState.Failed)) listener?.onFailure(e, true)
+            } finally {
+                // A connection reset reaches here as a cancellation, of the
+                // frame channel or of this handler, with nothing reported yet.
+                // Whatever ended the pump, the connection is over.
+                if (endConnection(TransportState.Closed)) {
+                    Log.d(TAG, "WebSocket from $remoteAddress lost")
+                    listener?.onClosed(CLOSE_ABNORMAL, "connection lost")
+                }
+            }
+        } finally {
+            served.complete(Unit)
         }
     }
 
@@ -179,9 +186,12 @@ class InboundWebSocketTransport internal constructor(
     /**
      * Close once everything already queued has been written. The pump does
      * both, one after the other, so nothing here waits or times out.
+     * [onFlushed] runs once [serve] has returned, at once if it already has.
      */
-    override fun closeAfterFlush(code: Int, reason: String) =
+    override fun closeAfterFlush(code: Int, reason: String, onFlushed: () -> Unit) {
         requestClose(CloseRequest(code, reason, flush = true))
+        served.invokeOnCompletion { onFlushed() }
+    }
 
     private fun requestClose(request: CloseRequest) {
         if (!closeRequest.compareAndSet(null, request)) return

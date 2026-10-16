@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -14,8 +15,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
+import com.sendspindroid.ui.adaptive.AdaptiveDefaults
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.tvFocusRing
 import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
@@ -48,6 +54,11 @@ fun ConnectionModeCard(
 ) {
     val searching = mode.searching
     val listeningPort = mode.listeningPort
+    val formFactor = LocalFormFactor.current
+    val isTv = formFactor == FormFactor.TV
+    // A TV is read from across the room; elsewhere the styles' own sizes.
+    val titleSize = if (isTv) AdaptiveDefaults.bodyTextSize(formFactor) else TextUnit.Unspecified
+    val detailSize = if (isTv) AdaptiveDefaults.captionTextSize(formFactor) else TextUnit.Unspecified
     Column(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -61,6 +72,7 @@ fun ConnectionModeCard(
                 }
             ),
             style = MaterialTheme.typography.titleMedium,
+            fontSize = titleSize,
             color = MaterialTheme.colorScheme.onSurface,
             textAlign = TextAlign.Center,
         )
@@ -72,6 +84,7 @@ fun ConnectionModeCard(
                 else -> stringResource(R.string.mode_advertising_body, mode.playerName)
             },
             style = MaterialTheme.typography.bodyMedium,
+            fontSize = detailSize,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
@@ -84,16 +97,21 @@ fun ConnectionModeCard(
                     stringResource(R.string.mode_advertising_starting)
                 },
                 style = MaterialTheme.typography.bodySmall,
+                fontSize = detailSize,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
         }
         Spacer(modifier = Modifier.height(12.dp))
-        OutlinedButton(onClick = { mode.onSearchingChange(!searching) }) {
+        OutlinedButton(
+            onClick = { mode.onSearchingChange(!searching) },
+            modifier = Modifier.tvFocusRing(shape = CircleShape),
+        ) {
             Text(
                 text = stringResource(
                     if (searching) R.string.mode_advertise_instead else R.string.mode_search_instead
-                )
+                ),
+                fontSize = detailSize,
             )
         }
     }

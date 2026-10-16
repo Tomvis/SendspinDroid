@@ -42,9 +42,11 @@ import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
+import com.sendspindroid.AppSendSpinHost
 import com.sendspindroid.MainActivity
 
 import com.sendspindroid.SyncOffsetPreference
+import com.sendspindroid.ui.adaptive.isTvDevice
 import com.sendspindroid.ui.settings.SettingsViewModel
 import com.sendspindroid.coordinator.ConnectionCoordinator
 import com.sendspindroid.coordinator.ConnectionMode
@@ -71,12 +73,8 @@ import com.sendspindroid.sendspin.transport.SendspinWebSocketServer
 import com.sendspindroid.UnifiedServerRepository
 import com.sendspindroid.UserSettings
 import com.sendspindroid.sendspin.SyncAudioPlayer
-import com.sendspindroid.sendspin.SyncAudioPlayerCallback
 import com.sendspindroid.sendspin.PlaybackState as SyncPlaybackState
-import com.sendspindroid.sendspin.decoder.AudioDecoder
-import com.sendspindroid.sendspin.protocol.SendSpinProtocol
 import com.sendspindroid.sendspin.protocol.TrackMetadata
-import com.sendspindroid.sendspin.protocol.StreamConfig
 import com.sendspindroid.sendspin.decoder.AudioDecoderFactory
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.NetworkEvaluator
@@ -84,22 +82,17 @@ import com.sendspindroid.network.NetworkState
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.DefaultMediaNotificationProvider
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.concurrent.thread
@@ -148,30 +141,47 @@ class PlaybackService : MediaLibraryService() {
 
     // The client every connection this service dials is made on.
     private var dialClient: SendSpin? = null
-    @Volatile private var syncAudioPlayer: SyncAudioPlayer? = null
-    // Owned exclusively by the decode worker coroutine (serialized on
-    // decodeDispatcher). Single-writer invariant: all mutations happen
-    // inside handleDecodeStartStream / handleDecodeRelease, both of which
-    // run on decodeDispatcher. No volatile / lock needed because no other
-    // thread reads or writes this field.
-    private var audioDecoder: AudioDecoder? = null
+    // Decoding and the audio output, fed by the client being played from.
+    private val engine = SendSpinEngine(
+        listener = object : SendSpinEngine.Listener {
+            override fun onStreamStarted() {
+                // Acquire playback locks (CPU/WiFi) to prevent sleep during streaming
+                // The foreground service is already running (started on connect)
+                acquirePlaybackLocks()
 
-    private var currentCodec: String = "pcm"  // Track current stream codec for stats
-    private var currentSampleRate: Int = 0
-    private var currentChannels: Int = 0
-    private var currentBitDepth: Int = 0
+                // Update notification to show we're now streaming
+                startForegroundServiceWithNotification()
+            }
 
-    /**
-     * Reset the audio stream spec to "no active stream". Called on disconnect
-     * so the Now Playing spec chips disappear; not called on stream/end (pause)
-     * since the chips should remain visible while paused.
-     */
-    private fun clearAudioStreamSpec() {
-        currentCodec = "pcm"
-        currentSampleRate = 0
-        currentChannels = 0
-        currentBitDepth = 0
-    }
+            @OptIn(UnstableApi::class)
+            override fun onOutputLost() {
+                // Fork: the engine gave up on a faulted AudioTrack and released
+                // the player; the next stream/start builds a fresh one.
+                releasePlaybackLocks()
+                _playbackState.value = _playbackState.value.copy(
+                    playbackState = PlaybackStateType.STOPPED
+                )
+                sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
+                broadcastSessionExtras()
+            }
+
+            override fun onPlayerChanged(player: SyncAudioPlayer?) {
+                sendSpinPlayer?.setSyncAudioPlayer(player)
+            }
+
+            @OptIn(UnstableApi::class)
+            override fun onPlayerStateChanged(state: SyncPlaybackState) {
+                // Update SendSpinPlayer so it notifies MediaSession listeners
+                sendSpinPlayer?.updateStateFromPlayer()
+            }
+        },
+        lowMemoryMode = { UserSettings.lowMemoryMode },
+        playerMuted = { UserSettings.getPlayerMuted() },
+        // Synchronous messages, as mainHandler posts: Dispatchers.Main posts
+        // asynchronous ones, which overtake mainHandler's (onStateChanged's
+        // pause, say) while a frame barrier is pending.
+        mainDispatcher = Handler(Looper.getMainLooper()).asCoroutineDispatcher(),
+    )
 
     // Active server as a flow, consumed by ConnectionCoordinator.
     private val _currentServerFlow = MutableStateFlow<UnifiedServer?>(null)
@@ -225,8 +235,8 @@ class PlaybackService : MediaLibraryService() {
     private val syncOffsetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val offsetMs = intent.getIntExtra(SyncOffsetPreference.EXTRA_OFFSET_MS, 0)
-            sendSpinClient?.getTimeFilter()?.let { timeFilter ->
-                timeFilter.setUserSyncOffsetMs(offsetMs.toDouble())
+            sendSpinClient?.let { client ->
+                client.setUserSyncOffsetMs(offsetMs.toDouble())
                 Log.i(TAG, "Applied sync offset from settings change: ${offsetMs}ms")
             }
         }
@@ -274,9 +284,39 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
+    // The player name changed in settings. The server only learns a name from
+    // client/hello ("the client/hello value is authoritative", connection.md),
+    // so the dial client and the mDNS announcement take the new one, and a
+    // live connection is made again ("restart": the server reconnects too).
+    // Server-initiated connections read the name when they are made.
+    private val playerNameReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val name = UserSettings.getPlayerName()
+            if (name == appliedPlayerName) return
+            appliedPlayerName = name
+            Log.i(TAG, "Player name changed to '$name'")
+            dialClient?.setDeviceName(name)
+            val port = _advertisedPort.value
+            val advertising = advertiser
+            if (port != null && advertising != null) {
+                advertising.start(name, port, SendspinWebSocketServer.DEFAULT_PATH)
+            }
+            if (sendSpinClient?.connectionState?.value is TransportState.Ready) {
+                sendSpinClient?.disconnectForReselection()
+            }
+        }
+    }
+
+    // The player name the clients and the announcement were last given
+    private var appliedPlayerName: String? = null
+
     // Flag to prevent callbacks from executing after service is destroyed
     @Volatile
     private var isDestroyed = false
+
+    // Set by COMMAND_EXIT: the service is on its way out and must not take
+    // the foreground again. Main thread only.
+    private var exiting = false
 
     // Tracks whether any of our activities is currently visible (Lifecycle
     // STARTED or above). Updated by an observer on ProcessLifecycleOwner.
@@ -290,27 +330,6 @@ class PlaybackService : MediaLibraryService() {
     // cycle leaks one observer plus the service instance it captures via the
     // appInForeground closure.
     private var appLifecycleObserver: androidx.lifecycle.DefaultLifecycleObserver? = null
-
-    // Guards against race condition: onAudioChunk runs on WebSocket thread but
-    // decoder creation is posted to mainHandler. Chunks arriving before the new
-    // decoder is ready would hit the old (released) decoder and throw.
-    @Volatile
-    private var decoderReady = false
-
-    // Identifies the stream a chunk belongs to. onAudioChunk snapshots
-    // it on WS-IO at enqueue time and the decode worker re-checks it before
-    // decoding, so chunks from a superseded stream are discarded no matter how
-    // long they sat on the main dispatch queue or in decodeChannel. Ordering
-    // and drains can both be defeated by in-flight work; a tag cannot.
-    // Single-writer: only the WS-IO stream callbacks mutate it.
-    @Volatile
-    private var decodeGeneration = 0
-
-    // Configuration of the active player stream, null when none is active.
-    // Tells a stream/start that begins a stream from one that reconfigures
-    // the stream already playing, which must keep its buffered audio.
-    @Volatile
-    private var activeStreamConfig: StreamConfig? = null
 
     // Playback state exposed as StateFlow (like Python CLI's AppState)
     private val _playbackState = MutableStateFlow(PlaybackState())
@@ -358,19 +377,6 @@ class PlaybackService : MediaLibraryService() {
     // Coroutine scope for background tasks (artwork loading)
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    // Decode worker: single-thread-equivalent coroutine that owns the
-    // decoder for its lifetime. See
-    // docs/superpowers/specs/2026-04-23-codec-safe-decoder-redesign-design.md
-    // for the H-4 + M-8 rationale.
-    @kotlin.OptIn(ExperimentalCoroutinesApi::class)
-    private val decodeDispatcher = Dispatchers.IO.limitedParallelism(1)
-
-    // Capacity = 1000 ~= 20 seconds at the expected 50 chunks/sec. Sized to
-    // absorb cold-start + pre-buffered bursts (~100 entries) with 10x headroom.
-    private val decodeChannel = Channel<DecodeTask>(capacity = 1000)
-
-    private var decodeJob: Job? = null
-
     // Wake lock to prevent CPU sleep during playback
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -381,6 +387,11 @@ class PlaybackService : MediaLibraryService() {
     // These span the entire connection (not just streaming) when High Power Mode is enabled
     private var highPowerWakeLock: PowerManager.WakeLock? = null
     private var highPowerWifiLock: WifiManager.WifiLock? = null
+
+    // Keeps the CPU awake while the loop makes a connection at boot or after
+    // a restart, when nothing else does. Not reference counted, and acquired
+    // with a timeout: it cannot be left held.
+    private var connectWakeLock: PowerManager.WakeLock? = null
 
     // Handler for periodic wake lock refresh
     private val wakeLockHandler = Handler(Looper.getMainLooper())
@@ -434,6 +445,8 @@ class PlaybackService : MediaLibraryService() {
     private var volumeObserver: ContentObserver? = null
     private var volumeObserverRegistered: Boolean = false  // Track registration state to prevent leaks
     private var lastKnownVolume: Int = -1  // Track to detect external volume changes
+    private var lastOutputType: Int? = null  // The output lastKnownVolume was set or synced on
+    private val fullVolumeOutputs = mutableSetOf<Int>()  // Outputs setVolume found holding the index at max
 
     // Audio focus management - required for Android Auto to hand over audio output.
     // requestAudioFocus() / abandonAudioFocus() can run on the Media3 session
@@ -453,6 +466,10 @@ class PlaybackService : MediaLibraryService() {
     // abandon on teardown or the listener (capturing this service) leaks.
     @Volatile
     private var audioFocusRegistered: Boolean = false
+    // Another app took the output for good, and it has not been taken back:
+    // a fact about the device, which every client played from reports as
+    // available: false. Main thread.
+    private var otherAppHoldsOutput = false
 
     // What another app taking the output has done to us (main thread only).
     // See AudioInterruptionPolicy.
@@ -491,6 +508,9 @@ class PlaybackService : MediaLibraryService() {
 
         private const val TAG = "PlaybackService"
 
+        // How long after an output is connected or removed its volume is read
+        private const val OUTPUT_CHANGE_SETTLE_MS = 300L
+
         // Every focus change, the audio mode at that moment and the action
         // taken are logged at INFO under this tag: adb logcat -s AudioFocus
         private const val FOCUS_TAG = "AudioFocus"
@@ -510,22 +530,20 @@ class PlaybackService : MediaLibraryService() {
         private const val CONNECT_TIMEOUT_MS = 15_000L
 
         // How long the playback locks (CPU, Wi-Fi, audio focus) held when a
-        // connection dropped are kept for the reconnect loop. Long enough for
-        // a server restart or a network blip with the screen off; after it the
-        // loop carries on whenever the device is awake.
+        // connection dropped are kept for the reconnect loop, and the wake
+        // lock of a connection made at boot or on a restart is held. Long
+        // enough for a server restart or a network blip with the screen off;
+        // after it the loop carries on whenever the device is awake.
         private const val RECONNECT_LOCK_HOLD_MS = 10 * 60 * 1000L
 
-        // How long boot auto-connect waits for mDNS to re-resolve a saved local
-        // server's current address before falling back to the stored one (#158).
-        private const val MDNS_AUTOCONNECT_TIMEOUT_MS = 5_000L
-
-        // Poll interval while an output format switch waits for the audio
-        // buffered in the previous format to play out.
-        private const val FORMAT_SWITCH_POLL_MS = 20L
+        // How long COMMAND_EXIT waits for the goodbye to go out before it
+        // stops the service anyway.
+        private const val EXIT_FLUSH_TIMEOUT_MS = 2_000L
 
         // Custom session commands
         const val COMMAND_CONNECT = "com.sendspindroid.CONNECT"
         const val COMMAND_DISCONNECT = "com.sendspindroid.DISCONNECT"
+        const val COMMAND_EXIT = "com.sendspindroid.EXIT"
         const val COMMAND_SET_VOLUME = "com.sendspindroid.SET_VOLUME"
         const val COMMAND_NEXT = "com.sendspindroid.NEXT"
         const val COMMAND_PREVIOUS = "com.sendspindroid.PREVIOUS"
@@ -677,70 +695,6 @@ class PlaybackService : MediaLibraryService() {
     }
 
 
-    /**
-     * Tasks sent through [decodeChannel] to the single-owner decode worker.
-     *
-     * All decoder lifecycle transitions (StartStream, Flush, Release) travel on
-     * the same channel as Chunk so they respect FIFO ordering with pending
-     * decodes. See
-     * docs/superpowers/specs/2026-04-23-codec-safe-decoder-redesign-design.md
-     * for the H-4 + M-8 rationale.
-     */
-    private sealed class DecodeTask {
-        data class Chunk(
-            val serverTimeMicros: Long,
-            val audioData: ByteArray,
-            val generation: Int,
-        ) : DecodeTask() {
-            // Override equals/hashCode because data classes with ByteArray use
-            // reference equality by default, which is surprising. In practice
-            // DecodeTask instances are only compared in tests.
-            override fun equals(other: Any?): Boolean {
-                if (this === other) return true
-                if (other !is Chunk) return false
-                return serverTimeMicros == other.serverTimeMicros &&
-                    generation == other.generation &&
-                    audioData.contentEquals(other.audioData)
-            }
-            override fun hashCode(): Int {
-                var result = serverTimeMicros.hashCode()
-                result = 31 * result + generation
-                result = 31 * result + audioData.contentHashCode()
-                return result
-            }
-        }
-        data class StartStream(
-            val codec: String,
-            val sampleRate: Int,
-            val channels: Int,
-            val bitDepth: Int,
-            val codecHeader: ByteArray?,
-            // True when this reconfigures an active stream: audio queued
-            // before it is in the previous format and must still play.
-            val keepBuffered: Boolean,
-        ) : DecodeTask() {
-            override fun equals(other: Any?): Boolean {
-                if (this === other) return true
-                if (other !is StartStream) return false
-                return codec == other.codec && sampleRate == other.sampleRate &&
-                    channels == other.channels && bitDepth == other.bitDepth &&
-                    keepBuffered == other.keepBuffered &&
-                    (codecHeader?.contentEquals(other.codecHeader) ?: (other.codecHeader == null))
-            }
-            override fun hashCode(): Int {
-                var result = codec.hashCode()
-                result = 31 * result + sampleRate
-                result = 31 * result + channels
-                result = 31 * result + bitDepth
-                result = 31 * result + keepBuffered.hashCode()
-                result = 31 * result + (codecHeader?.contentHashCode() ?: 0)
-                return result
-            }
-        }
-        object Flush : DecodeTask()
-        object Release : DecodeTask()
-    }
-
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
@@ -811,6 +765,10 @@ class PlaybackService : MediaLibraryService() {
             preferredCodecReceiver,
             IntentFilter(SettingsViewModel.ACTION_PREFERRED_CODEC_CHANGED)
         )
+        LocalBroadcastManager.getInstance(this).registerReceiver(
+            playerNameReceiver,
+            IntentFilter(SettingsViewModel.ACTION_PLAYER_NAME_CHANGED)
+        )
 
         // Initialize Coil ImageLoader for artwork fetching (skip in low memory mode)
         if (!com.sendspindroid.UserSettings.lowMemoryMode) {
@@ -871,6 +829,7 @@ class PlaybackService : MediaLibraryService() {
                     // The loop is over, one way or the other.
                     stopReconnectDiscovery()
                     mainHandler.removeCallbacks(reconnectLockRelease)
+                    releaseConnectWakeLock()
                     releaseIfIdle()
                     noteDialEnded()
                 }
@@ -907,7 +866,12 @@ class PlaybackService : MediaLibraryService() {
                     }
                     is com.sendspindroid.coordinator.NetworkEvent.LinkAddressesChanged -> {
                         Log.i(TAG, "networkEvent: LinkAddressesChanged")
-                        sendSpinClient?.onNetworkChanged()
+                        // The connection survives an address change on its
+                        // network, and so does its clock estimate: resetting
+                        // it here silenced a playing group for seconds and
+                        // dropped the queued audio. A change that does break
+                        // the path closes the socket, and the reconnect
+                        // starts the clock over.
                         browseDiscoveryManager?.refreshMulticastLockIfActive()
                         advertiseAgainAfterNetworkChange()
                     }
@@ -916,12 +880,6 @@ class PlaybackService : MediaLibraryService() {
         }
 
         sendSpinClient?.let { observeClient(it) }
-
-        // Launch the single-owner decode worker. Task 3 scaffolding: no
-        // callback currently sends into decodeChannel. Task 4 flips the
-        // existing onAudioChunk / onStreamStart / onStreamClear / onDestroy
-        // paths over to this channel.
-        startDecodeWorker()
 
         // Initialize network evaluator for passive network monitoring
         networkEvaluator = NetworkEvaluator(this)
@@ -972,6 +930,8 @@ class PlaybackService : MediaLibraryService() {
         clientObserver?.cancel()
         if (prevSendSpinState !is TransportState.Idle) onClientState(TransportState.Idle)
         sendSpinClient = client
+        engine.client = client
+        client.setExternalSource(otherAppHoldsOutput)
         sendSpinPlayer?.setSendSpinClient(client)
         admissionState = AdmissionState.READY
         pairingCode = null
@@ -982,8 +942,7 @@ class PlaybackService : MediaLibraryService() {
     /** Reacts to the connection state of the client being played from. */
     private fun onClientState(state: TransportState) {
         clientState.value = state
-        // No stream survives the connection it was started on.
-        if (state !is TransportState.Ready) activeStreamConfig = null
+        if (state !is TransportState.Ready) engine.endStream()
         when {
             state is TransportState.Ready && prevSendSpinState !is TransportState.Ready -> {
                 val serverName = sendSpinClient?.getServerName() ?: ""
@@ -1078,6 +1037,24 @@ class PlaybackService : MediaLibraryService() {
         },
         DiscoveryGate,
     )
+
+    // Fork: the stream format shown as Now Playing spec chips
+    private var currentCodec: String = "pcm"
+    private var currentSampleRate: Int = 0
+    private var currentChannels: Int = 0
+    private var currentBitDepth: Int = 0
+
+    /**
+     * Reset the audio stream spec to "no active stream". Called on disconnect
+     * so the Now Playing spec chips disappear; not called on stream/end (pause)
+     * since the chips should remain visible while paused.
+     */
+    private fun clearAudioStreamSpec() {
+        currentCodec = "pcm"
+        currentSampleRate = 0
+        currentChannels = 0
+        currentBitDepth = 0
+    }
 
     private val inboundConnections = InboundConnections(
         scope = serviceScope,
@@ -1198,11 +1175,9 @@ class PlaybackService : MediaLibraryService() {
 
     /** A client for one connection a server opens to us. Not on the main thread. */
     private fun newInboundClient(): SendSpin =
-        SendSpin(UserSettings.getPlayerName(), SendSpinClientCallback()).also { client ->
+        SendSpin(UserSettings.getPlayerName(), SendSpinClientCallback(), AppSendSpinHost).also { client ->
             val am = audioManager ?: return@also
-            val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            val percent = ((am.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max) * 100).toInt()
-            client.setInitialVolume(percent, UserSettings.getPlayerMuted())
+            client.setInitialVolume(currentVolumePercent(am), UserSettings.getPlayerMuted())
         }
 
     /** A server that connected to us was admitted: play from its connection. */
@@ -1246,10 +1221,10 @@ class PlaybackService : MediaLibraryService() {
 
         // Track current volume to detect external changes
         lastKnownVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
+        lastOutputType = audioManager?.let { mediaOutputType(it) }
 
         // Initialize playback state with actual device volume (not default 100%)
-        val maxVolume = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
-        val volumePercent = ((lastKnownVolume.toFloat() / maxVolume) * 100).toInt()
+        val volumePercent = audioManager?.let { deviceVolumePercent(it, lastKnownVolume) } ?: 0
         _playbackState.value = _playbackState.value.copy(volume = volumePercent)
 
         // Create observer to detect volume changes from hardware buttons
@@ -1259,20 +1234,8 @@ class PlaybackService : MediaLibraryService() {
 
                 // Only sync to server if volume actually changed (not our own change)
                 if (currentVolume != lastKnownVolume) {
-                    lastKnownVolume = currentVolume
-
-                    // Convert to normalized 0.0-1.0 and sync to server
-                    val maxVolume = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
-                    val normalizedVolume = currentVolume.toFloat() / maxVolume
-                    Log.d(TAG, "Device volume changed via hardware buttons: $currentVolume/$maxVolume ($normalizedVolume)")
-
-                    // Sync to server (for multi-client coordination)
-                    sendSpinClient?.setVolume(normalizedVolume.toDouble())
-
-                    // Update playback state for UI sync
-                    val volumePercent = (normalizedVolume * 100).toInt()
-                    _playbackState.value = _playbackState.value.copy(volume = volumePercent)
-                    broadcastSessionExtras()
+                    Log.d(TAG, "Device volume changed via hardware buttons: index $currentVolume")
+                    syncDeviceVolumeToServer(currentVolume)
                 }
             }
         }
@@ -1284,6 +1247,10 @@ class PlaybackService : MediaLibraryService() {
             volumeObserver!!
         )
         volumeObserverRegistered = true
+
+        // A new output brings its own stored index and its own volume curve,
+        // without any setting being written: report what plays now.
+        audioManager?.registerAudioDeviceCallback(outputDeviceCallback, mainHandler)
 
         Log.d(TAG, "Volume control initialized - using device STREAM_MUSIC")
     }
@@ -1317,243 +1284,18 @@ class PlaybackService : MediaLibraryService() {
             pairingGestureRequested = false
             // Use user-configured player name, falls back to device model
             val playerName = com.sendspindroid.UserSettings.getPlayerName()
+            appliedPlayerName = playerName
             dialClient = SendSpin(
                 deviceName = playerName,
-                callback = SendSpinClientCallback()
+                callback = SendSpinClientCallback(),
+                host = AppSendSpinHost,
             )
             sendSpinClient = dialClient
+            engine.client = dialClient
             sendSpinPlayer?.setSendSpinClient(sendSpinClient)
             Log.d(TAG, "SendSpin initialized with name: $playerName")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize SendSpin", e)
-        }
-    }
-
-    /**
-     * Launches the single-owner decode worker. The worker consumes
-     * [decodeChannel] sequentially on [decodeDispatcher]; all decoder
-     * lifecycle events (StartStream, Flush, Release) flow through the same
-     * channel as Chunk so they preserve FIFO ordering with pending decodes.
-     *
-     * Task 3 scaffolding: the worker is running but no callback currently
-     * sends into [decodeChannel]. Task 4 flips the callback sites over.
-     */
-    private fun startDecodeWorker() {
-        decodeJob = serviceScope.launch(decodeDispatcher) {
-            try {
-                for (task in decodeChannel) {
-                    try {
-                        when (task) {
-                            is DecodeTask.Chunk -> handleDecodeChunk(task)
-                            is DecodeTask.StartStream -> handleDecodeStartStream(task)
-                            DecodeTask.Flush -> handleDecodeFlush()
-                            DecodeTask.Release -> handleDecodeRelease()
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Decode worker error on task ${task::class.simpleName}", e)
-                    }
-                }
-            } finally {
-                // Channel-closed path. Releases the decoder unconditionally so
-                // a shutdown that couldn't enqueue an explicit Release task
-                // (trySend Failed because the channel was full at onDestroy)
-                // still doesn't leak the MediaCodec / codec native handles.
-                // The handleDecodeRelease path (when it runs successfully)
-                // leaves audioDecoder == null already, so this is a no-op in
-                // the normal case.
-                if (audioDecoder != null) {
-                    try {
-                        audioDecoder?.release()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error releasing decoder on worker exit", e)
-                    }
-                    audioDecoder = null
-                    decoderReady = false
-                }
-            }
-        }
-    }
-
-    /**
-     * Decode a single audio chunk. Runs on [decodeDispatcher]; [audioDecoder]
-     * is read from the single-owner thread so no TOCTOU local-ref capture is
-     * needed.
-     */
-    private suspend fun handleDecodeChunk(t: DecodeTask.Chunk) {
-        // Drop chunks belonging to a stream that has since ended or been
-        // replaced. Popping and discarding costs microseconds, so a ~30-second
-        // look-ahead backlog clears near-instantly instead of grinding through
-        // syncAudioPlayer.queueChunk back-pressure at real-time rate -- that
-        // stall is what delayed decoder reconfiguration in issue #114.
-        if (t.generation != decodeGeneration) return
-
-        // No decoder means the stream's codec could not be set up: drop the
-        // chunk. PCM has a decoder of its own, so nothing passes through raw.
-        val decoder = audioDecoder ?: return
-        val decoded = try {
-            decoder.decode(t.audioData, t.serverTimeMicros)
-        } catch (e: Exception) {
-            Log.e(TAG, "Decode error, dropping chunk", e)
-            return
-        }
-        val player = syncAudioPlayer ?: return
-        // Checked again, by the player under the lock its clear takes: a
-        // stream/clear or stream/end that landed while this chunk was
-        // decoding has cleared the player or is about to, and a chunk queued
-        // after that would sit at the head of the queue with the old stream's
-        // timestamp. The new stream's audio is then discarded as overlap
-        // until it catches up - seconds of silence after a skip. The
-        // generation is bumped before the clear is posted, so a chunk that
-        // passes here is queued before the clear and removed by it.
-        //
-        // Stamped by the decoder, not with this chunk's time: what comes out
-        // can be the previous chunk's audio.
-        for (audio in decoded) {
-            player.queueChunk(audio.timestampUs, audio.pcm) { t.generation == decodeGeneration }
-        }
-    }
-
-    /**
-     * Release any prior decoder and create+configure a new one for the new
-     * stream. Runs on [decodeDispatcher] so we're the single owner of
-     * [audioDecoder]. If the decoder cannot be created or configured there is
-     * no decoder and the stream's chunks are dropped: silence, never the
-     * compressed bytes played as PCM.
-     */
-    private suspend fun handleDecodeStartStream(t: DecodeTask.StartStream) {
-        Log.d(
-            TAG,
-            "Stream started: codec=${t.codec}, rate=${t.sampleRate}, " +
-                "channels=${t.channels}, bits=${t.bitDepth}, " +
-                "header=${t.codecHeader?.size ?: 0} bytes"
-        )
-
-        // Release existing decoder and create new one for this stream.
-        audioDecoder?.release()
-        audioDecoder = null
-        try {
-            val decoder = AudioDecoderFactory.create(t.codec)
-            decoder.configure(t.sampleRate, t.channels, t.bitDepth, t.codecHeader)
-            audioDecoder = decoder
-            Log.i(TAG, "Audio decoder created: ${t.codec}")
-            decoderReady = true
-        } catch (e: Exception) {
-            Log.e(TAG, "No decoder for ${t.codec}; dropping this stream's audio", e)
-            // Subsequent chunks are rejected at the WS-IO fast-path gate.
-            decoderReady = false
-        }
-
-        if (t.keepBuffered) switchOutputFormat(t)
-    }
-
-    /**
-     * Format change on an active stream. Everything already queued in
-     * [syncAudioPlayer] was decoded in the previous format and must still be
-     * played, so when the PCM format differs the player is only replaced once
-     * its queue has drained. Suspending here holds back the chunks behind this
-     * task, which are in the new format. A stream/clear or stream/end bumps
-     * [decodeGeneration] and ends the wait early.
-     */
-    private suspend fun switchOutputFormat(t: DecodeTask.StartStream) {
-        val old = syncAudioPlayer
-        if (old != null && old.matchesFormat(t.sampleRate, t.channels, t.bitDepth)) return
-
-        Log.i(TAG, "Output format change on active stream - playing out ${old?.getBufferedDurationMs() ?: 0}ms of buffered audio first")
-        val generation = decodeGeneration
-        while (old != null && old === syncAudioPlayer && generation == decodeGeneration &&
-            old.getBufferedDurationMs() > 0
-        ) {
-            delay(FORMAT_SWITCH_POLL_MS)
-        }
-
-        withContext(Dispatchers.Main) {
-            // Replaced or torn down while we waited (disconnect, new stream).
-            if (syncAudioPlayer !== old) return@withContext
-            old?.release()
-            createSyncAudioPlayer(t.sampleRate, t.channels, t.bitDepth)
-        }
-    }
-
-    /** Creates and starts a [SyncAudioPlayer] for the given PCM format. Main thread. */
-    private fun createSyncAudioPlayer(sampleRate: Int, channels: Int, bitDepth: Int) {
-        val timeFilter = sendSpinClient?.getTimeFilter()
-        if (timeFilter == null) {
-            Log.e(TAG, "Cannot start audio: time filter not available")
-            return
-        }
-        // In low memory mode, cap the chunk queue to ~10 seconds of audio
-        val maxSamples = if (com.sendspindroid.UserSettings.lowMemoryMode) {
-            sampleRate.toLong() * SendSpinProtocol.Buffer.DURATION_LOW_MEM_SEC
-        } else {
-            0L  // Unlimited
-        }
-        syncAudioPlayer = SyncAudioPlayer(
-            timeFilter = timeFilter,
-            sampleRate = sampleRate,
-            channels = channels,
-            bitDepth = bitDepth,
-            maxQueueSamples = maxSamples,
-        ).apply {
-            // Set callback to update SendSpinPlayer when playback state changes
-            setStateCallback(SyncAudioPlayerStateCallback())
-            // From settings, not _playbackState: that is reset on disconnect.
-            setMuted(SyncAudioPlayer.MuteReason.PLAYER, com.sendspindroid.UserSettings.getPlayerMuted())
-            setMuted(SyncAudioPlayer.MuteReason.INTERRUPTION, interruptionMuted)
-            initialize()
-            start()
-        }
-        sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
-        Log.i(TAG, "SyncAudioPlayer created: ${sampleRate}Hz, ${channels}ch, ${bitDepth}bit")
-    }
-
-    private suspend fun handleDecodeFlush() {
-        audioDecoder?.flush()
-    }
-
-    private suspend fun handleDecodeRelease() {
-        audioDecoder?.release()
-        audioDecoder = null
-        decoderReady = false
-    }
-
-    /**
-     * Callback for SyncAudioPlayer state changes.
-     * Updates SendSpinPlayer when playback state changes so MediaSession notifies controllers.
-     */
-    private inner class SyncAudioPlayerStateCallback : SyncAudioPlayerCallback {
-        @OptIn(UnstableApi::class)
-        override fun onPlaybackStateChanged(state: SyncPlaybackState) {
-            mainHandler.post {
-                Log.d(TAG, "SyncAudioPlayer state changed: $state")
-                // Update SendSpinPlayer so it notifies MediaSession listeners
-                sendSpinPlayer?.updateStateFromPlayer()
-            }
-        }
-
-        /**
-         * Fork: SyncAudioPlayer gave up recreating a faulted AudioTrack. Tear
-         * the player down completely so the next stream/start builds a fresh
-         * one; stop() alone would leave a non-null player whose loop is gone,
-         * and the reuse path would then produce no audio.
-         */
-        @OptIn(UnstableApi::class)
-        override fun onBufferExhausted() {
-            Log.e(TAG, "AudioTrack unrecoverable - stopping playback")
-            mainHandler.post {
-                syncAudioPlayer?.stop()
-                syncAudioPlayer?.release()
-                syncAudioPlayer = null
-                sendSpinPlayer?.setSyncAudioPlayer(null)
-                // Close the chunk fast-path gate; the next stream/start re-opens it.
-                decoderReady = false
-                releasePlaybackLocks()
-
-                _playbackState.value = _playbackState.value.copy(
-                    playbackState = PlaybackStateType.STOPPED
-                )
-                sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-                broadcastSessionExtras()
-            }
         }
     }
 
@@ -1615,17 +1357,16 @@ class PlaybackService : MediaLibraryService() {
                     // Stop: "reset position to beginning" - clear buffer
                     Log.d(TAG, "State is stopped - clearing audio buffer and releasing playback locks")
                     sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-                    syncAudioPlayer?.clearBuffer()
-                    syncAudioPlayer?.pause()
+                    engine.applyServerPlayback(newState)
                     releasePlaybackLocks()
                 } else if (newState == PlaybackStateType.PAUSED) {
                     // Pause: "maintains current position for later resumption" - keep buffer
                     Log.d(TAG, "State is paused - pausing audio (keeping buffer)")
                     sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-                    syncAudioPlayer?.pause()
+                    engine.applyServerPlayback(newState)
                     releasePlaybackLocks()
                 } else if (newState == PlaybackStateType.PLAYING) {
-                    // Playing: resume playback if paused. Re-attach syncAudioPlayer
+                    // Playing: resume playback if paused. Re-attach the player
                     // symmetrically with the onGroupUpdate PLAYING branch -- a
                     // server-PLAYING transition that arrives without a matching
                     // stream/start (rare but possible) can otherwise leave
@@ -1633,8 +1374,8 @@ class PlaybackService : MediaLibraryService() {
                     // path nulled it.
                     Log.d(TAG, "State is playing - resuming audio and acquiring playback locks")
                     sendSpinPlayer?.updatePlayWhenReadyFromServer(true)
-                    syncAudioPlayer?.resume()
-                    sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
+                    engine.applyServerPlayback(newState)
+                    sendSpinPlayer?.setSyncAudioPlayer(engine.hostPlayer)
                     acquirePlaybackLocks()
                     // Invalidate the session-extras dedup so the next broadcast
                     // pushes through even when the bundle content is byte-
@@ -1659,6 +1400,16 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
+        override fun onPlayerRoleChanged(active: Boolean) {
+            if (active) return
+            mainHandler.post {
+                // No longer a player: nothing of ours will play on this connection
+                Log.i(TAG, "Player role removed - releasing the output and its locks")
+                engine.releasePlayer()
+                releasePlaybackLocks()
+            }
+        }
+
         @OptIn(UnstableApi::class)
         override fun onGroupUpdate(groupId: String, groupName: String, playbackState: String) {
             mainHandler.post {
@@ -1675,23 +1426,22 @@ class PlaybackService : MediaLibraryService() {
                             // Stop: "reset position to beginning" - clear buffer
                             Log.d(TAG, "Playback stopped - clearing audio buffer and releasing playback locks")
                             sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-                            syncAudioPlayer?.clearBuffer()
-                            syncAudioPlayer?.pause()
+                            engine.applyServerPlayback(newPlaybackState)
                             releasePlaybackLocks()
                         }
                         PlaybackStateType.PAUSED -> {
                             // Pause: "maintains current position for later resumption" - keep buffer
                             Log.d(TAG, "Playback paused - pausing audio (keeping buffer)")
                             sendSpinPlayer?.updatePlayWhenReadyFromServer(false)
-                            syncAudioPlayer?.pause()
+                            engine.applyServerPlayback(newPlaybackState)
                             releasePlaybackLocks()
                         }
                         PlaybackStateType.PLAYING -> {
                             // Playing: resume playback if paused
                             Log.d(TAG, "Playback playing - resuming audio and acquiring playback locks")
                             sendSpinPlayer?.updatePlayWhenReadyFromServer(true)
-                            syncAudioPlayer?.resume()
-                            sendSpinPlayer?.setSyncAudioPlayer(syncAudioPlayer)
+                            engine.applyServerPlayback(newPlaybackState)
+                            sendSpinPlayer?.setSyncAudioPlayer(engine.hostPlayer)
                             acquirePlaybackLocks()
                             // Invalidate the session-extras dedup -- see the
                             // onStateChanged PLAYING branch for the rationale.
@@ -1937,192 +1687,28 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onStreamStart(codec: String, sampleRate: Int, channels: Int, bitDepth: Int, codecHeader: ByteArray?) {
-            val config = StreamConfig(codec, sampleRate, channels, bitDepth, codecHeader)
-            val action = StreamStartAction.of(activeStreamConfig, config)
-            activeStreamConfig = config
-            if (action == StreamStartAction.UNCHANGED) {
-                Log.d(TAG, "stream/start repeats the active format - nothing to do")
-                return
-            }
-            // A stream/start on an active stream reconfigures it: "Clients
-            // MUST keep buffered chunks and decode each chunk in the format
-            // that was in effect when it was received." FIFO ordering on
-            // decodeChannel gives the second half; not discarding anything
-            // gives the first.
-            val keepBuffered = action == StreamStartAction.FORMAT_CHANGE
-
-            // A new stream invalidates every chunk left from the last one.
-            // Bumping here -- on WS-IO, before anything new is queued -- means
-            // chunks already in flight toward decodeChannel carry the old tag
-            // and are dropped by the worker (#114).
-            if (!keepBuffered) decodeGeneration++
-
-            // Post decoder lifecycle to the single-owner decode worker via the
-            // channel. FIFO ordering between StartStream and any subsequent
-            // Chunk tasks ensures the new decoder is in place before its
-            // chunks are decoded. decoderReady is set optimistically so any
-            // chunk arriving during reconfiguration is still enqueued; it
-            // will decode with the new decoder once the worker drains the
-            // StartStream task ahead of it.
-            decoderReady = true
-            // CRITICAL: launch on the scope's default Main dispatcher (NOT
-            // Dispatchers.IO). The WebSocket receive loop invokes onStreamStart
-            // and onAudioChunk serially from a single coroutine, but if those
-            // callbacks each launch on a multi-thread dispatcher like
-            // Dispatchers.IO, the launched coroutines race when reaching
-            // decodeChannel.send(...). That reorders StartStream vs. its
-            // following Chunks at the decoder -- the decoder is either still
-            // the old one or absent when chunks arrive, producing dropped
-            // frames or codec-state corruption (audibly: choppy audio,
-            // glitches). Main is single-threaded, so launches drain in
-            // submission order. ClosedSendChannelException is the benign
-            // shutdown race -- worker releases the decoder in its finally.
-            serviceScope.launch {
-                try {
-                    decodeChannel.send(
-                        DecodeTask.StartStream(codec, sampleRate, channels, bitDepth, codecHeader, keepBuffered)
-                    )
-                } catch (e: ClosedSendChannelException) {
-                    // benign: shutdown race
-                }
-            }
-
-            // Non-decoder state updates continue to run on the main thread,
-            // where SyncAudioPlayer + foreground-service + lock bookkeeping
-            // live.
+            engine.onStreamStart(codec, sampleRate, channels, bitDepth, codecHeader)
+            // Fork: the stream's format for the Now Playing spec chips
             mainHandler.post {
                 currentCodec = codec
                 currentSampleRate = sampleRate
                 currentChannels = channels
                 currentBitDepth = bitDepth
                 broadcastSessionExtras()
-
-                if (sendSpinClient?.getTimeFilter() == null) {
-                    Log.e(TAG, "Cannot start audio: time filter not available")
-                    return@post
-                }
-
-                // Acquire playback locks (CPU/WiFi) to prevent sleep during streaming
-                // The foreground service is already running (started on connect)
-                acquirePlaybackLocks()
-
-                // Update notification to show we're now streaming
-                startForegroundServiceWithNotification()
-
-                // The decode worker switches the output of an active stream,
-                // once the audio buffered in the old format has played.
-                if (keepBuffered) return@post
-
-                // Reuse existing player if format matches (DAC timestamps stay warm)
-                val existingPlayer = syncAudioPlayer
-                if (existingPlayer != null && existingPlayer.matchesFormat(sampleRate, channels, bitDepth)) {
-                    Log.i(TAG, "Reusing existing SyncAudioPlayer - DAC already warm")
-                    existingPlayer.clearBuffer()
-                } else {
-                    // Format changed or no existing player - create new one
-                    existingPlayer?.release()
-                    createSyncAudioPlayer(sampleRate, channels, bitDepth)
-                }
             }
         }
 
-        override fun onStreamClear() {
-            Log.i(TAG, "[cmd-trace] T2 onStreamClear ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
-            // Decoder flush goes through the channel so it is ordered with
-            // any in-flight Chunk tasks: every chunk enqueued before the
-            // stream/clear message decodes with the pre-flush decoder
-            // state; every chunk enqueued after decodes with the flushed
-            // decoder. Preserves the FIFO guarantee from the design.
-            //
-            // "clients MUST clear all buffered audio chunks and continue with
-            // chunks received after this message": the bump discards chunks
-            // still waiting to be decoded, which can be seconds of audio while
-            // the worker is holding a format switch back.
-            decodeGeneration++
-            serviceScope.launch {
-                try {
-                    decodeChannel.send(DecodeTask.Flush)
-                } catch (e: ClosedSendChannelException) {
-                    // benign: shutdown race
-                }
-            }
-
-            mainHandler.post {
-                Log.i(TAG, "[cmd-trace] T3 onStreamClear.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
-                Log.d(TAG, "Stream clear - flushing audio buffer")
-                syncAudioPlayer?.clearBuffer()
-            }
-        }
+        override fun onStreamClear() = engine.onStreamClear()
 
         override fun onStreamEnd() {
-            Log.i(TAG, "[cmd-trace] T2 onStreamEnd ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
-
-            // Invalidate the ending stream's pre-buffered chunks (issue #114).
-            decodeGeneration++
-            activeStreamConfig = null
-
-            mainHandler.post {
-                Log.i(TAG, "[cmd-trace] T3 onStreamEnd.post ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name}")
-                Log.i(TAG, "Stream end - server terminated playback")
-                // Close the fast-path gate so any chunks still in the WS receive
-                // queue after stream/end are dropped before being launched into
-                // the decode channel. The streamGeneration counter inside
-                // SyncAudioPlayer is the primary defense against stale chunks,
-                // but rejecting them at the source avoids the decode-pipeline
-                // CPU burn. The next stream/start re-opens the gate.
-                decoderReady = false
-                // Enter idle mode: keep AudioTrack alive and writing silence
-                // so DAC timestamps stay warm for the next stream start.
-                //
-                // Deliberately do NOT zero currentSampleRate/Channels/BitDepth here.
-                // SendSpin fires stream/end whenever playback pauses, and the Now
-                // Playing UI wants the codec/bit-depth/sample-rate chips to remain
-                // visible through a pause. The spec is cleared on disconnect via
-                // clearAudioStreamSpec() in the TransportState.Idle / Failed handlers.
-                syncAudioPlayer?.enterIdle()
-                broadcastSessionExtras()
-            }
+            engine.onStreamEnd()
+            // Fork: the spec chips stay through a pause (stream/end); they are
+            // cleared on disconnect (clearAudioStreamSpec).
+            mainHandler.post { broadcastSessionExtras() }
         }
 
-        override fun onAudioChunk(serverTimeMicros: Long, audioData: ByteArray) {
-            // Fast-path gate: once onStreamStart has been observed but before
-            // any audio has been accepted, decoderReady stays false so we
-            // don't pile chunks into the channel for a decoder that will
-            // never exist. Normal steady state sees decoderReady = true.
-            if (!decoderReady) return
-
-            // Hand the chunk to the single-owner decode worker via the
-            // channel. Wrapping send() in launch lets this callback return
-            // immediately on WS-IO (fixing H-4); the launched coroutine
-            // suspends on the channel if it is full. We deliberately do
-            // NOT use trySend + drop: dropping compressed chunks mid-frame
-            // corrupts codec state (this is exactly the regression PR #142
-            // introduced via drop-oldest). Suspend-on-full is the
-            // correctness property; see design doc H-4 / M-8 rationale.
-            //
-            // CRITICAL: launch on the scope's default Main dispatcher (NOT
-            // a multi-threaded one like Dispatchers.IO). Chunks must reach
-            // decodeChannel.send(...) in the same order onAudioChunk was
-            // called; with a multi-thread pool the launched coroutines race
-            // and chunks land out of order at the decoder, corrupting codec
-            // state and producing choppy audio. Main is single-threaded so
-            // launches drain in submission order. The 50 launches/sec cost
-            // is ~150us/sec on Main -- negligible vs the frame budget.
-            // ClosedSendChannelException is the benign shutdown race --
-            // worker handles decoder release in its finally.
-            //
-            // Snapshot the generation on WS-IO so the tag reflects the stream
-            // this chunk actually arrived on, not whatever is current by the
-            // time the launched coroutine runs on the main dispatcher.
-            val generation = decodeGeneration
-            serviceScope.launch {
-                try {
-                    decodeChannel.send(DecodeTask.Chunk(serverTimeMicros, audioData, generation))
-                } catch (e: ClosedSendChannelException) {
-                    // benign: shutdown race
-                }
-            }
-        }
+        override fun onAudioChunk(serverTimeMicros: Long, audioData: ByteArray) =
+            engine.onAudioChunk(serverTimeMicros, audioData)
 
         override fun onVolumeChanged(volume: Int) {
             Log.i(TAG, "[cmd-trace] T2 onVolumeChanged ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name} vol=$volume")
@@ -2141,7 +1727,7 @@ class PlaybackService : MediaLibraryService() {
                 // Mute silences the output and leaves the volume alone: the
                 // two are independent, and a later volume change must not
                 // make a muted player audible.
-                syncAudioPlayer?.setMuted(SyncAudioPlayer.MuteReason.PLAYER, muted)
+                engine.setMuted(SyncAudioPlayer.MuteReason.PLAYER, muted)
                 com.sendspindroid.UserSettings.setPlayerMuted(muted)
                 // Update playback state with new mute status
                 _playbackState.value = _playbackState.value.copy(muted = muted)
@@ -2159,18 +1745,9 @@ class PlaybackService : MediaLibraryService() {
             }
         }
 
-        override fun onSyncMuteChanged(muted: Boolean) {
-            mainHandler.post {
-                syncAudioPlayer?.setMuted(SyncAudioPlayer.MuteReason.SYNC, muted)
-            }
-        }
+        override fun onSyncMuteChanged(muted: Boolean) = engine.onSyncMuteChanged(muted)
 
-        override fun onNetworkChanged() {
-            mainHandler.post {
-                android.util.Log.i(TAG, "Network changed - triggering audio player reanchor")
-                syncAudioPlayer?.clearBuffer()
-            }
-        }
+        override fun onNetworkChanged() = engine.onNetworkChanged()
 
     }
 
@@ -2303,13 +1880,7 @@ class PlaybackService : MediaLibraryService() {
         AppLog.session.end()
 
         // Stop audio playback
-        syncAudioPlayer?.stop()
-        syncAudioPlayer?.release()
-        syncAudioPlayer = null
-        sendSpinPlayer?.setSyncAudioPlayer(null)
-        // Close the chunk fast-path gate so any chunks still in the WS receive
-        // queue post-disconnect drop before being launched into the decode pipeline.
-        decoderReady = false
+        engine.releasePlayer()
         sendSpinPlayer?.updateConnectionState(
             connected = false,
             reconnecting = coordinator.reconnectStatus.value is ReconnectStatus.Attempting,
@@ -2540,9 +2111,9 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Connects to a SendSpin server because someone chose it: the user, Android
-     * Auto, boot auto-connect. Takes over from a reconnect loop still trying
-     * for the previous server.
+     * Connects to a SendSpin server because someone chose it: the user or
+     * Android Auto. Takes over from a reconnect loop still trying for the
+     * previous server.
      *
      * @param address Server address in "host:port" format
      * @param path WebSocket path (default: /sendspin)
@@ -2581,10 +2152,8 @@ class PlaybackService : MediaLibraryService() {
             // Read current device volume and set as initial volume for server and UI
             val am = audioManager
             if (am != null) {
-                val currentDeviceVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val volumePercent = ((currentDeviceVolume.toFloat() / maxVolume) * 100).toInt()
-                Log.d(TAG, "Setting initial volume from device: $currentDeviceVolume/$maxVolume = $volumePercent%")
+                val volumePercent = currentVolumePercent(am)
+                Log.d(TAG, "Setting initial volume from device: $volumePercent%")
                 // Mute is restored from settings: it is the app's own state,
                 // where volume is the device's.
                 val muted = com.sendspindroid.UserSettings.getPlayerMuted()
@@ -2606,16 +2175,17 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Disconnects from the current server.
      */
-    fun disconnectFromServer() {
+    fun disconnectFromServer(onFlushed: () -> Unit = {}) {
         Log.d(TAG, "Disconnecting from server")
-        sendSpinClient?.disconnect()
+        val client = sendSpinClient
+        if (client == null) onFlushed() else client.disconnect(onFlushed)
     }
 
     /**
-     * An established connection has ended. This is the one place a reconnect
-     * starts: the coordinator's loop, for the server the service was connected
-     * to, unless the client chose to leave (user disconnect, server switch,
-     * server/unpair, rejected activation). No activity needs to be alive.
+     * An established connection has ended. The coordinator's loop takes it
+     * back, for the server the service was connected to, unless the client
+     * chose to leave (user disconnect, server switch, server/unpair, rejected
+     * activation). No activity needs to be alive.
      *
      * Runs before the connection-state collector sees the connection gone, so
      * that it finds the loop already running and leaves the service in the
@@ -2629,6 +2199,16 @@ class PlaybackService : MediaLibraryService() {
             return
         }
         Log.i(TAG, "Connection to ${server.name} lost - reconnecting")
+        startReconnectLoop(server)
+    }
+
+    /**
+     * Start the coordinator's loop for [server], which keeps trying until it
+     * connects or is cancelled. Every connection the service makes on its own
+     * starts here, so none is tried only once: after a drop, at boot, and
+     * when the system restarts the service.
+     */
+    private fun startReconnectLoop(server: UnifiedServer) {
         startForegroundServiceWithNotification(server.name, reconnecting = true)
         mainHandler.removeCallbacks(reconnectLockRelease)
         mainHandler.postDelayed(reconnectLockRelease, RECONNECT_LOCK_HOLD_MS)
@@ -2662,6 +2242,13 @@ class PlaybackService : MediaLibraryService() {
      */
     @OptIn(UnstableApi::class)
     override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        // Media3 asks for the foreground while the player still reports
+        // playWhenReady, and for some time after, and starts the service to
+        // get it. On exit nothing may start it again (#327).
+        if (exiting) {
+            super.onUpdateNotification(session, false)
+            return
+        }
         // Waiting for a server to connect holds it too: the listener has to
         // stay reachable with the app in the background.
         val hold = isConnectedOrReconnecting() || connectionMode.isAdvertising
@@ -2715,6 +2302,10 @@ class PlaybackService : MediaLibraryService() {
             override fun onServerDiscovered(name: String, address: String, path: String, friendlyName: String) {
                 UnifiedServerRepository.addDiscoveredServer(friendlyName, address, path)
                 if (isSameServer(server, name, friendlyName, address)) {
+                    // addDiscoveredServer refreshes a saved server by its
+                    // friendly name only, and this one may be saved under
+                    // its service name.
+                    UnifiedServerRepository.refreshSavedServerAddressById(server.id, address)
                     Log.i(TAG, "${server.name} seen on mDNS at $address - retrying now")
                     coordinator.retryNow()
                 }
@@ -2745,6 +2336,8 @@ class PlaybackService : MediaLibraryService() {
         Log.d(TAG, "Set current server: $serverId")
 
         _currentServerFlow.value = serverId?.let { UnifiedServerRepository.getServer(it) }
+        // Kept for a restart by the system, which starts a new process.
+        UserSettings.dialledServerId = serverId
     }
 
     /**
@@ -2785,31 +2378,192 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Sets the playback volume via device STREAM_MUSIC (Spotify-style).
+     * Sets the playback volume, mostly via device STREAM_MUSIC (Spotify-style).
      *
-     * Volume is controlled via the device's media stream, not per-app gain.
-     * This enables hardware volume button support and follows best practices
-     * used by Spotify, Plexamp, and other major media apps.
+     * Volume stays on the device's media stream so the hardware keys work.
+     * The spec asks for `amplitude = (volume / 100)^1.5` (roles/player/v1.md),
+     * so the index is picked from the device's own curve and the rest is gain
+     * on the track ([VolumeLaw]). On a fixed-volume or full-volume output the
+     * whole of it is track gain.
+     *
+     * Main thread only.
      *
      * @param volume Normalized volume from 0.0 (mute) to 1.0 (full)
      */
     fun setVolume(volume: Float) {
         val am = audioManager ?: return
-        val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val newVolume = (volume * maxVolume).roundToInt().coerceIn(0, maxVolume)
-
-        Log.d(TAG, "Setting device volume: $newVolume/$maxVolume (normalized: $volume)")
-
-        // Update tracking to prevent echo in observer
-        lastKnownVolume = newVolume
+        val percent = (volume * 100).roundToInt().coerceIn(0, 100)
 
         // Every session-extras broadcast resends this value to the activity, so
         // it has to follow each volume set here or the slider snaps back to it.
-        _playbackState.value = _playbackState.value.copy(volume = (volume * 100).roundToInt())
+        _playbackState.value = _playbackState.value.copy(volume = percent)
+
+        if (am.isVolumeFixed) {
+            Log.d(TAG, "Fixed-volume output: volume $percent as track gain")
+            engine.setTrackGain(VolumeLaw.amplitude(percent))
+            return
+        }
+
+        val maxVolume = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val output = mediaOutputType(am)
+        val curve = deviceVolumeCurve(am, output)
+        val newVolume = if (curve != null) {
+            VolumeLaw.indexFor(percent, maxVolume, curve)
+        } else {
+            // No curve to go by: a linear index, and never the silent one
+            // for a volume above 0.
+            (volume * maxVolume).roundToInt().coerceIn(if (percent > 0) 1 else 0, maxVolume)
+        }
+
+        Log.d(TAG, "Setting device volume: $newVolume/$maxVolume (volume $percent)")
+
+        // Update tracking to prevent echo in observer
+        lastKnownVolume = newVolume
+        lastOutputType = output
 
         // Set device volume (no flags = silent, no UI popup)
         am.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
         Log.i(TAG, "[cmd-trace] T4 setStreamVolume ts=${System.nanoTime() / 1_000_000} thread=${Thread.currentThread().name} new=$newVolume max=$maxVolume")
+
+        // The track gain goes with the index that plays, so it is set once
+        // the index is read back.
+        val applied = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        when {
+            applied == newVolume ->
+                engine.setTrackGain(curve?.let { VolumeLaw.trackGainFor(percent, newVolume, it) } ?: 1f)
+            VolumeLaw.isFullVolumeOutput(newVolume, applied, maxVolume) -> {
+                // The index stays at max: the whole volume is track gain, as
+                // on a fixed-volume output, and the volume asked for plays.
+                Log.d(TAG, "Full-volume output: volume $percent as track gain")
+                lastKnownVolume = applied
+                fullVolumeOutputs += output
+                engine.setTrackGain(VolumeLaw.amplitude(percent))
+            }
+            else -> {
+                // The platform holds the index below what was asked (the safe
+                // media volume warning): report what actually plays.
+                Log.w(TAG, "Device volume held at $applied, asked for $newVolume")
+                syncDeviceVolumeToServer(applied)
+            }
+        }
+    }
+
+    /** Media attributes, as the player's AudioTrack uses them, to ask where media is routed. */
+    private val mediaAttributes = AndroidAudioAttributes.Builder()
+        .setUsage(AndroidAudioAttributes.USAGE_MEDIA)
+        .setContentType(AndroidAudioAttributes.CONTENT_TYPE_MUSIC)
+        .build()
+
+    /**
+     * The type of the output media plays on: the routed one from API 33,
+     * below that the one AudioPolicy picks for media of those connected
+     * ([VolumeLaw.mediaOutputType]).
+     */
+    private fun mediaOutputType(am: AudioManager): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            am.getAudioDevicesForAttributes(mediaAttributes).firstOrNull()?.type
+                ?: android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+        } else {
+            VolumeLaw.mediaOutputType(am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.type })
+        }
+
+    /**
+     * The device's own gain in dB at each STREAM_MUSIC index, on the output
+     * media plays on now; null where the platform cannot say (below API 28).
+     * On an absolute-volume output (most Bluetooth A2DP and LE audio, HDMI
+     * with CEC) the sink applies its own curve to the index, and this one
+     * only stands in for it.
+     */
+    private fun deviceVolumeCurve(am: AudioManager, deviceType: Int = mediaOutputType(am)): ((Int) -> Double)? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+        return try {
+            val min = am.getStreamMinVolume(AudioManager.STREAM_MUSIC)
+            val table = (0..am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)).map { index ->
+                if (index < min) Double.NEGATIVE_INFINITY
+                else am.getStreamVolumeDb(AudioManager.STREAM_MUSIC, index, deviceType).toDouble()
+            }
+            table::get
+        } catch (e: IllegalArgumentException) {
+            Log.w(TAG, "No volume curve for output type $deviceType", e)
+            null
+        }
+    }
+
+    /**
+     * The volume playing now: the one last set from here while the device is
+     * still on the index set for it (the track gain is part of it), else what
+     * the device's index stands for.
+     */
+    private fun currentVolumePercent(am: AudioManager): Int {
+        val index = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        return if (index == lastKnownVolume) _playbackState.value.volume else deviceVolumePercent(am, index)
+    }
+
+    /** The protocol volume (0-100) that STREAM_MUSIC [index] stands for on the current output. */
+    private fun deviceVolumePercent(am: AudioManager, index: Int): Int {
+        val curve = deviceVolumeCurve(am)
+        if (curve != null && !am.isVolumeFixed) return VolumeLaw.volumeFor(index, curve)
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        return ((index.toFloat() / max) * 100).roundToInt()
+    }
+
+    /**
+     * The device volume changed outside the app (hardware keys, another
+     * output): drop the track gain, which belonged to a volume set from here,
+     * and report the volume [index] stands for.
+     */
+    private fun syncDeviceVolumeToServer(index: Int) {
+        val am = audioManager ?: return
+        lastKnownVolume = index
+        engine.setTrackGain(1f)
+        val volumePercent = deviceVolumePercent(am, index)
+        Log.d(TAG, "Device volume index $index is volume $volumePercent")
+
+        // Sync to server (for multi-client coordination)
+        sendSpinClient?.setVolume(volumePercent / 100.0)
+
+        // Update playback state for UI sync
+        _playbackState.value = _playbackState.value.copy(volume = volumePercent)
+        broadcastSessionExtras()
+    }
+
+    /** Media may have moved to another output, with its own index and curve. */
+    private val outputDeviceCallback = object : android.media.AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out android.media.AudioDeviceInfo>) {
+            if (addedDevices.any { it.isSink }) scheduleOutputVolumeSync()
+        }
+
+        override fun onAudioDevicesRemoved(removedDevices: Array<out android.media.AudioDeviceInfo>) {
+            if (removedDevices.any { it.isSink }) scheduleOutputVolumeSync()
+        }
+    }
+
+    // Routing settles a moment after the device callback. Any sink counts
+    // there, so the volume is touched only when what plays changed.
+    private val outputVolumeSync = Runnable {
+        val am = audioManager ?: return@Runnable
+        val index = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val output = mediaOutputType(am)
+        // An output setVolume found to be full-volume (its type from the same
+        // mediaOutputType, so below API 33 too), with the index still at max
+        val fullVolume = output in fullVolumeOutputs && index == am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        when (VolumeLaw.outputChange(am.isVolumeFixed, fullVolume, index, lastKnownVolume, output, lastOutputType)) {
+            VolumeLaw.OutputChange.KEEP_VOLUME -> {
+                lastKnownVolume = index
+                lastOutputType = output
+                setVolume(_playbackState.value.volume / 100f)
+            }
+            VolumeLaw.OutputChange.NONE -> Unit
+            VolumeLaw.OutputChange.DEVICE_VOLUME -> {
+                lastOutputType = output
+                syncDeviceVolumeToServer(index)
+            }
+        }
+    }
+
+    private fun scheduleOutputVolumeSync() {
+        mainHandler.removeCallbacks(outputVolumeSync)
+        mainHandler.postDelayed(outputVolumeSync, OUTPUT_CHANGE_SETTLE_MS)
     }
 
     /**
@@ -2828,6 +2582,19 @@ class PlaybackService : MediaLibraryService() {
      */
     @Suppress("DEPRECATION")
     private fun acquirePlaybackLocks() {
+        val client = sendSpinClient
+        if (!AudioInterruptionPolicy.mayTakeFocus(
+                userRequest = false,
+                unavailable = otherAppHoldsOutput,
+                playerRoleActive = client?.playerRoleActive == true,
+            )
+        ) {
+            // Nothing will play: what the server still sends is discarded
+            Log.i(FOCUS_TAG, "not taking the output: " +
+                if (otherAppHoldsOutput) "another app owns it" else "not a player")
+            return
+        }
+
         // Request audio focus first - required for Android Auto to route audio to us
         requestAudioFocus()
 
@@ -2883,7 +2650,7 @@ class PlaybackService : MediaLibraryService() {
      * Used to determine whether to continue refreshing the wake lock.
      */
     private fun isActivelyPlaying(): Boolean {
-        val state = syncAudioPlayer?.getPlaybackState()
+        val state = engine.player?.getPlaybackState()
         return state == com.sendspindroid.sendspin.PlaybackState.PLAYING ||
                state == com.sendspindroid.sendspin.PlaybackState.WAITING_FOR_START
     }
@@ -2900,7 +2667,7 @@ class PlaybackService : MediaLibraryService() {
      * Called periodically when debug mode is active.
      */
     private fun logCurrentStats() {
-        val audioStats = syncAudioPlayer?.getStats() ?: return
+        val audioStats = engine.player?.getStats() ?: return
         val timeFilter = sendSpinClient?.getTimeFilter() ?: return
 
         val syncStats = SyncStats(
@@ -3082,10 +2849,28 @@ class PlaybackService : MediaLibraryService() {
             if (hasAudioFocus) {
                 // We own the output again: clear any 'external_source' report
                 // and any mute left by an interruption.
+                otherAppHoldsOutput = false
                 sendSpinClient?.setExternalSource(false)
                 setInterruptionMuted(false)
             }
         }
+    }
+
+    /**
+     * The user asked this device to play. If another app took the output for
+     * good, take it back: that makes the client available again, before the
+     * play command reaches the server. False when it cannot be taken back
+     * (a phone call): nothing could play, so the command is not sent.
+     */
+    private fun onUserPlay(): Boolean {
+        val client = sendSpinClient ?: return true
+        if (!otherAppHoldsOutput) return true
+        if (!AudioInterruptionPolicy.mayTakeFocus(
+                userRequest = true, unavailable = true, playerRoleActive = client.playerRoleActive)
+        ) return true
+        Log.i(FOCUS_TAG, "play asked while another app owns the output - taking it back")
+        requestAudioFocus()
+        return !otherAppHoldsOutput
     }
 
     /**
@@ -3128,7 +2913,7 @@ class PlaybackService : MediaLibraryService() {
      * Another app wants the output, or has given it back: ask
      * [AudioInterruptionPolicy] what to do, log it and do it.
      *
-     * A local interruption never pauses [syncAudioPlayer]. It is either a pause
+     * A local interruption never pauses the output. It is either a pause
      * on the server (which then stops sending, and the server-state handling
      * stops the player) or a mute, under which audio keeps draining in sync.
      */
@@ -3136,7 +2921,9 @@ class PlaybackService : MediaLibraryService() {
         val audioMode = audioManager?.mode ?: AudioManager.MODE_NORMAL
         val serverState = _playbackState.value.playbackState
         val canSendPause = sendSpinClient?.let { it.isConnected && it.canSendCommand("pause") } == true
-        val action = AudioInterruptionPolicy.decide(event, audioMode, serverState, canSendPause, pausedForCall)
+        val action = AudioInterruptionPolicy.decide(
+            event, audioMode, serverState, canSendPause, pausedForCall, isTv = isTvDevice()
+        )
         Log.i(
             FOCUS_TAG,
             "$event mode=${AudioInterruptionPolicy.modeName(audioMode)} server=$serverState " +
@@ -3171,6 +2958,7 @@ class PlaybackService : MediaLibraryService() {
                 hasAudioFocus = false
                 pausedForCall = false
                 setInterruptionMuted(true)
+                otherAppHoldsOutput = true
                 sendSpinClient?.setExternalSource(true)
             }
             InterruptionAction.NONE -> {}
@@ -3181,9 +2969,8 @@ class PlaybackService : MediaLibraryService() {
         }
         // Focus was kept through the interruption (see abandonAudioFocus);
         // give it up now if nothing is playing.
-        if (event == AudioInterruption.FOCUS_GAIN &&
-            action != InterruptionAction.RESUME_ON_SERVER &&
-            serverState != PlaybackStateType.PLAYING
+        if (event == AudioInterruption.FOCUS_GAIN && AudioInterruptionPolicy.abandonFocusOnGain(
+                action, serverState, playerRoleActive = sendSpinClient?.playerRoleActive == true)
         ) {
             abandonAudioFocus()
         }
@@ -3193,7 +2980,7 @@ class PlaybackService : MediaLibraryService() {
         if (interruptionMuted == muted) return
         interruptionMuted = muted
         Log.i(FOCUS_TAG, if (muted) "output muted" else "output un-muted")
-        syncAudioPlayer?.setMuted(SyncAudioPlayer.MuteReason.INTERRUPTION, muted)
+        engine.setMuted(SyncAudioPlayer.MuteReason.INTERRUPTION, muted)
     }
 
     /**
@@ -3303,6 +3090,31 @@ class PlaybackService : MediaLibraryService() {
         if (highPowerWifiLock?.isHeld == true) {
             highPowerWifiLock?.release()
             Log.d(TAG, "High Power WiFi lock released")
+        }
+    }
+
+    /**
+     * Keeps the CPU awake while the loop makes a connection at boot or after
+     * a restart. Released when the loop ends, or by its timeout of
+     * [RECONNECT_LOCK_HOLD_MS] if that comes first. No audio focus is asked
+     * for: nothing plays yet, and the user's other audio carries on.
+     */
+    private fun acquireConnectWakeLock() {
+        if (connectWakeLock == null) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            connectWakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "SendSpinDroid::Connect"
+            ).apply { setReferenceCounted(false) }
+        }
+        connectWakeLock?.acquire(RECONNECT_LOCK_HOLD_MS)
+        Log.d(TAG, "Connect wake lock acquired with ${RECONNECT_LOCK_HOLD_MS / 60000}min timeout")
+    }
+
+    private fun releaseConnectWakeLock() {
+        if (connectWakeLock?.isHeld == true) {
+            connectWakeLock?.release()
+            Log.d(TAG, "Connect wake lock released")
         }
     }
 
@@ -3536,6 +3348,7 @@ class PlaybackService : MediaLibraryService() {
             val sessionCommands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
                 .add(SessionCommand(COMMAND_CONNECT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_DISCONNECT, Bundle.EMPTY))
+                .add(SessionCommand(COMMAND_EXIT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_SET_VOLUME, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_NEXT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_PREVIOUS, Bundle.EMPTY))
@@ -3657,6 +3470,32 @@ class PlaybackService : MediaLibraryService() {
                     Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                 }
 
+                COMMAND_EXIT -> {
+                    // As DISCONNECT, and stop waiting for a server too. While
+                    // advertising, the disconnect completing would otherwise
+                    // put the service back in the foreground and start it
+                    // again, undoing the activity's stopService (#327).
+                    exiting = true
+                    coordinator.cancelReconnect()
+                    setCurrentServer(null)
+                    // The rest once the goodbye is out: taking the listener
+                    // down first could cut the socket it is going out on. The
+                    // result says the same, so a caller may end the process
+                    // after it (#330).
+                    val result = SettableFuture.create<SessionResult>()
+                    var done = false
+                    val finish = Runnable {
+                        if (done) return@Runnable
+                        done = true
+                        connectionMode.stop()
+                        stopForegroundNotification()
+                        result.set(SessionResult(SessionResult.RESULT_SUCCESS))
+                    }
+                    mainHandler.postDelayed(finish, EXIT_FLUSH_TIMEOUT_MS)
+                    disconnectFromServer { mainHandler.post(finish) }
+                    result
+                }
+
                 COMMAND_SET_SEARCH_FOR_SERVERS -> {
                     val search = args.getBoolean(ARG_SEARCH_FOR_SERVERS)
                     Log.i(TAG, if (search) "Mode: search for servers" else "Mode: wait for a server to connect")
@@ -3670,9 +3509,10 @@ class PlaybackService : MediaLibraryService() {
                 COMMAND_SET_VOLUME -> {
                     val volume = args.getFloat(ARG_VOLUME, -1f)
                     if (volume in 0f..1f) {
-                        setVolume(volume)
-                        // Also send volume command to server
+                        // Reported first: setVolume reports again if the
+                        // device holds the volume below what was asked.
                         sendSpinClient?.setVolume(volume.toDouble())
+                        setVolume(volume)
                         Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                     } else {
                         Log.e(TAG, "SET_VOLUME command has invalid volume: $volume")
@@ -3730,7 +3570,7 @@ class PlaybackService : MediaLibraryService() {
     private fun recordHandoff(status: ReconnectStatus) {
         val transport = coordinator.networkState.value.transportType.name
         val methods = coordinator.sessionState.value.server?.configuredMethods?.map { it.name } ?: emptyList()
-        val playing = syncAudioPlayer?.getStats()?.isPlaying ?: false
+        val playing = engine.player?.getStats()?.isPlaying ?: false
         val phase = when (status) {
             is ReconnectStatus.Attempting -> HandoffEpisodeRecorder.Phase.ATTEMPTING
             is ReconnectStatus.Succeeded -> HandoffEpisodeRecorder.Phase.SUCCEEDED
@@ -3760,7 +3600,7 @@ class PlaybackService : MediaLibraryService() {
             }
             bundle.putString("connection_state", stateLabel)
             bundle.putBoolean("server_initiated", client.isServerInitiated)
-            bundle.putString("audio_codec", currentCodec.uppercase())
+            bundle.putString("audio_codec", engine.codec.uppercase())
 
             // What the session negotiated
             val protocol = client.protocolStats()
@@ -3768,7 +3608,7 @@ class PlaybackService : MediaLibraryService() {
             protocol.pskCategory?.let { bundle.putString("psk_category", it.name) }
             bundle.putInt("min_buffer_ms", protocol.minBufferMs)
             bundle.putInt("required_lead_time_ms", protocol.requiredLeadTimeMs)
-            activeStreamConfig?.let { stream ->
+            engine.activeStream?.let { stream ->
                 bundle.putInt("stream_sample_rate", stream.sampleRate)
                 bundle.putInt("stream_bit_depth", stream.bitDepth)
                 bundle.putInt("stream_channels", stream.channels)
@@ -3782,7 +3622,7 @@ class PlaybackService : MediaLibraryService() {
         bundle.putString("handoff_episodes", handoffRecorder.summary())
 
         // Get stats from SyncAudioPlayer
-        val audioStats = syncAudioPlayer?.getStats()
+        val audioStats = engine.player?.getStats()
         if (audioStats != null) {
             // Playback state
             bundle.putString("playback_state", audioStats.playbackState.name)
@@ -3883,14 +3723,17 @@ class PlaybackService : MediaLibraryService() {
     /**
      * Applies the manual sync offset from UserSettings to the TimeFilter.
      * Called when connecting to a server to apply the saved offset.
+     *
+     * A setting of 0 is applied too: the client may hold an older value,
+     * set while another client was in use. A restore is not the user
+     * changing the offset, so it leaves an offset the server has already
+     * pushed in force.
      */
     private fun applySyncOffsetFromSettings() {
         val offsetMs = com.sendspindroid.UserSettings.getSyncOffsetMs()
-        if (offsetMs != 0) {
-            sendSpinClient?.getTimeFilter()?.let { timeFilter ->
-                timeFilter.setUserSyncOffsetMs(offsetMs.toDouble())
-                Log.i(TAG, "Applied manual sync offset from settings: ${offsetMs}ms")
-            }
+        sendSpinClient?.let { client ->
+            client.setUserSyncOffsetMs(offsetMs.toDouble(), overrideServer = false)
+            Log.i(TAG, "Applied manual sync offset from settings: ${offsetMs}ms")
         }
     }
 
@@ -3900,8 +3743,8 @@ class PlaybackService : MediaLibraryService() {
      */
     fun updateSyncOffset(offsetMs: Int) {
         com.sendspindroid.UserSettings.setSyncOffsetMs(offsetMs)
-        sendSpinClient?.getTimeFilter()?.let { timeFilter ->
-            timeFilter.setUserSyncOffsetMs(offsetMs.toDouble())
+        sendSpinClient?.let { client ->
+            client.setUserSyncOffsetMs(offsetMs.toDouble())
             Log.i(TAG, "Updated sync offset to: ${offsetMs}ms")
         }
     }
@@ -4003,7 +3846,7 @@ class PlaybackService : MediaLibraryService() {
 
     @OptIn(UnstableApi::class)
     private fun initializePlayer() {
-        sendSpinPlayer = SendSpinPlayer()
+        sendSpinPlayer = SendSpinPlayer().apply { onPlayRequested = { onUserPlay() } }
         Log.d(TAG, "SendSpinPlayer initialized")
     }
 
@@ -4042,134 +3885,110 @@ class PlaybackService : MediaLibraryService() {
         Log.d(TAG, "onStartCommand: action=${intent?.action}, flags=$flags")
         super.onStartCommand(intent, flags, startId)
 
-        if (intent?.action == ACTION_AUTO_CONNECT) {
-            // Must call startForeground within 5s when launched via
-            // startForegroundService() (Android 8+) -- and unconditionally here,
-            // BEFORE handleAutoConnect, because that method returns early on a
-            // missing/unknown server without ever promoting us.
-            //
-            // Gated on ACTION_AUTO_CONNECT: that is the only action any
-            // startForegroundService()/getForegroundService() path uses (see
-            // BootReceiver, both the direct start and the tap-to-resume
-            // PendingIntent), so it covers every case that owes Android a
-            // startForeground. Promoting unconditionally instead meant any
-            // media-button or Media3-originated start posted a permanent
-            // setOngoing(true) notification -- under an id Media3 does not own,
-            // so nothing would ever clear it while disconnected -- and on API
-            // 31+ a background-originated start threw
-            // ForegroundServiceStartNotAllowedException into the catch below.
-            startForegroundServiceWithNotification()
-            handleAutoConnect(intent)
+        when {
+            intent?.action == ACTION_AUTO_CONNECT -> handleAutoConnect(intent)
+            // START_STICKY: the system restarted the service it had killed.
+            intent == null -> handleRestart()
         }
 
         return START_STICKY
     }
 
     /**
-     * Handle auto-connect from BootReceiver.
-     * Looks up the default server and connects using its preferred connection method.
-     * Shows a foreground notification immediately to satisfy Android's requirements.
+     * Handle auto-connect from BootReceiver: connect to the server it names,
+     * the default server.
      */
     private fun handleAutoConnect(intent: Intent) {
         val serverId = intent.getStringExtra(EXTRA_SERVER_ID)
         if (serverId == null) {
             Log.w(TAG, "Auto-connect: missing server ID")
+            takeForegroundAndLetGo()
             return
         }
 
         val server = UnifiedServerRepository.getServer(serverId)
         if (server == null) {
             Log.w(TAG, "Auto-connect: server $serverId not found")
+            takeForegroundAndLetGo()
             return
         }
 
         Log.i(TAG, "Auto-connect on boot: ${server.name} (${server.id})")
+        connectOnStart(server)
+    }
 
+    /**
+     * The service was killed and the system has started it again. While
+     * advertising, onCreate has put the listener back and the server
+     * reconnects to it. While searching nothing would: connect to the server
+     * it was on, which [setCurrentServer] recorded. The service is left
+     * started only while it is connected or trying to be, so that is the
+     * server it was killed on. With no server recorded yet (the first restart
+     * after an update), the default server, as at boot. One recorded but not
+     * saved (found on mDNS) cannot be looked up again, and is not swapped for
+     * another server.
+     */
+    private fun handleRestart() {
+        if (connectionMode.isAdvertising) return
+        val dialled = UserSettings.dialledServerId
+        val server = if (dialled != null) {
+            UnifiedServerRepository.getServer(dialled)
+        } else {
+            UnifiedServerRepository.getDefaultServer()
+        }
+        if (server == null) {
+            Log.i(TAG, "Restarted with no server to connect to")
+            return
+        }
+        Log.i(TAG, "Restarted: connecting to ${server.name} (${server.id})")
+        connectOnStart(server)
+    }
+
+    /**
+     * Connect to [server] when the service starts on its own, at boot or
+     * after a restart, with nobody there to try again: through the reconnect
+     * loop, so that a server or a network not up yet is retried (#158), and
+     * with the CPU kept awake while the loop runs. A connection already up or
+     * being made is left alone.
+     */
+    private fun connectOnStart(server: UnifiedServer) {
+        if (isConnectedOrReconnecting()) {
+            Log.i(TAG, "Not connecting to ${server.name}: already connected or connecting")
+            // A start by startForegroundService still has to take the
+            // foreground, which a connection being made has not taken yet.
+            // If that connection fails, releaseIfIdle lets it go.
+            startForegroundServiceWithNotification(
+                connectedServerName(),
+                reconnecting = coordinator.reconnectStatus.value is ReconnectStatus.Attempting,
+            )
+            return
+        }
+        if (server.local == null) {
+            // The loop would wait forever with nothing to dial.
+            Log.w(TAG, "Auto-connect: server ${server.name} has no configured connection methods")
+            takeForegroundAndLetGo()
+            return
+        }
         // The server this service is connected to, which a later drop
         // reconnects to.
         setCurrentServer(server.id)
-
-        // Show foreground notification immediately (Android requires this within 10s)
-        startForegroundServiceWithNotification(server.name)
-
-        // Connect using the server's local address (the only connection method left).
-        when {
-            server.local != null -> {
-                // Re-resolve via mDNS first: a stored static IP can go stale
-                // (DHCP) and cause a refused connect on boot. See #158.
-                autoConnectLocalWithMdns(server)
-            }
-            else -> {
-                Log.w(TAG, "Auto-connect: server ${server.name} has no configured connection methods")
-            }
-        }
+        acquireConnectWakeLock()
+        // Takes the foreground at once, as a start by startForegroundService must.
+        startReconnectLoop(server)
     }
 
     /**
-     * Auto-connect to a saved local server, re-resolving its current address via
-     * mDNS first so a stale stored address (DHCP change) doesn't cause a failed
-     * connect on boot. Falls back to the stored address if mDNS doesn't find the
-     * server within [MDNS_AUTOCONNECT_TIMEOUT_MS] (server offline, or the network
-     * not yet up on boot). See #158.
+     * A start by startForegroundService has to take the foreground even when
+     * there is nothing to connect to; it is let go at once.
      */
-    private fun autoConnectLocalWithMdns(server: UnifiedServer) {
-        val local = server.local ?: return
-        serviceScope.launch {
-            val resolved = resolveLocalAddressViaMdns(server.name, MDNS_AUTOCONNECT_TIMEOUT_MS)
-            val address = resolved ?: local.address
-            when {
-                resolved == null ->
-                    // warn: on boot this correlates with a likely-failing connect
-                    // when the stored address has gone stale (the #158 scenario).
-                    Log.w(TAG, "Auto-connect: mDNS did not find '${server.name}'; using stored ${local.address}")
-                resolved != local.address ->
-                    Log.i(TAG, "Auto-connect: mDNS resolved '${server.name}' to $resolved (stored ${local.address})")
-                else ->
-                    Log.i(TAG, "Auto-connect: mDNS confirmed '${server.name}' at $resolved")
-            }
-            connectToServer(address, local.path)
-        }
-    }
-
-    /**
-     * Run a short, bounded mDNS discovery and return the current address of the
-     * discovered server whose friendly name (or, as a fallback, raw mDNS service
-     * name) equals [serverName], or null on timeout. Every result is fed to
-     * [UnifiedServerRepository.addDiscoveredServer], which also refreshes the
-     * matching saved server's stored address (by friendly name).
-     */
-    private suspend fun resolveLocalAddressViaMdns(serverName: String, timeoutMs: Long): String? {
-        val result = CompletableDeferred<String?>()
-        val manager = NsdDiscoveryManager(this, object : NsdDiscoveryManager.DiscoveryListener {
-            override fun onServerDiscovered(name: String, address: String, path: String, friendlyName: String) {
-                UnifiedServerRepository.addDiscoveredServer(friendlyName, address, path)
-                if (!result.isCompleted && (friendlyName == serverName || name == serverName)) {
-                    result.complete(address)
-                }
-            }
-            override fun onServerLost(name: String) {}
-            override fun onDiscoveryStarted() {}
-            override fun onDiscoveryStopped() {}
-            override fun onDiscoveryError(error: String) {
-                // Complete so we fall back to the stored address immediately
-                // instead of stalling for the full timeout.
-                Log.w(TAG, "Auto-connect: mDNS discovery error for '$serverName': $error")
-                if (!result.isCompleted) result.complete(null)
-            }
-        })
-        return try {
-            manager.startDiscovery()
-            withTimeoutOrNull(timeoutMs) { result.await() }
-        } finally {
-            // cleanup() (not stopDiscovery()) so the multicast lock is released
-            // even if onDiscoveryStarted never fired.
-            manager.cleanup()
-        }
+    private fun takeForegroundAndLetGo() {
+        startForegroundServiceWithNotification()
+        releaseIfIdle()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         // Check if SyncAudioPlayer is actively playing
-        val audioPlayerState = syncAudioPlayer?.getPlaybackState()
+        val audioPlayerState = engine.player?.getPlaybackState()
         val isPlaying = audioPlayerState == com.sendspindroid.sendspin.PlaybackState.PLAYING ||
                         audioPlayerState == com.sendspindroid.sendspin.PlaybackState.WAITING_FOR_START
 
@@ -4227,6 +4046,7 @@ class PlaybackService : MediaLibraryService() {
         // Unregister High Power Mode receiver and release locks
         LocalBroadcastManager.getInstance(this).unregisterReceiver(highPowerModeReceiver)
         LocalBroadcastManager.getInstance(this).unregisterReceiver(preferredCodecReceiver)
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(playerNameReceiver)
         releaseHighPowerLocks()
 
         // Let the final releasePlaybackLocks() abandon focus even mid-interruption
@@ -4242,8 +4062,10 @@ class PlaybackService : MediaLibraryService() {
         if (volumeObserverRegistered) {
             volumeObserver?.let { contentResolver.unregisterContentObserver(it) }
             volumeObserverRegistered = false
+            audioManager?.unregisterAudioDeviceCallback(outputDeviceCallback)
         }
         volumeObserver = null
+        mainHandler.removeCallbacks(outputVolumeSync)
 
         // Stop browse discovery if running
         browseDiscoveryManager?.cleanup()
@@ -4255,30 +4077,17 @@ class PlaybackService : MediaLibraryService() {
         sendSpinClient?.takeIf { it !== dialClient }?.destroy()
         connectionMode.stop()
 
-        // Send a final Release through the channel so it runs after any
-        // pending decode tasks, then close the channel and wait up to 500 ms
-        // for the worker to drain and exit. trySend (not send) because
-        // onDestroy is non-suspending -- if the channel is somehow full we
-        // don't want to block teardown waiting for the worker to make
-        // progress; handleDecodeRelease still runs if trySend succeeds, or
-        // the worker will release the decoder as it exits when the channel
-        // is closed.
-        decodeChannel.trySend(DecodeTask.Release)
-        decodeChannel.close()
-        runBlocking {
-            withTimeoutOrNull(500) { decodeJob?.join() }
-        }
+        // Waits up to 500 ms for the decode worker to drain, and releases
+        // the output.
+        engine.release()
 
         if (::coordinator.isInitialized) coordinator.close()
         serviceScope.cancel()
         imageLoader?.shutdown()
 
-        // audioDecoder is released by handleDecodeRelease on the decode
-        // worker (invariant: only that coroutine mutates the field).
         // Cancel playback locks and foreground notification.
-        syncAudioPlayer?.release()
-        syncAudioPlayer = null
         releasePlaybackLocks()
+        releaseConnectWakeLock()
         stopForegroundNotification()
 
         mediaSession?.run {

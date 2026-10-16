@@ -8,19 +8,26 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.tvFocusRing
 import com.sendspindroid.ui.theme.SendSpinTheme
 import com.sendspindroid.ui.wizard.ConnectionTestState
 
@@ -31,8 +38,13 @@ import com.sendspindroid.ui.wizard.ConnectionTestState
 fun TestingStep(
     testState: ConnectionTestState,
     onRetry: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onCancel: () -> Unit = {},
+    // For the step's button: Cancel while testing (TV only), Retry after a failure.
+    buttonFocusRequester: FocusRequester = remember { FocusRequester() }
 ) {
+    val isTv = LocalFormFactor.current == FormFactor.TV
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -55,6 +67,22 @@ fun TestingStep(
                     style = MaterialTheme.typography.titleMedium,
                     textAlign = TextAlign.Center
                 )
+
+                // The step has no Back button, and on a TV nothing else to
+                // focus. Cancel does what the remote's Back key does.
+                if (isTv) {
+                    Spacer(modifier = Modifier.height(24.dp))
+
+                    OutlinedButton(
+                        onClick = onCancel,
+                        modifier = Modifier.tvFocusRing(
+                            buttonFocusRequester,
+                            shape = ButtonDefaults.outlinedShape
+                        )
+                    ) {
+                        Text(stringResource(android.R.string.cancel))
+                    }
+                }
             }
 
             is ConnectionTestState.Success -> {
@@ -112,7 +140,10 @@ fun TestingStep(
 
                 Spacer(modifier = Modifier.height(24.dp))
 
-                Button(onClick = onRetry) {
+                Button(
+                    onClick = onRetry,
+                    modifier = Modifier.tvFocusRing(buttonFocusRequester, shape = ButtonDefaults.shape)
+                ) {
                     Text(stringResource(R.string.action_retry))
                 }
             }

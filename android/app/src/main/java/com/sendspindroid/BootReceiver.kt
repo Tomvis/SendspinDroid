@@ -34,11 +34,17 @@ class BootReceiver : BroadcastReceiver() {
     companion object {
         private const val TAG = "BootReceiver"
 
+        /** Actions only the system can send; see [onReceive]. */
         internal fun resumesOn(action: String?) =
             action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        // BOOT_COMPLETED and MY_PACKAGE_REPLACED only. The receiver is
+        // exported; both are broadcasts only the system can send (the latter
+        // goes to the updated app alone). QUICKBOOT_POWERON (old HTC fast
+        // boots) is not protected, so any app could send it to start a
+        // connection.
         if (!resumesOn(intent.action)) return
 
         UserSettings.initialize(context)

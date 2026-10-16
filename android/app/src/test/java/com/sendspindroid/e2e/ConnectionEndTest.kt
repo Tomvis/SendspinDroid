@@ -142,7 +142,7 @@ class ConnectionEndTest : E2ETestBase() {
     @Test
     fun `a stall is reconnected`() {
         connectedAndBusy()
-        getField<AtomicLong>(client, "lastByteReceivedAtMs").set(System.currentTimeMillis() - 60_000L)
+        getField<AtomicLong>(client, "lastByteReceivedAtMs").set(System.nanoTime() / 1_000_000 - 60_000L)
 
         invoke("checkStall")
 

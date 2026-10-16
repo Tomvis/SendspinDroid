@@ -333,18 +333,20 @@ abstract class BaseWebSocketTransport(
      * Bounded: a wedged socket must not hold the close open indefinitely, and a
      * goodbye is best-effort by nature.
      */
-    override fun closeAfterFlush(code: Int, reason: String) {
+    override fun closeAfterFlush(code: Int, reason: String, onFlushed: () -> Unit) {
         Log.d(tag, "Closing WebSocket after flush: code=$code reason=$reason")
         val sender = senderJob
         outgoingChannel?.close()
         if (sender == null) {
             close(code, reason)
+            onFlushed()
             return
         }
         scope.launch {
             val drained = withTimeoutOrNull(FLUSH_TIMEOUT_MS) { sender.join() } != null
             if (!drained) Log.w(tag, "Outgoing queue did not drain in ${FLUSH_TIMEOUT_MS}ms")
             close(code, reason)
+            onFlushed()
         }
     }
 

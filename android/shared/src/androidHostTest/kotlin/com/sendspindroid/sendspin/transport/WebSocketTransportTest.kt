@@ -248,6 +248,20 @@ class WebSocketTransportTest {
     }
 
     @Test
+    fun `closeAfterFlush says when it is done`() {
+        SilentServer().use { server ->
+            val (transport, _) = connectTo(server)
+            val flushed = CountDownLatch(1)
+
+            transport.closeAfterFlush(1000, "goodbye") { flushed.countDown() }
+
+            assertTrue(flushed.await(5, TimeUnit.SECONDS))
+            assertEquals(TransportState.Closed, transport.state)
+            transport.destroy()
+        }
+    }
+
+    @Test
     fun `a detached listener hears nothing from a local close`() {
         SilentServer().use { server ->
             val (transport, reports) = connectTo(server)

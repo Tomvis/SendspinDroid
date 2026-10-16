@@ -27,7 +27,7 @@ class LocalCloseLeavesReadyTest : E2ETestBase() {
     @Test
     fun `the stall watchdog leaves Ready`() {
         connectedAndReady()
-        getField<AtomicLong>(client, "lastByteReceivedAtMs").set(System.currentTimeMillis() - 60_000L)
+        getField<AtomicLong>(client, "lastByteReceivedAtMs").set(System.nanoTime() / 1_000_000 - 60_000L)
 
         invoke("checkStall")
 

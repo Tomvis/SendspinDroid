@@ -1,5 +1,6 @@
 package com.sendspindroid.ui.main.components
 
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,7 +24,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
-import com.sendspindroid.ui.adaptive.tvFocusable
+import com.sendspindroid.ui.adaptive.tvFocusRing
 import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
@@ -65,7 +66,7 @@ fun PlaybackControls(
                 enabled = isEnabled,
                 modifier = Modifier
                     .size(controlButtonSize)
-                    .tvFocusable()
+                    .tvFocusRing(shape = CircleShape)
             ) {
                 Icon(
                     painter = painterResource(R.drawable.ic_skip_previous),
@@ -82,7 +83,7 @@ fun PlaybackControls(
                 enabled = isEnabled,
                 modifier = Modifier
                     .size(playButtonSize)
-                    .tvFocusable(focusRequester = playFocusRequester),
+                    .tvFocusRing(focusRequester = playFocusRequester, shape = CircleShape),
                 colors = IconButtonDefaults.filledIconButtonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary
@@ -108,7 +109,7 @@ fun PlaybackControls(
                 enabled = isEnabled,
                 modifier = Modifier
                     .size(controlButtonSize)
-                    .tvFocusable()
+                    .tvFocusRing(shape = CircleShape)
             ) {
                 Icon(
                     painter = painterResource(R.drawable.ic_skip_next),
@@ -132,7 +133,7 @@ fun PlaybackControls(
                     enabled = isSwitchGroupEnabled,
                     modifier = Modifier
                         .size(48.dp)
-                        .tvFocusable()
+                        .tvFocusRing(shape = CircleShape)
                 ) {
                     Icon(
                         painter = painterResource(R.drawable.ic_swap_horiz),

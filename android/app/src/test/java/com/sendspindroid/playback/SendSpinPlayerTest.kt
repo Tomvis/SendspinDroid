@@ -219,4 +219,41 @@ class SendSpinPlayerTest {
 
         assertEquals(1.0f, player.playbackParameters.speed, 0.0f)
     }
+
+    // =========================================================================
+    // A play request reaches the host before the server
+    // =========================================================================
+
+    @Test
+    fun `play runs the play hook before sending the command`() {
+        val order = mutableListOf<String>()
+        val client = mockk<com.sendspindroid.sendspin.SendSpin>(relaxed = true)
+        every { client.play() } answers { order += "command" }
+        player.setSendSpinClient(client)
+        player.onPlayRequested = { order += "hook"; true }
+
+        player.play()
+
+        assertEquals(listOf("hook", "command"), order)
+    }
+
+    @Test
+    fun `play is not sent when nothing can play`() {
+        val client = mockk<com.sendspindroid.sendspin.SendSpin>(relaxed = true)
+        player.setSendSpinClient(client)
+        player.onPlayRequested = { false }
+
+        player.play()
+
+        verify(exactly = 0) { client.play() }
+        assertFalse(player.playWhenReady)
+    }
+
+    @Test
+    fun `pause does not run the play hook`() {
+        var ran = false
+        player.onPlayRequested = { ran = true; true }
+        player.pause()
+        assertFalse(ran)
+    }
 }

@@ -300,26 +300,38 @@ object UnifiedServerRepository {
      *
      * @return true if a saved server's address was updated.
      */
-    fun refreshSavedServerAddress(name: String, address: String): Boolean {
+    fun refreshSavedServerAddress(name: String, address: String): Boolean =
+        refreshSavedAddress(address) { it.name == name }
+
+    /**
+     * As [refreshSavedServerAddress], for the saved server with [serverId]:
+     * one already known to be the server mDNS has seen, whatever it is named.
+     *
+     * @return true if its address was updated.
+     */
+    fun refreshSavedServerAddressById(serverId: String, address: String): Boolean =
+        refreshSavedAddress(address) { it.id == serverId }
+
+    private fun refreshSavedAddress(address: String, matches: (UnifiedServer) -> Boolean): Boolean {
         ensurePersistedDataLoaded()
-        var oldAddress: String? = null
+        var refreshed: UnifiedServer? = null
         _savedServers.update { current ->
             val index = current.indexOfFirst {
-                it.name == name && it.local != null && it.local!!.address != address
+                matches(it) && it.local != null && it.local!!.address != address
             }
             if (index < 0) {
                 current
             } else {
                 val server = current[index]
-                oldAddress = server.local!!.address
+                refreshed = server
                 current.toMutableList().also {
                     it[index] = server.copy(local = server.local!!.copy(address = address))
                 }
             }
         }
-        val previous = oldAddress ?: return false
+        val previous = refreshed ?: return false
         persistServers()
-        Log.i(TAG, "Refreshed saved server '$name' address: $previous -> $address (mDNS)")
+        Log.i(TAG, "Refreshed saved server '${previous.name}' address: ${previous.local!!.address} -> $address (mDNS)")
         return true
     }
 

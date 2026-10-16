@@ -2,6 +2,7 @@ package com.sendspindroid
 
 import android.app.Application
 import android.content.Context
+import androidx.appcompat.app.AppCompatDelegate
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.request.CachePolicy
@@ -9,6 +10,7 @@ import com.google.android.material.color.DynamicColors
 import com.sendspindroid.diagnostics.Telemetry
 import com.sendspindroid.logging.AppLog
 import com.sendspindroid.logging.CrashHandler
+import com.sendspindroid.ui.adaptive.isTvDevice
 
 /**
  * Preferences file of the removed Music Assistant API client. It held that
@@ -43,6 +45,16 @@ class SendSpinApp : Application(), ImageLoaderFactory {
         // On Android 12+, applies wallpaper-derived colors to all activities.
         // On older devices, falls back to the static theme colors.
         DynamicColors.applyToActivitiesIfAvailable(this)
+        // Apply the saved light/dark choice before the first Activity inflates.
+        UserSettings.initialize(this)
+        // Fork (HW-114): light/dark moved from the home theme picker to upstream's setting.
+        com.sendspindroid.ui.theme.HomeThemeController.takeLegacyMode()?.let { legacy ->
+            if (UserSettings.themeMode == UserSettings.ThemeMode.SYSTEM) {
+                UserSettings.themeMode =
+                    if (legacy == "dark") UserSettings.ThemeMode.DARK else UserSettings.ThemeMode.LIGHT
+            }
+        }
+        AppCompatDelegate.setDefaultNightMode(UserSettings.themeMode.nightMode(isTvDevice()))
     }
 
     /**

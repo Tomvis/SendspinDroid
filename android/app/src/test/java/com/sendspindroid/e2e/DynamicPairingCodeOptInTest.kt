@@ -19,13 +19,10 @@ import org.junit.Test
 /**
  * FIX 1 regression guard: `dynamic_pairing_code` is opt-in and defaults off.
  *
- * Advertising it unconditionally broke the handshake entirely against
- * aiosendspin 9.1.1 (Music Assistant's shipped version): its `PairMethod`
- * enum predates `dynamic_pairing_code`, so `client/hello` fails to
- * deserialize with `InvalidFieldValue` - not a degraded feature, a dead
- * player. With the setting off, `client/hello` must be byte-identical to
- * before this branch: no `dynamic_pairing_code` anywhere, and
- * `supported_pair_methods` names only `pairing_psk`.
+ * It stays off until the flow has been tested on a device against a Sendspin
+ * 1.0.0-rc1 server (#220). With the setting off, `client/hello` must be
+ * byte-identical to before this branch: no `dynamic_pairing_code` anywhere,
+ * and `supported_pair_methods` names only `pairing_psk`.
  *
  * Exercised directly against [SendSpin]'s protected pair-method accessors
  * (via reflection) rather than through the full E2E transport/handshake fake:
@@ -53,7 +50,7 @@ class DynamicPairingCodeOptInTest {
         every { UserSettings.getUnpairedAccessEnabled() } returns true
         every { UserSettings.getDynamicPairingCodeEnabled() } returns false
 
-        client = SendSpin("TestDevice", mockk(relaxed = true))
+        client = SendSpin("TestDevice", mockk(relaxed = true), com.sendspindroid.AppSendSpinHost)
     }
 
     @After

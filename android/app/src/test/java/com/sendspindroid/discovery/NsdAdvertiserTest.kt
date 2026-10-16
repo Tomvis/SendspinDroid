@@ -91,7 +91,7 @@ class NsdAdvertiserTest {
     fun `stop withdraws the registration it made`() {
         advertiser.start("Kitchen", 8928, "/sendspin")
         val listener = slot<NsdManager.RegistrationListener>()
-        verify { nsdManager.registerService(any(), any(), capture(listener)) }
+        verify { nsdManager.registerService(any<NsdServiceInfo>(), any<Int>(), capture(listener)) }
 
         advertiser.stop()
         advertiser.stop()
@@ -106,9 +106,9 @@ class NsdAdvertiserTest {
         advertiser.refresh()
 
         verifyOrder {
-            nsdManager.registerService(any(), any(), any<NsdManager.RegistrationListener>())
+            nsdManager.registerService(any<NsdServiceInfo>(), any<Int>(), any<NsdManager.RegistrationListener>())
             nsdManager.unregisterService(any())
-            nsdManager.registerService(any(), any(), any<NsdManager.RegistrationListener>())
+            nsdManager.registerService(any<NsdServiceInfo>(), any<Int>(), any<NsdManager.RegistrationListener>())
         }
         assertEquals(1, activeMulticastLocks())
     }
@@ -119,7 +119,7 @@ class NsdAdvertiserTest {
         val advertiser = NsdAdvertiser(context, nsdManager) { results += it }
         advertiser.start("Kitchen", 8928, "/sendspin")
         val listener = slot<NsdManager.RegistrationListener>()
-        verify { nsdManager.registerService(any(), any(), capture(listener)) }
+        verify { nsdManager.registerService(any<NsdServiceInfo>(), any<Int>(), capture(listener)) }
 
         listener.captured.onRegistrationFailed(NsdServiceInfo(), NsdManager.FAILURE_INTERNAL_ERROR)
         listener.captured.onServiceRegistered(NsdServiceInfo())
@@ -132,7 +132,7 @@ class NsdAdvertiserTest {
         val results = mutableListOf<Boolean>()
         val advertiser = NsdAdvertiser(context, nsdManager) { results += it }
         every {
-            nsdManager.registerService(any(), any(), any<NsdManager.RegistrationListener>())
+            nsdManager.registerService(any<NsdServiceInfo>(), any<Int>(), any<NsdManager.RegistrationListener>())
         } throws IllegalArgumentException("no network") andThenAnswer { }
         advertiser.start("Kitchen", 8928, "/sendspin")
         assertEquals(listOf(false), results)
@@ -140,7 +140,7 @@ class NsdAdvertiserTest {
 
         advertiser.refresh()
 
-        verify(exactly = 2) { nsdManager.registerService(any(), any(), any<NsdManager.RegistrationListener>()) }
+        verify(exactly = 2) { nsdManager.registerService(any<NsdServiceInfo>(), any<Int>(), any<NsdManager.RegistrationListener>()) }
         assertEquals(1, activeMulticastLocks())
     }
 
@@ -148,7 +148,7 @@ class NsdAdvertiserTest {
     fun `a network change while not advertising does nothing`() {
         advertiser.refresh()
 
-        verify(exactly = 0) { nsdManager.registerService(any(), any(), any<NsdManager.RegistrationListener>()) }
+        verify(exactly = 0) { nsdManager.registerService(any<NsdServiceInfo>(), any<Int>(), any<NsdManager.RegistrationListener>()) }
         assertEquals(0, activeMulticastLocks())
     }
 }

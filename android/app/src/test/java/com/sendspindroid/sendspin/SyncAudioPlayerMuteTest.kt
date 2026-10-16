@@ -69,6 +69,31 @@ class SyncAudioPlayerMuteTest {
     }
 
     @Test
+    fun `track gain applies while not muted and comes back after a mute`() {
+        player.initialize()
+
+        player.setVolume(0.35f)
+        assertEquals(0.35f, sink.volume)
+
+        // A volume change while muted keeps the mute (roles/player/v1.md)
+        player.setMuted(MuteReason.PLAYER, true)
+        player.setVolume(0.5f)
+        assertEquals(0f, sink.volume)
+
+        player.setMuted(MuteReason.PLAYER, false)
+        assertEquals(0.5f, sink.volume)
+    }
+
+    @Test
+    fun `track gain set before the sink exists applies when it is created`() {
+        player.setVolume(0.25f)
+
+        player.initialize()
+
+        assertEquals(0.25f, sink.volume)
+    }
+
+    @Test
     fun `repeating a mute or an un-mute changes nothing`() {
         player.initialize()
 

@@ -7,6 +7,12 @@ expect object Platform {
     /** Wall clock time in milliseconds */
     fun currentTimeMillis(): Long
 
+    /**
+     * Time spent in deep sleep since boot, in microseconds: how far the
+     * monotonic clock (System.nanoTime) has fallen behind elapsed real time.
+     */
+    fun suspendedTimeMicros(): Long
+
     /** Base64 decode a string to bytes */
     fun base64Decode(input: String): ByteArray
 

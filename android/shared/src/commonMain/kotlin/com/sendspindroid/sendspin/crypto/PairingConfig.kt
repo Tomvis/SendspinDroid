@@ -12,12 +12,9 @@ package com.sendspindroid.sendspin.crypto
  * @param unpairedAccessEnabled whether this client admits a server with no
  *   pairing record. Advertised as `unpaired_access.enabled`.
  * @param dynamicPairingCodeEnabled whether the `dynamic_pairing_code` method is
- *   offered. Default false: `server/hello` carries no signal for whether the
- *   server understands this method, and advertising it unconditionally broke
- *   the handshake against aiosendspin 9.1.1 (its `PairMethod` enum predates
- *   `dynamic_pairing_code`, so `client/hello` fails to deserialize). Until a
- *   capability signal exists, this is an explicit opt-in the user makes
- *   knowing older servers may reject the connection.
+ *   offered. Default false: the flow has not yet been tested on a device
+ *   against a Sendspin 1.0.0-rc1 server (#220), so until it has, it is an
+ *   explicit opt-in.
  */
 class PairingConfig(
     pairingPsk: ByteArray,

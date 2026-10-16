@@ -72,7 +72,7 @@ class SendSpinDisconnectTelemetryTest {
 
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin("TestDevice", mockCallback)
+        client = SendSpin("TestDevice", mockCallback, com.sendspindroid.AppSendSpinHost)
 
         // Seed connection info so the disconnect paths execute fully.
         setField("serverAddress", "127.0.0.1:8080")
@@ -181,7 +181,7 @@ class SendSpinDisconnectTelemetryTest {
         val lastByteField = SendSpin::class.java.getDeclaredField("lastByteReceivedAtMs")
         lastByteField.isAccessible = true
         val atomicLong = lastByteField.get(client) as java.util.concurrent.atomic.AtomicLong
-        atomicLong.set(System.currentTimeMillis() - 5_000L)
+        atomicLong.set(System.nanoTime() / 1_000_000 - 5_000L)
 
         val ago = client.getLastByteReceivedAgoMs()
         assertTrue("ago should be around 5000ms, got $ago", ago in 4_500L..6_000L)

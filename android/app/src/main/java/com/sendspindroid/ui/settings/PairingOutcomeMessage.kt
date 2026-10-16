@@ -9,11 +9,22 @@ import com.sendspindroid.sendspin.pairing.PairingOutcome
 /** What happened to a pairing, in words the user can act on. */
 fun PairingOutcome.message(resources: Resources): String = when (this) {
     is PairingOutcome.Paired -> resources.getString(R.string.pairing_outcome_paired, server)
+    is PairingOutcome.Abandoned -> resources.getString(R.string.pairing_outcome_abandoned, server)
     is PairingOutcome.Unpaired -> resources.getString(R.string.pairing_outcome_unpaired, server)
     is PairingOutcome.Aborted -> abortMessageRes(reason, sentByUs)
         ?.let { resources.getString(it, server) }
         // A reason this client does not know still ended the attempt.
         ?: resources.getString(R.string.pairing_outcome_aborted_other, server, reason)
+}
+
+/**
+ * Why the last pairing attempt did not finish, for the main screen, or null
+ * when it did. An abandoned attempt counts: the server ended it without
+ * saying why.
+ */
+fun PairingOutcome.unfinishedMessage(resources: Resources): String? = when (this) {
+    is PairingOutcome.Aborted, is PairingOutcome.Abandoned -> message(resources)
+    is PairingOutcome.Paired, is PairingOutcome.Unpaired -> null
 }
 
 /**

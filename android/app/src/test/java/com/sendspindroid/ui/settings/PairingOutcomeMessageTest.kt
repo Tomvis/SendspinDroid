@@ -4,6 +4,7 @@ import com.sendspindroid.sendspin.pairing.PairAbortReason
 import com.sendspindroid.sendspin.pairing.PairingOutcome
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -54,15 +55,30 @@ class PairingOutcomeMessageTest {
     }
 
     @Test
-    fun successAndUnpairAreDistinctFromEveryAbort() {
-        val paired = PairingOutcome.Paired(server).message(resources)
-        val unpaired = PairingOutcome.Unpaired(server).message(resources)
+    fun successAbandonmentAndUnpairAreDistinctFromEachOtherAndEveryAbort() {
+        val others = listOf(
+            PairingOutcome.Paired(server),
+            PairingOutcome.Abandoned(server),
+            PairingOutcome.Unpaired(server),
+        ).map { it.message(resources) }
         val aborts = PairAbortReason.ALL.flatMap { listOf(aborted(it, true), aborted(it, false)) }
 
-        assertTrue(paired.isNotBlank() && server in paired)
-        assertTrue(unpaired.isNotBlank() && server in unpaired)
-        assertTrue(paired != unpaired)
-        assertTrue(paired !in aborts && unpaired !in aborts)
+        others.forEach { assertTrue(it, it.isNotBlank() && server in it) }
+        assertEquals("two outcomes share copy: $others", others.size, others.toSet().size)
+        others.forEach { assertTrue(it, it !in aborts) }
+    }
+
+    @Test
+    fun theMainScreenExplainsEveryAttemptThatDidNotFinish() {
+        val aborted = PairingOutcome.Aborted(PairAbortReason.ATTEMPT_TIMEOUT, sentByUs = true, server)
+
+        assertEquals(aborted.message(resources), aborted.unfinishedMessage(resources))
+        assertEquals(
+            PairingOutcome.Abandoned(server).message(resources),
+            PairingOutcome.Abandoned(server).unfinishedMessage(resources),
+        )
+        assertNull(PairingOutcome.Paired(server).unfinishedMessage(resources))
+        assertNull(PairingOutcome.Unpaired(server).unfinishedMessage(resources))
     }
 
     @Test

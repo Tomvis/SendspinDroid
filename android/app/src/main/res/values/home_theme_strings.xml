@@ -1,10 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Fork-only (HW-65): home theme. Kept apart from strings.xml so upstream merges stay clean. -->
 <resources>
-    <string name="home_theme_title">Theme</string>
+    <string name="home_theme_title">Colours</string>
     <string name="home_theme_summary_local">This device only.</string>
-    <string name="home_theme_mode_title">Light or dark</string>
-    <string name="home_theme_mode_automatic">Automatic</string>
-    <string name="home_theme_mode_light">Light</string>
-    <string name="home_theme_mode_dark">Dark</string>
 </resources>

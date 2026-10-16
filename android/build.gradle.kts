@@ -3,8 +3,9 @@
 
 plugins {
     // Android Gradle Plugin (AGP) - manages Android build process
-    id("com.android.application") version "9.0.1" apply false
-    id("com.android.kotlin.multiplatform.library") version "9.0.1" apply false
+    id("com.android.application") version "9.2.1" apply false
+    id("com.android.library") version "9.2.1" apply false
+    id("com.android.kotlin.multiplatform.library") version "9.2.1" apply false
 
     // Kotlin plugins
     id("org.jetbrains.kotlin.android") version "2.3.0" apply false

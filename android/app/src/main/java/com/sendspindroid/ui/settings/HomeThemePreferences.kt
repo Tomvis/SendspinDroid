@@ -18,9 +18,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,7 +36,7 @@ import com.sendspindroid.ui.theme.HomeThemeController
 import home.theme.HomeTheme
 import home.theme.HomeThemes
 
-/** Fork-only (HW-65): any home theme, plus light/dark, kept on this device. */
+/** Fork-only (HW-65): any home theme, kept on this device. Light/dark is upstream's Theme row. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeThemePreferences() {
@@ -70,19 +67,6 @@ fun HomeThemePreferences() {
         Swatch(current)
     }
 
-    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Text(stringResource(R.string.home_theme_mode_title), style = MaterialTheme.typography.bodyLarge)
-        Spacer(Modifier.size(8.dp))
-        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-            HomeThemeController.MODES.forEachIndexed { i, mode ->
-                SegmentedButton(
-                    selected = effective.mode == mode,
-                    onClick = { HomeThemeController.choose(effective.theme, mode) },
-                    shape = SegmentedButtonDefaults.itemShape(i, HomeThemeController.MODES.size),
-                ) { Text(modeLabel(mode)) }
-            }
-        }
-    }
 
     if (picking) {
         AlertDialog(
@@ -133,11 +117,3 @@ private fun Swatch(theme: HomeTheme) {
     }
 }
 
-@Composable
-private fun modeLabel(mode: String): String = stringResource(
-    when (mode) {
-        "light" -> R.string.home_theme_mode_light
-        "dark" -> R.string.home_theme_mode_dark
-        else -> R.string.home_theme_mode_automatic
-    },
-)

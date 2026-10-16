@@ -1,5 +1,7 @@
 package com.sendspindroid.ui.stats
 
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,8 +18,21 @@ import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.rememberNestedScrollInteropConnection
 import androidx.compose.ui.res.stringResource
@@ -26,7 +41,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.TvInitialFocus
+import com.sendspindroid.ui.adaptive.TvOverscanVertical
 import com.sendspindroid.ui.theme.SendSpinTheme
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
@@ -36,6 +56,9 @@ import androidx.compose.ui.Alignment
 private val ColorGood = Color(0xFF4CAF50)      // Green
 private val ColorWarning = Color(0xFFFFC107)   // Yellow/Amber
 private val ColorBad = Color(0xFFF44336)       // Red
+
+/** How far up from the bottom of the view the TV fade reaches. */
+private val MoreBelowFadeHeight = 48.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -59,13 +82,62 @@ fun StatsContent(
 ) {
     // Use nestedScroll to properly integrate with BottomSheetDialogFragment
     val nestedScrollInterop = rememberNestedScrollInteropConnection()
+    val scrollState = rememberScrollState()
+
+    // Nothing in the stats takes focus, so a remote could not scroll them and
+    // everything below the first sections stayed out of sight. On a TV the
+    // scroll container takes focus itself when the sheet opens, and Up and
+    // Down move it a third of the view at a time; Back is left to dismiss the
+    // sheet. The sheet runs from the top of the screen to the bottom there, so
+    // the view keeps clear of both edges, and a fade says there is more below.
+    val dpadScroll = if (LocalFormFactor.current == FormFactor.TV) {
+        val focusRequester = remember { FocusRequester() }
+        val scope = rememberCoroutineScope()
+        val fadeColor = MaterialTheme.colorScheme.surface
+        TvInitialFocus(focusRequester)
+        Modifier
+            .padding(vertical = TvOverscanVertical)
+            .drawWithContent {
+                drawContent()
+                if (scrollState.canScrollForward) {
+                    val fade = MoreBelowFadeHeight.toPx()
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            listOf(Color.Transparent, fadeColor),
+                            startY = size.height - fade,
+                            endY = size.height,
+                        ),
+                        topLeft = Offset(0f, size.height - fade),
+                        size = Size(size.width, fade),
+                    )
+                }
+            }
+            .focusRequester(focusRequester)
+            .onKeyEvent { event ->
+                val step = when (event.key) {
+                    Key.DirectionDown -> scrollState.viewportSize / 3f
+                    Key.DirectionUp -> -scrollState.viewportSize / 3f
+                    else -> return@onKeyEvent false
+                }
+                // Held down, the key repeats; each repeat takes over the scroll
+                // from where the last one has got to.
+                if (event.type == KeyEventType.KeyDown) {
+                    scope.launch { scrollState.animateScrollBy(step) }
+                }
+                true
+            }
+            .focusable()
+    } else {
+        Modifier
+    }
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .nestedScroll(nestedScrollInterop)
+            .then(dpadScroll)
             .padding(horizontal = 16.dp)
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
     ) {
         Text(
             text = stringResource(R.string.stats_title),

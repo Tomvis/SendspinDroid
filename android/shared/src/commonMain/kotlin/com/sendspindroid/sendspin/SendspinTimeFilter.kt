@@ -33,18 +33,17 @@ import kotlin.math.sqrt
  *
  * ## Reference
  *
- * Algorithm core matches upstream `Sendspin/time-filter` (Apache-2.0)
- * post-PR #6 (2026-04). Local adaptations are documented at their
- * respective sites in this file.
+ * A port of upstream `Sendspin/time-filter` (Apache-2.0) at 531e270,
+ * `cpp/sendspin_time_filter.cpp`, expression for expression ("Clients MUST
+ * use the time-filter algorithm"); SendspinTimeFilterGoldenTest holds it to
+ * vectors from a transcription of the C++. What is added here does not
+ * change its output: the readiness and convergence flags, and the playout
+ * terms of [serverToClient] / [clientToServer].
  */
 class SendspinTimeFilter {
 
     companion object {
-        // Algorithm and tunables match upstream Sendspin/time-filter (Apache-2.0)
-        // post-PR #6 (2026-04). Local additions on top of upstream are documented
-        // at their respective sites:
-        //   - IQR outlier pre-rejection
-        //   - +/-500 ppm hard drift cap
+        // Tunables: upstream's Config defaults.
 
         // Process-noise diffusion coefficients. Upstream defaults: zero offset
         // random walk (offset evolves only through drift*dt), and a tiny drift
@@ -79,18 +78,6 @@ class SendspinTimeFilter {
         private const val DRIFT_SIGNIFICANCE_THRESHOLD_SQUARED =
             DRIFT_SIGNIFICANCE_THRESHOLD * DRIFT_SIGNIFICANCE_THRESHOLD
 
-        // Local: IQR-based outlier pre-rejection ahead of the Kalman update.
-        // Defends against heavy-tailed wifi/cellular RTT spikes that upstream
-        // does not see in its testbed.
-        private const val OUTLIER_WINDOW_SIZE = 10
-        private const val OUTLIER_IQR_MULTIPLIER = 3.0
-        private const val MIN_OUTLIER_MEASUREMENTS = 5
-
-        // Local: hard cap on drift to keep prediction sane if a measurement
-        // sequence transiently suggests an unphysical clock-rate difference.
-        // 500 ppm is generous compared to typical phone crystals (10-50 ppm).
-        private const val MAX_DRIFT = 5e-4
-
         // Readiness and convergence reporting.
         private const val MIN_MEASUREMENTS = 2
         private const val MIN_MEASUREMENTS_FOR_CONVERGENCE = 5
@@ -107,14 +94,15 @@ class SendspinTimeFilter {
     private var offset: Double = 0.0
     private var drift: Double = 0.0
 
-    // Covariance matrix (2x2)
-    private var p00: Double = Double.MAX_VALUE  // offset variance
-    private var p01: Double = 0.0               // offset-drift covariance
-    private var p10: Double = 0.0               // drift-offset covariance
-    private var p11: Double = 0.0               // drift variance
+    // Covariance matrix (2x2, symmetric)
+    private var offsetCovariance: Double = Double.POSITIVE_INFINITY
+    private var offsetDriftCovariance: Double = 0.0
+    private var driftCovariance: Double = 0.0
 
     // Client time of the last accepted measurement
     private var lastUpdateTime: Long = 0
+    // Accepted measurements. Upstream's count stops at the forgetting gate;
+    // this one goes on, for readiness and logs, and is compared the same way.
     private var measurementCount: Int = 0
 
     private var useDrift: Boolean = false
@@ -129,7 +117,7 @@ class SendspinTimeFilter {
         val drift: Double = 0.0,
         val useDrift: Boolean = false,
         val lastUpdateTime: Long = 0,
-        val offsetVariance: Double = Double.MAX_VALUE,
+        val offsetVariance: Double = Double.POSITIVE_INFINITY,
         val measurementCount: Int = 0
     ) {
         /** The drift the conversions apply: zero until the estimate is significant. */
@@ -140,24 +128,27 @@ class SendspinTimeFilter {
 
     /** Publish the current filter state. Call with [lock] held, after every change. */
     private fun publish() {
-        snapshot = Snapshot(offset, drift, useDrift, lastUpdateTime, p00, measurementCount)
+        snapshot = Snapshot(offset, drift, useDrift, lastUpdateTime, offsetCovariance, measurementCount)
     }
 
-    // Outlier pre-rejection: tracks recent accepted offset measurements
-    private val recentOffsets = DoubleArray(OUTLIER_WINDOW_SIZE)
-    private var recentOffsetsIndex = 0
-    private var recentOffsetsCount = 0
-    private var rejectedCount = 0  // Consecutive rejections (for forced acceptance)
+    // Static delay: the sync offset, a server's if it pushed one and the
+    // user's otherwise (syncOffsetMicros). Output latency up to the DAC is
+    // not part of it - the player schedules against AudioTrack timestamps,
+    // which already include it. @Volatile: both fields are read by the audio
+    // thread (serverToClient) and written from others.
 
-    // Static delay: the sync offset set by the user's slider or pushed by the
-    // server. Output latency up to the DAC is not part of it - the player
-    // schedules against AudioTrack timestamps, which already include it.
-    // @Volatile: read by the audio thread (serverToClient), written from
-    // UI/main threads.
+    // The user's offset: the settings slider's value, set when the user moves
+    // it and restored when a connection is ready, both on the main thread.
     @Volatile private var userSyncOffsetMicros: Long = 0
-    // Fork: the server's client/sync_offset is kept apart from the user's
-    // slider so neither clobbers the other; they add.
-    @Volatile private var serverSyncOffsetMicros: Long = 0
+
+    // A server's push (client/sync_offset) stands in for the user's value
+    // until the user sets one again or the next connection starts
+    // (clearServerSyncOffset): it is that server's correction, not this
+    // device's. reset() keeps it, as it also runs mid-connection.
+    @Volatile private var serverSyncOffsetMicros: Long? = null
+
+    private val syncOffsetMicros: Long
+        get() = serverSyncOffsetMicros ?: userSyncOffsetMicros
 
     // Convergence tracking
     private var convergenceTimeMs: Long = 0L       // Time to reach isConverged
@@ -192,7 +183,7 @@ class SendspinTimeFilter {
      * Estimated error (standard deviation) in microseconds.
      */
     val errorMicros: Long
-        get() = snapshot.offsetVariance.let { if (it.isFinite() && it >= 0) sqrt(it).toLong() else Long.MAX_VALUE }
+        get() = snapshot.offsetVariance.let { if (it.isFinite() && it >= 0) roundHalfAway(sqrt(it)) else Long.MAX_VALUE }
 
     /**
      * Number of measurements collected so far.
@@ -221,13 +212,6 @@ class SendspinTimeFilter {
      */
     val staticDelayMs: Double
         get() = syncOffsetMicros / 1000.0
-
-    private val syncOffsetMicros: Long
-        get() = userSyncOffsetMicros + serverSyncOffsetMicros
-
-    /** Raw server-pushed sync-offset component (milliseconds). */
-    val serverSyncOffsetMs: Double
-        get() = serverSyncOffsetMicros / 1000.0
 
     /**
      * The spec's `output_delay_ms`: delay BEYOND the audio port, such as an
@@ -261,19 +245,35 @@ class SendspinTimeFilter {
     }
 
     /**
-     * Write the user's manual sync-offset correction (milliseconds).
-     * Called by the settings slider's broadcast path.
+     * Write the user's manual sync-offset correction (milliseconds). Called
+     * when the user changes it in the settings, and to restore the saved
+     * setting when a connection is ready.
+     *
+     * @param overrideServer false when this restores the saved setting
+     *   rather than the user changing it: a server's offset then stays in
+     *   force.
      */
-    fun setUserSyncOffsetMs(ms: Double) {
+    fun setUserSyncOffsetMs(ms: Double, overrideServer: Boolean = true) {
         userSyncOffsetMicros = (ms * 1000).toLong()
+        if (overrideServer) serverSyncOffsetMicros = null
     }
 
     /**
-     * Write a server-pushed sync-offset (from `client/sync_offset`).
-     * Stored apart from the user slider; both add in [staticDelayMs].
+     * Write a server-pushed sync-offset (from `client/sync_offset`). It
+     * replaces the user's value, as the latest correction to when this
+     * device should play, until the user sets one or the next connection
+     * starts ([clearServerSyncOffset]).
      */
     fun setServerSyncOffsetMs(ms: Double) {
         serverSyncOffsetMicros = (ms * 1000).toLong()
+    }
+
+    /**
+     * Drop a server's sync offset: the user's applies again. Called when a
+     * connection starts, not from [reset], which also runs mid-connection.
+     */
+    fun clearServerSyncOffset() {
+        serverSyncOffsetMicros = null
     }
 
     /**
@@ -288,21 +288,14 @@ class SendspinTimeFilter {
      * Thread-safe: synchronized to prevent concurrent mutation.
      */
     fun reset() = synchronized(lock) {
-        // The server's offset belongs to the session being reset; the next
-        // server may never push one. The user's offset is a device setting.
-        serverSyncOffsetMicros = 0
         offset = 0.0
         drift = 0.0
-        p00 = Double.MAX_VALUE
-        p01 = 0.0
-        p10 = 0.0
-        p11 = 0.0
+        offsetCovariance = Double.POSITIVE_INFINITY
+        offsetDriftCovariance = 0.0
+        driftCovariance = 0.0
         lastUpdateTime = 0
         measurementCount = 0
         useDrift = false
-        recentOffsetsIndex = 0
-        recentOffsetsCount = 0
-        rejectedCount = 0
         convergenceTimeMs = 0
         firstMeasurementTimeMs = 0
         hasLoggedConvergence = false
@@ -310,31 +303,36 @@ class SendspinTimeFilter {
     }
 
     /**
-     * Add a new time measurement to the filter.
-     *
-     * Includes outlier pre-rejection: measurements that deviate significantly from
-     * recent history are rejected before reaching the Kalman filter, protecting
-     * against cellular congestion spikes and handoff transients.
+     * Add a new time measurement to the filter: upstream's `update`.
      *
      * Thread-safe: synchronized to prevent concurrent mutation of filter state.
      *
      * @param measurementOffset The measured offset in microseconds
-     * @param maxError The maximum error (uncertainty) in microseconds
+     * @param maxError Half the round-trip delay in microseconds
      * @param clientTimeMicros The client timestamp when measurement was taken
-     * @return true if measurement was accepted, false if rejected as outlier
+     * @return false if the measurement was skipped, as upstream skips it: not
+     *   later than the last one, or with a [maxError] that is not positive
      */
     fun addMeasurement(
         measurementOffset: Long,
         maxError: Long,
         clientTimeMicros: Long
     ): Boolean = synchronized(lock) {
-        if (measurementCount > 0 && clientTimeMicros <= lastUpdateTime) {
+        if (clientTimeMicros <= lastUpdateTime) {
+            // Skip non-monotonic timestamps (duplicates or out-of-order packets)
+            return false
+        }
+        if (maxError <= 0) {
+            // A zero max_error would collapse the measurement variance (and the
+            // forgetting cutoff) to zero, and a negative one is not a valid half-RTT
             return false
         }
 
-        val measurement = measurementOffset.toDouble()
-        val maxErrorD = maxError.toDouble().coerceAtLeast(1.0)
-        val updateStdDev = maxErrorD * MAX_ERROR_SCALE
+        val dt = (clientTimeMicros - lastUpdateTime).toDouble()
+        val dtSquared = dt * dt
+        lastUpdateTime = clientTimeMicros
+
+        val updateStdDev = maxError * MAX_ERROR_SCALE
         val measurementVariance = updateStdDev * updateStdDev
 
         if (measurementCount == 0) {
@@ -343,33 +341,21 @@ class SendspinTimeFilter {
 
         when (measurementCount) {
             0 -> {
-                offset = measurement
-                p00 = measurementVariance
-                lastUpdateTime = clientTimeMicros
-                measurementCount = 1
-                recordAcceptedOffset(measurement)
+                // First measurement establishes the offset baseline
+                offset = measurementOffset.toDouble()
+                offsetCovariance = measurementVariance
+                drift = 0.0
             }
             1 -> {
-                val dt = (clientTimeMicros - lastUpdateTime).toDouble()
-                drift = ((measurement - offset) / dt).coerceIn(-MAX_DRIFT, MAX_DRIFT)
-                p11 = (p00 + measurementVariance) / (dt * dt)
-                offset = measurement
-                p00 = measurementVariance
-                lastUpdateTime = clientTimeMicros
-                measurementCount = 2
-                recordAcceptedOffset(measurement)
+                // Second measurement: initial drift from finite differences
+                drift = (measurementOffset - offset) / dt
+                offset = measurementOffset.toDouble()
+                driftCovariance = (offsetCovariance + measurementVariance) / dtSquared
+                offsetCovariance = measurementVariance
             }
-            else -> {
-                if (!shouldAcceptMeasurement(measurement, maxErrorD)) {
-                    rejectedCount++
-                    return false
-                }
-                rejectedCount = 0
-
-                kalmanUpdate(measurement, maxErrorD, clientTimeMicros)
-                recordAcceptedOffset(measurement)
-            }
+            else -> kalmanUpdate(measurementOffset, maxError, dt, dtSquared, measurementVariance)
         }
+        measurementCount++
         publish()
         checkConvergence()
         return true
@@ -387,108 +373,55 @@ class SendspinTimeFilter {
         }
     }
 
-    /**
-     * Determine if a measurement should be accepted or rejected as an outlier.
-     *
-     * Uses robust statistics (median + IQR) to detect measurements that are
-     * far from the recent accepted history. This protects the Kalman filter
-     * from being pulled by cellular congestion spikes (200ms+ outliers).
-     *
-     * Force-accepts after 3 consecutive rejections to handle genuine step changes
-     * (e.g., network route change where ALL measurements shift).
-     */
-    private fun shouldAcceptMeasurement(measurement: Double, maxError: Double): Boolean {
-        // Accept during early warmup - not enough history for outlier detection
-        if (recentOffsetsCount < MIN_OUTLIER_MEASUREMENTS) return true
-
-        // Force-accept after consecutive rejections (genuine step change)
-        if (rejectedCount >= 3) return true
-
-        val count = minOf(recentOffsetsCount, OUTLIER_WINDOW_SIZE)
-        val sorted = DoubleArray(count)
-        for (i in 0 until count) {
-            sorted[i] = recentOffsets[(recentOffsetsIndex - count + i + OUTLIER_WINDOW_SIZE) % OUTLIER_WINDOW_SIZE]
-        }
-        sorted.sort()
-
-        val median = if (count % 2 == 0) {
-            (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0
-        } else {
-            sorted[count / 2]
-        }
-
-        val q1 = sorted[count / 4]
-        val q3 = sorted[(count * 3) / 4]
-        val iqr = q3 - q1
-
-        // Threshold: at least RTT-sized window (maxError), or IQR-based
-        val threshold = maxOf(OUTLIER_IQR_MULTIPLIER * iqr, maxError)
-
-        return abs(measurement - median) <= threshold
-    }
-
-    /**
-     * Record an accepted offset measurement in the recent history window.
-     */
-    private fun recordAcceptedOffset(measurement: Double) {
-        recentOffsets[recentOffsetsIndex] = measurement
-        recentOffsetsIndex = (recentOffsetsIndex + 1) % OUTLIER_WINDOW_SIZE
-        if (recentOffsetsCount < OUTLIER_WINDOW_SIZE) recentOffsetsCount++
-    }
-
-    private fun kalmanUpdate(measurement: Double, maxError: Double, clientTimeMicros: Long) {
-        val dt = (clientTimeMicros - lastUpdateTime).toDouble()
-        val dtSquared = dt * dt
-        val updateStdDev = maxError * MAX_ERROR_SCALE
-        val measurementVariance = updateStdDev * updateStdDev
-
+    private fun kalmanUpdate(
+        measurement: Long,
+        maxError: Long,
+        dt: Double,
+        dtSquared: Double,
+        measurementVariance: Double,
+    ) {
         // Predict: x = F * x, P = F * P * F^T + Q with F = [[1, dt], [0, 1]]
-        // and Q = diag(PROCESS_VARIANCE, DRIFT_PROCESS_VARIANCE) * dt.
-        // The prediction always uses the drift estimate, significant or not:
-        // the gain below is computed for that model, and it is the innovation
-        // against it that corrects a wrong drift.
+        // and Q = diag(PROCESS_VARIANCE, DRIFT_PROCESS_VARIANCE) * dt
         val offsetPredicted = offset + drift * dt
 
-        var p00New = p00 + 2 * p01 * dt + p11 * dtSquared + PROCESS_VARIANCE * dt
-        var p01New = p01 + p11 * dt
-        var p10New = p10 + p11 * dt
-        var p11New = p11 + DRIFT_PROCESS_VARIANCE * dt
+        val driftProcessVariance = dt * DRIFT_PROCESS_VARIANCE
+        var newDriftCovariance = driftCovariance + driftProcessVariance
 
-        val innovation = measurement - offsetPredicted
+        var newOffsetDriftCovariance = offsetDriftCovariance + driftCovariance * dt
 
-        // Adaptive forgetting: residuals exceeding FORGETTING_THRESHOLD * max_error
-        // indicate a step change (route flip, server clock jump, etc). Inflate the
-        // entire predicted covariance so the next gain step is large enough to
-        // adopt the new measurement quickly. Gated by measurement count so a
-        // handful of early outliers cannot wipe the model.
-        if (measurementCount >= MIN_SAMPLES_FOR_FORGETTING &&
-            abs(innovation) > FORGETTING_THRESHOLD * maxError
-        ) {
-            p00New *= FORGETTING_VARIANCE_FACTOR
-            p01New *= FORGETTING_VARIANCE_FACTOR
-            p10New *= FORGETTING_VARIANCE_FACTOR
-            p11New *= FORGETTING_VARIANCE_FACTOR
+        val offsetProcessVariance = dt * PROCESS_VARIANCE
+        var newOffsetCovariance = offsetCovariance + 2 * offsetDriftCovariance * dt +
+            driftCovariance * dtSquared + offsetProcessVariance
+
+        // Adaptive forgetting: a residual beyond FORGETTING_THRESHOLD * max_error
+        // is a step (route flip, server clock jump): inflate the predicted
+        // covariance so the gain adopts it quickly. Only once
+        // MIN_SAMPLES_FOR_FORGETTING measurements have built a history.
+        val residual = measurement - offsetPredicted
+        val maxResidualCutoff = maxError * FORGETTING_THRESHOLD
+
+        if (measurementCount >= MIN_SAMPLES_FOR_FORGETTING && abs(residual) > maxResidualCutoff) {
+            newDriftCovariance *= FORGETTING_VARIANCE_FACTOR
+            newOffsetDriftCovariance *= FORGETTING_VARIANCE_FACTOR
+            newOffsetCovariance *= FORGETTING_VARIANCE_FACTOR
         }
 
         // Update: K = P * H^T * S^-1, x = x + K * y, P = (I - K * H) * P
-        // with H = [1, 0] and S = P[0,0] + R.
-        val s = p00New + measurementVariance
+        // with H = [1, 0] and S = P[0,0] + R
+        val uncertainty = 1.0 / (newOffsetCovariance + measurementVariance)
 
-        val k0 = p00New / s
-        val k1 = p10New / s
+        val offsetGain = newOffsetCovariance * uncertainty
+        val driftGain = newOffsetDriftCovariance * uncertainty
 
-        offset = offsetPredicted + k0 * innovation
-        drift = (drift + k1 * innovation).coerceIn(-MAX_DRIFT, MAX_DRIFT)
+        offset = offsetPredicted + offsetGain * residual
+        drift += driftGain * residual
 
-        p00 = (1 - k0) * p00New
-        p01 = (1 - k0) * p01New
-        p10 = p10New - k1 * p00New
-        p11 = p11New - k1 * p01New
+        driftCovariance = newDriftCovariance - driftGain * newOffsetDriftCovariance
+        offsetDriftCovariance = newOffsetDriftCovariance - driftGain * newOffsetCovariance
+        offsetCovariance = newOffsetCovariance - offsetGain * newOffsetCovariance
 
-        useDrift = drift * drift > DRIFT_SIGNIFICANCE_THRESHOLD_SQUARED * p11
-
-        lastUpdateTime = clientTimeMicros
-        measurementCount++
+        // Only apply drift in the conversions once it is significant
+        useDrift = drift * drift > DRIFT_SIGNIFICANCE_THRESHOLD_SQUARED * driftCovariance
     }
 
     /**
@@ -504,7 +437,7 @@ class SendspinTimeFilter {
     fun computeClientTime(serverTimeMicros: Long): Long {
         val s = snapshot
         val drift = s.effectiveDrift
-        return ((serverTimeMicros - s.offset + drift * s.lastUpdateTime) / (1.0 + drift)).roundToLong()
+        return roundHalfAway((serverTimeMicros - s.offset + drift * s.lastUpdateTime) / (1.0 + drift))
     }
 
     /**
@@ -525,6 +458,9 @@ class SendspinTimeFilter {
         val s = snapshot
         val clientTime = clientTimeMicros - syncOffsetMicros + outputDelayMicros
         val offsetNow = s.offset + s.effectiveDrift * (clientTime - s.lastUpdateTime)
-        return clientTime + offsetNow.roundToLong()
+        return clientTime + roundHalfAway(offsetNow)
     }
+
+    /** `std::round`: halfway cases away from zero ([roundToLong] takes them up). */
+    private fun roundHalfAway(x: Double): Long = if (x < 0) -(-x).roundToLong() else x.roundToLong()
 }

@@ -19,4 +19,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "SendSpinDroid"
-include(":app", ":shared", ":conformance-client")
+include(":app", ":player", ":shared", ":conformance-client")

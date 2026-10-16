@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import android.util.Log
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.preference.PreferenceManager
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
@@ -60,9 +61,11 @@ object UserSettings {
     const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
     const val KEY_HIGH_POWER_MODE = "high_power_mode"
     const val KEY_LAYOUT_MODE = "layout_mode"
+    const val KEY_THEME_MODE = "theme_mode"
     const val KEY_AUTO_START_ON_BOOT = "auto_start_on_boot"
     const val KEY_SEARCH_FOR_SERVERS = "search_for_servers"
     const val KEY_LAST_PLAYBACK_SERVER_ID = "last_playback_server_id"
+    const val KEY_DIALLED_SERVER_ID = "dialled_server_id"
     const val KEY_PAIRED_SERVER_NAME_PREFIX = "paired_server_name_"
 
     // Long-term PSK records from pairing (stored in encrypted prefs).
@@ -345,9 +348,8 @@ object UserSettings {
         sensitivePrefs?.edit()?.putBoolean(KEY_UNPAIRED_ACCESS, enabled)?.commit() ?: false
 
     /**
-     * Whether the `dynamic_pairing_code` method is offered. Default false: most
-     * servers do not yet support this method, and advertising it unconditionally
-     * can prevent connecting at all.
+     * Whether the `dynamic_pairing_code` method is offered. Default false until
+     * the flow has been tested on a device against an rc1 server (#220).
      */
     fun getDynamicPairingCodeEnabled(): Boolean =
         sensitivePrefs?.getBoolean(KEY_DYNAMIC_PAIRING_CODE_ENABLED, false) ?: false
@@ -453,7 +455,7 @@ object UserSettings {
      * Whether Low Memory Mode is enabled.
      * When enabled:
      * - Album artwork is not fetched (uses placeholder)
-     * - Audio buffer is reduced from 32MB to 8MB
+     * - The audio buffer is about 10 s instead of 35 s (buffer_capacity and the decoded queue)
      * - Coil ImageLoader is not initialized
      * Use when controlling playback from the server and UI isn't needed.
      */
@@ -491,12 +493,16 @@ object UserSettings {
     /**
      * Whether High Power Mode is enabled.
      * When enabled (for always-on/plugged-in devices):
-     * - WiFi and CPU locks held for entire connection (not just streaming)
+     * - WiFi and CPU locks held for entire connection (not just streaming),
+     *   and kept while it reconnects
      * - WiFi lock uses low-latency mode (API 29+)
-     * - Screen kept on while connected
-     * - Infinite reconnection attempts (30s steady-state interval)
-     * - Faster WebSocket ping (15s vs 30s) for quicker drop detection
-     * - Prompts user to exempt app from battery optimization
+     * - Screen kept on while connected or reconnecting, on MainActivity's window
+     * - Faster WebSocket ping (15s vs 30s, read through AppSendSpinHost) for
+     *   quicker drop detection
+     * - Settings offers to exempt the app from battery optimization
+     *
+     * Reconnecting is the same either way: no attempt cap, backing off to one
+     * attempt a minute (ConnectionCoordinator).
      */
     val highPowerMode: Boolean
         get() = prefs?.getBoolean(KEY_HIGH_POWER_MODE, false) ?: false
@@ -549,6 +555,15 @@ object UserSettings {
         set(value) { prefs?.edit()?.putString(KEY_LAST_PLAYBACK_SERVER_ID, value)?.apply() }
 
     /**
+     * The server (UnifiedServer.id, not a Sendspin `server_id`) the service
+     * last set out to connect to, null once the user has disconnected. A
+     * restart by the system returns to it.
+     */
+    var dialledServerId: String?
+        get() = prefs?.getString(KEY_DIALLED_SERVER_ID, null)
+        set(value) { prefs?.edit()?.putString(KEY_DIALLED_SERVER_ID, value)?.apply() }
+
+    /**
      * What a paired server last called itself, by `server_id`, for the list
      * of paired servers. A pairing record holds no name. Display only, and
      * not a secret: plain preferences.
@@ -580,6 +595,31 @@ object UserSettings {
             }
         }
         set(value) { prefs?.edit()?.putString(KEY_LAYOUT_MODE, value.name)?.apply() }
+
+    /**
+     * Light/dark theme override. SYSTEM follows the device setting, except on
+     * a TV, where it means dark (see [nightMode]).
+     */
+    enum class ThemeMode(private val nightMode: Int) {
+        SYSTEM(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM),
+        LIGHT(AppCompatDelegate.MODE_NIGHT_NO),
+        DARK(AppCompatDelegate.MODE_NIGHT_YES);
+
+        /**
+         * The AppCompat night mode for this choice. A TV reports light mode
+         * unless told otherwise, and a light screen glares across a room, so
+         * there SYSTEM means dark.
+         */
+        fun nightMode(isTv: Boolean): Int =
+            if (isTv && this == SYSTEM) AppCompatDelegate.MODE_NIGHT_YES else nightMode
+    }
+
+    var themeMode: ThemeMode
+        get() {
+            val value = prefs?.getString(KEY_THEME_MODE, null)
+            return ThemeMode.entries.firstOrNull { it.name == value } ?: ThemeMode.SYSTEM
+        }
+        set(value) { prefs?.edit()?.putString(KEY_THEME_MODE, value.name)?.apply() }
 
     /**
      * Gets the preferred audio codec for streaming.

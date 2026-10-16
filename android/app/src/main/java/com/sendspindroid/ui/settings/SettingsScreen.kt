@@ -12,11 +12,16 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,11 +50,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.ui.platform.LocalContext
@@ -57,10 +73,21 @@ import com.sendspindroid.R
 import com.sendspindroid.UserSettings
 import com.sendspindroid.diagnostics.Telemetry
 import com.sendspindroid.logging.LogLevel
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.TvInitialFocus
+import com.sendspindroid.ui.adaptive.TvKeyboardGate
+import com.sendspindroid.ui.adaptive.rememberTvKeyboardGate
+import com.sendspindroid.ui.adaptive.TvOverscanHorizontal
+import com.sendspindroid.ui.adaptive.TvOverscanVertical
+import com.sendspindroid.ui.adaptive.tvFocusable
 import com.sendspindroid.ui.theme.SendSpinTheme
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.platform.LocalClipboardManager
+import android.content.ClipData
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.background
 import android.widget.Toast
@@ -76,6 +103,8 @@ import androidx.compose.ui.text.input.ImeAction
  * @param onExportLogs Called when export logs is clicked
  * @param onReportProblem Called when "Report a problem" is clicked
  * @param onRestartApp Called when app restart is confirmed
+ * @param canShare False when nothing on the device can receive a share, which
+ *   hides "Report a problem" and "Export Debug Logs"
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -84,7 +113,8 @@ fun SettingsScreen(
     onNavigateBack: () -> Unit,
     onExportLogs: () -> Unit,
     onReportProblem: () -> Unit,
-    onRestartApp: () -> Unit
+    onRestartApp: () -> Unit,
+    canShare: Boolean
 ) {
     val playerName by viewModel.playerName.collectAsStateWithLifecycle()
     val dynamicPairingCodeEnabled by viewModel.dynamicPairingCodeEnabled.collectAsStateWithLifecycle()
@@ -93,6 +123,7 @@ fun SettingsScreen(
     val fullscreenMode by viewModel.fullscreenMode.collectAsStateWithLifecycle()
     val keepScreenOn by viewModel.keepScreenOn.collectAsStateWithLifecycle()
     val layoutMode by viewModel.layoutMode.collectAsStateWithLifecycle()
+    val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val syncOffset by viewModel.syncOffset.collectAsStateWithLifecycle()
     val preferredCodec by viewModel.preferredCodec.collectAsStateWithLifecycle()
     val supportedCodecs by viewModel.supportedCodecs.collectAsStateWithLifecycle()
@@ -111,28 +142,41 @@ fun SettingsScreen(
     var showRestartDialog by remember { mutableStateOf(false) }
     var showCodecDialog by remember { mutableStateOf(false) }
 
+    val isTv = LocalFormFactor.current == FormFactor.TV
+    val playerNameFocusRequester = remember { FocusRequester() }
+    val dynamicPairingFocusRequester = remember { FocusRequester() }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.settings_title)) },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.wizard_back)
-                        )
+                    // A remote has its own Back button, and an arrow that
+                    // takes focus first is one reflex OK away from leaving.
+                    if (!isTv) {
+                        IconButton(onClick = onNavigateBack) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = stringResource(R.string.wizard_back)
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.surface
-                )
+                ),
+                modifier = if (isTv) Modifier.padding(top = TvOverscanVertical).tvColumn() else Modifier
             )
         }
     ) { paddingValues ->
+        // Here, not above the Scaffold: its content is composed during layout,
+        // after an effect outside it would already have run.
+        TvInitialFocus(playerNameFocusRequester)
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .then(if (isTv) Modifier.padding(bottom = TvOverscanVertical).tvColumn() else Modifier)
                 .verticalScroll(rememberScrollState())
         ) {
             // Player Category
@@ -140,7 +184,8 @@ fun SettingsScreen(
             TextPreference(
                 title = stringResource(R.string.pref_player_name_title),
                 summary = playerName.ifEmpty { stringResource(R.string.pref_player_name_summary) },
-                onClick = { showPlayerNameDialog = true }
+                onClick = { showPlayerNameDialog = true },
+                modifier = Modifier.focusRequester(playerNameFocusRequester)
             )
 
             // Pairing Category
@@ -150,40 +195,59 @@ fun SettingsScreen(
             PairedServersSection(
                 servers = pairedServers,
                 lastOutcome = lastPairingOutcome,
-                onForget = { viewModel.forgetPairedServer(it.pskId) }
+                onForget = { viewModel.forgetPairedServer(it.pskId) },
+                afterListFocusRequester = dynamicPairingFocusRequester
             )
             SwitchPreference(
                 title = stringResource(R.string.pref_dynamic_pairing_code_title),
                 summary = stringResource(R.string.pref_dynamic_pairing_code_summary),
                 checked = dynamicPairingCodeEnabled,
-                onCheckedChange = { viewModel.setDynamicPairingCodeEnabled(it) }
+                onCheckedChange = { viewModel.setDynamicPairingCodeEnabled(it) },
+                modifier = Modifier.focusRequester(dynamicPairingFocusRequester)
             )
 
             // Display Category
             PreferenceCategory(title = stringResource(R.string.pref_category_display))
-            SwitchPreference(
-                title = stringResource(R.string.pref_full_screen_title),
-                summary = stringResource(R.string.pref_full_screen_summary),
-                checked = fullscreenMode,
-                onCheckedChange = { viewModel.setFullscreenMode(it) }
-            )
+            // A TV has no system bars to hide and ignores the Head Unit
+            // layout, so neither setting is offered there.
+            if (!isTv) {
+                SwitchPreference(
+                    title = stringResource(R.string.pref_full_screen_title),
+                    summary = stringResource(R.string.pref_full_screen_summary),
+                    checked = fullscreenMode,
+                    onCheckedChange = { viewModel.setFullscreenMode(it) }
+                )
+            }
             SwitchPreference(
                 title = stringResource(R.string.pref_keep_screen_on_title),
                 summary = stringResource(R.string.pref_keep_screen_on_summary),
                 checked = keepScreenOn,
                 onCheckedChange = { viewModel.setKeepScreenOn(it) }
             )
+            if (!isTv) {
+                SegmentedButtonPreference(
+                    title = stringResource(R.string.pref_layout_mode_title),
+                    summary = stringResource(R.string.pref_layout_mode_summary),
+                    options = listOf(
+                        stringResource(R.string.pref_layout_mode_auto) to UserSettings.LayoutMode.AUTO,
+                        stringResource(R.string.pref_layout_mode_headunit) to UserSettings.LayoutMode.HEADUNIT
+                    ),
+                    selectedOption = layoutMode,
+                    onOptionSelected = { viewModel.setLayoutMode(it) }
+                )
+            }
+            HomeThemePreferences() // Fork (HW-65), above upstream's light/dark row
             SegmentedButtonPreference(
-                title = stringResource(R.string.pref_layout_mode_title),
-                summary = stringResource(R.string.pref_layout_mode_summary),
+                title = stringResource(R.string.pref_theme_mode_title),
+                summary = stringResource(R.string.pref_theme_mode_summary),
                 options = listOf(
-                    stringResource(R.string.pref_layout_mode_auto) to UserSettings.LayoutMode.AUTO,
-                    stringResource(R.string.pref_layout_mode_headunit) to UserSettings.LayoutMode.HEADUNIT
+                    stringResource(R.string.pref_theme_mode_system) to UserSettings.ThemeMode.SYSTEM,
+                    stringResource(R.string.pref_theme_mode_light) to UserSettings.ThemeMode.LIGHT,
+                    stringResource(R.string.pref_theme_mode_dark) to UserSettings.ThemeMode.DARK
                 ),
-                selectedOption = layoutMode,
-                onOptionSelected = { viewModel.setLayoutMode(it) }
+                selectedOption = themeMode,
+                onOptionSelected = { viewModel.setThemeMode(it) }
             )
-            HomeThemePreferences() // Fork (HW-65)
 
             // Audio Category
             PreferenceCategory(title = stringResource(R.string.pref_category_audio))
@@ -228,11 +292,7 @@ fun SettingsScreen(
                     summary = "",
                     enabled = !batteryOptExempt,
                     onClick = {
-                        val intent = Intent(
-                            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                        context.startActivity(intent)
+                        openBatteryOptimizationSettings(context)
                         // Refresh status when user returns
                         viewModel.refreshBatteryOptExempt()
                     }
@@ -334,22 +394,24 @@ fun SettingsScreen(
                 )
             }
 
-            TextPreference(
-                title = stringResource(R.string.pref_report_problem_title),
-                summary = stringResource(R.string.pref_report_problem_summary),
-                onClick = onReportProblem
-            )
+            if (canShare) {
+                TextPreference(
+                    title = stringResource(R.string.pref_report_problem_title),
+                    summary = stringResource(R.string.pref_report_problem_summary),
+                    onClick = onReportProblem
+                )
 
-            TextPreference(
-                title = stringResource(R.string.pref_export_logs_title),
-                summary = if (logFileStats.second > 0) {
-                    stringResource(R.string.pref_export_logs_summary)
-                } else {
-                    stringResource(R.string.pref_export_logs_summary_empty)
-                },
-                enabled = logFileStats.second > 0,
-                onClick = onExportLogs
-            )
+                TextPreference(
+                    title = stringResource(R.string.pref_export_logs_title),
+                    summary = if (logFileStats.second > 0) {
+                        stringResource(R.string.pref_export_logs_summary)
+                    } else {
+                        stringResource(R.string.pref_export_logs_summary_empty)
+                    },
+                    enabled = logFileStats.second > 0,
+                    onClick = onExportLogs
+                )
+            }
 
             TextPreference(
                 title = stringResource(R.string.pref_clear_logs_title),
@@ -421,6 +483,17 @@ fun SettingsScreen(
     }
 }
 
+/**
+ * The column the bar and the list keep to on a TV. A phone list stretched
+ * across 960dp puts its labels and switches at the edges of the screen,
+ * which a TV may cut off, and is hard to follow from across a room.
+ */
+private fun Modifier.tvColumn(): Modifier = this
+    .fillMaxWidth()
+    .padding(horizontal = TvOverscanHorizontal)
+    .wrapContentWidth()
+    .widthIn(max = 720.dp)
+
 // ============================================================================
 // Preference Components
 // ============================================================================
@@ -435,14 +508,21 @@ fun SettingsScreen(
  * readability win is not worth an unexplainable failure.
  *
  * Monospace so a user reading it aloud or retyping it can tell O from 0.
+ *
+ * On a TV there is nothing to copy it to, so the QR is how the token leaves
+ * the device: it is larger there, with no Copy button. It is also a focus
+ * stop, as nothing else near it takes focus and the D-pad would otherwise
+ * scroll past it without ever showing it whole.
  */
 @Composable
 private fun PairingTokenPreference(
     token: String?,
     modifier: Modifier = Modifier
 ) {
+    val isTv = LocalFormFactor.current == FormFactor.TV
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     val copiedMessage = stringResource(R.string.pairing_token_copied)
 
     Column(
@@ -474,11 +554,16 @@ private fun PairingTokenPreference(
 
         PairingQrImage(
             token = token,
-            modifier = Modifier.align(Alignment.CenterHorizontally)
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .then(if (isTv) Modifier.tvFocusable(shape = RectangleShape) else Modifier),
+            size = if (isTv) 300.dp else 220.dp
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = stringResource(R.string.pairing_token_qr_hint),
+            text = stringResource(
+                if (isTv) R.string.pairing_token_qr_hint_tv else R.string.pairing_token_qr_hint
+            ),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.align(Alignment.CenterHorizontally)
@@ -486,7 +571,7 @@ private fun PairingTokenPreference(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        SelectionContainer {
+        SelectionContainerOffTv {
             Text(
                 text = token,
                 style = MaterialTheme.typography.bodySmall,
@@ -508,15 +593,33 @@ private fun PairingTokenPreference(
             color = MaterialTheme.colorScheme.error
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
-        TextButton(
-            onClick = {
-                clipboard.setText(AnnotatedString(token))
-                Toast.makeText(context, copiedMessage, Toast.LENGTH_SHORT).show()
+        if (!isTv) {
+            Spacer(modifier = Modifier.height(8.dp))
+            TextButton(
+                onClick = {
+                    scope.launch {
+                        clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("plain text", token)))
+                        Toast.makeText(context, copiedMessage, Toast.LENGTH_SHORT).show()
+                    }
+                }
+            ) {
+                Text(stringResource(R.string.pairing_token_copy))
             }
-        ) {
-            Text(stringResource(R.string.pairing_token_copy))
         }
+    }
+}
+
+/**
+ * [content] in a SelectionContainer, except on a TV. Selecting text takes a
+ * pointer; with a remote the container is only a focus stop that shows
+ * nothing when focused.
+ */
+@Composable
+internal fun SelectionContainerOffTv(content: @Composable () -> Unit) {
+    if (LocalFormFactor.current == FormFactor.TV) {
+        content()
+    } else {
+        SelectionContainer(content = content)
     }
 }
 
@@ -638,6 +741,59 @@ private fun SyncOffsetPreference(
     onValueClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val value = if (offset >= 0) "+${offset}ms" else "${offset}ms"
+
+    // On a TV the -, value and + buttons sit at the right of the screen, where
+    // Down from the row above passes them by. There the row is one stop:
+    // Left and Right step the offset, and OK opens the dialog.
+    if (LocalFormFactor.current == FormFactor.TV) {
+        Row(
+            modifier = modifier
+                .fillMaxWidth()
+                .onKeyEvent { event ->
+                    if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                    when (event.key) {
+                        Key.DirectionLeft -> { onDecrease(); true }
+                        Key.DirectionRight -> { onIncrease(); true }
+                        else -> false
+                    }
+                }
+                .clickable(onClick = onValueClick)
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.pref_sync_offset_title),
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = stringResource(R.string.pref_sync_offset_summary),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = value,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        return
+    }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -678,7 +834,7 @@ private fun SyncOffsetPreference(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
         ) {
             Text(
-                text = if (offset >= 0) "+${offset}ms" else "${offset}ms",
+                text = value,
                 style = MaterialTheme.typography.bodyMedium
             )
         }
@@ -743,6 +899,9 @@ private fun <T> SegmentedButtonPreference(
 // Dialogs
 // ============================================================================
 
+// A dialog opens with nothing focused, which leaves a remote nothing to act
+// on: on a TV each one focuses its main control, or the safe one.
+
 @Composable
 private fun PlayerNameDialog(
     currentName: String,
@@ -755,16 +914,11 @@ private fun PlayerNameDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.pref_player_name_title)) },
         text = {
-            OutlinedTextField(
+            DialogTextField(
                 value = name,
                 onValueChange = { name = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text(stringResource(R.string.pref_player_name_title)) },
-                singleLine = true,
-                // Done does what OK does: with the keyboard up in landscape
-                // the dialog's buttons can be out of reach.
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { onConfirm(name) })
+                label = stringResource(R.string.pref_player_name_title),
+                onDone = { onConfirm(name) }
             )
         },
         confirmButton = {
@@ -792,17 +946,12 @@ private fun SyncOffsetDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.pref_sync_offset_dialog_title)) },
         text = {
-            OutlinedTextField(
+            DialogTextField(
                 value = offsetText,
                 onValueChange = { offsetText = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text(stringResource(R.string.pref_sync_offset_title)) },
-                singleLine = true,
-                suffix = { Text("ms") },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(
-                    onDone = { offsetText.toIntOrNull()?.let { onConfirm(it) } }
-                )
+                label = stringResource(R.string.pref_sync_offset_title),
+                onDone = { offsetText.toIntOrNull()?.let { onConfirm(it) } },
+                suffix = { Text("ms") }
             )
         },
         confirmButton = {
@@ -822,17 +971,58 @@ private fun SyncOffsetDialog(
     )
 }
 
+/**
+ * The text field of the player name and sync offset dialogs, and on a TV the
+ * dialog's initial focus. Done does what the dialog's OK does: with the
+ * keyboard up in landscape the dialog's buttons can be out of reach.
+ *
+ * On a TV the keyboard waits for OK on the field ([TvKeyboardGate]), or it
+ * would cover the dialog's OK and Cancel as soon as the dialog opens.
+ */
+@Composable
+private fun DialogTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    onDone: () -> Unit,
+    suffix: @Composable (() -> Unit)? = null
+) {
+    val keyboardGate = rememberTvKeyboardGate()
+    val focusRequester = remember { FocusRequester() }
+
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester)
+            .then(keyboardGate.modifier),
+        label = { Text(label) },
+        suffix = suffix,
+        readOnly = keyboardGate.readOnly,
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { onDone() })
+    )
+    // After the field: focused before it has finished setting up, the field
+    // would open the keyboard, read-only or not.
+    TvInitialFocus(focusRequester)
+}
+
 @Composable
 private fun RestartAppDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val initialFocus = remember { FocusRequester() }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.pref_low_memory_restart_title)) },
         text = { Text(stringResource(R.string.pref_low_memory_restart_message)) },
         confirmButton = {
-            Button(onClick = onConfirm) {
+            TvInitialFocus(initialFocus)
+            Button(onClick = onConfirm, modifier = Modifier.focusRequester(initialFocus)) {
                 Text(stringResource(R.string.pref_low_memory_restart_now))
             }
         },
@@ -858,24 +1048,40 @@ private fun CodecSelectionDialog(
         "pcm" to "PCM"
     )
     val unavailableHint = stringResource(R.string.pref_codec_unavailable_hint)
+    // The selected codec, unless this device cannot play it: its row then
+    // cannot take focus, so the first one it can play does.
+    val focusedCodec = currentCodec.takeIf { it in supportedCodecs } ?: supportedCodecs.first()
+    val initialFocus = remember { FocusRequester() }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
+            TvInitialFocus(initialFocus)
             Column {
                 codecs.forEach { (value, label) ->
                     val supported = value in supportedCodecs
+                    // The row is the one control: a RadioButton with its own
+                    // onClick would be a second focus stop for the same choice.
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable(enabled = supported) { onSelect(value) }
+                            .then(
+                                if (value == focusedCodec) Modifier.focusRequester(initialFocus)
+                                else Modifier
+                            )
+                            .selectable(
+                                selected = currentCodec == value,
+                                enabled = supported,
+                                role = Role.RadioButton,
+                                onClick = { onSelect(value) }
+                            )
                             .padding(vertical = 12.dp, horizontal = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
                             selected = currentCodec == value,
-                            onClick = if (supported) { { onSelect(value) } } else null,
+                            onClick = null,
                             enabled = supported
                         )
                         Spacer(modifier = Modifier.width(8.dp))
@@ -912,6 +1118,29 @@ private fun CodecSelectionDialog(
 // ============================================================================
 // Utility
 // ============================================================================
+
+/**
+ * Asks to exempt the app from battery optimization. Some devices, TVs among
+ * them, have no screen for that request; the list of exemptions is the next
+ * best place, and with neither there is nothing to open.
+ */
+private fun openBatteryOptimizationSettings(context: Context) {
+    val request = Intent(
+        android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+        Uri.parse("package:${context.packageName}")
+    )
+    try {
+        context.startActivity(request)
+    } catch (_: ActivityNotFoundException) {
+        try {
+            context.startActivity(
+                Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            )
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(context, R.string.pref_battery_opt_unavailable, Toast.LENGTH_SHORT).show()
+        }
+    }
+}
 
 private fun getCodecDisplayName(codec: String): String {
     return when (codec.lowercase()) {

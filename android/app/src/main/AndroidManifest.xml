@@ -71,6 +71,16 @@
          Note: Only active when user enables "Auto-start on boot" in settings -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Package visibility: lets Settings see which apps take a text share.
+         On a TV the only one may be a stub, and then Report a problem and
+         Export Debug Logs are hidden. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
+    </queries>
+
     <!--
         Application Configuration:
         - allowBackup: Enable automatic backup to Google Drive (default: true)
@@ -217,7 +227,7 @@
             BootReceiver: Auto-start PlaybackService on device boot
             - Only active when user enables "Auto-start on boot" in settings
             - Connects to the configured default server without launching UI
-            - Handles BOOT_COMPLETED (standard) and QUICKBOOT_POWERON (HTC/some OEMs)
+            - Handles BOOT_COMPLETED only, which only the system can send
             - Also MY_PACKAGE_REPLACED: an in-place update kills the running service
         -->
         <receiver
@@ -225,7 +235,6 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>

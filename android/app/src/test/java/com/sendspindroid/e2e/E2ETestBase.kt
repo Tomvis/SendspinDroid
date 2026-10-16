@@ -75,7 +75,7 @@ abstract class E2ETestBase {
 
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin("E2ETestDevice", mockCallback)
+        client = SendSpin("E2ETestDevice", mockCallback, com.sendspindroid.AppSendSpinHost)
 
         // Create fake transport and server
         fakeTransport = FakeTransport()

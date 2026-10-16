@@ -23,6 +23,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
+import com.sendspindroid.ui.adaptive.AdaptiveDefaults
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.main.ReconnectingState
 import com.sendspindroid.ui.theme.SendSpinTheme
 
@@ -35,6 +38,16 @@ fun ReconnectingBanner(
     state: ReconnectingState,
     modifier: Modifier = Modifier
 ) {
+    // A TV is read from across the room
+    val formFactor = LocalFormFactor.current
+    val isTv = formFactor == FormFactor.TV
+    val textStyle = if (isTv) {
+        val size = AdaptiveDefaults.bodyTextSize(formFactor)
+        MaterialTheme.typography.bodyMedium.copy(fontSize = size, lineHeight = size * 1.2f)
+    } else {
+        MaterialTheme.typography.bodyMedium
+    }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -48,7 +61,7 @@ fun ReconnectingBanner(
         verticalAlignment = Alignment.CenterVertically
     ) {
         CircularProgressIndicator(
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(if (isTv) 20.dp else 16.dp),
             strokeWidth = 2.dp,
             color = MaterialTheme.colorScheme.onTertiaryContainer
         )
@@ -57,7 +70,7 @@ fun ReconnectingBanner(
 
         Text(
             text = stringResource(R.string.reconnecting_attempt, state.serverName, state.attempt),
-            style = MaterialTheme.typography.bodyMedium,
+            style = textStyle,
             color = MaterialTheme.colorScheme.onTertiaryContainer
         )
     }

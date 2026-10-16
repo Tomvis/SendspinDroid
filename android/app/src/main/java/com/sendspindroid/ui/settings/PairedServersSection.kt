@@ -1,5 +1,6 @@
 package com.sendspindroid.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -7,18 +8,21 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -27,6 +31,9 @@ import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
 import com.sendspindroid.sendspin.pairing.PairedServer
 import com.sendspindroid.sendspin.pairing.PairingOutcome
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.TvInitialFocus
 
 /**
  * The device's `client_id`, next to the token it belongs with.
@@ -53,7 +60,7 @@ internal fun PairingClientId(clientId: String, modifier: Modifier = Modifier) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(modifier = Modifier.height(8.dp))
-        SelectionContainer {
+        SelectionContainerOffTv {
             Text(
                 text = clientId,
                 style = MaterialTheme.typography.bodySmall,
@@ -70,16 +77,26 @@ internal fun PairingClientId(clientId: String, modifier: Modifier = Modifier) {
  * record, so there is nothing to tell apart with a badge. The rows show who
  * the server is and never the key.
  *
+ * On a TV each row is one focus stop whose OK asks to forget it: a Forget
+ * button at the right of the row is hard to reach with the D-pad.
+ *
  * @param onForget called once the user has confirmed.
+ * @param afterListFocusRequester on a TV, takes focus when the last row is
+ *   forgotten. A forgotten row is removed while it has focus, which would
+ *   leave nothing focused; the next row takes focus, or failing that this.
  */
 @Composable
 internal fun PairedServersSection(
     servers: List<PairedServer>,
     lastOutcome: PairingOutcome?,
     onForget: (PairedServer) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    afterListFocusRequester: FocusRequester? = null
 ) {
+    val isTv = LocalFormFactor.current == FormFactor.TV
     var forgetting by remember { mutableStateOf<PairedServer?>(null) }
+    val rowFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
+    var refocus by remember { mutableStateOf<FocusRequester?>(null) }
 
     Column(modifier = modifier.fillMaxWidth()) {
         if (lastOutcome != null) {
@@ -115,11 +132,20 @@ internal fun PairedServersSection(
             )
         }
         servers.forEach { server ->
-            PairedServerRow(server = server, onForgetClick = { forgetting = server })
+            key(server.pskId) {
+                PairedServerRow(
+                    server = server,
+                    onForgetClick = { forgetting = server },
+                    modifier = Modifier.focusRequester(
+                        rowFocusRequesters.getOrPut(server.pskId) { FocusRequester() }
+                    )
+                )
+            }
         }
     }
 
     forgetting?.let { server ->
+        val cancelFocus = remember { FocusRequester() }
         AlertDialog(
             onDismissRequest = { forgetting = null },
             title = { Text(stringResource(R.string.paired_server_forget_title, server.label())) },
@@ -127,17 +153,33 @@ internal fun PairedServersSection(
             confirmButton = {
                 TextButton(onClick = {
                     forgetting = null
+                    if (isTv) {
+                        val next = servers.getOrNull(servers.indexOf(server) + 1)
+                        refocus = next?.let { rowFocusRequesters[it.pskId] } ?: afterListFocusRequester
+                    }
                     onForget(server)
                 }) {
                     Text(stringResource(R.string.paired_server_forget))
                 }
             },
             dismissButton = {
-                TextButton(onClick = { forgetting = null }) {
+                // Forgetting cannot be undone, so on a TV the dialog opens on Cancel.
+                TvInitialFocus(cancelFocus)
+                TextButton(
+                    onClick = { forgetting = null },
+                    modifier = Modifier.focusRequester(cancelFocus)
+                ) {
                     Text(stringResource(android.R.string.cancel))
                 }
             }
         )
+    }
+
+    refocus?.let { requester ->
+        LaunchedEffect(requester) {
+            requester.requestFocus()
+            refocus = null
+        }
     }
 }
 
@@ -152,9 +194,11 @@ private fun PairedServerRow(
     onForgetClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val isTv = LocalFormFactor.current == FormFactor.TV
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .then(if (isTv) Modifier.clickable(onClick = onForgetClick) else Modifier)
             .padding(start = 16.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -180,8 +224,18 @@ private fun PairedServerRow(
             }
         }
         Spacer(modifier = Modifier.width(8.dp))
-        TextButton(onClick = onForgetClick) {
-            Text(stringResource(R.string.paired_server_forget))
+        if (isTv) {
+            // The row is the control; this only says what OK on it does.
+            Text(
+                text = stringResource(R.string.paired_server_forget),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 12.dp)
+            )
+        } else {
+            TextButton(onClick = onForgetClick) {
+                Text(stringResource(R.string.paired_server_forget))
+            }
         }
     }
 }

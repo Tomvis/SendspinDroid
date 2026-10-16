@@ -20,6 +20,7 @@ import com.sendspindroid.ui.stats.StatsViewModel
 import com.sendspindroid.ui.theme.SendSpinTheme
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.sendspindroid.ui.adaptive.ProvideTvFormFactor
 
 /**
  * Stats for Nerds - Bottom Sheet showing real-time audio synchronization diagnostics.
@@ -59,14 +60,16 @@ class StatsBottomSheet : BottomSheetDialogFragment() {
                 val statsState by viewModel.statsState.collectAsStateWithLifecycle()
 
                 SendSpinTheme {
-                    // Surface sets LocalContentColor so all child Text composables
-                    // inherit the correct theme-aware text color
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        color = MaterialTheme.colorScheme.surface,
-                        contentColor = MaterialTheme.colorScheme.onSurface
-                    ) {
-                        StatsContent(state = statsState)
+                    ProvideTvFormFactor {
+                        // Surface sets LocalContentColor so all child Text composables
+                        // inherit the correct theme-aware text color
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.surface,
+                            contentColor = MaterialTheme.colorScheme.onSurface
+                        ) {
+                            StatsContent(state = statsState)
+                        }
                     }
                 }
             }

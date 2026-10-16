@@ -4,19 +4,15 @@ import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
+import android.content.DialogInterface
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import androidx.preference.PreferenceManager
-import android.database.ContentObserver
-import android.media.AudioManager
-import android.provider.Settings
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import com.sendspindroid.diagnostics.DiagnosticsExport
@@ -28,6 +24,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.FrameLayout
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -36,6 +33,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
@@ -43,11 +41,14 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import com.sendspindroid.discovery.DiscoveryGate
 import com.sendspindroid.discovery.NsdDiscoveryManager
 import com.sendspindroid.coordinator.ConnectionCoordinator
+import com.sendspindroid.ui.settings.SettingsViewModel
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filterNotNull
 import com.sendspindroid.coordinator.ReconnectStatus
@@ -57,6 +58,7 @@ import com.sendspindroid.sendspin.pairing.PairedServers
 import com.sendspindroid.sendspin.protocol.AdmissionState
 import com.sendspindroid.ui.settings.message
 import com.sendspindroid.model.UnifiedServer
+import com.sendspindroid.model.trackPositionMs
 import com.sendspindroid.network.ConnectionSelector
 import com.sendspindroid.network.DefaultServerPinger
 import com.sendspindroid.ui.server.AddServerWizardActivity
@@ -77,18 +79,19 @@ import com.sendspindroid.ui.main.nowPlayingArtworkSource
 import com.sendspindroid.ui.main.nowPlayingArtworkUrl
 import com.sendspindroid.ui.main.ServerListScreen
 import com.sendspindroid.ui.main.components.ConnectionModeState
+import com.sendspindroid.ui.main.components.SEEK_STEP_MS
 import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import com.sendspindroid.ui.AppShell
 import com.sendspindroid.ui.adaptive.FormFactor
-import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.ProvideFormFactor
 import com.sendspindroid.ui.adaptive.determineFormFactor
 import com.sendspindroid.ui.adaptive.isTvDevice
 import com.sendspindroid.ui.theme.SendSpinTheme
@@ -122,8 +125,10 @@ class MainActivity : AppCompatActivity() {
     // Connection state machine - starts with ServerList (shows immediately on startup)
     private var connectionState: AppConnectionState = AppConnectionState.ServerList
 
-    // Track the currently connected server ID for editing
-    private var currentConnectedServerId: String? = null
+    // Track the currently connected server ID for editing: null while not
+    // connected, or connected to a server that dialled in. Compose state, so
+    // the TV menu offers Edit Server only while there is a saved server to edit.
+    private var currentConnectedServerId: String? by mutableStateOf(null)
 
     // NsdManager-based discovery (Android native - more reliable than Go's hashicorp/mdns)
     private var discoveryManager: NsdDiscoveryManager? = null
@@ -132,9 +137,6 @@ class MainActivity : AppCompatActivity() {
     // Provides playback control and state observation
     private var mediaControllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
-
-    // Handler for UI operations
-    private val handler = Handler(Looper.getMainLooper())
 
     // User manually disconnected flag - when true, blocks auto-connect to default server
     // Set when user taps "Switch Server" or manually selects a different server while connected
@@ -149,12 +151,6 @@ class MainActivity : AppCompatActivity() {
 
     // Charging state receiver for adaptive ping intervals
     private var chargingReceiver: BroadcastReceiver? = null
-
-    // Volume control - uses device STREAM_MUSIC (Spotify-style)
-    private val audioManager by lazy {
-        getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    }
-    private var volumeObserver: ContentObserver? = null
 
     // Android TV detection - used for D-pad navigation and remote control handling
     private val isTvDevice: Boolean by lazy {
@@ -334,6 +330,11 @@ class MainActivity : AppCompatActivity() {
         if (isFinishing || isDestroyed) {
             return
         }
+        // On a TV the banner over Now Playing says it already, and an
+        // indefinite snackbar would sit over the transport controls.
+        if (isTvDevice) {
+            return
+        }
 
         // Dismiss any existing reconnecting snackbar
         reconnectingSnackbar?.dismiss()
@@ -390,7 +391,10 @@ class MainActivity : AppCompatActivity() {
         // showSearchingView() which starts auto-discovery
         initializeDiscoveryManager()
         initializeDefaultServerPinger()
-        initializeMediaController()
+        // The controller binds PlaybackService, which advertises the player
+        // as soon as it is created: on the first run the user names it in
+        // the welcome first, and Continue builds the controller.
+        if (prefs.getBoolean(PREF_ONBOARDING_SHOWN, false)) initializeMediaController()
         setupUI()
 
         // Install the Compose shell as the content view
@@ -427,22 +431,66 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Shows the onboarding dialog if this is the user's first launch.
-     * Uses SharedPreferences to track if the dialog has been shown.
+     * Shows the welcome dialog if this is the user's first launch, with the
+     * player's name to change before any server can see it. Continue builds
+     * the MediaController, and so starts PlaybackService.
      */
     private fun showOnboardingIfNeeded() {
-        if (!prefs.getBoolean(PREF_ONBOARDING_SHOWN, false)) {
-            MaterialAlertDialogBuilder(this)
-                .setTitle(R.string.onboarding_title)
-                .setMessage(R.string.onboarding_message)
-                .setPositiveButton(R.string.onboarding_got_it) { dialog, _ ->
-                    // Mark onboarding as shown
-                    prefs.edit().putBoolean(PREF_ONBOARDING_SHOWN, true).apply()
-                    dialog.dismiss()
-                }
-                .setCancelable(false)
-                .show()
+        if (prefs.getBoolean(PREF_ONBOARDING_SHOWN, false)) return
+        val nameLayout = TextInputLayout(
+            this, null, com.google.android.material.R.attr.textInputOutlinedStyle
+        ).apply {
+            hint = getString(R.string.pref_player_name_title)
         }
+        // Made with the layout's context, which carries the outlined style's
+        // theme overlay: with the activity's, the field keeps an underline.
+        val nameField = TextInputEditText(nameLayout.context).apply {
+            setText(UserSettings.getPlayerName())
+            isSingleLine = true
+            imeOptions = EditorInfo.IME_ACTION_DONE
+        }
+        nameLayout.addView(nameField)
+        // A dialog's custom view gets no inset of its own: line it up with
+        // the message.
+        val inset = (24 * resources.displayMetrics.density).toInt()
+        val content = FrameLayout(this).apply {
+            setPadding(inset, 0, inset, 0)
+            addView(nameLayout)
+        }
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.onboarding_title)
+            .setMessage(R.string.onboarding_message)
+            .setView(content)
+            .setPositiveButton(R.string.onboarding_continue) { _, _ ->
+                onWelcomeConfirmed(nameField.text.toString())
+            }
+            .setCancelable(false)
+            .show()
+        // On a TV the field would take focus and open the keyboard over the
+        // dialog. Continue takes it, as a phone shows the dialog: OK keeps
+        // the name, and Up then OK on the field changes it.
+        dialog.focusButtonOnTv(DialogInterface.BUTTON_POSITIVE)
+        // Done does what Continue does: with the keyboard up in landscape the
+        // dialog's buttons can be out of reach.
+        nameField.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId != EditorInfo.IME_ACTION_DONE) return@setOnEditorActionListener false
+            dialog.getButton(DialogInterface.BUTTON_POSITIVE).performClick()
+            true
+        }
+    }
+
+    /** The user named the player and pressed Continue. */
+    private fun onWelcomeConfirmed(name: String) {
+        // Continue pressed twice (a remote's OK, Done and a tap) is queued
+        // twice: a second controller would replace the one being connected.
+        if (prefs.getBoolean(PREF_ONBOARDING_SHOWN, false)) return
+        UserSettings.setPlayerName(name)
+        prefs.edit().putBoolean(PREF_ONBOARDING_SHOWN, true).apply()
+        // A service Android Auto started already advertises: it takes the
+        // name the way it takes a rename in Settings.
+        LocalBroadcastManager.getInstance(this)
+            .sendBroadcast(Intent(SettingsViewModel.ACTION_PLAYER_NAME_CHANGED))
+        initializeMediaController()
     }
 
     /**
@@ -526,10 +574,6 @@ class MainActivity : AppCompatActivity() {
         // and network-loss snackbars (replaces the deleted ConnectivityManager.NetworkCallback).
         observeNetworkState()
 
-        // Volume slider - controls device STREAM_MUSIC (Spotify-style)
-        // Initialize slider to current device volume
-        syncSliderWithDeviceVolume()
-
         // Start with server list view and begin discovery in background
         showServerListView()
     }
@@ -596,13 +640,18 @@ class MainActivity : AppCompatActivity() {
                         .unregisterOnSharedPreferenceChangeListener(listener)
                 }
             }
-            val formFactor = when (layoutModeState.value) {
-                UserSettings.LayoutMode.HEADUNIT -> FormFactor.HEADUNIT
-                UserSettings.LayoutMode.AUTO -> detectedFormFactor
+            // A TV is driven by a remote, which the head-unit touch layout
+            // cannot be used with: the override does not apply there.
+            val formFactor = when {
+                detectedFormFactor == FormFactor.TV -> FormFactor.TV
+                layoutModeState.value == UserSettings.LayoutMode.HEADUNIT -> FormFactor.HEADUNIT
+                else -> detectedFormFactor
             }
 
+            val savedServers by UnifiedServerRepository.savedServers.collectAsStateWithLifecycle()
+
             SendSpinTheme {
-                CompositionLocalProvider(LocalFormFactor provides formFactor) {
+                ProvideFormFactor(formFactor) {
                     AppShell(
                         viewModel = viewModel,
                         serverListContent = {
@@ -655,7 +704,11 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         },
-                        onExitAppClick = { onExitAppClicked() }
+                        onExitAppClick = { onExitAppClicked() },
+                        canEditServer = savedServers.any { it.id == currentConnectedServerId },
+                        // As Android 12 and later do for the launcher's activity: the
+                        // app keeps its state and keeps playing.
+                        onLeaveApp = { moveTaskToBack(true) }
                     )
                 }
             }
@@ -705,14 +758,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        registerVolumeObserver()
         // Notify pinger of foreground state for adaptive intervals
         defaultServerPinger?.onForegroundChanged(true)
     }
 
     override fun onStop() {
         super.onStop()
-        unregisterVolumeObserver()
         // Notify pinger of background state for adaptive intervals
         defaultServerPinger?.onForegroundChanged(false)
     }
@@ -732,8 +783,8 @@ class MainActivity : AppCompatActivity() {
         updateKeepScreenOn(mediaController?.isPlaying == true)
         // Re-sync UI state with MediaController
         syncUIWithPlayerState()
-        // Re-sync volume slider with device volume (may have changed while in background)
-        syncSliderWithDeviceVolume()
+        // Re-sync volume slider with the service's volume
+        syncSliderWithServiceVolume()
     }
 
     /**
@@ -928,8 +979,8 @@ class MainActivity : AppCompatActivity() {
         discoveryManager?.stopDiscovery()
         defaultServerPinger?.stop()
 
-        // Sync volume slider with current device volume
-        syncSliderWithDeviceVolume()
+        // Sync volume slider with the service's volume
+        syncSliderWithServiceVolume()
     }
 
     /**
@@ -1276,7 +1327,10 @@ class MainActivity : AppCompatActivity() {
                     is AppConnectionState.Reconnecting -> currentState.serverAddress
                     // A server connected to us: there is no saved server
                     // behind the connection.
-                    is AppConnectionState.ServerList -> ""
+                    is AppConnectionState.ServerList -> {
+                        currentConnectedServerId = null
+                        ""
+                    }
                     else -> {
                         Log.w(TAG, "STATE_CONNECTED received in unexpected state: $currentState, using serverId fallback")
                         currentConnectedServerId ?: ""
@@ -1335,6 +1389,7 @@ class MainActivity : AppCompatActivity() {
                 Log.d(TAG, "Disconnected from server")
 
                 connectionState = AppConnectionState.ServerList
+                currentConnectedServerId = null
                 // Sync state to ViewModel for Compose UI
                 viewModel.updateConnectionState(connectionState)
                 viewModel.resetPlaybackState()
@@ -1347,6 +1402,7 @@ class MainActivity : AppCompatActivity() {
                 Log.e(TAG, "Connection error: $errorMessage")
 
                 connectionState = AppConnectionState.Error(errorMessage)
+                currentConnectedServerId = null
                 // Sync state to ViewModel for Compose UI
                 viewModel.updateConnectionState(connectionState)
                 showServerListView()
@@ -1680,6 +1736,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     .setNegativeButton(android.R.string.cancel, null)
                     .show()
+                    .focusButtonOnTv(DialogInterface.BUTTON_NEGATIVE)
             }
         }
 
@@ -1749,6 +1806,22 @@ class MainActivity : AppCompatActivity() {
     private fun onSeekRequested(positionMs: Long) {
         Log.d(TAG, "Seek requested: $positionMs ms")
         mediaController?.seekTo(positionMs)
+    }
+
+    /**
+     * Seeks [deltaMs] from the position Now Playing shows, for the remote's
+     * fast-forward and rewind keys.
+     */
+    private fun seekBy(deltaMs: Long) {
+        val durationMs = viewModel.durationMs.value
+        if (durationMs <= 0) return
+        val shownMs = trackPositionMs(
+            anchorPositionMs = viewModel.positionMs.value,
+            elapsedMs = SystemClock.elapsedRealtime() - viewModel.positionUpdatedAt.value,
+            playbackSpeed = viewModel.playbackSpeed.value,
+            durationMs = durationMs
+        )
+        onSeekRequested((shownMs + deltaMs).coerceIn(0L, durationMs))
     }
 
     /**
@@ -1826,6 +1899,7 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton(R.string.disconnect_dialog_negative, null)
             .show()
+            .focusButtonOnTv(DialogInterface.BUTTON_NEGATIVE)
     }
 
     /**
@@ -1871,6 +1945,16 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton(R.string.disconnect_dialog_negative, null)
             .show()
+            .focusButtonOnTv(DialogInterface.BUTTON_NEGATIVE)
+    }
+
+    /**
+     * On a TV, starts a dialog with focus on one of its buttons, [which]: a
+     * confirmation on Cancel. Without it a dialog focuses its message, which
+     * shows nothing, so the first press of OK seems to do nothing.
+     */
+    private fun androidx.appcompat.app.AlertDialog.focusButtonOnTv(which: Int) {
+        if (isTvDevice) getButton(which)?.requestFocus()
     }
 
     /**
@@ -1880,10 +1964,10 @@ class MainActivity : AppCompatActivity() {
     private fun performExitApp() {
         Log.d(TAG, "Performing app exit")
 
-        // Disconnect from server if connected
+        // Disconnect, and stop waiting for a server, so the service can stop
         try {
             mediaController?.let { controller ->
-                val command = SessionCommand(PlaybackService.COMMAND_DISCONNECT, Bundle.EMPTY)
+                val command = SessionCommand(PlaybackService.COMMAND_EXIT, Bundle.EMPTY)
                 controller.sendCustomCommand(command, Bundle.EMPTY)
             }
         } catch (e: Exception) {
@@ -1900,20 +1984,15 @@ class MainActivity : AppCompatActivity() {
     /**
      * Handles volume slider changes.
      *
-     * Sets device STREAM_MUSIC volume directly (Spotify-style) AND syncs to server
-     * via PlaybackService custom command for multi-client coordination.
+     * Sends the volume to PlaybackService, which owns the device STREAM_MUSIC
+     * index: it picks the index and the track gain for the volume and reports
+     * it to the server.
      *
      * @param volume Normalized volume from 0.0 to 1.0
      */
     private fun onVolumeChanged(volume: Float) {
         Log.d(TAG, "Volume changed: $volume")
 
-        // Set device volume directly (Spotify-style)
-        val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val newVolume = (volume * maxVolume).roundToInt().coerceIn(0, maxVolume)
-        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
-
-        // Also notify PlaybackService to sync to server (for multi-client coordination)
         val controller = mediaController ?: return
         val args = Bundle().apply {
             putFloat(PlaybackService.ARG_VOLUME, volume)
@@ -1923,52 +2002,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Syncs the volume slider with the current device STREAM_MUSIC volume.
-     * Called on startup and when returning from background.
+     * Syncs the volume slider with the volume PlaybackService publishes.
+     * The device index is not a volume on its own (the service adds track
+     * gain to it), and a hardware-key change reaches the slider through the
+     * service's session extras.
      */
-    private fun syncSliderWithDeviceVolume() {
-        val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-        val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        // Whole percent, truncated
-        val sliderValue = ((currentVolume.toFloat() / maxVolume) * 100).toInt().toFloat()
-
-        // Sync Compose UI (now playing Compose slider)
-        viewModel.updateVolume(sliderValue / 100f)
-
-        Log.d(TAG, "Synced slider with device volume: $currentVolume/$maxVolume ($sliderValue%)")
-    }
-
-    /**
-     * Registers a ContentObserver to detect device volume changes from hardware buttons.
-     * This keeps the UI slider in sync when user presses hardware volume buttons.
-     */
-    private fun registerVolumeObserver() {
-        if (volumeObserver != null) return  // Already registered
-
-        volumeObserver = object : ContentObserver(handler) {
-            override fun onChange(selfChange: Boolean) {
-                // Sync slider to device volume when hardware buttons are pressed
-                syncSliderWithDeviceVolume()
-            }
-        }
-
-        contentResolver.registerContentObserver(
-            Settings.System.CONTENT_URI,
-            true,
-            volumeObserver!!
-        )
-        Log.d(TAG, "Volume observer registered")
-    }
-
-    /**
-     * Unregisters the volume ContentObserver.
-     */
-    private fun unregisterVolumeObserver() {
-        volumeObserver?.let {
-            contentResolver.unregisterContentObserver(it)
-            volumeObserver = null
-            Log.d(TAG, "Volume observer unregistered")
-        }
+    private fun syncSliderWithServiceVolume() {
+        val volume = mediaController?.sessionExtras?.getInt(PlaybackService.EXTRA_VOLUME, -1) ?: -1
+        if (volume in 0..100) viewModel.updateVolume(volume / 100f)
     }
 
     /**
@@ -2035,10 +2076,6 @@ class MainActivity : AppCompatActivity() {
      * Order matters: Release MediaController before cleaning up other resources
      */
     override fun onDestroy() {
-        // Fork: cancel pending callbacks BEFORE super.onDestroy() so messages
-        // dispatched mid-teardown don't target a half-destroyed activity.
-        handler.removeCallbacksAndMessages(null)
-
         // Release MediaController connection to service
         mediaControllerFuture?.let {
             MediaController.releaseFuture(it)
@@ -2073,39 +2110,77 @@ class MainActivity : AppCompatActivity() {
      * Handles key events from TV remotes and D-pad controllers.
      *
      * Media keys (play/pause, next, previous) are handled when connected to a server.
-     * On TV devices, volume up/down keys adjust the app volume slider instead of
-     * system volume, providing a more intuitive experience.
+     * On TV devices, fast-forward and rewind seek when the server offers it, and
+     * volume up/down keys adjust the app volume slider instead of system volume,
+     * providing a more intuitive experience.
      */
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // Holding a key repeats it, and each repeat would be another command
+        // to the server: only the first press of a transport key acts. The
+        // repeats are still consumed, so nothing else acts on them either.
+        val firstPress = (event?.repeatCount ?: 0) == 0
+
         // Handle media keys when connected to a server
         when (keyCode) {
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
                 if (connectionState is AppConnectionState.Connected) {
-                    onPlayPauseClicked()
+                    if (firstPress) onPlayPauseClicked()
                     return true
                 }
             }
+            // PLAY and PAUSE are not toggles: a CEC remote sends PLAY for its
+            // Play button while the music plays, too. playWhenReady rather than
+            // isPlaying, so a pause also stops a stream that is still starting.
             KeyEvent.KEYCODE_MEDIA_PLAY -> {
                 if (connectionState is AppConnectionState.Connected) {
-                    onPlayPauseClicked()
+                    val controller = mediaController
+                    if (firstPress && controller != null && !controller.playWhenReady) {
+                        Log.d(TAG, "Play key")
+                        controller.play()
+                    }
                     return true
                 }
             }
             KeyEvent.KEYCODE_MEDIA_PAUSE -> {
                 if (connectionState is AppConnectionState.Connected) {
-                    onPlayPauseClicked()
+                    val controller = mediaController
+                    if (firstPress && controller != null && controller.playWhenReady) {
+                        Log.d(TAG, "Pause key")
+                        controller.pause()
+                    }
                     return true
                 }
             }
             KeyEvent.KEYCODE_MEDIA_NEXT -> {
                 if (connectionState is AppConnectionState.Connected) {
-                    onNextClicked()
+                    if (firstPress) onNextClicked()
                     return true
                 }
             }
             KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
                 if (connectionState is AppConnectionState.Connected) {
-                    onPreviousClicked()
+                    if (firstPress) onPreviousClicked()
+                    return true
+                }
+            }
+            // A relative seek where the server offers one: it moves from the
+            // server's own position, so presses quicker than its answer add up,
+            // and it works on a stream with no absolute seek. Otherwise from
+            // the position shown.
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                val forward = keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
+                val controller = mediaController
+                val relative = controller?.isCommandAvailable(
+                    if (forward) Player.COMMAND_SEEK_FORWARD else Player.COMMAND_SEEK_BACK
+                ) == true
+                if (isTvDevice && connectionState is AppConnectionState.Connected && (relative || viewModel.seekable.value)) {
+                    if (firstPress) {
+                        when {
+                            relative && forward -> controller?.seekForward()
+                            relative -> controller?.seekBack()
+                            else -> seekBy(if (forward) SEEK_STEP_MS else -SEEK_STEP_MS)
+                        }
+                    }
                     return true
                 }
             }

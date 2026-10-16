@@ -3,7 +3,6 @@ package com.sendspindroid.logging
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -41,6 +40,10 @@ internal class LogcatBridge(
 
     fun stop() {
         synchronized(stateLock) {
+            // Cancelled before the process goes, so the reader takes the end of
+            // its input for this stop and not for logcat dying.
+            readerJob?.cancel()
+            stderrJob?.cancel()
             try {
                 process?.destroy()
             } catch (_: Exception) { /* best-effort */ }
@@ -48,8 +51,8 @@ internal class LogcatBridge(
             // Join briefly; avoid deadlocking the main thread if caller runs on it.
             runBlocking {
                 try {
-                    readerJob?.cancelAndJoin()
-                    stderrJob?.cancelAndJoin()
+                    readerJob?.join()
+                    stderrJob?.join()
                 } catch (_: Exception) { /* ignore */ }
             }
             readerJob = null

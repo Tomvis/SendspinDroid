@@ -27,13 +27,20 @@ class AdmissionNoticeTest {
 
     private val failure = "Pairing with Kitchen timed out."
 
-    private fun show(state: AdmissionState, lastFailure: String?) {
+    private fun show(
+        state: AdmissionState,
+        lastFailure: String?,
+        pairingCode: String? = null,
+        gestureRequested: Boolean = false,
+    ) {
         composeTestRule.setContent {
             SendSpinTheme {
                 AdmissionNotice(
                     state = state,
                     serverName = "Kitchen",
                     onOpenPairingClick = {},
+                    pairingCode = pairingCode,
+                    gestureRequested = gestureRequested,
                     lastFailure = lastFailure
                 )
             }
@@ -63,5 +70,23 @@ class AdmissionNoticeTest {
 
         composeTestRule.onNodeWithText(failure).assertIsDisplayed()
         composeTestRule.onNodeWithText("Waiting for approval").assertIsDisplayed()
+    }
+
+    @Test
+    fun aNewAttemptsCodeIsNotShownUnderTheLastOnesFailure() {
+        // "Start pairing again on the server" over a code the server is
+        // waiting for would send the user to restart an attempt in progress.
+        show(AdmissionState.PAIRING, failure, pairingCode = "123456")
+
+        composeTestRule.onNodeWithText("Enter this code on the server").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText(failure).assertCountEquals(0)
+    }
+
+    @Test
+    fun aNewAttemptsGesturePromptIsNotShownUnderTheLastOnesFailure() {
+        show(AdmissionState.PAIRING, failure, gestureRequested = true)
+
+        composeTestRule.onAllNodesWithText("Allow pairing").assertCountEquals(2)
+        composeTestRule.onAllNodesWithText(failure).assertCountEquals(0)
     }
 }

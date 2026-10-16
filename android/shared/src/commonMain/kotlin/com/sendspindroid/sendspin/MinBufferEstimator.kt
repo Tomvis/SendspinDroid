@@ -7,20 +7,24 @@ import com.sendspindroid.sendspin.protocol.SendSpinProtocol
  * (roles/player/v1.md, "Measuring timing parameters").
  *
  * A chunk's delay is its arrival time minus the local time at which the
- * server sent it. The value reported is the floor plus the worst delay seen
- * in the last five minutes, in steps of [STEP_MS]: "the upper tail of the
- * distribution, measured over a window long enough to include intermittent
- * interference".
+ * server sent it. The value reported is the floor plus the worst delay that
+ * came back in at least two of the ten-second slots of the last five
+ * minutes, in steps of [STEP_MS]: "the upper tail of the distribution,
+ * measured over a window long enough to include intermittent interference".
+ * One late chunk on its own is the "transient fluctuation" the spec asks
+ * players not to report; it costs every player in the group latency on
+ * every start for as long as it is reported.
  *
  * Chunks sent or received faster than they play are not samples. That is
  * the buffer being filled after a start or a skip, when thirty seconds of
  * audio come at once and the delay measures how fast we can take them in:
  * the "burst conditions that do not represent steady-state delay".
  *
- * A late chunk raises the value straight away, because waiting would risk
- * the underrun the value exists to prevent. It comes back down only when
- * that chunk has left the window, which is the debounce the spec asks for,
- * and it never changes more than once per [MIN_CHANGE_INTERVAL_MS].
+ * A delay that recurs raises the value as soon as it has, and it comes back
+ * down only when no slot in the window still holds it, a full window after
+ * it last occurred: a delay that recurs every few minutes is still covered
+ * when it next comes. It never changes more than once per
+ * [MIN_CHANGE_INTERVAL_MS].
  *
  * [addChunk] is called from the receive thread only; [minBufferMs] may be
  * read from any thread.
@@ -87,8 +91,24 @@ class MinBufferEstimator(
         val delayMs = ((arrivalMicros - sentMicros) / 1000).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
         if (delayMs > worstDelayMs[slot]) worstDelayMs[slot] = delayMs
 
-        // Rounding the delay down is covered by the margin in the floor.
-        val target = floorMs + worstDelayMs.max() / STEP_MS * STEP_MS
+        // Raise once a delay has come back in another slot (the second-largest
+        // slot); keep it while any slot in the window still holds it, so it
+        // lasts a full window after the latest occurrence. Rounding down is
+        // covered by the margin in the floor. One pass rather than a sort, as
+        // this runs for every chunk on the receive thread.
+        var largest = 0
+        var secondLargest = 0
+        for (d in worstDelayMs) {
+            if (d > largest) {
+                secondLargest = largest
+                largest = d
+            } else if (d > secondLargest) {
+                secondLargest = d
+            }
+        }
+        val reportedDelayMs = minBufferMs - floorMs
+        val heldDelayMs = if (largest / STEP_MS * STEP_MS >= reportedDelayMs) reportedDelayMs else 0
+        val target = floorMs + maxOf(secondLargest / STEP_MS * STEP_MS, heldDelayMs)
         if (target == minBufferMs || nowMs - lastChangeMs < MIN_CHANGE_INTERVAL_MS) return false
         minBufferMs = target
         lastChangeMs = nowMs

@@ -81,9 +81,18 @@ class FakeTransport : SendSpinTransport {
     var flushedBeforeClose = false
         private set
 
-    override fun closeAfterFlush(code: Int, reason: String) {
+    /** The flush in progress: [finishFlush] completes it, as the real transport does later. */
+    private var pendingFlush: (() -> Unit)? = null
+
+    override fun closeAfterFlush(code: Int, reason: String, onFlushed: () -> Unit) {
         flushedBeforeClose = true
         close(code, reason)
+        pendingFlush = onFlushed
+    }
+
+    fun finishFlush() {
+        pendingFlush?.invoke()
+        pendingFlush = null
     }
 
     override fun destroy() {

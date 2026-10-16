@@ -22,6 +22,9 @@ class TimeSyncManagerTest {
     private var sendCount = 0
     private lateinit var manager: TimeSyncManager
 
+    // Time the device has spent asleep, as Platform.suspendedTimeMicros reports it
+    private var suspendedUs = 0L
+
     @Before
     fun setUp() {
         mockkObject(Log)
@@ -33,9 +36,11 @@ class TimeSyncManagerTest {
 
         timeFilter = SendspinTimeFilter()
         sendCount = 0
+        suspendedUs = 0L
         manager = TimeSyncManager(
             timeFilter = timeFilter,
-            sendClientTime = { sendCount++ }
+            sendClientTime = { sendCount++ },
+            suspendedTimeMicros = { suspendedUs },
         )
     }
 
@@ -422,5 +427,139 @@ class TimeSyncManagerTest {
         )
 
         manager.stop()
+    }
+
+    // --- Deep sleep and samples the filter skips ---
+    //
+    // Default schedule: a burst sends 10 requests 50 ms apart, from 0 ms, and
+    // is processed at 600 ms; the next starts 250 ms later, at 850 ms, and is
+    // processed at 1450 ms.
+
+    private fun readyFilter() {
+        timeFilter.addMeasurement(10_000L, 2_000L, 1_000_000L)
+        timeFilter.addMeasurement(10_000L, 2_000L, 2_000_000L)
+        assertTrue(timeFilter.isReady)
+    }
+
+    @Test
+    fun aSleepBetweenBursts_startsSyncOverAndBurstsAgainAtOnce() = runTest {
+        manager.start(this)
+        advanceTimeBy(700)
+        readyFilter()
+        suspendedUs += 5_000_000L  // asleep for 5 s before the next burst
+
+        advanceTimeBy(200)
+        assertTrue(manager.onServerTime(TimeMeasurement(offset = 5_010_000L, rtt = 4_000L, clientReceived = 3_000_000L)))
+        advanceTimeBy(560)
+
+        assertEquals("started over, with this burst as its first measurement", 1, timeFilter.measurementCountValue)
+        assertEquals(5_010_000L, timeFilter.offsetMicros)
+        assertEquals("the next burst started at once", 21, sendCount)
+        manager.stop()
+    }
+
+    @Test
+    fun aBurstThatSpansASleep_isDiscarded() = runTest {
+        manager.start(this)
+        advanceTimeBy(700)
+        readyFilter()
+
+        advanceTimeBy(200)
+        assertTrue(manager.onServerTime(TimeMeasurement(offset = 10_000L, rtt = 4_000L, clientReceived = 3_000_000L)))
+        suspendedUs += 5_000_000L  // asleep in the middle of the burst
+        advanceTimeBy(560)
+
+        assertEquals("started over, without this burst", 0, timeFilter.measurementCountValue)
+        assertFalse(timeFilter.isReady)
+        assertEquals("the next burst started at once", 21, sendCount)
+        manager.stop()
+    }
+
+    @Test
+    fun aReplyOutsideABurst_afterASleep_isIgnored() = runTest {
+        manager.start(this)
+        advanceTimeBy(700)
+        readyFilter()
+        suspendedUs += 5_000_000L
+
+        assertFalse(manager.onServerTime(TimeMeasurement(offset = 5_010_000L, rtt = 4_000L, clientReceived = 3_000_000L)))
+        assertEquals(2, timeFilter.measurementCountValue)
+        manager.stop()
+    }
+
+    @Test
+    fun aRoundTripWithNoPositiveMaxError_doesNotWinTheBurst() = runTest {
+        manager.start(this)
+        advanceTimeBy(100)
+        // rtt 1 us halves to a max_error of 0, which the filter skips
+        manager.onServerTime(TimeMeasurement(offset = 900_000L, rtt = 1L, clientReceived = 1_000_000L))
+        manager.onServerTime(TimeMeasurement(offset = 10_000L, rtt = 4_000L, clientReceived = 1_100_000L))
+        advanceTimeBy(600)
+
+        assertEquals(1, timeFilter.measurementCountValue)
+        assertEquals(10_000L, timeFilter.offsetMicros)
+        manager.stop()
+    }
+
+    @Test
+    fun aSleepIsNoticedOnTheFrameThatEndsIt() = runTest {
+        manager.start(this)
+        advanceTimeBy(700)
+        readyFilter()
+        suspendedUs += 5_000_000L  // a server frame wakes the device
+
+        manager.checkForSleep()
+
+        assertFalse("the estimate from before the sleep must not translate this frame", timeFilter.isReady)
+        val sent = sendCount
+        advanceTimeBy(10)
+        assertTrue("sync starts over without waiting the interval", sendCount > sent)
+        manager.stop()
+    }
+
+    @Test
+    fun aReplyOutsideABurst_afterASleepFoundOnAFrame_isIgnored() = runTest {
+        manager.start(this)
+        advanceTimeBy(700)
+        suspendedUs += 5_000_000L
+        manager.checkForSleep()
+
+        // Its request went out before the sleep
+        assertFalse(manager.onServerTime(TimeMeasurement(offset = 5_010_000L, rtt = 4_000L, clientReceived = 3_000_000L)))
+        assertEquals(0, timeFilter.measurementCountValue)
+        manager.stop()
+    }
+
+    @Test
+    fun aSleep_burstsAtOnceUntilConverged() = runTest {
+        var trueOffsetUs = 10_000L
+        lateinit var answering: TimeSyncManager
+        answering = TimeSyncManager(
+            timeFilter = timeFilter,
+            sendClientTime = {
+                answering.onServerTime(
+                    TimeMeasurement(trueOffsetUs, 4_000L, testScheduler.currentTime * 1000 + 4_000)
+                )
+            },
+            suspendedTimeMicros = { suspendedUs },
+        )
+        answering.start(this)
+        advanceTimeBy(20_000)
+        assertTrue(timeFilter.isConverged)
+
+        suspendedUs += 5_000_000L
+        trueOffsetUs += 5_000_000L
+        answering.checkForSleep()
+        var convergedAfterMs = -1L
+        for (t in 1..6_000) {
+            advanceTimeBy(1)
+            if (timeFilter.isConverged) { convergedAfterMs = t.toLong(); break }
+        }
+        answering.stop()
+
+        // Five bursts back to back, about 350 ms each, rather than two and
+        // then the regular interval
+        assertTrue("converged again after $convergedAfterMs ms", convergedAfterMs in 1..2_000)
+        assertEquals(5_010_000L, timeFilter.offsetMicros)
     }
 }

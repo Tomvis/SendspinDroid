@@ -79,7 +79,7 @@ class SendSpinDisconnectForReselectionTest {
 
         mockCallback = mockk(relaxed = true)
 
-        client = SendSpin("TestDevice", mockCallback)
+        client = SendSpin("TestDevice", mockCallback, com.sendspindroid.AppSendSpinHost)
         fakeTransport = FakeTransport()
 
         // Seed connected-state so disconnectForReselection has something to tear down.

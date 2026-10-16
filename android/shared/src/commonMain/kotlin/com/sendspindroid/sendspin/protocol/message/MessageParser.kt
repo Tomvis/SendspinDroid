@@ -239,7 +239,14 @@ object MessageParser {
         val codec = player.stringOrDefault("codec", SendSpinProtocol.AudioFormat.DEFAULT_CODEC)
         val sampleRate = player.intOrDefault("sample_rate", SendSpinProtocol.AudioFormat.SAMPLE_RATE)
         val channels = player.intOrDefault("channels", SendSpinProtocol.AudioFormat.CHANNELS)
-        val bitDepth = player.intOrDefault("bit_depth", SendSpinProtocol.AudioFormat.BIT_DEPTH)
+        // "bit_depth ... ignored for opus" (roles/player/v1.md): an Opus
+        // decoder puts out 16-bit PCM whatever the server says here, and a
+        // change of it alone is no change of format.
+        val bitDepth = if (codec == "opus") {
+            SendSpinProtocol.AudioFormat.BIT_DEPTH
+        } else {
+            player.intOrDefault("bit_depth", SendSpinProtocol.AudioFormat.BIT_DEPTH)
+        }
 
         val codecHeader = player["codec_header"]?.jsonPrimitive?.contentOrNull?.let { base64 ->
             try {

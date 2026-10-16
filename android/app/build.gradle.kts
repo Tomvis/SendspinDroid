@@ -38,8 +38,8 @@ android {
     // Namespace replaces package attribute in AndroidManifest.xml (AGP 7.0+)
     namespace = "com.sendspindroid"
 
-    // compileSdk 36 required by androidx.core:core-ktx:1.17.0
-    compileSdk = 36
+    // compileSdk 37 required by Compose 1.12 (compose-bom 2026.09.00)
+    compileSdk = 37
 
     // Signing configuration for release builds
     // Only configure if keystore exists (allows CI to build unsigned APKs)
@@ -77,11 +77,11 @@ android {
         // (e.g. 2.0.0-Beta4 = 20004, 2.0.0-Beta18 = 20018). Every installable
         // build needs a strictly higher code than the one it replaces, so a
         // beta cannot share one; see the versionCode table in CLAUDE.md.
-        versionCode = 20020
+        versionCode = 20023
 
         // versionName: User-visible version string
         // Follows semantic versioning (major.minor.patch[-prerelease])
-        versionName = "2.0.0-Beta20"
+        versionName = "2.0.0-Beta23"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -180,6 +180,9 @@ dependencies {
     // Shared KMP module
     implementation(project(":shared"))
 
+    // The player: protocol client, sync audio output, decoders
+    implementation(project(":player"))
+
     // Kotlinx Serialization JSON - used for protocol message parsing in :app
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
 
@@ -217,15 +220,15 @@ dependencies {
 
     // ========== Jetpack Compose ==========
     // BOM (Bill of Materials) ensures all Compose libraries use compatible versions
-    val composeBom = platform("androidx.compose:compose-bom:2025.01.01")
+    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
     implementation(composeBom)
 
     // Material Design 3 for Compose - modern theming and components
     implementation("androidx.compose.material3:material3")
 
-    // Jetpack Compose for TV - focus-aware IconButton/Surface for D-pad UIs.
-    // Not part of Compose BOM; pin explicitly. Used by the TV Now Playing surface.
-    implementation("androidx.tv:tv-material:1.1.0-rc01")
+    // Material icons (Icons.Default, Icons.AutoMirrored) - material3 1.4 no
+    // longer brings them in
+    implementation("androidx.compose.material:material-icons-core")
 
     // Material3 Adaptive - WindowSizeClass detection and NavigationSuiteScaffold
     // (auto-switches between BottomNav, NavigationRail, and NavigationDrawer)
@@ -234,6 +237,10 @@ dependencies {
 
     // Foundation - core layout primitives (Column, Row, Box, LazyColumn)
     implementation("androidx.compose.foundation:foundation")
+
+    // Compose for TV - the side menu of the TV shell. 1.1.0 is built against
+    // Compose 1.10, below the BOM's, so it leaves the BOM's versions as they are.
+    implementation("androidx.tv:tv-material:1.1.0")
 
     // UI Tooling - @Preview support and debugging tools
     implementation("androidx.compose.ui:ui-tooling-preview")

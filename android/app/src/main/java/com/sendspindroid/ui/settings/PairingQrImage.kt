@@ -12,8 +12,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.sendspindroid.R
 
 /**
  * Paints a pairing token as a scannable QR code.
@@ -55,7 +57,8 @@ fun PairingQrImage(
 
     Image(
         bitmap = bitmap,
-        contentDescription = null,
+        // What it is, never the token: a description is read aloud.
+        contentDescription = stringResource(R.string.pairing_token_qr_description),
         filterQuality = FilterQuality.None,
         contentScale = ContentScale.Fit,
         modifier = modifier

@@ -90,7 +90,7 @@ class InboundConnectionsTest : E2ETestBase() {
         newClient = {
             val callback = mockk<SendSpin.Callback>(relaxed = true)
             callbacks += callback
-            SendSpin("Tablet", callback).also { clients += it }
+            SendSpin("Tablet", callback, com.sendspindroid.AppSendSpinHost).also { clients += it }
         },
         onAdmitted = { admitted += it },
         lastPlaybackServerId = { lastPlayback },

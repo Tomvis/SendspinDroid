@@ -3,6 +3,7 @@ package com.sendspindroid.sendspin
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import kotlin.math.abs
 
 class SyncErrorFilterTest {
 
@@ -265,5 +266,40 @@ class SyncErrorFilterTest {
             "Drift should be positive after step change with increasing measurements, was ${filter.driftValue}",
             filter.driftValue > 0
         )
+    }
+
+    // --- The filter SyncAudioPlayer uses ---
+
+    /** One reading every 20 ms, as the player takes one per chunk written. */
+    private fun SyncErrorFilter.feed(fromMs: Int, toMs: Int, errorUs: (Int) -> Long) {
+        for (ms in fromMs until toMs step 20) update(errorUs(ms), ms * 1_000L)
+    }
+
+    // Deterministic jitter within +/-650 us, the AudioTimestamp jitter seen on a tablet
+    private fun jitterUs(ms: Int): Long = ((ms / 20 * 7919L) % 1301L) - 650L
+
+    @Test
+    fun production_smoothsTimestampJitter() {
+        val f = SyncErrorFilter.forDacSyncError()
+        var worstUs = 0L
+        f.feed(0, 2_000) { jitterUs(it) }
+        f.feed(2_000, 60_000) { ms -> jitterUs(ms).also { if (abs(f.offsetMicros) > worstUs) worstUs = abs(f.offsetMicros) } }
+        // Measured: 56 us
+        assertTrue("smoothed error reached ${worstUs}us", worstUs < 150L)
+    }
+
+    @Test
+    fun production_followsAStep() {
+        val f = SyncErrorFilter.forDacSyncError()
+        f.feed(0, 10_000) { jitterUs(it) }
+        var passedAtMs = -1
+        for (ms in 10_000 until 15_000 step 20) {
+            f.update(1_500L + jitterUs(ms), ms * 1_000L)
+            if (passedAtMs < 0 && f.offsetMicros > 1_000L) passedAtMs = ms - 10_000
+        }
+        // Measured: past the 1 ms floor 580 ms after the step, which is how
+        // long a real step waits for the one-shot resync (audit E2-25)
+        assertTrue("passed 1 ms ${passedAtMs}ms after the step", passedAtMs in 1..1_000)
+        assertEquals(1_500.0, f.offsetMicros.toDouble(), 150.0)
     }
 }

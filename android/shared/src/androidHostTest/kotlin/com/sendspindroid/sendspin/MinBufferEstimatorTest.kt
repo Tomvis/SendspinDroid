@@ -40,10 +40,20 @@ class MinBufferEstimatorTest {
     }
 
     @Test
-    fun `adds the worst delay to the floor in whole steps`() {
+    fun `adds a recurring delay to the floor in whole steps`() {
         play(10_000, 70_000, delayMs = 12)
-        assertTrue(chunk(70_000, delayMs = 130))
+        chunk(70_000, delayMs = 130)
+        assertTrue(chunk(80_000, delayMs = 130))
         assertEquals(450, estimator.minBufferMs)
+    }
+
+    @Test
+    fun `a delay that comes back larger is reported at the size both reached`() {
+        play(10_000, 70_000, delayMs = 12)
+        chunk(70_000, delayMs = 220)
+        play(70_020, 80_000, delayMs = 12)
+        assertTrue(chunk(80_000, delayMs = 300))
+        assertEquals(550, estimator.minBufferMs)
     }
 
     @Test
@@ -54,23 +64,53 @@ class MinBufferEstimatorTest {
     }
 
     @Test
-    fun `one late chunk raises the value at once and it holds for the window`() {
+    fun `one late chunk on its own is not reported`() {
         play(10_000, 70_000, delayMs = 12)
-        assertTrue(chunk(70_000, delayMs = 220))
+        assertFalse(chunk(70_000, delayMs = 220))
+        assertEquals(0, play(70_020, 340_000, delayMs = 12))
+        assertEquals(350, estimator.minBufferMs)
+    }
+
+    @Test
+    fun `a delay that comes back raises the value and it holds for the window`() {
+        play(10_000, 70_000, delayMs = 12)
+        chunk(70_000, delayMs = 220)
+        play(70_020, 100_000, delayMs = 12)
+        assertTrue(chunk(100_000, delayMs = 220))
         assertEquals(550, estimator.minBufferMs)
 
-        // Four and a half minutes of clean arrivals do not lower it.
-        assertEquals(0, play(70_020, 340_000, delayMs = 12))
+        // Nearly five minutes of clean arrivals do not lower it, nor does
+        // the first of the two leaving the window at 370 s.
+        assertEquals(0, play(100_020, 390_000, delayMs = 12))
         assertEquals(550, estimator.minBufferMs)
     }
 
     @Test
-    fun `the value comes back down once the late chunk leaves the window`() {
+    fun `the value comes back down once the latest delay leaves the window`() {
         play(10_000, 70_000, delayMs = 12)
         chunk(70_000, delayMs = 220)
+        play(70_020, 100_000, delayMs = 12)
+        chunk(100_000, delayMs = 220)
 
-        assertEquals(1, play(70_020, 410_000, delayMs = 12))
+        assertEquals(0, play(100_020, 400_000, delayMs = 12))
+        assertEquals(550, estimator.minBufferMs)
+        assertEquals(1, play(400_000, 410_000, delayMs = 12))
         assertEquals(350, estimator.minBufferMs)
+    }
+
+    @Test
+    fun `a stall that recurs every few minutes is covered from its third time on`() {
+        play(10_000, 70_000, delayMs = 12)
+        var changes = 0
+        val valueAtStall = mutableListOf<Int>()
+        // A 300 ms stall every 200 s, as fifteen chunks arriving together.
+        for (stallAt in 70_000L until 1_300_000L step 200_000) {
+            valueAtStall += estimator.minBufferMs
+            for (i in 0 until 15) if (chunk(stallAt + i * 20L, delayMs = 300 - i * 20L)) changes++
+            changes += play(stallAt + 300, stallAt + 200_000, delayMs = 12)
+        }
+        assertEquals(listOf(350, 350) + List(valueAtStall.size - 2) { 650 }, valueAtStall)
+        assertEquals(1, changes)
     }
 
     @Test
@@ -82,13 +122,16 @@ class MinBufferEstimatorTest {
     }
 
     @Test
-    fun `a worsening link is reported at most once a second`() {
+    fun `a worsening link is reported once it lasts into a second slot`() {
         play(10_000, 20_000, delayMs = 12)
         // Delay climbing 10 ms per chunk for 600 ms, then holding at 300 ms.
         var changes = 0
         for (i in 0 until 30) if (chunk(20_000 + i * 20L, delayMs = 12 + i * 10L)) changes++
-        changes += play(20_600, 23_000, delayMs = 300)
-        assertEquals(2, changes)
+        // Slots go by arrival: these all arrive before 30 s
+        changes += play(20_600, 29_600, delayMs = 300)
+        assertEquals("not within its first ten seconds", 0, changes)
+        changes += play(29_600, 33_000, delayMs = 300)
+        assertEquals(1, changes)
         assertEquals(650, estimator.minBufferMs)
     }
 
@@ -140,9 +183,12 @@ class MinBufferEstimatorTest {
     @Test
     fun `chunks held up by the network and delivered together count once, at their worst`() {
         play(10_000, 70_000, delayMs = 12)
-        // 300 ms stall: fifteen chunks sent in real time arrive at the same moment.
-        for (i in 0 until 15) chunk(70_000 + i * 20L, delayMs = 300 - i * 20L)
-        play(70_300, 72_000, delayMs = 12)
+        // 300 ms stalls: fifteen chunks sent in real time arrive at the same
+        // moment, and again ten seconds later.
+        for (stallAt in listOf(70_000L, 80_000L)) {
+            for (i in 0 until 15) chunk(stallAt + i * 20L, delayMs = 300 - i * 20L)
+            play(stallAt + 300, stallAt + 10_000, delayMs = 12)
+        }
         assertEquals(650, estimator.minBufferMs)
     }
 }

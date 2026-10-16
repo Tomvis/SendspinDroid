@@ -157,6 +157,9 @@ class DynamicPairingCodeFlow(
      */
     val attemptInProgress: Boolean get() = state.inAttempt && state != State.AWAITING_GESTURE
 
+    /** Holding the attempt back until the operator's gesture, having sent `client/pair-pending`. */
+    val awaitingGesture: Boolean get() = state == State.AWAITING_GESTURE
+
     private var pairingIndex: Int = 0
 
     /** The client's nonce contribution. Discarded on every exit path. */

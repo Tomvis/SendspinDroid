@@ -17,9 +17,9 @@ import kotlin.math.sqrt
  * the drift estimate isn't biased by suppressing its own contribution
  * to predicted offset.
  *
- * Defaults are tuned for the higher-rate (~10 Hz) DAC-error stream
- * rather than the lower-rate (~0.1 Hz post-convergence) NTP-style
- * burst stream that the time-sync filter sees.
+ * SyncAudioPlayer uses [forDacSyncError]: one reading per chunk written,
+ * 40-50 Hz with 20 ms chunks, jittering by about +/-0.65 ms. The defaults
+ * are a slower, heavier smoothing.
  *
  * Not thread-safe; the playback loop is the sole writer / reader.
  *
@@ -38,6 +38,13 @@ class SyncErrorFilter(
     companion object {
         private const val MIN_MEASUREMENTS = 2
 
+        /**
+         * The filter SyncAudioPlayer smooths the measured DAC sync error with.
+         * AudioTimestamp jitter is about +/-0.65 ms peak; the process noise
+         * gives the estimate a time constant of about a second.
+         */
+        fun forDacSyncError() = SyncErrorFilter(processStdDev = 0.085, measurementNoiseUs = 400L)
+
         // Adaptive forgetting fires when |residual| > FORGETTING_RESIDUAL_SIGMAS *
         // measurementNoiseUs, scaling the predicted covariance by
         // FORGETTING_VARIANCE_FACTOR. 6 sigma + 4x matches the structural
@@ -47,10 +54,10 @@ class SyncErrorFilter(
         private const val FORGETTING_FACTOR = 2.0
         private const val FORGETTING_VARIANCE_FACTOR = FORGETTING_FACTOR * FORGETTING_FACTOR
 
-        // At ~10 Hz update cadence, this gates forgetting until the filter has
-        // built ~2 s of history. Upstream uses 100 because its sample rate is
-        // ~0.1 Hz post-convergence; the same wall-clock warmup at our rate
-        // would over-suppress disruption response.
+        // Forgetting waits for this many readings: about half a second at the
+        // player's 40-50 Hz. Upstream uses 100 because its sample rate is
+        // ~0.1 Hz post-convergence; the same count at our rate would
+        // over-suppress disruption response.
         private const val MIN_SAMPLES_FOR_FORGETTING = 20
 
         // Hard cap on drift magnitude. +/-500 ppm is generous for any

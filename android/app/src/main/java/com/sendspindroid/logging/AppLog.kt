@@ -2,7 +2,6 @@ package com.sendspindroid.logging
 
 import android.content.Context
 import android.content.Intent
-import android.util.Log
 import androidx.preference.PreferenceManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,9 +31,9 @@ object AppLog {
     /** Default for fresh installs / the one-time lightweight migration. */
     private val DEFAULT_LEVEL = LogLevel.WARN
 
-    @Volatile
-    var level: LogLevel = LogLevel.OFF
-        private set
+    /** Held by [PlayerLog], so the player library's loggers are gated by it too. */
+    val level: LogLevel
+        get() = PlayerLog.level
 
     @Volatile
     internal var writer: LogFileWriter? = null
@@ -50,13 +49,13 @@ object AppLog {
 
     private val bridgeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    val Audio: Logger = Logger(LogCategory.Audio)
-    val Sync: Logger = Logger(LogCategory.Sync)
-    val Protocol: Logger = Logger(LogCategory.Protocol)
-    val Network: Logger = Logger(LogCategory.Network)
-    val Playback: Logger = Logger(LogCategory.Playback)
-    val UI: Logger = Logger(LogCategory.UI)
-    val App: Logger = Logger(LogCategory.App)
+    val Audio: Logger = PlayerLog.Audio
+    val Sync: Logger = PlayerLog.Sync
+    val Protocol: Logger = PlayerLog.Protocol
+    val Network: Logger = PlayerLog.Network
+    val Playback: Logger = PlayerLog.Playback
+    val UI: Logger = PlayerLog.UI
+    val App: Logger = PlayerLog.App
 
     /** Session markers for connect/disconnect events. */
     object session {
@@ -123,7 +122,7 @@ object AppLog {
      */
     fun setLevel(newLevel: LogLevel) {
         val previous = level
-        level = newLevel
+        PlayerLog.level = newLevel
         appContext?.let { ctx ->
             PreferenceManager.getDefaultSharedPreferences(ctx).edit()
                 .putString(PREF_LOG_LEVEL, newLevel.name)
@@ -177,36 +176,5 @@ object AppLog {
      */
     fun recordCrash(record: String) {
         writer?.appendRaw("\n=== CRASH ===\n$record\n")
-    }
-}
-
-/**
- * Per-category logger. One instance exists as a property on [AppLog] per [LogCategory].
- * All methods are gate-checked against [AppLog.level] before delegating to [android.util.Log].
- */
-class Logger internal constructor(private val category: LogCategory) {
-
-    fun v(msg: String) {
-        if (AppLog.level.permits(LogLevel.VERBOSE)) Log.v(category.tag, msg)
-    }
-
-    fun d(msg: String) {
-        if (AppLog.level.permits(LogLevel.DEBUG)) Log.d(category.tag, msg)
-    }
-
-    fun i(msg: String) {
-        if (AppLog.level.permits(LogLevel.INFO)) Log.i(category.tag, msg)
-    }
-
-    fun w(msg: String, t: Throwable? = null) {
-        if (AppLog.level.permits(LogLevel.WARN)) {
-            if (t != null) Log.w(category.tag, msg, t) else Log.w(category.tag, msg)
-        }
-    }
-
-    fun e(msg: String, t: Throwable? = null) {
-        if (AppLog.level.permits(LogLevel.ERROR)) {
-            if (t != null) Log.e(category.tag, msg, t) else Log.e(category.tag, msg)
-        }
     }
 }

@@ -47,7 +47,7 @@ Any new or modified UI must:
 SendSpinDroid is a **synchronized audio player** that connects to SendSpin servers:
 
 ```
-SendSpin Server ──WebSocket──► SendSpinClient ──► SyncAudioPlayer (AudioTrack) ──► Audio Output
+SendSpin Server ──WebSocket──► SendSpin ──► SendSpinEngine ──► SyncAudioPlayer (AudioTrack) ──► Audio Output
                     │
                     ├── JSON messages (metadata, state)
                     └── Binary messages (timestamped audio PCM)
@@ -55,11 +55,16 @@ SendSpin Server ──WebSocket──► SendSpinClient ──► SyncAudioPlaye
 
 ## Key Components
 
-### SendSpinClient (`sendspin/SendSpinClient.kt`)
-- WebSocket connection via OkHttp
-- Protocol parsing (JSON + binary)
-- Clock synchronization
-- Audio buffering with timestamps
+### Modules
+- `:shared` - Kotlin Multiplatform: protocol, Noise, pairing, transports, clock filter
+- `:player` - Android library: `SendSpin`, `SendSpinEngine` (the decode pipeline and its player), `SyncAudioPlayer`, decoders, `InboundConnections`, `NsdAdvertiser`. No UI and no app settings; it reaches the app only through `SendSpinHost` and the engine's constructor. Its R8 rules are in `player/consumer-rules.pro`
+- `:app` - UI, `PlaybackService`, `UserSettings` and `AppSendSpinHost`
+
+### SendSpin (`player/.../sendspin/SendSpin.kt`)
+- WebSocket connection via Ktor, dialled or accepted (`InboundConnections`), Noise-encrypted
+- Protocol parsing (JSON + binary), in `SendSpinProtocolHandler`
+- Clock synchronization (`TimeSyncManager`, `SendspinTimeFilter`)
+- Hands stream events and audio chunks to `SendSpinEngine`, which decodes them for `SyncAudioPlayer`
 
 ### PlaybackService (`playback/PlaybackService.kt`)
 - Android MediaLibraryService for background playback
@@ -84,7 +89,8 @@ transport message. After decryption, byte 0 is the message ID:
          (flags bit 1 = first, bit 0 = last)
   2-3:   Reserved
   4:     Audio chunk
-  8-11:  Artwork channels 0-3 (announce/part/cancel; only channel 0 is declared)
+  8-11:  Artwork channels 0-3 (announce/part/cancel; channel 0 album art and
+         channel 1 the artist image are declared)
   16-23: Visualizer (not claimed)
 
 Audio chunk (13-byte header):
@@ -97,7 +103,8 @@ Bytes 13+:   Encoded audio frame
 ### Audio Format
 - 48kHz sample rate
 - 16-bit, 24-bit, or 32-bit signed PCM (negotiated via client hello)
-- Stereo (2 channels) or Mono (1 channel)
+- Stereo (2 channels): only stereo is advertised, as a change of channel count
+  needs a new AudioTrack and so cannot be gapless
 - Audio sample data is little-endian; header timestamps are big-endian
 
 ### Client State (`client/state`)
@@ -213,14 +220,17 @@ a beta cannot share a code with anything else. Current practice is `base + N` fo
 | `2.0.0-Beta18` | 20018 |
 | `2.0.0-Beta19` | 20019 |
 | `2.0.0-Beta20` | 20020 |
+| `2.0.0-Beta21` | 20021 |
+| `2.0.0-Beta22` | 20022 |
+| `2.0.0-Beta23` | 20023 |
 
 Beta1 through Beta3 used `base + (N-1)` (20000, 20001, 20002). `20003` was skipped once,
 which realigned the series; from Beta4 onward it has been `base + N`, and that is the only
 rule to apply going forward.
 
-**Trap: 2.0.0 stable cannot be 20000.** The base is already spent -- Beta20 shipped as
-20020 -- and anything lower is a downgrade Android will not install over it. The first
-stable `2.0.0` needs at least 20021. Choose that number deliberately when the time comes
+**Trap: 2.0.0 stable cannot be 20000.** The base is already spent -- Beta23 shipped as
+20023 -- and anything lower is a downgrade Android will not install over it. The first
+stable `2.0.0` needs at least 20024. Choose that number deliberately when the time comes
 instead of reading it off the base formula.
 
 ## License
@@ -244,5 +254,5 @@ The CLI shows the canonical approach:
 
 ### Android Deviations from the Python Reference
 
-- **Sync correction**: follows the suggested strategy of the Sendspin `player@v1` spec ("Playback Synchronization") instead of the reference's proportional +/-4% rate. Outside a +/-100us dead band, `SyncAudioPlayer` drops or repeats one 21us step (1 frame at 48kHz) at most every 20ms (`CORRECTION_STEP_US`, `CORRECTION_INTERVAL_US`): about 0.1% speed change against the spec's +/-0.5% over 150ms, enough to absorb 1ms of error per second. At startup, and when the smoothed error passes the +/-1ms floor (`SNAP_THRESHOLD_US`), it resyncs in one shot instead: drop the late leading frames, or insert silence if early. After an underrun the estimate starts over and the same resync applies once it has settled.
+- **Sync correction**: follows the suggested strategy of the Sendspin `player@v1` spec ("Playback Synchronization") instead of the reference's proportional +/-4% rate. Outside a +/-100us dead band, `SyncAudioPlayer` drops or repeats one 21us step (1 frame at 48kHz) at most every 20ms (`CORRECTION_STEP_US`, `CORRECTION_INTERVAL_US`): about 0.1% speed change against the spec's +/-0.5% over 150ms, enough to absorb 1ms of error per second. When the smoothed error passes the +/-1ms floor (`SNAP_THRESHOLD_US`), it resyncs in one shot instead: drop the late leading frames, or insert silence if early. A start, an output that has run dry (an empty queue alone is not an underrun), and an error past 500ms on two consecutive readings (`REANCHOR_THRESHOLD_US`) all go through start gating, which drops the audio that is late and waits for audio that is early. The queue is never discarded for a sync error: the server does not resend.
 - **Audio output API**: `AudioTrack` in `MODE_STREAM` instead of `sounddevice`. DAC position is read via `AudioTrack.getTimestamp()` for sync-error measurement and start-gating. `AudioTimestamp.nanoTime` is already on the `System.nanoTime` clock and is used directly. Its readings jitter by about +/-0.65ms on a tablet, so the error is Kalman-smoothed (`SyncErrorFilter`) before it drives corrections. The track is kept fed with silence while idle or waiting to start: a track left to underrun freezes its timestamps.

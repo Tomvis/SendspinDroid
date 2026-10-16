@@ -243,6 +243,35 @@ class InboundWebSocketTransportTest {
     }
 
     @Test
+    fun `a close after flush says when it is done, with nothing lost`() {
+        val server = dial(listen())
+        peerFor(server)
+        val (inbound, _) = take()
+        val flushed = CountDownLatch(1)
+
+        repeat(50) { inbound.send("frame-$it") }
+        inbound.closeAfterFlush(1000, "goodbye") { flushed.countDown() }
+
+        assertTrue(flushed.await(WAIT_S, TimeUnit.SECONDS))
+        repeat(50) { assertEquals("text:frame-$it", server.next()) }
+        assertTrue(server.next()!!.startsWith("clos"))
+    }
+
+    @Test
+    fun `a close after flush on a connection already over says so at once`() {
+        val server = dial(listen())
+        val peer = peerFor(server)
+        val (inbound, recorder) = take()
+        peer.close(1000, "server leaves")
+        assertTrue(recorder.nextClose()!!.startsWith("closed:"))
+        val flushed = CountDownLatch(1)
+
+        inbound.closeAfterFlush(1000, "goodbye") { flushed.countDown() }
+
+        assertTrue(flushed.await(WAIT_S, TimeUnit.SECONDS))
+    }
+
+    @Test
     fun `a plain close does not wait for the queue`() {
         val server = dial(listen())
         peerFor(server)

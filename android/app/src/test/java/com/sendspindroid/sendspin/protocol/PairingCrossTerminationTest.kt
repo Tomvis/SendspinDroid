@@ -133,6 +133,7 @@ class CrossTerminationTestHandler : SendSpinProtocolHandler("CrossTerminationTes
     /** The code on screen, or null when none is shown. */
     var shownCode: String? = null
     val protocolFailures = mutableListOf<String>()
+    var abandonments = 0
 
     private val timeFilter = SendspinTimeFilter()
     private val counterStore = InMemoryPairingCounterStore()
@@ -159,6 +160,10 @@ class CrossTerminationTestHandler : SendSpinProtocolHandler("CrossTerminationTes
 
     override fun onProtocolFailure(reason: String) {
         protocolFailures.add(reason)
+    }
+
+    override fun onPairingAbandoned() {
+        abandonments += 1
     }
 
     override fun offeredPairMethods(): Set<String> = setOf("pairing_psk", "dynamic_pairing_code")

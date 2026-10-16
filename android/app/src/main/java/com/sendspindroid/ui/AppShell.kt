@@ -1,42 +1,39 @@
 package com.sendspindroid.ui
 
-import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.LocalIndication
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.Surface
+import com.sendspindroid.ui.tv.TvMenuEntry
+import com.sendspindroid.ui.tv.TvShell
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.annotation.StringRes
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,16 +41,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -61,8 +48,6 @@ import com.sendspindroid.R
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.LocalFormFactor
-import com.sendspindroid.ui.adaptive.LocalTvFocusReclaimToken
-import com.sendspindroid.ui.adaptive.tvFocusable
 import com.sendspindroid.ui.main.MainActivityViewModel
 import com.sendspindroid.ui.main.NowPlayingScreen
 import com.sendspindroid.ui.main.components.ConnectionStatusDot
@@ -87,7 +72,9 @@ import com.sendspindroid.ui.adaptive.FormFactor
  * @param onSeek Progress bar scrub released at a position in milliseconds
  * @param onAllowPairingClick Confirm the dynamic pairing gesture gate
  * @param onDisconnectClick Disconnect from server
- * @param onAddServerClick FAB: launch add server wizard
+ * @param onAddServerClick TV: the side menu's Add Server entry
+ * @param canEditServer TV: whether the connection is to a saved server, which Edit Server opens
+ * @param onLeaveApp TV: Back pressed in the side menu, to leave the app
  */
 @Composable
 fun AppShell(
@@ -106,9 +93,41 @@ fun AppShell(
     onSettingsClick: () -> Unit,
     onEditServerClick: () -> Unit,
     onExitAppClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    canEditServer: Boolean = true,
+    onLeaveApp: () -> Unit = {},
 ) {
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
+
+    if (LocalFormFactor.current == FormFactor.TV) {
+        TvAppShell(
+            viewModel = viewModel,
+            serverListContent = serverListContent,
+            nowPlaying = {
+                NowPlayingScreen(
+                    viewModel = viewModel,
+                    onPreviousClick = onPreviousClick,
+                    onPlayPauseClick = onPlayPauseClick,
+                    onNextClick = onNextClick,
+                    onSwitchGroupClick = onSwitchGroupClick,
+                    onVolumeChange = onVolumeChange,
+                    onSeek = onSeek,
+                    onOpenPairingClick = onSettingsClick,
+                    onAllowPairingClick = onAllowPairingClick,
+                    modifier = Modifier.fillMaxSize()
+                )
+            },
+            onDisconnectClick = onDisconnectClick,
+            onAddServerClick = onAddServerClick,
+            onStatsClick = onStatsClick,
+            onSettingsClick = onSettingsClick,
+            onEditServerClick = onEditServerClick.takeIf { canEditServer },
+            onExitAppClick = onExitAppClick,
+            onLeaveApp = onLeaveApp,
+            modifier = modifier
+        )
+        return
+    }
 
     when (connectionState) {
         is AppConnectionState.ServerList,
@@ -217,11 +236,6 @@ private fun ConnectedShell(
 
     // Overflow menu state
     var showOverflowMenu by remember { mutableStateOf(false) }
-    // Incremented each time a transient TV overlay (overflow menu) dismisses,
-    // so the underlying NowPlaying focus anchor can reclaim D-pad focus.
-    // Without this, focus is stranded after the overlay tears down and the
-    // user has to back out to the Activity-level BackHandler to recover.
-    var tvFocusReclaimToken by remember { mutableIntStateOf(0) }
 
     // Server name for the toolbar subtitle
     val serverName = when (val state = connectionState) {
@@ -239,18 +253,6 @@ private fun ConnectedShell(
 
     // Title for the top bar
     val topBarTitle = stringResource(R.string.now_playing)
-
-    // Single definition of the overflow menu, rendered twice: inside the top-bar
-    // DropdownMenu, and (on TV, where the top bar is hidden) inside the parallel
-    // D-pad-operable overlay triggered by the OK / DPAD_CENTER remote button.
-    // Each renderer supplies its own dismiss behaviour and divider styling.
-    val overflowActions = listOf(
-        OverflowAction(R.string.action_stats, onClick = onStatsClick),
-        OverflowAction(R.string.action_edit_server, onClick = onEditServerClick),
-        OverflowAction(R.string.action_switch_server, onClick = onDisconnectClick),
-        OverflowAction(R.string.action_app_settings, onClick = onSettingsClick),
-        OverflowAction(R.string.action_exit_app, dividerBefore = true, onClick = onExitAppClick),
-    )
 
     // Shared top bar composable
     val topBar: @Composable () -> Unit = {
@@ -296,16 +298,42 @@ private fun ConnectedShell(
                         expanded = showOverflowMenu,
                         onDismissRequest = { showOverflowMenu = false }
                     ) {
-                        overflowActions.forEach { action ->
-                            if (action.dividerBefore) HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text(stringResource(action.labelRes)) },
-                                onClick = {
-                                    showOverflowMenu = false
-                                    action.onClick()
-                                }
-                            )
-                        }
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.action_stats)) },
+                            onClick = {
+                                showOverflowMenu = false
+                                onStatsClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.action_edit_server)) },
+                            onClick = {
+                                showOverflowMenu = false
+                                onEditServerClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.action_switch_server)) },
+                            onClick = {
+                                showOverflowMenu = false
+                                onDisconnectClick()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.action_app_settings)) },
+                            onClick = {
+                                showOverflowMenu = false
+                                onSettingsClick()
+                            }
+                        )
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.action_exit_app)) },
+                            onClick = {
+                                showOverflowMenu = false
+                                onExitAppClick()
+                            }
+                        )
                     }
                 }
             },
@@ -333,167 +361,120 @@ private fun ConnectedShell(
         )
     }
 
-    // On TV the top bar is hidden so Now Playing owns the whole screen, which
-    // also puts the overflow icon out of reach -- OK / DPAD_CENTER on the
-    // passive focus anchor opens the menu instead. The handler returns false
-    // unless it actually consumes the press, so focused buttons elsewhere keep
-    // their normal behavior.
-    val hideTopBar = formFactor == FormFactor.TV
-
-    Box(modifier = modifier.onKeyEvent { event ->
-        when {
-            !hideTopBar || showOverflowMenu -> false
-            event.type != KeyEventType.KeyUp -> false
-            event.key == Key.DirectionCenter ||
-                event.key == Key.Enter ||
-                event.key == Key.NumPadEnter -> {
-                showOverflowMenu = true
-                true
-            }
-            else -> false
-        }
-    }) {
-        CompositionLocalProvider(
-            LocalTvFocusReclaimToken provides tvFocusReclaimToken,
-        ) {
-            Scaffold(
-                topBar = if (hideTopBar) ({}) else topBar,
-                content = contentArea
-            )
-        }
-        if (hideTopBar && showOverflowMenu) {
-            // Material3 DropdownMenu items are not D-pad operable on TV;
-            // render a TV-tailored overlay with tvFocusable items instead.
-            TvOverflowMenuOverlay(
-                actions = overflowActions,
-                onDismiss = {
-                    showOverflowMenu = false
-                    // Bump the reclaim token so NowPlayingFocus's anchor
-                    // re-requests focus once the overlay tears down.
-                    tvFocusReclaimToken++
-                },
-            )
-        }
-    }
+    Scaffold(
+        modifier = modifier,
+        topBar = topBar,
+        content = contentArea
+    )
 }
 
 /**
- * TV overflow menu overlay: shown on Now Playing when the user presses OK on
- * the remote (top bar is hidden so the dropdown is unreachable). Items are
- * tvFocusable with large hit targets and visible focus ring; first item gets
- * initial focus; Back dismisses.
- */
-@Composable
-private fun TvOverflowMenuOverlay(
-    actions: List<OverflowAction>,
-    onDismiss: () -> Unit,
-) {
-    val firstFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { firstFocus.requestFocus() }
-
-    // Intercept BACK during the tunnel (preview) phase so it dismisses the
-    // overlay in one press. Without this, BACK first reaches the focused
-    // menu item's `clickable` modifier and is consumed there (clearing the
-    // focus highlight without dismissing), so the user has to press BACK
-    // twice -- once to clear focus, once for the surrounding BackHandler to
-    // fire. Routing BACK here first puts the dismiss above any child focus
-    // consumer. KeyDown filter avoids handling the up event.
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .onPreviewKeyEvent { event ->
-                if (event.key == Key.Back && event.type == KeyEventType.KeyDown) {
-                    onDismiss()
-                    true
-                } else {
-                    false
-                }
-            }
-            .background(Color.Black.copy(alpha = 0.55f))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onDismiss,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Surface(
-            shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 8.dp,
-            modifier = Modifier
-                .widthIn(min = 360.dp, max = 520.dp)
-                .padding(48.dp),
-        ) {
-            Column(modifier = Modifier.padding(vertical = 12.dp)) {
-                actions.forEachIndexed { index, action ->
-                    if (action.dividerBefore) {
-                        HorizontalDivider(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                        )
-                    }
-                    TvOverflowMenuItem(
-                        label = stringResource(action.labelRes),
-                        onClick = { onDismiss(); action.onClick() },
-                        focusRequester = if (index == 0) firstFocus else null,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TvOverflowMenuItem(
-    label: String,
-    onClick: () -> Unit,
-    focusRequester: FocusRequester? = null,
-) {
-    // Hand clickable's own interaction source to tvFocusable so the shared focus
-    // ring is driven by this Box's single focus target. Letting the helper add
-    // its own focus target instead would stack two of them: the outer one would
-    // absorb focus while the inner clickable kept the OK key handler, so the
-    // item would highlight but pressing OK would do nothing.
-    val interactionSource = remember { MutableInteractionSource() }
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp)
-            .tvFocusable(
-                focusRequester = focusRequester,
-                cornerRadius = 10.dp,
-                focusScale = 1.02f,
-                interactionSource = interactionSource,
-            )
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(
-                interactionSource = interactionSource,
-                indication = LocalIndication.current,
-                onClick = onClick,
-            )
-            .heightIn(min = 56.dp)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Text(
-            text = label,
-            fontSize = 20.sp,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-    }
-}
-
-/**
- * One entry in the app's overflow menu. Declared once in `ConnectedShell` and
- * rendered by both the Material dropdown (phone/tablet) and the D-pad overlay
- * (TV), so adding or reordering an entry is a single edit.
+ * The TV frame: the side menu of [TvShell] in place of the top bar, the
+ * overflow menu and the corner buttons, around the server list or Now Playing.
  *
- * [onClick] is the bare action -- each renderer wraps it with its own dismiss.
- * [dividerBefore] asks the renderer to draw a separator above this entry, in
- * whatever style that surface uses.
+ * The connection status the phone shows in its top bar is at the top of the
+ * menu: a dot while it is collapsed, the server's name with it when open.
+ *
+ * @param onEditServerClick Null when the connection is not to a saved server.
  */
-private class OverflowAction(
-    @param:StringRes val labelRes: Int,
-    val dividerBefore: Boolean = false,
-    val onClick: () -> Unit,
-)
+@Composable
+private fun TvAppShell(
+    viewModel: MainActivityViewModel,
+    serverListContent: @Composable () -> Unit,
+    nowPlaying: @Composable () -> Unit,
+    onDisconnectClick: () -> Unit,
+    onAddServerClick: () -> Unit,
+    onStatsClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+    onEditServerClick: (() -> Unit)?,
+    onExitAppClick: () -> Unit,
+    onLeaveApp: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
+    val connected = when (connectionState) {
+        is AppConnectionState.ServerList, is AppConnectionState.Error -> false
+        is AppConnectionState.Connecting,
+        is AppConnectionState.Connected,
+        is AppConnectionState.Reconnecting -> true
+    }
+
+    val settings = TvMenuEntry(stringResource(R.string.action_app_settings), Icons.Default.Settings, onSettingsClick)
+    val exit = TvMenuEntry(stringResource(R.string.action_exit_app), Icons.AutoMirrored.Filled.ExitToApp, onExitAppClick)
+    val home: TvMenuEntry
+    val entries: List<TvMenuEntry>
+    if (connected) {
+        home = TvMenuEntry(stringResource(R.string.now_playing), Icons.Default.PlayArrow)
+        entries = listOfNotNull(
+            TvMenuEntry(stringResource(R.string.action_switch_server), Icons.AutoMirrored.Filled.List, onDisconnectClick),
+            onEditServerClick?.let { TvMenuEntry(stringResource(R.string.action_edit_server), Icons.Default.Edit, it) },
+            TvMenuEntry(stringResource(R.string.action_stats), Icons.Default.Info, onStatsClick),
+        )
+    } else {
+        home = TvMenuEntry(stringResource(R.string.tv_menu_servers), Icons.AutoMirrored.Filled.List)
+        entries = listOf(TvMenuEntry(stringResource(R.string.add_server), Icons.Default.Add, onAddServerClick))
+    }
+
+    Surface(
+        modifier = modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground
+    ) {
+        TvShell(
+            home = home,
+            entries = entries,
+            footerEntries = listOf(settings, exit),
+            onLeave = onLeaveApp,
+            header = { open -> TvMenuHeader(connectionState, open) }
+        ) {
+            if (connected) nowPlaying() else serverListContent()
+        }
+    }
+}
+
+/** The app's name and, when connected, the server and its status. */
+@Composable
+private fun TvMenuHeader(connectionState: AppConnectionState, open: Boolean) {
+    val serverName = when (connectionState) {
+        is AppConnectionState.Connected -> connectionState.serverName
+        is AppConnectionState.Connecting -> connectionState.serverName
+        is AppConnectionState.Reconnecting -> connectionState.serverName
+        else -> null
+    }
+    if (!open) {
+        // Lines the dot up with the icons of the collapsed entries
+        Box(modifier = Modifier.width(56.dp).height(48.dp), contentAlignment = Alignment.Center) {
+            if (serverName != null) {
+                ConnectionStatusDot(connectionState = connectionState, modifier = Modifier.size(12.dp))
+            }
+        }
+        return
+    }
+    Column(modifier = Modifier.width(232.dp).padding(horizontal = 16.dp, vertical = 4.dp)) {
+        Text(
+            text = stringResource(R.string.app_name),
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (serverName != null) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ConnectionStatusDot(connectionState = connectionState, modifier = Modifier.size(12.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (connectionState is AppConnectionState.Reconnecting) {
+                        stringResource(R.string.reconnecting_toolbar_subtitle)
+                    } else {
+                        serverName
+                    },
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}

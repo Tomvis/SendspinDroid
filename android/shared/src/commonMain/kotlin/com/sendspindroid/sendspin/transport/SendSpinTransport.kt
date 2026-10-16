@@ -79,8 +79,15 @@ interface SendSpinTransport {
      * opposite of what every goodbye reason asks for.
      *
      * Defaults to [close] for transports that cannot distinguish the two.
+     *
+     * @param onFlushed called once, on any thread, when the queued frames
+     *   and the close have gone as far as this transport takes them: the
+     *   point after which ending the process loses nothing.
      */
-    fun closeAfterFlush(code: Int = 1000, reason: String = "") = close(code, reason)
+    fun closeAfterFlush(code: Int = 1000, reason: String = "", onFlushed: () -> Unit = {}) {
+        close(code, reason)
+        onFlushed()
+    }
 
     /**
      * Release all resources associated with this transport.

@@ -2,7 +2,6 @@ package com.sendspindroid.ui.theme
 
 import android.content.Context
 import android.content.SharedPreferences
-import androidx.appcompat.app.AppCompatDelegate
 import home.theme.HomeThemes
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,8 +11,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * The home theme (HW-65), fork-only, chosen in Settings and kept on this device. Upstream removed
  * the Music Assistant client (#302), so it no longer follows the MA user's theme (HW-85).
  *
- * Light/dark goes through AppCompat's night mode, so Compose, the XML dialogs and
- * `isSystemInDarkTheme()` all follow it; Automatic = the system's.
+ * Light/dark is upstream's Theme setting (UserSettings.themeMode, #323) since HW-114; [Effective.mode]
+ * is only read once, by [takeLegacyMode], to carry an older fork choice over to it.
  */
 object HomeThemeController {
     private const val PREFS = "home_theme"
@@ -45,11 +44,15 @@ object HomeThemeController {
     private fun apply(effective: Effective) {
         _effective.value = effective
         prefs?.edit()?.putString(KEY_LAST, "${effective.theme}/${effective.mode}")?.apply()
-        val night = when (effective.mode) {
-            "light" -> AppCompatDelegate.MODE_NIGHT_NO
-            "dark" -> AppCompatDelegate.MODE_NIGHT_YES
-            else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
-        }
-        if (AppCompatDelegate.getDefaultNightMode() != night) AppCompatDelegate.setDefaultNightMode(night)
+    }
+
+    /**
+     * A light/dark choice made in the fork's own picker before HW-114 ("light"/"dark"), handed
+     * over once: the stored mode goes back to Automatic.
+     */
+    fun takeLegacyMode(): String? {
+        val mode = _effective.value.mode.takeIf { it == "light" || it == "dark" } ?: return null
+        apply(_effective.value.copy(mode = "automatic"))
+        return mode
     }
 }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        The Material3 alert dialog with a focus state that can be seen across a
+        room: Material3 shows a focused dialog button or list row only as a 12%
+        tint. A focused button gets a primary outline and a stronger tint, and
+        a focused list row a stronger highlight.
+    -->
+    <style name="ThemeOverlay.SendSpinDroid.AlertDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="buttonBarPositiveButtonStyle">@style/Widget.SendSpinDroid.TvDialogButton</item>
+        <item name="buttonBarNegativeButtonStyle">@style/Widget.SendSpinDroid.TvDialogButton</item>
+        <item name="buttonBarNeutralButtonStyle">@style/Widget.SendSpinDroid.TvDialogButton</item>
+        <item name="colorControlHighlight">@color/tv_focus_highlight</item>
+    </style>
+
+    <style name="Widget.SendSpinDroid.TvDialogButton" parent="Widget.Material3.Button.TextButton.Dialog">
+        <item name="strokeColor">@color/tv_focus_stroke</item>
+        <item name="strokeWidth">2dp</item>
+        <item name="rippleColor">@color/tv_focus_highlight</item>
+    </style>
+</resources>

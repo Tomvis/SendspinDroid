@@ -40,7 +40,8 @@ class AudioInterruptionPolicyTest {
         serverState: PlaybackStateType = PlaybackStateType.PLAYING,
         canSendPause: Boolean = true,
         pausedForCall: Boolean = false,
-    ) = AudioInterruptionPolicy.decide(event, audioMode, serverState, canSendPause, pausedForCall)
+        isTv: Boolean = false,
+    ) = AudioInterruptionPolicy.decide(event, audioMode, serverState, canSendPause, pausedForCall, isTv)
 
     // ---- A phone or VoIP call ----
 
@@ -207,6 +208,22 @@ class AudioInterruptionPolicyTest {
     }
 
     @Test
+    fun `becoming noisy on a TV does nothing`() {
+        // HDMI hotplug: the display waking or sleeping fires it, and a TV has
+        // no speaker of its own to protect (#325).
+        for (state in PlaybackStateType.values()) {
+            for (canSend in listOf(true, false)) {
+                assertEquals("$state", NONE, decide(BECOMING_NOISY, serverState = state, canSendPause = canSend, isTv = true))
+            }
+        }
+    }
+
+    @Test
+    fun `a TV still pauses for a call`() {
+        assertEquals(PAUSE_ON_SERVER, decide(FOCUS_LOSS_TRANSIENT, audioMode = AudioManager.MODE_IN_CALL, isTv = true))
+    }
+
+    @Test
     fun `no interruption resumes after becoming noisy`() {
         // The service sets pausedForCall only for a transient focus loss, so a
         // later focus gain is decided without it and only un-mutes.
@@ -235,5 +252,39 @@ class AudioInterruptionPolicyTest {
     fun `only call modes count as a call`() {
         for (mode in callModes) assertTrue("mode=$mode", AudioInterruptionPolicy.isCallMode(mode))
         assertFalse(AudioInterruptionPolicy.isCallMode(AudioManager.MODE_NORMAL))
+    }
+
+    // ---- Taking the output back after a permanent loss ----
+
+    @Test
+    fun `playback takes the output while available`() {
+        assertTrue(AudioInterruptionPolicy.mayTakeFocus(userRequest = false, unavailable = false, playerRoleActive = true))
+    }
+
+    @Test
+    fun `a stream that crossed the unavailable report does not take the output back`() {
+        assertFalse(AudioInterruptionPolicy.mayTakeFocus(userRequest = false, unavailable = true, playerRoleActive = true))
+    }
+
+    @Test
+    fun `the user asking to play takes the output back`() {
+        assertTrue(AudioInterruptionPolicy.mayTakeFocus(userRequest = true, unavailable = true, playerRoleActive = true))
+    }
+
+    @Test
+    fun `the end of an interruption gives up the focus once the connection is not a player`() {
+        assertTrue(AudioInterruptionPolicy.abandonFocusOnGain(UNMUTE_LOCALLY, PlaybackStateType.PLAYING, playerRoleActive = false))
+        assertTrue(AudioInterruptionPolicy.abandonFocusOnGain(RESUME_ON_SERVER, PlaybackStateType.PAUSED, playerRoleActive = false))
+        // A player keeps it while it resumes or plays
+        assertFalse(AudioInterruptionPolicy.abandonFocusOnGain(UNMUTE_LOCALLY, PlaybackStateType.PLAYING, playerRoleActive = true))
+        assertFalse(AudioInterruptionPolicy.abandonFocusOnGain(RESUME_ON_SERVER, PlaybackStateType.PAUSED, playerRoleActive = true))
+        assertTrue(AudioInterruptionPolicy.abandonFocusOnGain(UNMUTE_LOCALLY, PlaybackStateType.STOPPED, playerRoleActive = true))
+    }
+
+    @Test
+    fun `nothing takes the output on a connection that is not a player`() {
+        for (user in listOf(false, true)) for (unavailable in listOf(false, true)) {
+            assertFalse(AudioInterruptionPolicy.mayTakeFocus(user, unavailable, playerRoleActive = false))
+        }
     }
 }

@@ -405,7 +405,7 @@ object MessageBuilder {
      *
      * The advertised list never contains a codec other than [preferredCodec] or
      * `"pcm"`, and when both are present the preferred codec appears first
-     * (each with stereo+mono variants at the appropriate bit depths). Edge cases:
+     * (each in stereo at the appropriate bit depths). Edge cases:
      * - If [preferredCodec] is not supported on this device, it is silently dropped
      *   and only PCM is advertised. The Settings UI surfaces supported codecs
      *   explicitly; this fallback exists so a connection can still succeed even
@@ -443,18 +443,16 @@ object MessageBuilder {
                     listOf(SendSpinProtocol.AudioFormat.BIT_DEPTH)
                 }
                 for (bitDepth in depths) {
-                    // Stereo
+                    // Stereo only. A change of channel count needs a new
+                    // AudioTrack, so it cannot be made without a gap: "A
+                    // player that cannot switch its output between the
+                    // formats it lists without a gap SHOULD list a single
+                    // sample_rate and channels" (roles/player/v1.md). The
+                    // server mixes a mono source up for us.
                     add(FormatEntry(
                         codec = codec,
                         sampleRate = SendSpinProtocol.AudioFormat.SAMPLE_RATE,
                         channels = SendSpinProtocol.AudioFormat.CHANNELS,
-                        bitDepth = bitDepth
-                    ))
-                    // Mono
-                    add(FormatEntry(
-                        codec = codec,
-                        sampleRate = SendSpinProtocol.AudioFormat.SAMPLE_RATE,
-                        channels = SendSpinProtocol.AudioFormat.CHANNELS_MONO,
                         bitDepth = bitDepth
                     ))
                 }

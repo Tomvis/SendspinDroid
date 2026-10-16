@@ -2,16 +2,36 @@ package com.sendspindroid.ui.settings
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Button
+import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.isFocusable
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.test.requestFocus
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.sendspin.pairing.PairedServer
 import com.sendspindroid.sendspin.pairing.PairingOutcome
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.theme.SendSpinTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -165,5 +185,72 @@ class PairedServersSectionTest {
         }
 
         composeTestRule.onNodeWithText("Forget").assertIsDisplayed()
+    }
+
+    /**
+     * On a TV, between two other controls: the one after the list is where
+     * focus goes once the list is empty, and the one before it is where focus
+     * would land if it only went to the first thing that takes it.
+     */
+    private fun showOnTv(initial: List<PairedServer>) {
+        composeTestRule.setContent {
+            CompositionLocalProvider(LocalFormFactor provides FormFactor.TV) {
+                SendSpinTheme {
+                    var servers by remember { mutableStateOf(initial) }
+                    val afterList = remember { FocusRequester() }
+                    Column {
+                        Button(onClick = {}) { Text("Before the list") }
+                        PairedServersSection(
+                            servers = servers,
+                            lastOutcome = null,
+                            onForget = {
+                                forgotten += it
+                                servers = servers - it
+                            },
+                            afterListFocusRequester = afterList
+                        )
+                        Button(onClick = {}, modifier = Modifier.focusRequester(afterList)) {
+                            Text("After the list")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** OK on the focused row, then Right from Cancel and OK on the dialog's Forget. */
+    private fun forgetFocusedRowOnTv(rowText: String) {
+        composeTestRule.onNodeWithText(rowText).performKeyInput { pressKey(Key.DirectionCenter) }
+        composeTestRule.onNodeWithText("Cancel").performKeyInput { pressKey(Key.DirectionRight) }
+        composeTestRule.onNode(hasText("Forget") and hasAnyAncestor(isDialog()))
+            .performKeyInput { pressKey(Key.DirectionCenter) }
+    }
+
+    @Test
+    fun onATv_eachRowIsOneFocusStop_andOkAsksToForget_onCancel() {
+        showOnTv(listOf(kitchen, office))
+
+        // Two rows and the controls around them; no Forget buttons of their own.
+        composeTestRule.onAllNodes(isFocusable()).assertCountEquals(4)
+        val row = composeTestRule.onNodeWithText("Kitchen")
+        row.requestFocus()
+        row.performKeyInput { pressKey(Key.DirectionCenter) }
+
+        composeTestRule.onNodeWithText("Forget Kitchen?").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Cancel").assertIsFocused()
+        assertEquals(emptyList<PairedServer>(), forgotten)
+    }
+
+    @Test
+    fun onATv_forgettingARowMovesFocusToTheNextOne_andPastTheListAfterTheLast() {
+        showOnTv(listOf(kitchen, office))
+        composeTestRule.onNodeWithText("Kitchen").requestFocus()
+
+        forgetFocusedRowOnTv("Kitchen")
+        composeTestRule.onNodeWithText(officeId).assertIsFocused()
+
+        forgetFocusedRowOnTv(officeId)
+        composeTestRule.onNodeWithText("After the list").assertIsFocused()
+        assertEquals(listOf(kitchen, office), forgotten)
     }
 }

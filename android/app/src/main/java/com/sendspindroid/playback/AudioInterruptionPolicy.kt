@@ -48,6 +48,8 @@ enum class InterruptionAction {
  *   device only, so un-muting is instant and exactly in time.
  * - Permanent loss reports the player as unavailable.
  * - An output disconnect (headphones unplugged) pauses the group and never resumes.
+ *   Not on a TV: there it is HDMI hotplug, the display waking or sleeping, and
+ *   there is no speaker of its own to fall back to (#325).
  *
  * Whenever the `pause` command cannot be sent, the device is muted instead.
  */
@@ -64,6 +66,7 @@ object AudioInterruptionPolicy {
      * @param canSendPause connected, controller role active and `pause` supported
      * @param pausedForCall we sent `pause` for a call and nobody has changed
      *   playback since (see [callPauseSuperseded])
+     * @param isTv the device is a TV
      */
     fun decide(
         event: AudioInterruption,
@@ -71,6 +74,7 @@ object AudioInterruptionPolicy {
         serverState: PlaybackStateType,
         canSendPause: Boolean,
         pausedForCall: Boolean,
+        isTv: Boolean = false,
     ): InterruptionAction {
         val canPause = canSendPause && serverState == PlaybackStateType.PLAYING
         return when (event) {
@@ -82,12 +86,41 @@ object AudioInterruptionPolicy {
                 if (isCallMode(audioMode) && canPause) InterruptionAction.PAUSE_ON_SERVER
                 else InterruptionAction.MUTE_LOCALLY
             AudioInterruption.BECOMING_NOISY -> when {
+                isTv -> InterruptionAction.NONE
                 canPause -> InterruptionAction.PAUSE_ON_SERVER
                 serverState == PlaybackStateType.PLAYING -> InterruptionAction.MUTE_LOCALLY
                 else -> InterruptionAction.NONE
             }
         }
     }
+
+    /**
+     * Whether starting playback may take the audio focus.
+     *
+     * After a permanent focus loss this client reports `available: false`:
+     * another app owns the output and will not yield it. A stream/start or a
+     * 'playing' that crossed that report must not take it back from that app;
+     * the server ends the stream when the report arrives. Only the user asking
+     * this device to play does, which also makes it available again ("SHOULD
+     * return to `available: true` as soon as it is again willing to be taken
+     * over"). Nothing takes the focus on a connection that is not a player.
+     *
+     * @param userRequest the user asked this device to play
+     * @param unavailable the client reports `available: false` for a focus loss
+     * @param playerRoleActive the connection has the player role
+     */
+    fun mayTakeFocus(userRequest: Boolean, unavailable: Boolean, playerRoleActive: Boolean): Boolean =
+        playerRoleActive && (userRequest || !unavailable)
+
+    /**
+     * Whether the focus, kept through a transient loss, is given up once the
+     * interruption is over: unless we resume the group, or it is still
+     * playing here. A connection that is no longer a player has nothing of
+     * its own to play.
+     */
+    fun abandonFocusOnGain(action: InterruptionAction, serverState: PlaybackStateType, playerRoleActive: Boolean): Boolean =
+        !playerRoleActive ||
+            (action != InterruptionAction.RESUME_ON_SERVER && serverState != PlaybackStateType.PLAYING)
 
     /**
      * True when a server playback-state change shows that our pause-for-a-call no

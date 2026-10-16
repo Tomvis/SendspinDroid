@@ -16,14 +16,21 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -36,15 +43,24 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.sendspindroid.R
 import com.sendspindroid.playback.PlaybackService
+import com.sendspindroid.ui.adaptive.FormFactor
+import com.sendspindroid.ui.adaptive.LocalFormFactor
+import com.sendspindroid.ui.adaptive.rememberFocusFallback
+import com.sendspindroid.ui.adaptive.tvFocusable
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.theme.SendSpinTheme
+import kotlinx.coroutines.launch
 
 /**
  * Album art card with optional buffering overlay.
  * Displays artwork from various sources (byte array, URI, or URL).
  *
  * When the server has sent an image of the artist, the card can be swiped
- * sideways to it and back, with two dots showing which one is in view.
+ * sideways to it and back, with two dots showing which one is in view. A TV
+ * remote cannot swipe: there the card takes focus, and OK turns it.
+ *
+ * @param focusFallback where focus goes if the card has it when it stops
+ *   taking focus, which happens when the next track has no artist image.
  */
 @Composable
 fun AlbumArtCard(
@@ -52,12 +68,36 @@ fun AlbumArtCard(
     isBuffering: Boolean,
     modifier: Modifier = Modifier,
     maxWidth: Dp = 320.dp,
-    contentDescription: String = stringResource(R.string.album_art)
+    contentDescription: String = stringResource(R.string.album_art),
+    artistImage: ByteArray? = PlaybackService.artistArtwork.collectAsStateWithLifecycle().value,
+    focusFallback: FocusRequester? = null,
 ) {
+    // Starts on the album art each time an artist image appears
+    val pagerState = key(artistImage != null) { rememberPagerState(pageCount = { 2 }) }
+    val scope = rememberCoroutineScope()
+    val isTv = LocalFormFactor.current == FormFactor.TV
+    val turnable = artistImage != null && isTv
+    val keepFocus = focusFallback?.let { rememberFocusFallback(turnable, it) } ?: Modifier
+    val turnOnTv = if (turnable) {
+        Modifier
+            .onPreviewKeyEvent { event ->
+                val ok = event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter
+                if (ok && event.type == KeyEventType.KeyUp) {
+                    scope.launch { pagerState.animateScrollToPage(1 - pagerState.currentPage) }
+                }
+                ok
+            }
+            .tvFocusable(shape = RoundedCornerShape(16.dp))
+    } else {
+        Modifier
+    }
+
     Card(
         modifier = modifier
             .widthIn(max = maxWidth)
-            .aspectRatio(1f),
+            .aspectRatio(1f)
+            .then(keepFocus)
+            .then(turnOnTv),
         shape = RoundedCornerShape(16.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
     ) {
@@ -90,25 +130,50 @@ fun AlbumArtCard(
             }
 
             val albumArt: @Composable () -> Unit = {
-                AsyncImage(
-                    model = imageRequest,
-                    contentDescription = contentDescription,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(RoundedCornerShape(16.dp)),
-                    contentScale = ContentScale.Crop,
-                    placeholder = painterResource(R.drawable.placeholder_album_simple),
-                    error = painterResource(R.drawable.placeholder_album_simple),
-                    fallback = painterResource(R.drawable.placeholder_album_simple)
-                )
+                if (isTv) {
+                    // The light grey placeholder glares in the dark room a TV
+                    // is watched in: the theme's muted colours instead, which
+                    // the art covers once it loads.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_music_note),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.fillMaxSize(0.4f)
+                        )
+                        AsyncImage(
+                            model = imageRequest,
+                            contentDescription = contentDescription,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(16.dp)),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                } else {
+                    AsyncImage(
+                        model = imageRequest,
+                        contentDescription = contentDescription,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(16.dp)),
+                        contentScale = ContentScale.Crop,
+                        placeholder = painterResource(R.drawable.placeholder_album_simple),
+                        error = painterResource(R.drawable.placeholder_album_simple),
+                        fallback = painterResource(R.drawable.placeholder_album_simple)
+                    )
+                }
             }
 
-            val artistImage by PlaybackService.artistArtwork.collectAsStateWithLifecycle()
             val artist = artistImage
             if (artist == null) {
                 albumArt()
             } else {
-                val pagerState = rememberPagerState(pageCount = { 2 })
                 HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                     if (page == 0) {
                         albumArt()

@@ -1,6 +1,7 @@
 package com.sendspindroid.ui.main
 
 import android.content.res.Configuration
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,14 +42,14 @@ import androidx.compose.ui.unit.sp
 import com.sendspindroid.R
 import com.sendspindroid.ui.main.components.AdmissionNotice
 import com.sendspindroid.sendspin.pairing.PairedServers
-import com.sendspindroid.sendspin.pairing.PairingOutcome
 import com.sendspindroid.sendspin.protocol.AdmissionState
-import com.sendspindroid.ui.settings.message
+import com.sendspindroid.ui.settings.unfinishedMessage
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.adaptive.AdaptiveDefaults
 import com.sendspindroid.ui.adaptive.FormFactor
 import com.sendspindroid.ui.adaptive.LocalFormFactor
-import com.sendspindroid.ui.adaptive.overscanSafe
+import com.sendspindroid.ui.adaptive.TvOverscanHorizontal
+import com.sendspindroid.ui.adaptive.TvOverscanVertical
 import com.sendspindroid.ui.main.components.AlbumArtCard
 import com.sendspindroid.ui.main.components.ConnectionProgress
 import com.sendspindroid.ui.main.components.PlaybackControls
@@ -58,6 +59,7 @@ import com.sendspindroid.ui.main.components.VolumeSlider
 import com.sendspindroid.ui.preview.AllDevicePreviews
 import com.sendspindroid.ui.preview.TabletPreviews
 import com.sendspindroid.ui.theme.SendSpinTheme
+import com.sendspindroid.ui.tv.LocalTvMenuOpen
 
 /**
  * Now Playing screen showing album art, track info, and playback controls.
@@ -254,8 +256,7 @@ fun NowPlayingScreen(
             gestureRequested = pairingGestureRequested,
             onOpenPairingClick = onOpenPairingClick,
             onAllowPairingClick = onAllowPairingClick,
-            lastFailure = (lastPairingOutcome as? PairingOutcome.Aborted)
-                ?.message(LocalContext.current.resources),
+            lastFailure = lastPairingOutcome?.unfinishedMessage(LocalContext.current.resources),
             modifier = modifier
         )
         return
@@ -374,17 +375,24 @@ fun NowPlayingScreen(
             }
         }
 
-        // Reconnecting banner overlay at top. overscanSafe adds 48dp on TV so
-        // the banner doesn't sit inside the panel's overscan zone; no-op on
-        // phone / tablet / head-unit. The 16dp internal padding shapes the
-        // gap between the safe-area edge and the banner pill.
+        // Reconnecting banner overlay at top
         reconnectingState?.let { state ->
             ReconnectingBanner(
                 state = state,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .overscanSafe()
-                    .padding(16.dp)
+                    .then(
+                        // Inside the part of the picture every TV shows
+                        if (formFactor == FormFactor.TV) {
+                            Modifier.padding(
+                                start = TvOverscanHorizontal,
+                                top = TvOverscanVertical,
+                                end = TvOverscanHorizontal
+                            )
+                        } else {
+                            Modifier.padding(16.dp)
+                        }
+                    )
             )
         }
     }

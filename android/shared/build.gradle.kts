@@ -5,7 +5,7 @@ plugins {
 }
 
 kotlin {
-    androidLibrary {
+    android {
         namespace = "com.sendspindroid.shared"
         compileSdk = 36
         minSdk = 26
@@ -43,7 +43,7 @@ kotlin {
     // suppress the automatic application of the default template for the whole
     // module - silently, and taking the standard androidHostTest wiring with it.
     // The template's withAndroidTarget() does not match this module's
-    // `androidLibrary` target, so the edge is wired by hand.
+    // `android` target, so the edge is wired by hand.
     applyDefaultHierarchyTemplate()
 
     sourceSets {
