@@ -22,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -44,12 +45,10 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.ModalNavigationDrawer
 import androidx.tv.material3.NavigationDrawerItem
-import androidx.tv.material3.NavigationDrawerItemDefaults
 import androidx.tv.material3.NavigationDrawerScope
 import androidx.tv.material3.Text
 import androidx.tv.material3.darkColorScheme
 import androidx.tv.material3.rememberDrawerState
-import com.sendspindroid.ui.adaptive.TvOverscanHorizontal
 import com.sendspindroid.ui.adaptive.TvOverscanVertical
 
 /**
@@ -76,7 +75,8 @@ class TvMenuEntry(
  * The TV frame around a screen: a full-height side menu at the left edge,
  * as TV apps have, in place of the phone's top bar and overflow menu.
  *
- * Collapsed, the menu is a rail of icons beside the screen. It opens over the
+ * Collapsed, the menu is hidden and the screen has the full width (fork: upstream
+ * shows a rail of icons beside the screen). It opens over the
  * screen, behind a scrim, as soon as it takes focus: D-pad Left from the
  * screen's left edge, the Back key, or a remote's Menu key. It opens on
  * [home], the entry for the screen being shown. D-pad Right, or choosing
@@ -87,9 +87,9 @@ class TvMenuEntry(
  *
  * A screen with nothing to focus, such as one waiting for a server, leaves
  * focus in the menu, and so does one whose focused control goes, such as the
- * server list replaced by a connection in progress. The menu stays collapsed
- * then, so the screen is not dimmed, and opens at the first key; closing it
- * only collapses it again.
+ * server list replaced by a connection in progress. The menu stays collapsed,
+ * and hidden, then, so the screen is not dimmed, and opens at the first key;
+ * closing it only collapses it again.
  *
  * Screens reach the menu's [home] entry through [LocalTvMenu].
  *
@@ -155,6 +155,9 @@ fun TvShell(
                 Column(
                     modifier = Modifier
                         .fillMaxHeight()
+                        // Fork: no rail while collapsed. Still laid out and
+                        // focusable at the left edge, so D-pad toward it works.
+                        .alpha(if (value == DrawerValue.Open) 1f else 0f)
                         .background(if (value == DrawerValue.Open) menuBackground else Color.Transparent)
                         .padding(horizontal = RailPadding, vertical = TvOverscanVertical)
                         // Focus in the collapsed menu: the first key opens it
@@ -188,9 +191,12 @@ fun TvShell(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                // The modal drawer lays the screen out under its rail. Screens
-                // keep the TV side margin themselves, so this adds the rest.
-                .padding(start = RailWidth - TvOverscanHorizontal)
+                // Fork: the modal drawer lays the screen out under its rail,
+                // which is hidden while collapsed, so the screen keeps nearly
+                // the full width (upstream pads it by the rail's width less
+                // the TV side margin). It must still start right of the menu's
+                // entries, or D-pad Right from them does not find it.
+                .padding(start = ScreenStart)
                 .onPreviewKeyEvent { event ->
                     val menuKey = event.key == Key.Menu
                     if (menuKey && event.type == KeyEventType.KeyDown) openMenu()
@@ -211,8 +217,8 @@ private val MenuKeys = setOf(
 
 private val RailPadding = 12.dp
 
-/** The collapsed menu: its entries' icons, with [RailPadding] either side. */
-private val RailWidth = NavigationDrawerItemDefaults.CollapsedDrawerItemWidth + RailPadding * 2
+/** Fork: where the screen starts, just right of the menu entries' left edge. */
+private val ScreenStart = RailPadding * 2
 
 @Composable
 private fun NavigationDrawerScope.MenuItem(

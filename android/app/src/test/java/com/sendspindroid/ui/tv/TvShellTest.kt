@@ -16,12 +16,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertLeftPositionInRootIsEqualTo
 import androidx.compose.ui.test.isFocused
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.requestFocus
+import com.sendspindroid.ui.adaptive.TvOverscanHorizontal
 import com.sendspindroid.ui.theme.SendSpinTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -255,5 +257,31 @@ class TvShellTest {
 
         assertEquals(1, stats)
         composeTestRule.onNodeWithText("Previous").assertIsFocused()
+    }
+
+    // Fork: no rail beside the screen while the menu is collapsed
+    @Test
+    fun `collapsed, the menu takes almost no room and left from the screen's margin still opens it`() {
+        composeTestRule.setContent {
+            SendSpinTheme {
+                TvShell(
+                    home = TvMenuEntry("Now Playing", Icons.Default.PlayArrow),
+                    entries = emptyList(),
+                    footerEntries = emptyList(),
+                    onLeave = {}
+                ) {
+                    Row(modifier = Modifier.padding(start = TvOverscanHorizontal)) {
+                        Button(onClick = {}) { Text("Previous") }
+                    }
+                }
+            }
+        }
+        composeTestRule.onNodeWithText("Previous").assertLeftPositionInRootIsEqualTo(24.dp + TvOverscanHorizontal)
+        composeTestRule.onNodeWithText("Previous").requestFocus()
+
+        composeTestRule.onNodeWithText("Previous").performKeyInput { pressKey(Key.DirectionLeft) }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("Now Playing").assertIsFocused()
     }
 }
