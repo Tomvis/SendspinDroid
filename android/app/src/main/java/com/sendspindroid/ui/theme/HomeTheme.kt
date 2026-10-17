@@ -15,7 +15,7 @@ import home.theme.HomeThemes
 /*
  * Home theme (HW-48; per person since HW-65, homelab-stacks theme/): every theme x light/dark as M3
  * roles, generated into home/theme/HomeThemes.kt; cyan "lit" is in no role. Fork-only file so upstream
- * merges stay clean; Color.kt / res/values{,-night}/colors.xml (slate) remain for the XML dialogs.
+ * merges stay clean. The XML side takes the same theme from HomeXmlTheme (HW-125).
  */
 
 /** The person's theme (HomeThemeController) as M3 roles; generated catalog in home/theme/HomeThemes.kt. */
@@ -27,10 +27,22 @@ fun homeColorScheme(dark: Boolean): ColorScheme {
 
 /** TV D-pad focus ring: the theme's lit role reads as "focused/active" at 10 feet in both modes. */
 val ColorScheme.focusRing: Color
-    @Composable get() {
-        val theme = HomeThemes.byId(HomeThemeController.effective.collectAsState().value.theme)
-        return Color(if (LocalIsDarkTheme.current) theme.dark.lit else theme.light.lit)
-    }
+    @Composable get() = Color(homeScheme().lit)
+
+/** The theme's success role, for "online"/"connected" (statusOnline, HW-125). */
+val ColorScheme.homeSuccess: Color
+    @Composable get() = Color(homeScheme().success)
+
+/** The theme's warning role, for "reconnecting"/"paused" (statusWarning, HW-125). */
+val ColorScheme.homeWarning: Color
+    @Composable get() = Color(homeScheme().warning)
+
+/** The person's theme in the current light/dark mode. */
+@Composable
+private fun homeScheme(): HomeScheme {
+    val theme = HomeThemes.byId(HomeThemeController.effective.collectAsState().value.theme)
+    return if (LocalIsDarkTheme.current) theme.dark else theme.light
+}
 
 private fun HomeScheme.toColorScheme(dark: Boolean): ColorScheme =
     if (dark) {

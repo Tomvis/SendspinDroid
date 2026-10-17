@@ -1,5 +1,6 @@
 package com.sendspindroid.ui.theme
 
+import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
 import home.theme.HomeThemes
@@ -27,6 +28,8 @@ object HomeThemeController {
     val effective: StateFlow<Effective> = _effective.asStateFlow()
 
     fun initialize(context: Context) {
+        // Before the guard: a test sandbox keeps this object across Application instances
+        (context.applicationContext as? Application)?.let(HomeXmlTheme::register)
         if (prefs != null) return
         val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         prefs = p

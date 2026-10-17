@@ -30,6 +30,7 @@ fun SendSpinTvTheme(content: @Composable () -> Unit) {
         base.copy(
             primary = m3.primary,
             onPrimary = m3.onPrimary,
+            inversePrimary = m3.inversePrimary,
             primaryContainer = m3.primaryContainer,
             onPrimaryContainer = m3.onPrimaryContainer,
             secondary = m3.secondary,
@@ -46,6 +47,9 @@ fun SendSpinTvTheme(content: @Composable () -> Unit) {
             onSurface = m3.onSurface,
             surfaceVariant = m3.surfaceVariant,
             onSurfaceVariant = m3.onSurfaceVariant,
+            surfaceTint = m3.surfaceTint,
+            inverseSurface = m3.inverseSurface,
+            inverseOnSurface = m3.inverseOnSurface,
             error = m3.error,
             onError = m3.onError,
             errorContainer = m3.errorContainer,

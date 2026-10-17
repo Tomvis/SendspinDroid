@@ -141,10 +141,10 @@ fun SendSpinTheme(
  * Requires [LocalIsDarkTheme] to be provided (automatically set by [SendSpinTheme]).
  */
 val ColorScheme.statusOnline: Color
-    @Composable get() = if (LocalIsDarkTheme.current) StatusGreenDark else StatusGreenLight
+    @Composable get() = homeSuccess // fork: the home theme's success (HW-125)
 
 /**
  * Orange/amber used for "reconnecting" / "warning" status indicators.
  */
 val ColorScheme.statusWarning: Color
-    @Composable get() = if (LocalIsDarkTheme.current) StatusOrangeDark else StatusOrangeLight
+    @Composable get() = homeWarning // fork: the home theme's warning (HW-125)

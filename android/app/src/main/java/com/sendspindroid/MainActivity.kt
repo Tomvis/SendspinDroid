@@ -39,6 +39,7 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.textfield.TextInputEditText
@@ -249,10 +250,9 @@ class MainActivity : AppCompatActivity() {
             if (errorType == ErrorType.VALIDATION) Snackbar.LENGTH_SHORT else Snackbar.LENGTH_LONG
         )
 
-        // Set error background color
-        snackbar.view.setBackgroundColor(
-            ContextCompat.getColor(this, com.google.android.material.R.color.design_default_color_error)
-        )
+        // Set error background color (fork: the home theme's, HW-125)
+        snackbar.setBackgroundTint(MaterialColors.getColor(snackbar.view, androidx.appcompat.R.attr.colorError))
+        snackbar.setTextColor(MaterialColors.getColor(snackbar.view, com.google.android.material.R.attr.colorOnError))
 
         // Add retry action if provided
         retryAction?.let { action ->
@@ -260,7 +260,7 @@ class MainActivity : AppCompatActivity() {
                 action()
             }
             snackbar.setActionTextColor(
-                ContextCompat.getColor(this, android.R.color.white)
+                MaterialColors.getColor(snackbar.view, com.google.android.material.R.attr.colorOnError)
             )
         }
 
@@ -300,10 +300,9 @@ class MainActivity : AppCompatActivity() {
             Snackbar.LENGTH_SHORT
         )
 
-        // Set success background color (using primary color)
-        snackbar.view.setBackgroundColor(
-            ContextCompat.getColor(this, com.google.android.material.R.color.design_default_color_primary_dark)
-        )
+        // Set success background color (using primary color; fork: the home theme's, HW-125)
+        snackbar.setBackgroundTint(MaterialColors.getColor(snackbar.view, androidx.appcompat.R.attr.colorPrimary))
+        snackbar.setTextColor(MaterialColors.getColor(snackbar.view, com.google.android.material.R.attr.colorOnPrimary))
 
         snackbar.show()
     }
@@ -348,10 +347,9 @@ class MainActivity : AppCompatActivity() {
                 message,
                 Snackbar.LENGTH_INDEFINITE
             ).apply {
-                // Use warning/info color instead of error
-                view.setBackgroundColor(
-                    ContextCompat.getColor(this@MainActivity, com.google.android.material.R.color.design_default_color_primary)
-                )
+                // Use warning/info color instead of error (fork: the home theme's primary, HW-125)
+                setBackgroundTint(MaterialColors.getColor(view, androidx.appcompat.R.attr.colorPrimary))
+                setTextColor(MaterialColors.getColor(view, com.google.android.material.R.attr.colorOnPrimary))
                 show()
             }
         } catch (e: Exception) {

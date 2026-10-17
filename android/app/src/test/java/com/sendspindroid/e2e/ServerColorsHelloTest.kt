@@ -24,6 +24,7 @@ class ServerColorsHelloTest : E2ETestBase() {
 
     @Test
     fun `with album colors on the hello lists color@v1`() {
+        every { UserSettings.serverColors } returns true // fork: off by default (HW-125)
         connectAndHandshake()
 
         assertEquals(listOf("player@v1", "controller@v1", "metadata@v1", "artwork@v1", "color@v1"), helloRoles())

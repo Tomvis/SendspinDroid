@@ -36,22 +36,22 @@ class UserSettingsServerColorsTest {
     }
 
     @Test
-    fun `server colors are on by default`() {
-        assertTrue(UserSettings.serverColors)
-    }
-
-    @Test
-    fun `turning server colors off is persisted`() {
-        UserSettings.serverColors = false
-
+    fun `server colors are off by default on this fork`() { // HW-125: the home theme first
         assertFalse(UserSettings.serverColors)
-        assertFalse(prefsStore.getValue(UserSettings.KEY_SERVER_COLORS))
     }
 
     @Test
-    fun `server colors are on before the settings are loaded`() {
+    fun `turning server colors on is persisted`() {
+        UserSettings.serverColors = true
+
+        assertTrue(UserSettings.serverColors)
+        assertTrue(prefsStore.getValue(UserSettings.KEY_SERVER_COLORS))
+    }
+
+    @Test
+    fun `server colors are off before the settings are loaded`() {
         UserSettings.resetForTesting()
 
-        assertTrue(UserSettings.serverColors)
+        assertFalse(UserSettings.serverColors)
     }
 }

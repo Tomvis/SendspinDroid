@@ -65,6 +65,7 @@ class SettingsServerColorsTest {
 
     @Test
     fun `the switch is on, and turning it off is saved`() {
+        UserSettings.serverColors = true // fork: off by default (HW-125)
         show()
         composeTestRule.onNodeWithText("Album colors").performScrollTo()
         composeTestRule.onNode(albumColorsSwitch).assertIsOn()

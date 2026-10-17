@@ -52,6 +52,7 @@ import com.sendspindroid.ui.adaptive.overscanSafe
 import com.sendspindroid.ui.main.ArtworkSource
 import com.sendspindroid.ui.main.AudioStreamSpec
 import com.sendspindroid.ui.main.TrackMetadata
+import com.sendspindroid.ui.theme.NpBase
 import com.sendspindroid.ui.theme.NpCream
 import com.sendspindroid.ui.theme.NpCreamDim
 import com.sendspindroid.ui.theme.NpFrauncesFamily
@@ -59,9 +60,8 @@ import com.sendspindroid.ui.theme.NpInterFamily
 import kotlinx.coroutines.delay
 import java.util.Locale
 
-private val FocusFg = NpCream
-private val FocusFgDim = NpCreamDim
-private val AlbumBackdropBase = Color(0xFF0C1419)
+private val FocusFg: Color @Composable get() = NpCream
+private val FocusFgDim: Color @Composable get() = NpCreamDim
 
 @Composable
 fun NowPlayingFocus(
@@ -173,12 +173,12 @@ fun NowPlayingFocus(
         metadata.title + "\n" + metadata.artist + "\n" + metadata.album
     }
 
-    // Black backdrop on the root so any uncovered gap during a track-change
-    // recomposition reads as black rather than as the Scaffold background
-    // (which on a light system theme would flash white). AmbientBg's
+    // NpBase backdrop on the root so any uncovered gap during a track-change
+    // recomposition reads as the ambient base rather than as the Scaffold
+    // background (which on a light system theme would flash white). AmbientBg's
     // BlurredCover holds its own held-bitmap underlay; this is belt and
     // suspenders for the rest of the surface.
-    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+    Box(modifier = modifier.fillMaxSize().background(NpBase)) {
         // AmbientBg deliberately full-bleed (outside overscanSafe) so the
         // blurred-cover wash extends to the actual screen edge; nothing
         // critical sits there.
@@ -368,7 +368,7 @@ private fun DarkAlbumBackdrop(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(AlbumBackdropBase),
+                .background(NpBase),
         )
         RadialWash(modifier = Modifier.fillMaxSize(), key1 = accent) { w, h ->
             Brush.radialGradient(
@@ -380,11 +380,12 @@ private fun DarkAlbumBackdrop(
         // Cream hairline so the card still reads as a physical object when
         // the dark backdrop is showing. 6% alpha matches the cover's own
         // box-shadow inner stroke from the design spec.
+        val hairline = NpCream.copy(alpha = 0.06f)
         androidx.compose.foundation.Canvas(
             modifier = Modifier.fillMaxSize(),
         ) {
             drawRoundRect(
-                color = NpCream.copy(alpha = 0.06f),
+                color = hairline,
                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(
                     NowPlayingTvTokens.Radius.AlbumArt.toPx(),
                 ),

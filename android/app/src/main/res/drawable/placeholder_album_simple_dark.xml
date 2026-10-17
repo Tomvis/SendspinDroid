@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Dark-theme placeholder used by the TV Now Playing focus layout.
+<!-- Placeholder used by the TV Now Playing focus layout, light or dark.
      Matches the screen's ambient base; the Compose layer paints an accent
      halo / inner-stroke on top so the empty state still feels alive.
      Phone, tablet, and MiniPlayer keep the light placeholder_album_simple. -->
@@ -8,13 +8,13 @@
     android:height="48dp"
     android:viewportWidth="48"
     android:viewportHeight="48">
-    <!-- Backdrop: same family as AmbientBase (#070D11), home night family (HW-48). -->
+    <!-- Backdrop: NpBase, the home theme's deepest surface (HW-125), from the activity's ThemeOverlay.Home. -->
     <path
-        android:fillColor="#0C1419"
+        android:fillColor="?attr/colorSurfaceContainerLowest"
         android:pathData="M0,0h48v48h-48z" />
-    <!-- Glyph: mist at 18% so it reads as a hint, not a logo. -->
+    <!-- Glyph: NpCream (onBackground) at 18% so it reads as a hint, not a logo. -->
     <path
         android:fillAlpha="0.18"
-        android:fillColor="#EAF0F0"
+        android:fillColor="?attr/colorOnBackground"
         android:pathData="M24,8v17.55c-0.98,-0.57 -2.12,-0.92 -3.33,-0.92c-3.68,0 -6.67,2.99 -6.67,6.67s2.99,6.67 6.67,6.67s6.67,-2.99 6.67,-6.67V14.67h6.67V8H24z" />
 </vector>

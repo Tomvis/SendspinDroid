@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -38,14 +39,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.util.lerp
 import com.sendspindroid.R
+import com.sendspindroid.ui.theme.NpCream
 import com.sendspindroid.ui.theme.NpInterFamily
+import com.sendspindroid.ui.theme.focusRing
+import com.sendspindroid.ui.theme.homeWarning
 import java.util.Calendar
 import java.util.Locale
 
-private val StatusGreen = Color(0xFF14D9C4) // home lit: on right now (HW-48)
-private val StatusAmber = Color(0xFFF5B14C) // home dark warning
-private val ChromeFg = Color(0xFFFFFFFF).copy(alpha = 0.70f)
-private val ChromeFgFaint = Color(0xFFFFFFFF).copy(alpha = 0.55f)
+// The home theme, light or dark (HW-125): lit = on right now
+private val StatusGreen: Color @Composable get() = MaterialTheme.colorScheme.focusRing
+private val StatusAmber: Color @Composable get() = MaterialTheme.colorScheme.homeWarning
+private val ChromeFg: Color @Composable get() = NpCream.copy(alpha = 0.70f)
+private val ChromeFgFaint: Color @Composable get() = NpCream.copy(alpha = 0.55f)
 
 @Composable
 fun SourceBadge(
@@ -122,14 +127,16 @@ fun SourceBadge(
     // the Shield Tegra. The inner dot still animates via dotColor so the
     // status transition reads smoothly; the halo's hard color switch
     // is imperceptible against that.
-    val glowBrushGreen = remember {
+    val green = StatusGreen
+    val amber = StatusAmber
+    val glowBrushGreen = remember(green) {
         Brush.radialGradient(
-            colors = listOf(StatusGreen.copy(alpha = 0.55f), Color.Transparent),
+            colors = listOf(green.copy(alpha = 0.55f), Color.Transparent),
         )
     }
-    val glowBrushAmber = remember {
+    val glowBrushAmber = remember(amber) {
         Brush.radialGradient(
-            colors = listOf(StatusAmber.copy(alpha = 0.55f), Color.Transparent),
+            colors = listOf(amber.copy(alpha = 0.55f), Color.Transparent),
         )
     }
     val glowBrush = if (paused) glowBrushAmber else glowBrushGreen

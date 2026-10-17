@@ -49,10 +49,10 @@ import kotlinx.coroutines.isActive
 import java.util.Locale
 import kotlin.math.roundToInt
 
-private val RailFg = NpCream
-private val RailFgDim = NpCream.copy(alpha = 0.58f)
-private val RailBarBg = NpCream.copy(alpha = 0.14f)
-private val RailHeadRing = NpCream.copy(alpha = 0.7f)
+private val RailFg: Color @Composable get() = NpCream
+private val RailFgDim: Color @Composable get() = NpCream.copy(alpha = 0.58f)
+private val RailBarBg: Color @Composable get() = NpCream.copy(alpha = 0.14f)
+private val RailHeadRing: Color @Composable get() = NpCream.copy(alpha = 0.7f)
 private val BarShape = RoundedCornerShape(50)
 
 @Composable
@@ -356,11 +356,13 @@ private fun RailBar(
         )
         // Remember the two gradient brushes so shader allocation isn't on the
         // frame budget.
-        val playingBrush = remember(accent) {
-            Brush.horizontalGradient(listOf(accent, Color.White))
+        val fg = RailFg
+        val fgDim = RailFgDim
+        val playingBrush = remember(accent, fg) {
+            Brush.horizontalGradient(listOf(accent, fg))
         }
-        val pausedBrush = remember {
-            Brush.horizontalGradient(listOf(RailFgDim, RailFgDim))
+        val pausedBrush = remember(fgDim) {
+            Brush.horizontalGradient(listOf(fgDim, fgDim))
         }
         val fillBrush = if (fillAlpha >= 0.5f) playingBrush else pausedBrush
         Box(
@@ -388,9 +390,10 @@ private fun RailBar(
                 .background(fillBrush),
         )
 
-        // Playhead stays in Canvas — it's a flat white/stroked pill, no
+        // Playhead stays in Canvas — it's a flat fg/stroked pill, no
         // brush involved, so the Canvas path is fine for it. The progress read
         // happens inside the draw lambda, so interpolation invalidates draw only.
+        val headRing = RailHeadRing
         Canvas(modifier = Modifier.fillMaxWidth().fillMaxHeight()) {
             val headWidth = NowPlayingTvTokens.Dimen.RailHeadWidth.toPx()
             val headHeight = NowPlayingTvTokens.Dimen.RailHeadHeight.toPx()
@@ -403,7 +406,7 @@ private fun RailBar(
 
             if (playheadAlpha > 0f) {
                 drawRoundRect(
-                    color = Color(0xFFFFFFFF).copy(alpha = playheadAlpha),
+                    color = fg.copy(alpha = playheadAlpha),
                     topLeft = Offset(headX - halfW, headY - halfH),
                     size = Size(headWidth, headHeight),
                     cornerRadius = CornerRadius(headRadius),
@@ -415,7 +418,7 @@ private fun RailBar(
                 // full pause renders at 70% alpha, matching the rest of the
                 // dim-on-pause treatment.
                 drawRoundRect(
-                    color = RailHeadRing.copy(alpha = 0.7f * (1f - playheadAlpha)),
+                    color = headRing.copy(alpha = 0.7f * (1f - playheadAlpha)),
                     topLeft = Offset(headX - halfW, headY - halfH),
                     size = Size(headWidth, headHeight),
                     cornerRadius = CornerRadius(headRadius),

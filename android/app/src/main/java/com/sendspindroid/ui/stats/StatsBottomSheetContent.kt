@@ -46,6 +46,8 @@ import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.adaptive.TvInitialFocus
 import com.sendspindroid.ui.adaptive.TvOverscanVertical
 import com.sendspindroid.ui.theme.SendSpinTheme
+import com.sendspindroid.ui.theme.statusOnline
+import com.sendspindroid.ui.theme.statusWarning
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -53,9 +55,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Alignment
 
 // Color constants for status indicators
-private val ColorGood = Color(0xFF4CAF50)      // Green
-private val ColorWarning = Color(0xFFFFC107)   // Yellow/Amber
-private val ColorBad = Color(0xFFF44336)       // Red
+// Fork: the home theme's status roles (HW-125)
+private val ColorGood: Color @Composable get() = MaterialTheme.colorScheme.statusOnline
+private val ColorWarning: Color @Composable get() = MaterialTheme.colorScheme.statusWarning
+private val ColorBad: Color @Composable get() = MaterialTheme.colorScheme.error
 
 /** How far up from the bottom of the view the TV fade reaches. */
 private val MoreBelowFadeHeight = 48.dp
@@ -409,6 +412,7 @@ private fun playbackLabel(playbackState: String): String = stringResource(
     }
 )
 
+@Composable
 private fun playbackColor(playbackState: String): Color? = when (playbackState) {
     "PLAYING" -> ColorGood
     "WAITING_FOR_START", "REANCHORING" -> ColorWarning
@@ -449,6 +453,7 @@ private fun handoffEpisodeLines(summary: String?): List<String> =
         ?.toList()
         ?: emptyList()
 
+@Composable
 private fun handoffLineColor(line: String): Color = when {
     line.contains("RECOVERED") -> ColorGood
     line.contains("EXHAUSTED") -> ColorBad
@@ -514,6 +519,7 @@ private fun StatRow(
 // Color Helpers
 // ============================================================================
 
+@Composable
 private fun getStatusColor(status: ThresholdStatus): Color {
     return when (status) {
         ThresholdStatus.GOOD -> ColorGood
@@ -522,6 +528,7 @@ private fun getStatusColor(status: ThresholdStatus): Color {
     }
 }
 
+@Composable
 private fun getNetworkTypeColor(type: String): Color? {
     return when (type) {
         "WIFI", "ETHERNET" -> ColorGood
@@ -530,6 +537,7 @@ private fun getNetworkTypeColor(type: String): Color? {
     }
 }
 
+@Composable
 private fun getNetworkQualityColor(quality: String): Color? {
     return when (quality) {
         "EXCELLENT", "GOOD" -> ColorGood
@@ -539,6 +547,7 @@ private fun getNetworkQualityColor(quality: String): Color? {
     }
 }
 
+@Composable
 private fun getWifiRssiColor(rssi: Int): Color {
     return when {
         rssi > -50 -> ColorGood
@@ -548,6 +557,7 @@ private fun getWifiRssiColor(rssi: Int): Color {
     }
 }
 
+@Composable
 private fun getLastSyncColor(ageMs: Long): Color {
     return when {
         ageMs < 2_000L -> ColorGood

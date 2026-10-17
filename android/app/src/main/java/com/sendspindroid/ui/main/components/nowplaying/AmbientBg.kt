@@ -36,9 +36,11 @@ import coil.compose.AsyncImage
 import coil.size.Size
 import coil.transform.Transformation
 import com.sendspindroid.ui.main.ArtworkSource
+import com.sendspindroid.ui.theme.NpBase
+import com.sendspindroid.ui.theme.NpCoverAlpha
+import com.sendspindroid.ui.theme.NpVignette
 import kotlin.random.Random
 
-private val AmbientBase = Color(0xFF070D11)
 
 @Composable
 fun AmbientBg(
@@ -50,7 +52,7 @@ fun AmbientBg(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(AmbientBase),
+            .background(NpBase),
     ) {
         BlurredCover(artworkSource = artworkSource, paused = paused)
         AccentWash(accent = accent, paused = paused)
@@ -111,10 +113,11 @@ private fun BlurredCover(artworkSource: ArtworkSource?, paused: Boolean) {
         transformations(BoxBlurTransformation(radius = 24, iterations = 3))
     }
 
+    val coverAlpha = NpCoverAlpha
     val coverLayer: GraphicsLayerScope.() -> Unit = {
         scaleX = 1.18f
         scaleY = 1.18f
-        alpha = 0.7f
+        alpha = coverAlpha
         val driftProgress = if (paused) driftState.value else 0f
         translationX = -size.width * 0.015f * driftProgress
         translationY = -size.height * 0.01f * driftProgress
@@ -326,17 +329,18 @@ private fun AccentWash(accent: Color, paused: Boolean) {
 }
 
 /**
- * Radial darken-to-edges vignette. [radiusFactor] scales the gradient radius
+ * Radial vignette toward [NpVignette] (black in dark mode, the background in light). [radiusFactor] scales the gradient radius
  * relative to the larger screen dimension (smaller = tighter/darker). Shared by
  * AmbientBg (0.75) and the idle screen (0.8).
  */
 @Composable
 internal fun Vignette(radiusFactor: Float = 0.75f) {
-    RadialWash(modifier = Modifier.fillMaxSize(), key1 = radiusFactor) { w, h ->
+    val edge = NpVignette
+    RadialWash(modifier = Modifier.fillMaxSize(), key1 = radiusFactor, key2 = edge) { w, h ->
         Brush.radialGradient(
             colorStops = arrayOf(
                 0.35f to Color.Transparent,
-                1.0f to Color.Black,
+                1.0f to edge,
             ),
             center = Offset(w * 0.5f, h * 0.5f),
             radius = maxOf(w, h) * radiusFactor,

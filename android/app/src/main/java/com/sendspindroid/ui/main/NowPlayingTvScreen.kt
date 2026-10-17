@@ -3,6 +3,7 @@ package com.sendspindroid.ui.main
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
@@ -21,7 +22,8 @@ import com.sendspindroid.ui.theme.SendSpinTvTheme
  * progress bar gradient + glow, chip borders, album-art halo, source-badge
  * dot (when paused), idle wordmark + pulsing colons, and ambient wash.
  */
-private val FallbackAccent: Color = Color(0xFF8DB0BD) // home dark primary (HW-48)
+private val FallbackAccent: Color
+    @Composable get() = MaterialTheme.colorScheme.primary // the home theme's (HW-125)
 
 /**
  * TV Now Playing surface. Deliberately display-only: the screen is driven

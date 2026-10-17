@@ -58,6 +58,7 @@ class MainActivityServerColorsTest {
     fun setUp() {
         val prefs = PreferenceManager.getDefaultSharedPreferences(app)
         UserSettings.initializeForTesting(prefs, prefs)
+        UserSettings.serverColors = true // fork: off by default (HW-125)
         // Robolectric runs no media session, and by default answers the
         // controller's bind with a null component, which media3 throws on.
         shadowOf(app).declareComponentUnbindable(ComponentName(app, PlaybackService::class.java))

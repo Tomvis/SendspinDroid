@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -52,13 +53,14 @@ import com.sendspindroid.ui.theme.NpInterFamily
 import java.util.Calendar
 import java.util.Locale
 
-private val IdleBase = Color(0xFF16222A) // home night (HW-48)
-private val IdleFg = NpCream
-private val IdleFgDim = NpCreamDim
-private val IdleFgFaint = NpCream.copy(alpha = 0.35f)
-private val IdleFgError = Color(0xFFFF8AA0) // home dark alarm
-private val BlobTintA = Color(0xFF587E8D).copy(alpha = 0.4f)
-private val BlobTintB = Color(0xFFBAD2DE).copy(alpha = 0.30f)
+// The home theme, light or dark (HW-125)
+private val IdleBase: Color @Composable get() = MaterialTheme.colorScheme.background
+private val IdleFg: Color @Composable get() = NpCream
+private val IdleFgDim: Color @Composable get() = NpCreamDim
+private val IdleFgFaint: Color @Composable get() = NpCream.copy(alpha = 0.35f)
+private val IdleFgError: Color @Composable get() = MaterialTheme.colorScheme.error
+private val BlobTintA: Color @Composable get() = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+private val BlobTintB: Color @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.30f)
 
 /**
  * View-model for the idle screen's status surfaces (standby badge + wordmark
@@ -67,7 +69,7 @@ private val BlobTintB = Color(0xFFBAD2DE).copy(alpha = 0.30f)
  * constructor argument, so adding a sixth state is a single edit here rather
  * than a new arm in each surface's `when`.
  *
- * [dotColor] is null for the states whose dot picks up the live accent colour.
+ * [dot] is the badge dot's colour, resolved where it is drawn (a theme colour is composable).
  * [pulses] drives the breathing dot the focus screen uses while the link isn't
  * healthy.
  *
@@ -79,14 +81,17 @@ private enum class IdleStatus(
     @param:StringRes val dotLabel: Int,
     @param:StringRes val wordmarkLabel: Int,
     val pulses: Boolean,
-    val dotColor: Color?,
+    val dot: IdleDot,
 ) {
-    READY(R.string.np_tv_idle_standby, R.string.np_tv_idle_standby_sub, pulses = false, dotColor = IdleFgFaint),
-    CONNECTING(R.string.np_tv_idle_connecting, R.string.np_tv_idle_connecting_sub, pulses = true, dotColor = null),
-    RECONNECTING(R.string.np_tv_idle_reconnecting, R.string.np_tv_idle_reconnecting_sub, pulses = true, dotColor = null),
-    OFFLINE(R.string.np_tv_idle_offline, R.string.np_tv_idle_offline_sub, pulses = false, dotColor = IdleFgFaint),
-    ERROR(R.string.np_tv_idle_error, R.string.np_tv_idle_error_sub, pulses = true, dotColor = IdleFgError),
+    READY(R.string.np_tv_idle_standby, R.string.np_tv_idle_standby_sub, pulses = false, dot = IdleDot.FAINT),
+    CONNECTING(R.string.np_tv_idle_connecting, R.string.np_tv_idle_connecting_sub, pulses = true, dot = IdleDot.ACCENT),
+    RECONNECTING(R.string.np_tv_idle_reconnecting, R.string.np_tv_idle_reconnecting_sub, pulses = true, dot = IdleDot.ACCENT),
+    OFFLINE(R.string.np_tv_idle_offline, R.string.np_tv_idle_offline_sub, pulses = false, dot = IdleDot.FAINT),
+    ERROR(R.string.np_tv_idle_error, R.string.np_tv_idle_error_sub, pulses = true, dot = IdleDot.ERROR),
 }
+
+/** The badge dot: the live accent, the faint foreground, or the error colour. */
+private enum class IdleDot { ACCENT, FAINT, ERROR }
 
 private fun AppConnectionState?.toIdleStatus(): IdleStatus = when (this) {
     null -> IdleStatus.READY
@@ -282,7 +287,11 @@ private fun StandbyBadge(
         ),
         label = "np-idle-badge-scale",
     )
-    val dotColor = status.dotColor ?: accent
+    val dotColor = when (status.dot) {
+        IdleDot.ACCENT -> accent
+        IdleDot.FAINT -> IdleFgFaint
+        IdleDot.ERROR -> IdleFgError
+    }
     StatusBadge(
         label = badgeLabel(status = stringResource(status.dotLabel), groupLabel = groupLabel),
         labelColor = IdleFgDim,
@@ -501,9 +510,10 @@ private fun HorizonTagline() {
     // Use Modifier.background for the divider gradient rather than a Canvas-
     // style drawRect(brush=...) -- the Shield Tegra renderer can drop the
     // gradient and paint black; Modifier.background is the safe path.
-    val dividerBrush = remember {
+    val faint = IdleFgFaint
+    val dividerBrush = remember(faint) {
         Brush.horizontalGradient(
-            colors = listOf(Color.Transparent, IdleFgFaint, Color.Transparent),
+            colors = listOf(Color.Transparent, faint, Color.Transparent),
         )
     }
     Row(

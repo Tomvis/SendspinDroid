@@ -70,9 +70,8 @@
     </style>
 
     <style name="Theme.SendSpinDroid.BottomSheetDialog" parent="ThemeOverlay.Material3.BottomSheetDialog">
-        <item name="colorSurface">@color/md_theme_light_surface</item>
-        <item name="colorOnSurface">@color/md_theme_light_onSurface</item>
-        <item name="colorSurfaceContainerLow">@color/md_theme_light_surface</item>
+        <!-- Fork (HW-125): the activity's (home theme) surface, not the slate colors.xml -->
+        <item name="colorSurfaceContainerLow">?attr/colorSurface</item>
     </style>
 
     <!-- Dialog Theme -->

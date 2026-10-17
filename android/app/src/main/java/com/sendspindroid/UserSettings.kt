@@ -658,12 +658,12 @@ object UserSettings {
 
     /**
      * Whether Now Playing takes the colors the server sends for the current
-     * track (Settings, "Album colors"). On by default. Off, the app keeps its
+     * track (Settings, "Album colors"). Off by default on this fork (HW-125). Off, the app keeps its
      * Material colors at once and leaves `color@v1` out of `client/hello`
      * from the next connection, through AppSendSpinHost.
      */
     var serverColors: Boolean
-        get() = prefs?.getBoolean(KEY_SERVER_COLORS, true) ?: true
+        get() = prefs?.getBoolean(KEY_SERVER_COLORS, false) ?: false // fork: home theme first (HW-125)
         set(value) { prefs?.edit()?.putBoolean(KEY_SERVER_COLORS, value)?.apply() }
 
     /**

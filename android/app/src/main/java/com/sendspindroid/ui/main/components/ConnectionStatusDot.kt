@@ -7,6 +7,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -17,14 +18,17 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.model.AppConnectionState
 import com.sendspindroid.ui.theme.SendSpinTheme
+import com.sendspindroid.ui.theme.statusOnline
+import com.sendspindroid.ui.theme.statusWarning
 
 /**
  * Dot color indicating connection health.
  */
-private val ConnectedGreen = Color(0xFF4CAF50)
-private val ReconnectingAmber = Color(0xFFFFA726)
-private val ConnectingAmber = Color(0xFFFFA726)
-private val ErrorRed = Color(0xFFEF5350)
+// Fork: the home theme's status roles (HW-125)
+private val ConnectedGreen: Color @Composable get() = MaterialTheme.colorScheme.statusOnline
+private val ReconnectingAmber: Color @Composable get() = MaterialTheme.colorScheme.statusWarning
+private val ConnectingAmber: Color @Composable get() = MaterialTheme.colorScheme.statusWarning
+private val ErrorRed: Color @Composable get() = MaterialTheme.colorScheme.error
 
 /**
  * Small status dot that reflects the current connection state.

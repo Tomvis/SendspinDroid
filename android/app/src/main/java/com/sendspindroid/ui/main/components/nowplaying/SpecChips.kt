@@ -17,13 +17,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.sendspindroid.R
 import com.sendspindroid.ui.main.AudioStreamSpec
+import com.sendspindroid.ui.theme.NpCream
 import com.sendspindroid.ui.theme.NpMonoFamily
 import java.util.Locale
 
-// Dark-theme frosted-glass per spec: rgba(255,255,255,0.08) bg, 0.14 border, 0.88 fg.
-private val ChipBg = Color(0xFFFFFFFF).copy(alpha = 0.08f)
-private val ChipBorder = Color(0xFFFFFFFF).copy(alpha = 0.14f)
-private val ChipFg = Color(0xFFFFFFFF).copy(alpha = 0.88f)
+// Frosted glass per spec, in the theme's foreground (HW-125): 0.08 bg, 0.14 border, 0.88 fg.
+private val ChipBg: Color @Composable get() = NpCream.copy(alpha = 0.08f)
+private val ChipBorder: Color @Composable get() = NpCream.copy(alpha = 0.14f)
+private val ChipFg: Color @Composable get() = NpCream.copy(alpha = 0.88f)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
