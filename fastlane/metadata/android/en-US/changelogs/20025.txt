@@ -1,0 +1,9 @@
+First stable 2.x release, rebuilt from the 1.0.x series:
+- Encrypted connections, with pairing by token
+- Waits for a server to connect, or searches for one
+- Finer multi-room sync and gapless format changes
+- Android TV and car head unit layouts
+- Seek from the app, lock screen and Android Auto
+- Remote ID and proxy access removed: local network only
+- Your server will likely list it as a new player
+Needs a SendSpin 1.0 server (Music Assistant 2.11 or newer).
