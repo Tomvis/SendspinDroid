@@ -2801,10 +2801,6 @@ class PlaybackService : MediaLibraryService() {
      * @param reconnecting Shows "Reconnecting to [serverName]..." instead.
      */
     private fun startForegroundServiceWithNotification(serverName: String? = null, reconnecting: Boolean = false) {
-        // Started as well as bound: a service that is only bound is destroyed
-        // when the activity lets go of its controller, foreground or not.
-        // Refused from the background, where it is already started.
-        runCatching { startService(Intent(this, PlaybackService::class.java)) }
         try {
             val contentText = when {
                 reconnecting -> "Reconnecting to $serverName..."
@@ -2840,6 +2836,15 @@ class PlaybackService : MediaLibraryService() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start foreground service", e)
         }
+        // Started as well as bound: a service that is only bound is destroyed
+        // when the activity lets go of its controller, foreground or not.
+        // Refused from the background, where it is already started.
+        // After startForeground, never before: on Android 11 a plain start
+        // clears fgRequired, so a startForeground after it does not cancel
+        // the pending startForegroundService timeout, and the next
+        // startForegroundService (MY_PACKAGE_REPLACED can arrive several
+        // times) lets that old timeout kill the app 10 s after the first.
+        runCatching { startService(Intent(this, PlaybackService::class.java)) }
     }
 
     /**
