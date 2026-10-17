@@ -128,11 +128,12 @@ class AppShellServerColorsTest {
     @Test
     @Config(qualifiers = "w960dp-h540dp-land")
     // Fork: the TV Now Playing screen paints its own artwork-tinted
-    // background, so only the shell behind the (hidden) rail is checked
-    fun `on a TV, connected, the menu rail takes the server background`() {
+    // background, out to the left edge, so no strip of the shell shows
+    // where the (hidden) rail was
+    fun `on a TV, connected, Now Playing covers the shell at the left edge`() {
         val screen = show(FormFactor.TV, connected)
 
-        assertServerBackground("menu rail", screen[2, screen.height / 2])
+        assertMaterial("left edge", screen[2, screen.height / 2])
     }
 
     @Test

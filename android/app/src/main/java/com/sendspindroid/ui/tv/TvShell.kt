@@ -37,10 +37,13 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.offset
 import androidx.tv.material3.DrawerValue
 import androidx.tv.material3.Icon
 import androidx.tv.material3.MaterialTheme
@@ -119,6 +122,10 @@ fun TvShell(
     // D-pad toward the menu: Left, or Right in a right-to-left layout, where
     // the menu is at the right edge
     val towardMenu = if (LocalLayoutDirection.current == LayoutDirection.Rtl) FocusDirection.Right else FocusDirection.Left
+    // Fork: D-pad back toward the screen, which closes the open menu
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val towardScreen = if (rtl) FocusDirection.Left else FocusDirection.Right
+    val towardScreenKey = if (rtl) Key.DirectionLeft else Key.DirectionRight
     // The drawer opens on any focus it gains, but only D-pad toward the menu
     // is the user going into it. The platform puts focus there too when it
     // picks a control itself, as when the focused control goes.
@@ -130,12 +137,12 @@ fun TvShell(
         homeEntry.requestFocus()
         drawerState.setValue(DrawerValue.Open)
     }
-    // As D-pad Right does. Restoring what had focus on the screen would need a
-    // focusRestorer on each lazy list: with one only around the screen,
-    // Compose 1.12 puts focus on the list's top visible row, not the one that
-    // had it.
+    // As D-pad toward the screen does. Restoring what had focus on the screen
+    // would need a focusRestorer on each lazy list: with one only around the
+    // screen, Compose 1.12 puts focus on the list's top visible row, not the
+    // one that had it.
     val closeMenu: () -> Unit = {
-        if (!focusManager.moveFocus(FocusDirection.Right)) drawerState.setValue(DrawerValue.Closed)
+        if (!focusManager.moveFocus(towardScreen)) drawerState.setValue(DrawerValue.Closed)
     }
 
     // Back first takes the user to the menu, and only Back there leaves:
@@ -165,10 +172,20 @@ fun TvShell(
                         .background(if (open) menuColorScheme.surfaceContainer else Color.Transparent)
                         .padding(horizontal = RailPadding, vertical = TvOverscanVertical)
                         // Focus in the collapsed menu: the first key opens it
+                        // (fork: but not D-pad toward the screen, which has
+                        // just closed it, now that it is hidden)
                         .onPreviewKeyEvent { event ->
-                            val opens = drawerState.currentValue == DrawerValue.Closed && event.key in MenuKeys
-                            if (opens && event.type == KeyEventType.KeyDown) drawerState.setValue(DrawerValue.Open)
-                            opens
+                            val collapsed = drawerState.currentValue == DrawerValue.Closed
+                            val opens = collapsed && event.key in MenuKeys && event.key != towardScreenKey
+                            // Fork: as choosing [home] does, so the menu
+                            // also closes when the screen has nothing to
+                            // focus, as on the TV Now Playing screen
+                            val closes = !collapsed && event.key == towardScreenKey
+                            if (event.type == KeyEventType.KeyDown) {
+                                if (opens) drawerState.setValue(DrawerValue.Open)
+                                if (closes) closeMenu()
+                            }
+                            opens || closes
                         }
                         .focusProperties {
                             onEnter = {
@@ -196,10 +213,10 @@ fun TvShell(
             modifier = Modifier
                 .fillMaxSize()
                 // Fork: the modal drawer lays the screen out under its rail,
-                // which is hidden while collapsed, so the screen keeps nearly
-                // the full width (upstream pads it by the rail's width less
-                // the TV side margin). It must still start right of the menu's
-                // entries, or D-pad Right from them does not find it.
+                // which is hidden while collapsed (upstream pads the screen by
+                // the rail's width less the TV side margin). D-pad Right from
+                // the menu's entries finds the screen only if it starts right
+                // of them, so it starts at ScreenStart and draws under that.
                 .padding(start = ScreenStart)
                 .onPreviewKeyEvent { event ->
                     val menuKey = event.key == Key.Menu
@@ -208,21 +225,37 @@ fun TvShell(
                 }
                 .focusGroup()
         ) {
-            CompositionLocalProvider(LocalTvMenu provides homeEntry, LocalTvMenuOpen provides menuOpen) { content() }
+            Box(modifier = Modifier.extendToStart(ScreenStart)) {
+                CompositionLocalProvider(LocalTvMenu provides homeEntry, LocalTvMenuOpen provides menuOpen) { content() }
+            }
         }
     }
 }
 
-/** The keys that move or act in the menu: Back has handlers of its own. */
+/**
+ * The keys that move or act in the menu: Back has handlers of its own. Fork:
+ * and Menu, which the screen handles only while focus is on the screen.
+ */
 private val MenuKeys = setOf(
     Key.DirectionUp, Key.DirectionDown, Key.DirectionLeft, Key.DirectionRight,
-    Key.DirectionCenter, Key.Enter, Key.NumPadEnter,
+    Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.Menu,
 )
 
 private val RailPadding = 12.dp
 
 /** Fork: where the screen starts, just right of the menu entries' left edge. */
 private val ScreenStart = RailPadding * 2
+
+/**
+ * Fork: lays the content out [inset] wider, reaching that far past the start
+ * edge, so a screen's background covers the inset while the focus group
+ * around it keeps its bounds.
+ */
+private fun Modifier.extendToStart(inset: Dp): Modifier = layout { measurable, constraints ->
+    val extra = inset.roundToPx()
+    val placeable = measurable.measure(constraints.offset(horizontal = extra))
+    layout(placeable.width - extra, placeable.height) { placeable.placeRelative(-extra, 0) }
+}
 
 @Composable
 private fun NavigationDrawerScope.MenuItem(

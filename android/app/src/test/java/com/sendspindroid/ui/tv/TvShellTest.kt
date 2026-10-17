@@ -16,6 +16,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertWidthIsEqualTo
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.platform.testTag
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.test.assertLeftPositionInRootIsEqualTo
 import androidx.compose.ui.test.isFocused
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -276,12 +281,77 @@ class TvShellTest {
                 }
             }
         }
-        composeTestRule.onNodeWithText("Previous").assertLeftPositionInRootIsEqualTo(24.dp + TvOverscanHorizontal)
+        composeTestRule.onNodeWithText("Previous").assertLeftPositionInRootIsEqualTo(TvOverscanHorizontal)
         composeTestRule.onNodeWithText("Previous").requestFocus()
 
         composeTestRule.onNodeWithText("Previous").performKeyInput { pressKey(Key.DirectionLeft) }
         composeTestRule.waitForIdle()
 
+        composeTestRule.onNodeWithText("Now Playing").assertIsFocused()
+    }
+
+    // Fork: nothing of the shell shows where the rail was
+    @Test
+    fun `collapsed, the screen draws from the left edge and right from the menu still returns to it`() {
+        composeTestRule.setContent {
+            SendSpinTheme {
+                TvShell(
+                    home = TvMenuEntry("Now Playing", Icons.Default.PlayArrow),
+                    entries = emptyList(),
+                    footerEntries = emptyList(),
+                    onLeave = {}
+                ) {
+                    Box(modifier = Modifier.fillMaxSize().testTag("screen")) {
+                        // Past the open menu's edge, as in showShell
+                        Button(onClick = {}, modifier = Modifier.padding(start = 320.dp)) { Text("Previous") }
+                    }
+                }
+            }
+        }
+        composeTestRule.onNodeWithTag("screen").assertLeftPositionInRootIsEqualTo(0.dp)
+        composeTestRule.onNodeWithTag("screen").assertWidthIsEqualTo(960.dp)
+        composeTestRule.onNodeWithText("Previous").requestFocus()
+        composeTestRule.onNodeWithText("Previous").performKeyInput { pressKey(Key.DirectionLeft) }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("Now Playing").performKeyInput { pressKey(Key.DirectionRight) }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("Previous").assertIsFocused()
+    }
+
+    // Fork: the TV Now Playing screen has nothing to focus, and Right from the
+    // open menu still closes it
+    @Test
+    fun `with nothing on the screen to focus right from the menu collapses it`() {
+        composeTestRule.setContent {
+            SendSpinTheme {
+                TvShell(
+                    home = TvMenuEntry("Now Playing", Icons.Default.PlayArrow),
+                    entries = emptyList(),
+                    footerEntries = emptyList(),
+                    onLeave = {}
+                ) {
+                    Text("Battery", modifier = Modifier.padding(start = 320.dp))
+                }
+            }
+        }
+        pressBack()
+        composeTestRule.onNodeWithText("Now Playing").assertIsFocused()
+
+        composeTestRule.onNodeWithText("Now Playing").performKeyInput { pressKey(Key.DirectionRight) }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("Now Playing").assertDoesNotExist()
+
+        // Right again does not bring back the menu just closed
+        composeTestRule.onNode(isFocused()).performKeyInput { pressKey(Key.DirectionRight) }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Now Playing").assertDoesNotExist()
+
+        // Collapsed with focus in it, the Menu key opens it again
+        composeTestRule.onNode(isFocused()).performKeyInput { pressKey(Key.Menu) }
+        composeTestRule.waitForIdle()
         composeTestRule.onNodeWithText("Now Playing").assertIsFocused()
     }
 }
