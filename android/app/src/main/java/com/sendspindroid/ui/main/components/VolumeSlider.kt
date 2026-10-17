@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -34,6 +35,10 @@ import com.sendspindroid.ui.theme.SendSpinTheme
 /**
  * Volume slider with volume icons on either side.
  * Supports custom accent color for dynamic theming based on album art.
+ *
+ * With [onMuteToggle], the left icon is a mute button. While [muted] it shows
+ * the muted speaker, the label says so and the slider's track is greyed; the
+ * slider still sets the volume, which mute leaves alone.
  */
 @Composable
 fun VolumeSlider(
@@ -41,15 +46,20 @@ fun VolumeSlider(
     onVolumeChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    accentColor: Color? = null
+    accentColor: Color? = null,
+    muted: Boolean = false,
+    onMuteToggle: (() -> Unit)? = null
 ) {
-    val activeTrackColor = accentColor ?: MaterialTheme.colorScheme.primary
-    val thumbColor = accentColor ?: MaterialTheme.colorScheme.primary
+    val accent = accentColor ?: MaterialTheme.colorScheme.primary
+    val activeTrackColor = if (muted) MaterialTheme.colorScheme.outline else accent
+    val thumbColor = if (muted) MaterialTheme.colorScheme.outline else accent
     // Dimmed, but not on a server's palette, whose contrast holds only opaque
     val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
         .copy(alpha = if (LocalServerColors.current) 1f else 0.7f)
     val focusManager = LocalFocusManager.current
     val view = LocalView.current
+    // The label lines up with the start of the slider
+    val leadingWidth = if (onMuteToggle != null) MUTE_BUTTON_SIZE + 4.dp else 20.dp + 12.dp
 
     Column(
         modifier = modifier
@@ -58,26 +68,46 @@ fun VolumeSlider(
     ) {
         // Label
         Text(
-            text = stringResource(R.string.device_volume),
+            text = stringResource(if (muted) R.string.device_volume_muted else R.string.device_volume),
             style = MaterialTheme.typography.labelSmall,
             color = labelColor,
             fontSize = 11.sp,
-            modifier = Modifier.padding(start = 32.dp, bottom = 2.dp)
+            modifier = Modifier.padding(start = leadingWidth, bottom = 2.dp)
         )
 
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Volume Down Icon
-            Icon(
-                painter = painterResource(R.drawable.ic_volume_down),
-                contentDescription = null,
-                modifier = Modifier.size(20.dp),
-                tint = labelColor
-            )
+            if (onMuteToggle != null) {
+                IconToggleButton(
+                    checked = muted,
+                    onCheckedChange = { onMuteToggle() },
+                    enabled = enabled,
+                    modifier = Modifier.size(MUTE_BUTTON_SIZE)
+                ) {
+                    Icon(
+                        painter = painterResource(
+                            if (muted) R.drawable.ic_volume_off else R.drawable.ic_volume_down
+                        ),
+                        contentDescription = stringResource(R.string.accessibility_mute_button),
+                        modifier = Modifier.size(20.dp),
+                        tint = if (muted) accent else labelColor
+                    )
+                }
 
-            Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+            } else {
+                // Volume Down Icon
+                Icon(
+                    painter = painterResource(R.drawable.ic_volume_down),
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = labelColor
+                )
+
+                Spacer(modifier = Modifier.width(12.dp))
+            }
 
             // Volume Slider
             Slider(
@@ -103,6 +133,21 @@ fun VolumeSlider(
                 tint = labelColor
             )
         }
+    }
+}
+
+private val MUTE_BUTTON_SIZE = 40.dp
+
+@Preview(showBackground = true)
+@Composable
+private fun VolumeSliderMutedPreview() {
+    SendSpinTheme {
+        VolumeSlider(
+            volume = 0.6f,
+            onVolumeChange = {},
+            muted = true,
+            onMuteToggle = {}
+        )
     }
 }
 

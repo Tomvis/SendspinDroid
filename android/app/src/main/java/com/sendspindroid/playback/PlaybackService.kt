@@ -553,6 +553,8 @@ class PlaybackService : MediaLibraryService() {
         const val COMMAND_DISCONNECT = "com.sendspindroid.DISCONNECT"
         const val COMMAND_EXIT = "com.sendspindroid.EXIT"
         const val COMMAND_SET_VOLUME = "com.sendspindroid.SET_VOLUME"
+        /** Mute or un-mute this player ([ARG_MUTED]), as the server's `mute` command does. */
+        const val COMMAND_SET_MUTED = "com.sendspindroid.SET_MUTED"
         const val COMMAND_NEXT = "com.sendspindroid.NEXT"
         const val COMMAND_PREVIOUS = "com.sendspindroid.PREVIOUS"
         const val COMMAND_SWITCH_GROUP = "com.sendspindroid.SWITCH_GROUP"
@@ -571,6 +573,7 @@ class PlaybackService : MediaLibraryService() {
         const val ARG_SERVER_ADDRESS = "server_address"
         const val ARG_SERVER_PATH = "server_path"
         const val ARG_VOLUME = "volume"
+        const val ARG_MUTED = "muted"
         const val ARG_SERVER_ID = "server_id"
 
         /**
@@ -632,6 +635,8 @@ class PlaybackService : MediaLibraryService() {
 
         // Session extras keys for volume (server → controller)
         const val EXTRA_VOLUME = "volume"
+        /** The player's `muted` state, independent of [EXTRA_VOLUME]. */
+        const val EXTRA_MUTED = "muted"
 
         // Audio stream spec (populated on stream/start, cleared on stream/end)
         const val EXTRA_AUDIO_CODEC = "audio_codec"
@@ -1751,17 +1756,7 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onMutedChanged(muted: Boolean) {
-            mainHandler.post {
-                // Mute silences the output and leaves the volume alone: the
-                // two are independent, and a later volume change must not
-                // make a muted player audible.
-                engine.setMuted(SyncAudioPlayer.MuteReason.PLAYER, muted)
-                com.sendspindroid.UserSettings.setPlayerMuted(muted)
-                // Update playback state with new mute status
-                _playbackState.value = _playbackState.value.copy(muted = muted)
-                // Broadcast all state including mute to UI controllers
-                broadcastSessionExtras()
-            }
+            mainHandler.post { applyPlayerMuted(muted) }
         }
 
         override fun onSyncOffsetApplied(offsetMs: Double, source: String) {
@@ -2084,6 +2079,7 @@ class PlaybackService : MediaLibraryService() {
 
             // Volume
             putInt(EXTRA_VOLUME, playbackState.volume)
+            putBoolean(EXTRA_MUTED, playbackState.muted)
 
             // Audio stream spec (0 = not currently streaming)
             putString(EXTRA_AUDIO_CODEC, currentCodec)
@@ -2410,6 +2406,32 @@ class PlaybackService : MediaLibraryService() {
             disconnectFromServer()
             false
         }
+    }
+
+    /**
+     * The user mutes or un-mutes this player. Reported to the server when
+     * connected; otherwise the next connection reports the persisted state.
+     *
+     * Main thread only.
+     */
+    fun setPlayerMuted(muted: Boolean) {
+        sendSpinClient?.setMuted(muted)
+        applyPlayerMuted(muted)
+    }
+
+    /**
+     * Mute or un-mute this player, from the server's `mute` command or the
+     * user. Mute silences the output and leaves the volume alone: the two are
+     * independent, and a later volume change must not make a muted player
+     * audible. Persisted, as roles/player/v1.md recommends.
+     *
+     * Main thread only.
+     */
+    private fun applyPlayerMuted(muted: Boolean) {
+        engine.setMuted(SyncAudioPlayer.MuteReason.PLAYER, muted)
+        UserSettings.setPlayerMuted(muted)
+        _playbackState.value = _playbackState.value.copy(muted = muted)
+        broadcastSessionExtras()
     }
 
     /**
@@ -3414,6 +3436,7 @@ class PlaybackService : MediaLibraryService() {
                 .add(SessionCommand(COMMAND_DISCONNECT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_EXIT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_SET_VOLUME, Bundle.EMPTY))
+                .add(SessionCommand(COMMAND_SET_MUTED, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_NEXT, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_PREVIOUS, Bundle.EMPTY))
                 .add(SessionCommand(COMMAND_SWITCH_GROUP, Bundle.EMPTY))
@@ -3591,6 +3614,16 @@ class PlaybackService : MediaLibraryService() {
                         Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
                     } else {
                         Log.e(TAG, "SET_VOLUME command has invalid volume: $volume")
+                        Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
+                    }
+                }
+
+                COMMAND_SET_MUTED -> {
+                    if (args.containsKey(ARG_MUTED)) {
+                        setPlayerMuted(args.getBoolean(ARG_MUTED))
+                        Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                    } else {
+                        Log.e(TAG, "SET_MUTED command has no muted argument")
                         Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
                     }
                 }

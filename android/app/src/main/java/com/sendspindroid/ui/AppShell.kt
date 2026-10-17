@@ -71,6 +71,7 @@ import com.sendspindroid.ui.theme.ServerColorTheme
  * @param onNextClick Playback: next track
  * @param onSwitchGroupClick Switch playback group
  * @param onVolumeChange Volume slider callback (0-1 range)
+ * @param onMuteToggle Volume slider mute button callback
  * @param onSeek Progress bar scrub released at a position in milliseconds
  * @param onAllowPairingClick Confirm the dynamic pairing gesture gate
  * @param onDisconnectClick Disconnect from server
@@ -89,6 +90,7 @@ fun AppShell(
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
+    onMuteToggle: () -> Unit,
     onSeek: (Long) -> Unit,
     onAllowPairingClick: () -> Unit,
     onDisconnectClick: () -> Unit,
@@ -116,6 +118,7 @@ fun AppShell(
                     onNextClick = onNextClick,
                     onSwitchGroupClick = onSwitchGroupClick,
                     onVolumeChange = onVolumeChange,
+                    onMuteToggle = onMuteToggle,
                     onSeek = onSeek,
                     onOpenPairingClick = onSettingsClick,
                     onAllowPairingClick = onAllowPairingClick,
@@ -155,6 +158,7 @@ fun AppShell(
                 onNextClick = onNextClick,
                 onSwitchGroupClick = onSwitchGroupClick,
                 onVolumeChange = onVolumeChange,
+                onMuteToggle = onMuteToggle,
                 onSeek = onSeek,
                 onAllowPairingClick = onAllowPairingClick,
                 onDisconnectClick = onDisconnectClick,
@@ -232,6 +236,7 @@ private fun ConnectedShell(
     onNextClick: () -> Unit,
     onSwitchGroupClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
+    onMuteToggle: () -> Unit,
     onSeek: (Long) -> Unit,
     onAllowPairingClick: () -> Unit,
     onDisconnectClick: () -> Unit,
@@ -363,6 +368,7 @@ private fun ConnectedShell(
             onNextClick = onNextClick,
             onSwitchGroupClick = onSwitchGroupClick,
             onVolumeChange = onVolumeChange,
+            onMuteToggle = onMuteToggle,
             onSeek = onSeek,
             onOpenPairingClick = onSettingsClick,
             onAllowPairingClick = onAllowPairingClick,

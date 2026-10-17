@@ -62,6 +62,7 @@ class NowPlayingPairingTest {
                         onNextClick = {},
                         onSwitchGroupClick = {},
                         onVolumeChange = {},
+                        onMuteToggle = {},
                         onSeek = {},
                         onOpenPairingClick = {},
                         onAllowPairingClick = { allowPairingClicks++ },

@@ -73,6 +73,7 @@ class AppShellServerColorsTest {
                         onNextClick = {},
                         onSwitchGroupClick = {},
                         onVolumeChange = {},
+                        onMuteToggle = {},
                         onSeek = {},
                         onAllowPairingClick = {},
                         onDisconnectClick = {},

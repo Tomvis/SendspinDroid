@@ -49,6 +49,7 @@ class NowPlayingAlbumArtistYearTest {
                         onNextClick = {},
                         onSwitchGroupClick = {},
                         onVolumeChange = {},
+                        onMuteToggle = {},
                         onSeek = {},
                         onOpenPairingClick = {},
                         onAllowPairingClick = {},

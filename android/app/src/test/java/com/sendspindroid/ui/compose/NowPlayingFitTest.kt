@@ -62,6 +62,7 @@ class NowPlayingFitTest {
                         onNextClick = {},
                         onSwitchGroupClick = {},
                         onVolumeChange = {},
+                        onMuteToggle = {},
                         onSeek = {},
                         onOpenPairingClick = {},
                         onAllowPairingClick = {},

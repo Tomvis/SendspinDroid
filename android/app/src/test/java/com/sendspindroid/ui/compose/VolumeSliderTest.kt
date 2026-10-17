@@ -8,6 +8,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.ComposeView
@@ -15,6 +16,10 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -29,6 +34,7 @@ import com.sendspindroid.ui.adaptive.LocalFormFactor
 import com.sendspindroid.ui.main.components.VolumeSlider
 import com.sendspindroid.ui.theme.SendSpinTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -212,5 +218,64 @@ class VolumeSliderTest {
 
         assertTrue(below.isFocused)
         assertEquals(0.5f, volume, 0f)
+    }
+
+    private var muted by mutableStateOf(false)
+
+    private fun setMutableSlider() {
+        composeTestRule.setContent {
+            SendSpinTheme {
+                VolumeSlider(
+                    volume = volume,
+                    onVolumeChange = { volume = it },
+                    muted = muted,
+                    onMuteToggle = { muted = !muted }
+                )
+            }
+        }
+    }
+
+    private fun muteButton() = composeTestRule.onNodeWithContentDescription("Mute")
+
+    @Test
+    fun volumeSlider_muteButton_togglesAndShowsTheMute() {
+        setMutableSlider()
+        muteButton().assertIsOff()
+        composeTestRule.onNodeWithText("Device Volume").assertIsDisplayed()
+
+        muteButton().performClick()
+
+        assertTrue(muted)
+        muteButton().assertIsOn()
+        composeTestRule.onNodeWithText("Device Volume - Muted").assertIsDisplayed()
+
+        muteButton().performClick()
+
+        assertFalse(muted)
+        composeTestRule.onNodeWithText("Device Volume").assertIsDisplayed()
+    }
+
+    @Test
+    fun volumeSlider_whileMuted_stillSetsTheVolume() {
+        muted = true
+        setMutableSlider()
+
+        slider().requestFocus()
+        slider().performKeyInput { pressKey(Key.DirectionRight) }
+        composeTestRule.waitForIdle()
+
+        assertEquals(0.51f, volume, 0.001f)
+        assertTrue(muted)
+    }
+
+    @Test
+    fun volumeSlider_withoutMuteToggle_hasNoMuteButton() {
+        composeTestRule.setContent {
+            SendSpinTheme {
+                VolumeSlider(volume = 0.5f, onVolumeChange = {})
+            }
+        }
+
+        muteButton().assertDoesNotExist()
     }
 }

@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">SendSpin Player</string>
     <string name="device_volume">Device Volume</string>
+    <string name="device_volume_muted">Device Volume - Muted</string>
     <string name="track_position">Track position</string>
     <string name="group_label">Group: %s</string>
     <string name="album_artist_label">Album artist: %s</string>
@@ -19,6 +20,7 @@
     <string name="accessibility_previous_button">Previous track button</string>
     <string name="accessibility_next_button">Next track button</string>
     <string name="accessibility_switch_group_button">Switch to next playback group</string>
+    <string name="accessibility_mute_button">Mute</string>
 
     <!-- Error messages -->
     <string name="error_discovery">Failed to discover servers.</string>

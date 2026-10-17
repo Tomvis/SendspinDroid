@@ -693,6 +693,7 @@ class MainActivity : AppCompatActivity() {
                             onVolumeChanged(volume)
                             viewModel.updateVolume(volume)
                         },
+                        onMuteToggle = { onMuteToggled() },
                         onSeek = { positionMs -> onSeekRequested(positionMs) },
                         onDisconnectClick = { onDisconnectClicked() },
                         onAddServerClick = { showAddServerWizard() },
@@ -1276,6 +1277,9 @@ class MainActivity : AppCompatActivity() {
             Log.d(TAG, "Server volume update received: $volume%")
             // Sync state to ViewModel for Compose UI
             viewModel.updateVolume(volume / 100f)
+        }
+        if (extras.containsKey(PlaybackService.EXTRA_MUTED)) {
+            viewModel.updateMuted(extras.getBoolean(PlaybackService.EXTRA_MUTED))
         }
 
         // Handle group name updates
@@ -2012,6 +2016,24 @@ class MainActivity : AppCompatActivity() {
             putFloat(PlaybackService.ARG_VOLUME, volume)
         }
         val command = SessionCommand(PlaybackService.COMMAND_SET_VOLUME, Bundle.EMPTY)
+        controller.sendCustomCommand(command, args)
+    }
+
+    /**
+     * Mutes or un-mutes this player from the volume slider's mute button.
+     * PlaybackService applies it, persists it and reports it to the server;
+     * its session extras bring the state back to the slider.
+     */
+    private fun onMuteToggled() {
+        val muted = !viewModel.muted.value
+        Log.d(TAG, "Mute toggled: $muted")
+
+        val controller = mediaController ?: return
+        viewModel.updateMuted(muted)
+        val args = Bundle().apply {
+            putBoolean(PlaybackService.ARG_MUTED, muted)
+        }
+        val command = SessionCommand(PlaybackService.COMMAND_SET_MUTED, Bundle.EMPTY)
         controller.sendCustomCommand(command, args)
     }
 

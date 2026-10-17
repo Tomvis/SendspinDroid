@@ -79,6 +79,7 @@ class TvAppShellFocusTest {
                         onNextClick = {},
                         onSwitchGroupClick = {},
                         onVolumeChange = {},
+                        onMuteToggle = {},
                         onSeek = {},
                         onAllowPairingClick = {},
                         onDisconnectClick = {},

@@ -145,6 +145,10 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private val _volume = MutableStateFlow(0.75f)
     val volume: StateFlow<Float> = _volume.asStateFlow()
 
+    // The player's mute, independent of the volume
+    private val _muted = MutableStateFlow(false)
+    val muted: StateFlow<Boolean> = _muted.asStateFlow()
+
     // ========================================================================
     // Reconnection State
     // ========================================================================
@@ -320,6 +324,10 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
 
     fun updateVolume(volume: Float) {
         _volume.value = volume.coerceIn(0f, 1f)
+    }
+
+    fun updateMuted(muted: Boolean) {
+        _muted.value = muted
     }
 
     // ========================================================================
