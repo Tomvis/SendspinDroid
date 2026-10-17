@@ -1,10 +1,10 @@
 package com.sendspindroid.ui.main
 
-import android.content.res.Configuration
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,9 +12,12 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -64,9 +67,9 @@ import com.sendspindroid.ui.tv.LocalTvMenuOpen
 
 /**
  * Now Playing screen showing album art, track info, and playback controls.
- * Adapts layout based on form factor and orientation:
- * - Phone portrait: Album art at top, controls below
- * - Phone landscape: Album art on left, controls on right
+ * Adapts layout based on form factor and the shape of the space it has:
+ * - Taller than wide: Album art at top, controls below
+ * - Wider than tall: Album art on left, controls on right
  */
 @Composable
 fun NowPlayingScreen(
@@ -300,16 +303,19 @@ fun NowPlayingScreen(
         }
     }
 
-    // Check orientation and form factor
     val configuration = LocalConfiguration.current
-    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val formFactor = LocalFormFactor.current
 
     // A line of its own, so only where there is the height for it
     val albumArtist = albumArtistToShow(metadata)
         ?.takeIf { showsAlbumArtist(formFactor, configuration.screenHeightDp) }
 
-    Box(modifier = modifier.fillMaxSize()) {
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        // Goes by the space this screen has, not the device's orientation: a
+        // floating or split window can be any shape.
+        val isLandscape = maxWidth > maxHeight
+        val compactHeight = maxHeight < COMPACT_HEIGHT
+        val controlsFormFactor = controlsFormFactor(formFactor, compactHeight)
         when {
             // Head unit: portrait layout with large touch targets
             formFactor == FormFactor.HEADUNIT -> {
@@ -368,7 +374,9 @@ fun NowPlayingScreen(
                     onSwitchGroupClick = onSwitchGroupClick,
                     onVolumeChange = onVolumeChange,
                     seekable = seekable && controlsEnabled,
-                    onSeek = onSeek
+                    onSeek = onSeek,
+                    controlsFormFactor = controlsFormFactor,
+                    compactHeight = compactHeight
                 )
             }
             else -> {
@@ -392,7 +400,8 @@ fun NowPlayingScreen(
                     onSwitchGroupClick = onSwitchGroupClick,
                     onVolumeChange = onVolumeChange,
                     seekable = seekable && controlsEnabled,
-                    onSeek = onSeek
+                    onSeek = onSeek,
+                    controlsFormFactor = controlsFormFactor
                 )
             }
         }
@@ -421,7 +430,9 @@ fun NowPlayingScreen(
 }
 
 /**
- * Portrait layout: Album art at top, controls below.
+ * Portrait layout: Album art at top, controls below. The art gives up height
+ * first, so the controls stay on screen; once it has none left to give, the
+ * screen scrolls.
  */
 @Composable
 private fun NowPlayingPortrait(
@@ -445,132 +456,144 @@ private fun NowPlayingPortrait(
     onVolumeChange: (Float) -> Unit,
     seekable: Boolean = false,
     onSeek: (Long) -> Unit = {},
+    controlsFormFactor: FormFactor = LocalFormFactor.current,
     modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Album Art
-        AlbumArtCard(
-            artworkSource = artworkSource,
-            isBuffering = isBuffering,
-            modifier = Modifier.fillMaxWidth(0.7f)
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Track Title
-        Text(
-            text = metadata.title.ifEmpty { stringResource(R.string.not_playing) },
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onBackground,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            letterSpacing = (-0.02).sp,
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        // At least the screen's height, so the art's weight has that height to
+        // share out even though a scrolling column has no maximum.
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .semantics { liveRegion = LiveRegionMode.Polite }
-        )
+                .verticalScroll(rememberScrollState())
+                .heightIn(min = maxHeight)
+                .padding(horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(modifier = Modifier.height(16.dp))
 
-        Spacer(modifier = Modifier.height(4.dp))
+            // Album Art: the height the rest leaves, up to 70% of the width
+            Box(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .fillMaxWidth(0.7f),
+                contentAlignment = Alignment.Center
+            ) {
+                AlbumArtCard(
+                    artworkSource = artworkSource,
+                    isBuffering = isBuffering
+                )
+            }
 
-        // Artist / Album
-        val metadataText = buildMetadataString(metadata.artist, metadata.album, metadata.year)
-        if (metadataText.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Track Title
             Text(
-                text = metadataText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                text = metadata.title.ifEmpty { stringResource(R.string.not_playing) },
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground,
                 textAlign = TextAlign.Center,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
+                letterSpacing = (-0.02).sp,
                 modifier = Modifier
                     .fillMaxWidth()
                     .semantics { liveRegion = LiveRegionMode.Polite }
             )
-        }
 
-        // Album Artist
-        if (albumArtist != null) {
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = stringResource(R.string.album_artist_label, albumArtist),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth()
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Artist / Album
+            val metadataText = buildMetadataString(metadata.artist, metadata.album, metadata.year)
+            if (metadataText.isNotEmpty()) {
+                Text(
+                    text = metadataText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { liveRegion = LiveRegionMode.Polite }
+                )
+            }
+
+            // Album Artist
+            if (albumArtist != null) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = stringResource(R.string.album_artist_label, albumArtist),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            // Group Name
+            if (groupName.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = stringResource(R.string.group_label, groupName),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Track Progress + Speed Control
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                TrackProgressBar(
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                    playbackSpeed = playbackSpeed,
+                    accentColor = accentColor,
+                    positionUpdatedAt = positionUpdatedAt,
+                    seekable = seekable,
+                    onSeek = onSeek
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Playback Controls
+            PlaybackControls(
+                isPlaying = isPlaying,
+                isEnabled = controlsEnabled,
+                onPreviousClick = onPreviousClick,
+                onPlayPauseClick = onPlayPauseClick,
+                onNextClick = onNextClick,
+                showSecondaryRow = true,
+                isSwitchGroupEnabled = controlsEnabled,
+                onSwitchGroupClick = onSwitchGroupClick,
+                playButtonSize = AdaptiveDefaults.playButtonSize(controlsFormFactor),
+                controlButtonSize = AdaptiveDefaults.controlButtonSize(controlsFormFactor)
             )
-        }
 
-        // Group Name
-        if (groupName.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = stringResource(R.string.group_label, groupName),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-                textAlign = TextAlign.Center,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Volume Slider
+            VolumeSlider(
+                volume = volume,
+                onVolumeChange = onVolumeChange,
+                enabled = controlsEnabled,
+                accentColor = accentColor
             )
+
+            Spacer(modifier = Modifier.height(16.dp))
         }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Track Progress + Speed Control
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
-        ) {
-            TrackProgressBar(
-                positionMs = positionMs,
-                durationMs = durationMs,
-                playbackSpeed = playbackSpeed,
-                accentColor = accentColor,
-                positionUpdatedAt = positionUpdatedAt,
-                seekable = seekable,
-                onSeek = onSeek
-            )
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Playback Controls
-        val formFactor = LocalFormFactor.current
-        PlaybackControls(
-            isPlaying = isPlaying,
-            isEnabled = controlsEnabled,
-            onPreviousClick = onPreviousClick,
-            onPlayPauseClick = onPlayPauseClick,
-            onNextClick = onNextClick,
-            showSecondaryRow = true,
-            isSwitchGroupEnabled = controlsEnabled,
-            onSwitchGroupClick = onSwitchGroupClick,
-            playButtonSize = AdaptiveDefaults.playButtonSize(formFactor),
-            controlButtonSize = AdaptiveDefaults.controlButtonSize(formFactor)
-        )
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Volume Slider
-        VolumeSlider(
-            volume = volume,
-            onVolumeChange = onVolumeChange,
-            enabled = controlsEnabled,
-            accentColor = accentColor
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
@@ -599,133 +622,142 @@ private fun NowPlayingLandscape(
     onVolumeChange: (Float) -> Unit,
     seekable: Boolean = false,
     onSeek: (Long) -> Unit = {},
+    controlsFormFactor: FormFactor = LocalFormFactor.current,
+    compactHeight: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    Row(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // Left: Album Art (square, full height)
-        AlbumArtCard(
-            artworkSource = artworkSource,
-            isBuffering = isBuffering,
-            modifier = Modifier.fillMaxHeight()
-        )
-
-        Spacer(modifier = Modifier.width(24.dp))
-
-        // Right: Track Info + Controls
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+    BoxWithConstraints(modifier = modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = if (compactHeight) 16.dp else 24.dp)) {
+        val width = maxWidth
+        val height = maxHeight
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // Track Title
-            Text(
-                text = metadata.title.ifEmpty { stringResource(R.string.not_playing) },
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onBackground,
-                textAlign = TextAlign.Center,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                letterSpacing = (-0.02).sp,
+            // Left: Album Art (square, full height), leaving the controls at
+            // least 60% of a window that is barely wider than it is tall
+            AlbumArtCard(
+                artworkSource = artworkSource,
+                isBuffering = isBuffering,
+                modifier = Modifier.fillMaxHeight(),
+                maxWidth = minOf(320.dp, width * 0.4f)
+            )
+
+            Spacer(modifier = Modifier.width(24.dp))
+
+            // Right: Track Info + Controls, centred, scrolling when they do
+            // not fit. The minimum height gives the centring room to work in
+            // a scrolling column, which has no maximum.
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .semantics { liveRegion = LiveRegionMode.Polite }
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // Artist / Album
-            val metadataText = buildMetadataString(metadata.artist, metadata.album, metadata.year)
-            if (metadataText.isNotEmpty()) {
-                Text(
-                    text = metadataText,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
-            // Album Artist
-            if (albumArtist != null) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = stringResource(R.string.album_artist_label, albumArtist),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
-            // Group Name
-            if (groupName.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = stringResource(R.string.group_label, groupName),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Track Progress + Speed Control
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .heightIn(min = height),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
-                TrackProgressBar(
-                    positionMs = positionMs,
-                    durationMs = durationMs,
-                    playbackSpeed = playbackSpeed,
-                    accentColor = accentColor,
-                    positionUpdatedAt = positionUpdatedAt,
-                    seekable = seekable,
-                    onSeek = onSeek
+                // Track Title
+                Text(
+                    text = metadata.title.ifEmpty { stringResource(R.string.not_playing) },
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    letterSpacing = (-0.02).sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { liveRegion = LiveRegionMode.Polite }
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Artist / Album
+                val metadataText = buildMetadataString(metadata.artist, metadata.album, metadata.year)
+                if (metadataText.isNotEmpty()) {
+                    Text(
+                        text = metadataText,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                // Album Artist
+                if (albumArtist != null) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = stringResource(R.string.album_artist_label, albumArtist),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                // Group Name
+                if (groupName.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = stringResource(R.string.group_label, groupName),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Track Progress + Speed Control
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    TrackProgressBar(
+                        positionMs = positionMs,
+                        durationMs = durationMs,
+                        playbackSpeed = playbackSpeed,
+                        accentColor = accentColor,
+                        positionUpdatedAt = positionUpdatedAt,
+                        seekable = seekable,
+                        onSeek = onSeek
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Playback Controls (horizontal layout in landscape)
+                PlaybackControls(
+                    isPlaying = isPlaying,
+                    isEnabled = controlsEnabled,
+                    onPreviousClick = onPreviousClick,
+                    onPlayPauseClick = onPlayPauseClick,
+                    onNextClick = onNextClick,
+                    isSwitchGroupEnabled = controlsEnabled,
+                    onSwitchGroupClick = onSwitchGroupClick,
+                    playButtonSize = AdaptiveDefaults.playButtonSize(controlsFormFactor),
+                    controlButtonSize = AdaptiveDefaults.controlButtonSize(controlsFormFactor),
+                    secondaryInline = compactHeight
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Volume Slider
+                VolumeSlider(
+                    volume = volume,
+                    onVolumeChange = onVolumeChange,
+                    enabled = controlsEnabled,
+                    accentColor = accentColor
                 )
             }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Playback Controls (horizontal layout in landscape)
-            val formFactor = LocalFormFactor.current
-            PlaybackControls(
-                isPlaying = isPlaying,
-                isEnabled = controlsEnabled,
-                onPreviousClick = onPreviousClick,
-                onPlayPauseClick = onPlayPauseClick,
-                onNextClick = onNextClick,
-                isSwitchGroupEnabled = controlsEnabled,
-                onSwitchGroupClick = onSwitchGroupClick,
-                playButtonSize = AdaptiveDefaults.playButtonSize(formFactor),
-                controlButtonSize = AdaptiveDefaults.controlButtonSize(formFactor)
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Volume Slider
-            VolumeSlider(
-                volume = volume,
-                onVolumeChange = onVolumeChange,
-                enabled = controlsEnabled,
-                accentColor = accentColor
-            )
         }
     }
 }
@@ -773,6 +805,21 @@ internal fun albumArtistToShow(metadata: TrackMetadata): String? =
 internal fun showsAlbumArtist(formFactor: FormFactor, screenHeightDp: Int): Boolean =
     formFactor == FormFactor.TV ||
         ((formFactor == FormFactor.TABLET_7 || formFactor == FormFactor.TABLET_10) && screenHeightDp >= 600)
+
+/**
+ * The form factor to size the transport controls for. [FormFactor] goes by
+ * width, so a phone on its side or a short floating window reads as a tablet;
+ * when Now Playing is [compactHeight] (under [COMPACT_HEIGHT]) it gets the
+ * phone's buttons, which leave room for the rest of the screen.
+ */
+internal fun controlsFormFactor(formFactor: FormFactor, compactHeight: Boolean): FormFactor =
+    if ((formFactor == FormFactor.TABLET_7 || formFactor == FormFactor.TABLET_10) && compactHeight) {
+        FormFactor.PHONE
+    } else {
+        formFactor
+    }
+
+private val COMPACT_HEIGHT = 480.dp
 
 // ============================================================================
 // Previews

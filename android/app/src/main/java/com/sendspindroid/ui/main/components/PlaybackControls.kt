@@ -29,7 +29,8 @@ import com.sendspindroid.ui.theme.SendSpinTheme
 
 /**
  * Main playback controls: Previous, Play/Pause, Next buttons.
- * Plus optional secondary row with Switch Group.
+ * Plus optional secondary row with Switch Group, which [secondaryInline]
+ * puts at the end of the main row instead, where height is short.
  */
 @Composable
 fun PlaybackControls(
@@ -40,6 +41,7 @@ fun PlaybackControls(
     onNextClick: () -> Unit,
     modifier: Modifier = Modifier,
     showSecondaryRow: Boolean = true,
+    secondaryInline: Boolean = false,
     isSwitchGroupEnabled: Boolean = false,
     onSwitchGroupClick: () -> Unit = {},
     playButtonSize: Dp = 72.dp,
@@ -47,6 +49,22 @@ fun PlaybackControls(
     buttonGap: Dp = 16.dp,
     playFocusRequester: FocusRequester? = null
 ) {
+    val switchGroupButton: @Composable () -> Unit = {
+        FilledTonalIconButton(
+            onClick = onSwitchGroupClick,
+            enabled = isSwitchGroupEnabled,
+            modifier = Modifier
+                .size(48.dp)
+                .tvFocusRing(shape = CircleShape)
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_swap_horiz),
+                contentDescription = stringResource(R.string.accessibility_switch_group_button),
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally
@@ -117,30 +135,22 @@ fun PlaybackControls(
                     modifier = Modifier.size(controlIconSize)
                 )
             }
+
+            if (showSecondaryRow && secondaryInline) {
+                Spacer(modifier = Modifier.width(buttonGap))
+                switchGroupButton()
+            }
         }
 
         // Secondary Row (only when enabled)
-        if (showSecondaryRow) {
+        if (showSecondaryRow && !secondaryInline) {
             Spacer(modifier = Modifier.height(12.dp))
 
             Row(
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Switch Group Button
-                FilledTonalIconButton(
-                    onClick = onSwitchGroupClick,
-                    enabled = isSwitchGroupEnabled,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .tvFocusRing(shape = CircleShape)
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_swap_horiz),
-                        contentDescription = stringResource(R.string.accessibility_switch_group_button),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
+                switchGroupButton()
             }
         }
     }
