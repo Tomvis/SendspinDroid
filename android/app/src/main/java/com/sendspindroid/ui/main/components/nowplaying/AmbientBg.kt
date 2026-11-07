@@ -1,6 +1,7 @@
 package com.sendspindroid.ui.main.components.nowplaying
 
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.drawable.BitmapDrawable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -22,11 +23,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.center
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.GraphicsLayerScope
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageShader
+import androidx.compose.ui.graphics.RadialGradientShader
+import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.asImageBitmap
@@ -329,22 +333,34 @@ private fun AccentWash(accent: Color, paused: Boolean) {
 }
 
 /**
- * Radial vignette toward [NpVignette] (black in dark mode, the background in light). [radiusFactor] scales the gradient radius
- * relative to the larger screen dimension (smaller = tighter/darker). Shared by
- * AmbientBg (0.75) and the idle screen (0.8).
+ * Elliptical vignette toward [NpVignette] (black in dark mode, the background in light), stretched to the
+ * screen's aspect so every edge darkens alike. A circle on 16:9 crushed the sides to near-black, which
+ * read as black bars on an OLED (HW-164). [radiusFactor] is relative to the shorter screen side (smaller =
+ * tighter/darker). Shared by AmbientBg (0.9) and the idle screen (0.95).
  */
 @Composable
-internal fun Vignette(radiusFactor: Float = 0.75f) {
+internal fun Vignette(radiusFactor: Float = 0.9f) {
     val edge = NpVignette
-    RadialWash(modifier = Modifier.fillMaxSize(), key1 = radiusFactor, key2 = edge) { w, h ->
-        Brush.radialGradient(
-            colorStops = arrayOf(
-                0.35f to Color.Transparent,
-                1.0f to edge,
-            ),
-            center = Offset(w * 0.5f, h * 0.5f),
-            radius = maxOf(w, h) * radiusFactor,
-        )
+    val brush = remember(radiusFactor, edge) { EllipticalVignetteBrush(edge, radiusFactor) }
+    // Modifier.background: shader brushes inside Canvas DrawScopes paint black on the Shield's Tegra.
+    Box(modifier = Modifier.fillMaxSize().background(brush))
+}
+
+private class EllipticalVignetteBrush(
+    private val edge: Color,
+    private val radiusFactor: Float,
+) : ShaderBrush() {
+    override fun createShader(size: androidx.compose.ui.geometry.Size): Shader {
+        val short = size.minDimension.coerceAtLeast(1f)
+        val center = size.center
+        return RadialGradientShader(
+            center = center,
+            radius = short * radiusFactor,
+            colors = listOf(Color.Transparent, edge),
+            colorStops = listOf(0.35f, 1.0f),
+        ).apply {
+            setLocalMatrix(Matrix().apply { setScale(size.width / short, size.height / short, center.x, center.y) })
+        }
     }
 }
 

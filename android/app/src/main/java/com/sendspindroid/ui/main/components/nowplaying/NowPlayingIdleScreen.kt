@@ -126,7 +126,7 @@ fun NowPlayingIdleScreen(
                 .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen },
         ) {
             IdleBlobs(accent = accent)
-            Vignette(radiusFactor = 0.8f)
+            Vignette(radiusFactor = 0.95f)
             GrainOverlay()
         }
 
