@@ -6,4 +6,6 @@
 <paths>
     <!-- Debug logs in app cache directory -->
     <cache-path name="debug_logs" path="." />
+    <!-- Fork (HW-301): logs moved to the external files dir so adb can pull them -->
+    <external-files-path name="debug_logs_ext" path="logs/" />
 </paths>

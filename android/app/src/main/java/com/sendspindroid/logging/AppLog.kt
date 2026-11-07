@@ -77,7 +77,7 @@ object AppLog {
      */
     fun init(context: Context) {
         appContext = context.applicationContext
-        val logsDir = File(context.cacheDir, "logs")
+        val logsDir = LogsDir.resolve(context)
         val w = LogFileWriter(logsDir)
         w.init()
         writer = w
