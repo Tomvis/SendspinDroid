@@ -256,6 +256,16 @@ class SyncAudioPlayer(
         private const val MAX_SINK_RECOVERIES = 10
         private const val SINK_RECOVERY_BACKOFF_US = 1_000_000L   // 1s between recreate attempts
         private const val SINK_RECOVERY_WINDOW_US = 60_000_000L   // 60s rolling budget window
+        // Fork (HW-301): one-shot resyncs that flip sign OSCILLATION_RESYNCS times
+        // in a row, each within OSCILLATION_MAX_GAP_US of the last, mean the DAC
+        // timestamps no longer track the output (seen on Shield after audioserver
+        // restored the track: +/-5ms every ~0.6s for hours, heard as crackle).
+        // The track is rebuilt once; if it oscillates again within
+        // OSCILLATION_SUSPEND_US, one-shot resync is suspended for that long and
+        // soft correction (and the 500ms reanchor) carry on alone.
+        private const val OSCILLATION_RESYNCS = 6
+        private const val OSCILLATION_MAX_GAP_US = 2_000_000L
+        private const val OSCILLATION_SUSPEND_US = 600_000_000L   // 10 min
 
         // An AudioTimestamp older than this means the track has stalled (underrun)
         private const val TIMESTAMP_MAX_AGE_US = 100_000L
@@ -385,6 +395,14 @@ class SyncAudioPlayer(
     private var sinkRecoveryCount = 0
     private var lastSinkRecoveryUs = 0L          // wall-clock of last recovery, for the windowed budget
     private var lastSinkRecoveryAttemptUs = 0L   // wall-clock of last recreate attempt, for backoff
+
+    // Fork (HW-301): resync-oscillation detection. Audio thread only.
+    private var lastOneShotSign = 0
+    private var lastOneShotAtUs = 0L
+    private var alternatingOneShots = 0
+    private var lastOscillationRebuildUs: Long? = null   // survives stream resets
+    private var oneShotSuspendedUntilUs = 0L             // survives stream resets
+    private var sinkRebuildRequested = false
     @Volatile private var audioBufferSize = 0
 
     // Playback state machine (from Python reference)
@@ -922,6 +940,8 @@ class SyncAudioPlayer(
         syncErrorFilter.reset()
         largeErrorReadings = 0
         largeErrorTimestampNs = Long.MIN_VALUE
+        alternatingOneShots = 0
+        lastOneShotSign = 0
 
         // Reset sample insert/drop correction state
         insertEveryNFrames = 0
@@ -1635,14 +1655,19 @@ class SyncAudioPlayer(
                 // the player down and builds a fresh one on the next stream.
                 PlayerLog.Audio.e("AudioTrack recovery cap reached ($MAX_SINK_RECOVERIES within window); giving up")
                 consecutiveWriteFailures = 0
+                sinkRebuildRequested = false
                 setPlaybackState(PlaybackState.INITIALIZING)
                 stateCallback?.onBufferExhausted()
                 return
             }
             sinkRecoveryCount++
+            // A rebuild for resync oscillation finds a track that still plays:
+            // its queue is still good and goes back through start gating.
+            val keepQueue = consecutiveWriteFailures < SINK_FAILURE_RECOVERY_THRESHOLD
             PlayerLog.Audio.e(
-                "Recreating AudioTrack after $consecutiveWriteFailures consecutive write failures " +
-                    "(recovery $sinkRecoveryCount/$MAX_SINK_RECOVERIES)"
+                "Recreating AudioTrack after " +
+                    (if (keepQueue) "resync oscillation" else "$consecutiveWriteFailures consecutive write failures") +
+                    " (recovery $sinkRecoveryCount/$MAX_SINK_RECOVERIES)"
             )
 
             val old = audioSink
@@ -1664,9 +1689,15 @@ class SyncAudioPlayer(
             audioSink = rebuilt
             if (muteReasons.isNotEmpty() || trackGain != 1f) applyGain()
             consecutiveWriteFailures = 0
-            // Queued audio was timed against the old track: drop it and have the
-            // loop reset onto the new one.
-            clearQueueAndRequestReset()
+            sinkRebuildRequested = false
+            if (keepQueue) {
+                resetRequested = true
+                realignQueue()
+            } else {
+                // Queued audio was timed against the old track: drop it and have the
+                // loop reset onto the new one.
+                clearQueueAndRequestReset()
+            }
         } finally {
             stateLock.unlock()
         }
@@ -1754,7 +1785,7 @@ class SyncAudioPlayer(
         // Fork: recreate the AudioTrack if writes have been failing (dead HAL).
         // Done here, at the top of an iteration with no track reference held,
         // never from inside a write.
-        if (consecutiveWriteFailures >= SINK_FAILURE_RECOVERY_THRESHOLD) {
+        if (consecutiveWriteFailures >= SINK_FAILURE_RECOVERY_THRESHOLD || sinkRebuildRequested) {
             recoverFromSinkFailure()
             return STATE_POLL_DELAY_MS
         }
@@ -2140,6 +2171,7 @@ class SyncAudioPlayer(
         syncErrorFilter.update(errorUs, nowUs)
 
         if (!correctionsAllowed(nowUs)) return
+        if (nowUs < oneShotSuspendedUntilUs) return
         val late = errorUs > SNAP_THRESHOLD_US && smoothedUs > SNAP_THRESHOLD_US
         val early = errorUs < -SNAP_THRESHOLD_US && smoothedUs < -SNAP_THRESHOLD_US
         if (!late && !early) return
@@ -2156,6 +2188,36 @@ class SyncAudioPlayer(
         syncCorrections++
         syncErrorFilter.reset()
         playingStateEnteredAtUs = nowUs  // let the filter settle before correcting again
+        noteOneShotResync(if (late) 1 else -1, nowUs)
+    }
+
+    /**
+     * Fork (HW-301): watch one-shot resyncs for a sign-flipping run, which no
+     * real drift produces. The first run rebuilds the track (what a reboot
+     * fixed on Shield); a second within [OSCILLATION_SUSPEND_US] suspends
+     * one-shot resync instead of rebuilding again.
+     */
+    private fun noteOneShotResync(sign: Int, nowUs: Long) {
+        val flipped = sign == -lastOneShotSign && nowUs - lastOneShotAtUs <= OSCILLATION_MAX_GAP_US
+        alternatingOneShots = if (flipped) alternatingOneShots + 1 else 1
+        lastOneShotSign = sign
+        lastOneShotAtUs = nowUs
+        if (alternatingOneShots < OSCILLATION_RESYNCS) return
+
+        alternatingOneShots = 0
+        lastOneShotSign = 0
+        val lastRebuild = lastOscillationRebuildUs
+        if (lastRebuild != null && nowUs - lastRebuild < OSCILLATION_SUSPEND_US) {
+            oneShotSuspendedUntilUs = nowUs + OSCILLATION_SUSPEND_US
+            PlayerLog.Sync.w(
+                "Resync oscillation again ${(nowUs - lastRebuild) / 1_000_000}s after a rebuild: " +
+                    "one-shot resync suspended for ${OSCILLATION_SUSPEND_US / 60_000_000} min"
+            )
+            return
+        }
+        lastOscillationRebuildUs = nowUs
+        PlayerLog.Sync.w("Resync oscillation: $OSCILLATION_RESYNCS one-shot resyncs flipping sign; rebuilding the AudioTrack")
+        sinkRebuildRequested = true
     }
 
     /**

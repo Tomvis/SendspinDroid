@@ -60,7 +60,7 @@ class SyncAudioPlayerLoopTest {
             bitDepth = 16,
             maxQueueSamples = maxQueueSamples,
             nowNs = { now.get() },
-            sinkFactory = { _, _, _, _ -> sink },
+            sinkFactory = { _, _, _, _ -> sinkBuilds++; sink },
         ).apply {
             initialize()
             // start() needs a Looper; the test runs the loop itself.
@@ -69,6 +69,7 @@ class SyncAudioPlayerLoopTest {
         }
 
     private val sink = FakeAudioSink()
+    private var sinkBuilds = 0  // tracks the factory built; a rebuild hands back the same fake
     private val player = newPlayer(sink)
 
     private val stepMethod = SyncAudioPlayer::class.java.getDeclaredMethod("playbackLoopStep")
@@ -1162,5 +1163,77 @@ class SyncAudioPlayerLoopTest {
         val uncapped = newPlayer(FakeAudioSink())
         repeat(3) { uncapped.queueChunk(nowUs + 500_000L + it * 20_000L, pcm(it + 1)) }
         assertTrue(uncapped.hasRoomFor(chunkFrames.toLong()))
+    }
+
+    // ========================================================================
+    // Fork (HW-301): one-shot resyncs that keep flipping sign
+    // ========================================================================
+
+    // Seen on the Living Room Shield after audioserver restored the track:
+    // every ~0.6 s a one-shot resync of ~5 ms, alternately dropping and
+    // inserting, for hours. Modelled as a timestamp off by 5 ms whose sign
+    // flips after each one-shot resync.
+    private var faultShiftNs = 5_000_000L
+
+    private fun oneShots(): Long = player.getStats().syncCorrections - player.getStats().reanchorCount
+
+    private fun tickWithFlippingTimestamps(ticks: Int) {
+        var seen = oneShots()
+        repeat(ticks) {
+            tick(timestampShiftNs = faultShiftNs)
+            if (oneShots() != seen) {
+                seen = oneShots()
+                faultShiftNs = -faultShiftNs
+            }
+        }
+    }
+
+    @Test
+    fun `one-shot resyncs that keep flipping sign rebuild the track and keep the queue`() {
+        steadyPlay(nowUs + 400_000L, count = 2_000)
+        assertEquals(1, sinkBuilds)
+        val dropped = player.getStats().chunksDropped
+
+        tickWithFlippingTimestamps(600)
+
+        assertEquals("rebuilt once", 2, sinkBuilds)
+        assertEquals(1, sink.releaseCallCount.get())
+        assertTrue("the queue is kept", queuedSamples() > 100L * chunkFrames)
+        assertTrue("at most what went late is dropped", player.getStats().chunksDropped - dropped < 10)
+
+        // Clean timestamps from the new track: it settles and stays put
+        repeat(300) { tick() }
+        assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
+        val settled = oneShots()
+        repeat(300) { tick() }
+        assertEquals(settled, oneShots())
+        assertEquals(2, sinkBuilds)
+    }
+
+    @Test
+    fun `if the rebuilt track flips too one-shot resync is suspended instead of rebuilding again`() {
+        steadyPlay(nowUs + 400_000L, count = 3_000)
+
+        tickWithFlippingTimestamps(1_400)
+
+        assertEquals("one rebuild only", 2, sinkBuilds)
+        assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
+        val suspendedAt = oneShots()
+        tickWithFlippingTimestamps(500)
+        assertEquals("no one-shot resync while suspended", suspendedAt, oneShots())
+    }
+
+    @Test
+    fun `alternating one-shot resyncs far apart are not an oscillation`() {
+        steadyPlay(nowUs + 400_000L, count = 3_000)
+
+        // Real 3 ms steps, alternating, 3 s apart: each is corrected once
+        repeat(8) {
+            timeFilter.setUserSyncOffsetMs(if (it % 2 == 0) 3.0 else 0.0)
+            repeat(300) { tick() }
+        }
+
+        assertTrue("${oneShots()} resyncs", oneShots() >= 6)
+        assertEquals(1, sinkBuilds)
     }
 }
