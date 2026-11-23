@@ -1169,13 +1169,15 @@ class SyncAudioPlayerLoopTest {
     // Fork (HW-301): one-shot resyncs that keep flipping sign
     // ========================================================================
 
-    // Seen on the Living Room Shield after audioserver restored the track:
-    // every ~0.6 s a one-shot resync of ~5 ms, alternately dropping and
-    // inserting, for hours. Modelled as a timestamp off by 5 ms whose sign
-    // flips after each one-shot resync.
+    // Seen on the Living Room Shield (11-07, 11-14): every ~0.6 s a one-shot
+    // resync of ~5 ms, alternately dropping and inserting, for hours.
+    // Modelled as a timestamp off by 5 ms whose sign flips after each
+    // one-shot resync.
     private var faultShiftNs = 5_000_000L
 
     private fun oneShots(): Long = player.getStats().syncCorrections - player.getStats().reanchorCount
+
+    private fun suspended(): Boolean = field<Long>(player, "oneShotSuspendedUntilUs") > nowUs
 
     private fun tickWithFlippingTimestamps(ticks: Int) {
         var seen = oneShots()
@@ -1188,39 +1190,61 @@ class SyncAudioPlayerLoopTest {
         }
     }
 
-    @Test
-    fun `one-shot resyncs that keep flipping sign rebuild the track and keep the queue`() {
-        steadyPlay(nowUs + 400_000L, count = 2_000)
-        assertEquals(1, sinkBuilds)
-        val dropped = player.getStats().chunksDropped
-
-        tickWithFlippingTimestamps(600)
-
-        assertEquals("rebuilt once", 2, sinkBuilds)
-        assertEquals(1, sink.releaseCallCount.get())
-        assertTrue("the queue is kept", queuedSamples() > 100L * chunkFrames)
-        assertTrue("at most what went late is dropped", player.getStats().chunksDropped - dropped < 10)
-
-        // Clean timestamps from the new track: it settles and stays put
-        repeat(300) { tick() }
-        assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
-        val settled = oneShots()
-        repeat(300) { tick() }
-        assertEquals(settled, oneShots())
-        assertEquals(2, sinkBuilds)
+    // Seen 11-22: a drop, its undoing insert ~0.6 s later, then seconds of
+    // quiet before the next pair. True if both resyncs happened.
+    private fun flipPair(): Boolean {
+        val before = oneShots()
+        for (shiftNs in longArrayOf(5_000_000L, -5_000_000L)) {
+            val seen = oneShots()
+            var ticks = 0
+            while (oneShots() == seen && ticks++ < 300) tick(timestampShiftNs = shiftNs)
+        }
+        return oneShots() - before == 2L
     }
 
     @Test
-    fun `if the rebuilt track flips too one-shot resync is suspended instead of rebuilding again`() {
+    fun `one-shot resyncs that keep flipping sign suspend one-shot resync without a rebuild`() {
         steadyPlay(nowUs + 400_000L, count = 3_000)
 
-        tickWithFlippingTimestamps(1_400)
+        tickWithFlippingTimestamps(600)
 
-        assertEquals("one rebuild only", 2, sinkBuilds)
-        assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
+        assertTrue(suspended())
         val suspendedAt = oneShots()
-        tickWithFlippingTimestamps(500)
+        assertTrue("$suspendedAt resyncs before suspending", suspendedAt <= 9)
+        tickWithFlippingTimestamps(1_000)
         assertEquals("no one-shot resync while suspended", suspendedAt, oneShots())
+        assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
+        assertEquals("no rebuild", 1, sinkBuilds)
+    }
+
+    @Test
+    fun `flip pairs seconds apart suspend one-shot resync`() {
+        steadyPlay(nowUs + 400_000L, count = 4_000)
+
+        repeat(3) {
+            assertTrue("pair ${it + 1}", flipPair())
+            repeat(500) { tick() }
+        }
+        assertFalse(suspended())
+        assertTrue("pair 4", flipPair())
+
+        assertTrue(suspended())
+        assertFalse("no one-shot resync while suspended", flipPair())
+        assertEquals(PlaybackState.PLAYING, player.getPlaybackState())
+        assertEquals("no rebuild", 1, sinkBuilds)
+    }
+
+    @Test
+    fun `flip pairs more than a minute apart do not suspend one-shot resync`() {
+        steadyPlay(nowUs + 400_000L, count = 9_000)
+
+        // ~26 s apart: never more than three within a minute
+        repeat(5) {
+            assertTrue("pair ${it + 1}", flipPair())
+            repeat(2_500) { tick() }
+        }
+
+        assertFalse(suspended())
     }
 
     @Test
@@ -1234,6 +1258,6 @@ class SyncAudioPlayerLoopTest {
         }
 
         assertTrue("${oneShots()} resyncs", oneShots() >= 6)
-        assertEquals(1, sinkBuilds)
+        assertFalse(suspended())
     }
 }
