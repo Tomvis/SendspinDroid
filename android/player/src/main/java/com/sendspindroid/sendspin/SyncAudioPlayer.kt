@@ -267,6 +267,15 @@ class SyncAudioPlayer(
         private const val OSCILLATION_PAIRS = 4
         private const val OSCILLATION_WINDOW_US = 60_000_000L
         private const val OSCILLATION_SUSPEND_US = 3_600_000_000L   // 60 min
+        // Fork (HW-301) diagnostics: a timestamp whose position strays this far
+        // from its own clock is logged (at most once a minute, with a count);
+        // the sync trace (~50 KB) is dumped at most every
+        // TRACE_DUMP_MIN_INTERVAL_US, except at suspension, so even noisy
+        // timestamps leave the 10 MB log rotation over a week of history.
+        private const val TIMESTAMP_JUMP_US = 2_000L
+        private const val TIMESTAMP_JUMP_LOG_INTERVAL_US = 60_000_000L
+        private const val TRACE_DUMP_MIN_INTERVAL_US = 3_600_000_000L   // 60 min
+        private const val SUSPENDED_SUMMARY_INTERVAL_US = 60_000_000L
 
         // An AudioTimestamp older than this means the track has stalled (underrun)
         private const val TIMESTAMP_MAX_AGE_US = 100_000L
@@ -402,6 +411,23 @@ class SyncAudioPlayer(
     private var lastOneShotAtUs = 0L
     private val flipPairsAtUs = ArrayDeque<Long>()       // survives stream resets
     private var oneShotSuspendedUntilUs = 0L             // survives stream resets
+    // Fork (HW-301) diagnostics. Audio thread only.
+    private var diagLog: (String) -> Unit = { PlayerLog.Sync.w(it) }
+    private val syncTrace = SyncTrace()
+    private var lastTraceDumpUs = Long.MIN_VALUE / 2
+    private var lastDacFramePosition = 0L
+    private var prevTsPosition = -1L
+    private var prevTsNanoTime = 0L
+    private var timestampJumps = 0
+    private var timestampJumpsLogged = 0
+    private var lastTimestampJumpLogUs = Long.MIN_VALUE / 2
+    private var suspendedSinceSummaryUs = 0L
+    private var suspendedReadings = 0
+    private var suspendedErrSumUs = 0L
+    private var suspendedErrMinUs = Long.MAX_VALUE
+    private var suspendedErrMaxUs = Long.MIN_VALUE
+    private var suspendedLate = 0
+    private var suspendedEarly = 0
     @Volatile private var audioBufferSize = 0
 
     // Playback state machine (from Python reference)
@@ -2142,6 +2168,11 @@ class SyncAudioPlayer(
         val errorUs = timeFilter.clientToServer(dacTimeUs) - chunk.serverTimeMicros
         syncErrorUs = errorUs
         startTimeCalibrated = true
+        syncTrace.record(
+            nowUs, lastDacFramePosition, lastDacTimestampNs, totalFramesWritten.get(), errorUs,
+            syncErrorFilter.offsetMicros, if (dropEveryNFrames > 0) 1 else if (insertEveryNFrames > 0) -1 else 0,
+            framesDropped, framesInserted,
+        )
         if (abs(errorUs) > REANCHOR_THRESHOLD_US) {
             // Chunks written back to back can be measured against the same
             // timestamp; a reading confirms another only from a newer one.
@@ -2158,9 +2189,16 @@ class SyncAudioPlayer(
         syncErrorFilter.update(errorUs, nowUs)
 
         if (!correctionsAllowed(nowUs)) return
-        if (nowUs < oneShotSuspendedUntilUs) return
         val late = errorUs > SNAP_THRESHOLD_US && smoothedUs > SNAP_THRESHOLD_US
         val early = errorUs < -SNAP_THRESHOLD_US && smoothedUs < -SNAP_THRESHOLD_US
+        if (oneShotSuspendedUntilUs != 0L) {
+            if (nowUs < oneShotSuspendedUntilUs) {
+                noteSuspendedReading(errorUs, late, early, nowUs)
+                return
+            }
+            oneShotSuspendedUntilUs = 0L
+            diagLog("One-shot resync resumed")
+        }
         if (!late && !early) return
 
         val frames = (abs(errorUs) * sampleRate) / 1_000_000
@@ -2175,6 +2213,7 @@ class SyncAudioPlayer(
         syncCorrections++
         syncErrorFilter.reset()
         playingStateEnteredAtUs = nowUs  // let the filter settle before correcting again
+        syncTrace.markOneShot(if (late) frames else -frames)
         noteOneShotResync(if (late) 1 else -1, nowUs)
     }
 
@@ -2194,14 +2233,86 @@ class SyncAudioPlayer(
             flipPairsAtUs.removeFirst()
         }
         flipPairsAtUs.addLast(nowUs)
+        if (flipPairsAtUs.size == 1) dumpSyncTrace("flip pair", nowUs)
         if (flipPairsAtUs.size < OSCILLATION_PAIRS) return
 
         flipPairsAtUs.clear()
         oneShotSuspendedUntilUs = nowUs + OSCILLATION_SUSPEND_US
-        PlayerLog.Sync.w(
+        diagLog(
             "Resync oscillation: $OSCILLATION_PAIRS flip pairs within ${OSCILLATION_WINDOW_US / 1_000_000}s; " +
                 "one-shot resync suspended for ${OSCILLATION_SUSPEND_US / 60_000_000} min"
         )
+        dumpSyncTrace("suspended", nowUs, force = true)
+        resetSuspendedSummary(nowUs)
+    }
+
+    /** Fork (HW-301): rate-limited unless [force]d. */
+    private fun dumpSyncTrace(reason: String, nowUs: Long, force: Boolean = false) {
+        if (!force && nowUs - lastTraceDumpUs < TRACE_DUMP_MIN_INTERVAL_US) return
+        lastTraceDumpUs = nowUs
+        syncTrace.dump(reason, sampleRate, diagLog)
+    }
+
+    /**
+     * Fork (HW-301): while one-shot resync is suspended, keep measuring and
+     * log a summary once a minute: whether the error the suspended resyncs
+     * would have chased is real (it persists, soft correction works on it)
+     * or a reading artefact (it hovers around zero).
+     */
+    private fun noteSuspendedReading(errorUs: Long, late: Boolean, early: Boolean, nowUs: Long) {
+        suspendedReadings++
+        suspendedErrSumUs += errorUs
+        if (errorUs < suspendedErrMinUs) suspendedErrMinUs = errorUs
+        if (errorUs > suspendedErrMaxUs) suspendedErrMaxUs = errorUs
+        if (late) suspendedLate++
+        if (early) suspendedEarly++
+        if (nowUs - suspendedSinceSummaryUs < SUSPENDED_SUMMARY_INTERVAL_US) return
+        diagLog(
+            "One-shot suspended: $suspendedReadings readings in ${(nowUs - suspendedSinceSummaryUs) / 1_000_000}s, " +
+                "err min/mean/max=$suspendedErrMinUs/${suspendedErrSumUs / suspendedReadings}/${suspendedErrMaxUs}us, " +
+                "past +/-${SNAP_THRESHOLD_US}us: $suspendedLate late/$suspendedEarly early, " +
+                "smoothed=${syncErrorFilter.offsetMicros}us, soft drop/insert every " +
+                "$dropEveryNFrames/$insertEveryNFrames frames, dropped=$framesDropped inserted=$framesInserted, " +
+                "timestamp jumps=$timestampJumps, ${(oneShotSuspendedUntilUs - nowUs) / 60_000_000} min left"
+        )
+        resetSuspendedSummary(nowUs)
+    }
+
+    private fun resetSuspendedSummary(nowUs: Long) {
+        suspendedSinceSummaryUs = nowUs
+        suspendedReadings = 0
+        suspendedErrSumUs = 0L
+        suspendedErrMinUs = Long.MAX_VALUE
+        suspendedErrMaxUs = Long.MIN_VALUE
+        suspendedLate = 0
+        suspendedEarly = 0
+    }
+
+    /**
+     * Fork (HW-301): a sane track's timestamp position advances with its own
+     * clock. One that moves more or less than that (a restored track
+     * re-basing its position, say) is what the oscillation hypothesis needs
+     * to see, so log it and dump the trace.
+     */
+    private fun checkTimestampContinuity(pos: Long, nanoTime: Long, nowUs: Long) {
+        if (nanoTime == prevTsNanoTime) return
+        val hadPrev = prevTsPosition >= 0
+        val dPos = (pos - prevTsPosition).toInt().toLong()
+        val dUs = (nanoTime - prevTsNanoTime) / 1000
+        prevTsPosition = pos
+        prevTsNanoTime = nanoTime
+        if (!hadPrev || playbackState != PlaybackState.PLAYING || dUs <= 0 || dUs > 1_000_000L) return
+        val jumpUs = dPos * 1_000_000L / sampleRate - dUs
+        if (abs(jumpUs) < TIMESTAMP_JUMP_US) return
+        timestampJumps++
+        if (nowUs - lastTimestampJumpLogUs < TIMESTAMP_JUMP_LOG_INTERVAL_US) return
+        lastTimestampJumpLogUs = nowUs
+        diagLog(
+            "Timestamp jump: position moved $dPos frames in ${dUs}us, ${jumpUs}us off its clock " +
+                "(${timestampJumps - timestampJumpsLogged} since the last line, $timestampJumps in all)"
+        )
+        timestampJumpsLogged = timestampJumps
+        dumpSyncTrace("timestamp jump", nowUs)
     }
 
     /**
@@ -2222,6 +2333,8 @@ class SyncAudioPlayer(
         val pendingFrames = framesAhead(totalFramesWritten.get(), ts.framePosition)
         if (pendingFrames < 0 || pendingFrames > track.bufferSizeInBytes / bytesPerFrame + sampleRate) return null
         lastDacTimestampNs = ts.nanoTime
+        lastDacFramePosition = ts.framePosition
+        checkTimestampContinuity(ts.framePosition, ts.nanoTime, nowNs() / 1000)
         return tsUs + (pendingFrames * 1_000_000L) / sampleRate
     }
 

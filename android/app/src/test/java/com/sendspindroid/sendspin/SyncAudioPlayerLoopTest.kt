@@ -1260,4 +1260,56 @@ class SyncAudioPlayerLoopTest {
         assertTrue("${oneShots()} resyncs", oneShots() >= 6)
         assertFalse(suspended())
     }
+
+    // ========================================================================
+    // Fork (HW-301): diagnostics for the next episode
+    // ========================================================================
+
+    private val diag = mutableListOf<String>()
+
+    private fun captureDiagnostics() = setField(player, "diagLog", { line: String -> diag += line })
+
+    @Test
+    fun `an oscillation dumps the sync trace before and at suspension`() {
+        captureDiagnostics()
+        steadyPlay(nowUs + 400_000L, count = 3_000)
+
+        tickWithFlippingTimestamps(600)
+
+        // The fault model's flips are timestamp jumps too: the first dump is
+        // the jump's, which holds back the flip pair's (rate limit); the
+        // suspension's always goes out.
+        val headers = diag.filter { it.startsWith("Sync trace [") }
+        assertEquals(headers.toString(), 2, headers.size)
+        assertTrue(headers[0], headers[0].startsWith("Sync trace [timestamp jump]"))
+        assertTrue(headers[1], headers[1].startsWith("Sync trace [suspended]"))
+        assertTrue("one-shots are marked", diag.any { Regex("os=[+-]\\d+").containsMatchIn(it) && !it.contains("os=0") })
+    }
+
+    @Test
+    fun `while suspended a summary is logged once a minute`() {
+        captureDiagnostics()
+        steadyPlay(nowUs + 400_000L, count = 8_000)
+        tickWithFlippingTimestamps(600)
+        assertTrue(suspended())
+
+        tickWithFlippingTimestamps(12_500)  // 125 s
+
+        val summaries = diag.filter { it.startsWith("One-shot suspended:") }
+        assertEquals(summaries.toString(), 2, summaries.size)
+        assertTrue(summaries[0], summaries[0].contains("readings") && summaries[0].contains("err min/mean/max"))
+    }
+
+    @Test
+    fun `a timestamp that jumps against its own clock is logged`() {
+        captureDiagnostics()
+        steadyPlay(nowUs + 400_000L, count = 3_000)
+        assertTrue(diag.toString(), diag.none { it.startsWith("Timestamp jump") })
+
+        repeat(50) { tick(timestampShiftNs = 5_000_000L) }
+
+        val jumps = diag.filter { it.startsWith("Timestamp jump") }
+        assertEquals(jumps.toString(), 1, jumps.size)
+        assertTrue(diag.any { it.startsWith("Sync trace [timestamp jump]") })
+    }
 }
