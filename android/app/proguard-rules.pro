@@ -2,40 +2,6 @@
 # These rules prevent R8 from removing classes accessed via reflection
 
 # ============================================================================
-# Moshi (SendSpin protocol JSON parsing / building)
-#
-# Moshi resolves codegen-generated adapters reflectively as
-#   <ClassName>JsonAdapter via Class.forName, so R8 can't see them as
-# referenced and strips them. Without the adapter, Moshi falls back to
-# KotlinJsonAdapterFactory and fails on Kotlin data classes whose
-# constructor-parameter metadata has been minified out, throwing
-#   "No property for required constructor parameter #N <name>" on (de)serialize.
-# This first manifested as a hello-message send failure against the MA-backed
-# SendSpin server after the Moshi+KSP migration.
-# ============================================================================
--keep,allowobfuscation,allowshrinking @com.squareup.moshi.JsonClass class *
--if @com.squareup.moshi.JsonClass class *
--keep class <1>JsonAdapter {
-    <init>(...);
-    <fields>;
-}
-# Keep every constructor on @JsonClass-annotated data classes. Codegen-generated
-# adapters look up the synthetic default constructor via
-#   getDeclaredConstructor(<field-types>..., Int, DefaultConstructorMarker)
-# for data classes with default-valued params. R8 doesn't trace those
-# reflection lookups, so without this rule it strips the synthetic ctor and
-# parsing fails with a NoSuchMethodException-style error mentioning the
-# obfuscated parameter types (e.g. `WireMetadata.<init> [class ka.f, ...]`).
--if @com.squareup.moshi.JsonClass class *
--keepclassmembers class <1> {
-    <init>(...);
-}
-# Reflection fallback (KotlinJsonAdapterFactory) reads kotlin.Metadata; without
-# it, constructor-parameter names are unrecoverable and adapter creation throws.
--keep class kotlin.Metadata { *; }
--keepattributes RuntimeVisibleAnnotations, AnnotationDefault
-
-# ============================================================================
 # AndroidX Media3 (MediaSession, MediaController)
 # ============================================================================
 -keep class androidx.media3.** { *; }

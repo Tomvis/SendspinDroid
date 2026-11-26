@@ -954,17 +954,14 @@ class SendSpin(
     }
 
     /**
-     * Called when the network changes while the socket is still alive.
-     *
-     * Fork: the time filter is NOT reset. A reset muted audio for the 5-10 s
-     * reconvergence even when the clock relationship was unchanged (e.g. a
-     * DHCP renewal); the filter's adaptive forgetting absorbs a real route
-     * step, and a new connection resets it in connectLocal anyway.
+     * Called when the network changes: the clock estimate was measured over
+     * the old path, so it is discarded.
      */
     fun onNetworkChanged() {
         if (!isConnected) return
 
-        Log.i(TAG, "Network changed - relying on adaptive forgetting for re-sync")
+        Log.i(TAG, "Network changed - resetting time filter for re-sync")
+        timeFilter.reset()
         callback.onNetworkChanged()
     }
 
@@ -1425,24 +1422,10 @@ class SendSpin(
         if (responseCode == 401 || responseCode == 403) {
             return FailureReason.AuthRejected
         }
-        if (throwable != null) {
-            // Fork: walk the cause chain. Ktor over OkHttp wraps the real cause
-            // 2-3 levels deep and responseCode is never wired through, so a
-            // proxy upgrade's 401/403 only shows up as a nested message like
-            // "Expected HTTP 101 response but was '401 Unauthorized'".
-            val chain = generateSequence(throwable) { it.cause }.take(16).toList()
-            val combinedMessage = chain.mapNotNull { it.message }.joinToString(" | ").lowercase()
-            // Network/handshake first, so a host:port containing 401/403 is
-            // never read as auth.
-            if (chain.any { it is javax.net.ssl.SSLException || it is java.net.UnknownHostException } ||
-                combinedMessage.contains("refused")) {
-                return FailureReason.HandshakeFailed
-            }
-            if (combinedMessage.contains("unauthorized") ||
-                combinedMessage.contains("forbidden") ||
-                Regex("""\b(401|403)\b""").containsMatchIn(combinedMessage)) {
-                return FailureReason.AuthRejected
-            }
+        if (throwable is javax.net.ssl.SSLException ||
+            throwable is java.net.UnknownHostException ||
+            throwable?.message?.contains("refused", ignoreCase = true) == true) {
+            return FailureReason.HandshakeFailed
         }
         return FailureReason.TransientNetwork
     }
