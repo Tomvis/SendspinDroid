@@ -273,6 +273,12 @@ class SyncAudioPlayer(
         // TRACE_DUMP_MIN_INTERVAL_US, except at suspension, so even noisy
         // timestamps leave the 10 MB log rotation over a week of history.
         private const val TIMESTAMP_JUMP_US = 2_000L
+        // Fork (HW-301 root cause, 11-25 trace): on the Shield a timestamp can
+        // step ~5.3 ms (one HAL period) off its clock for a reading or two and
+        // then step back. Readings until the timeline has held this long after
+        // a jump are kept out of the error filter and drive no correction; a
+        // real step still holds afterwards and is corrected then.
+        private const val TIMESTAMP_SETTLE_US = 500_000L
         private const val TIMESTAMP_JUMP_LOG_INTERVAL_US = 60_000_000L
         private const val TRACE_DUMP_MIN_INTERVAL_US = 3_600_000_000L   // 60 min
         private const val SUSPENDED_SUMMARY_INTERVAL_US = 60_000_000L
@@ -421,6 +427,7 @@ class SyncAudioPlayer(
     private var timestampJumps = 0
     private var timestampJumpsLogged = 0
     private var lastTimestampJumpLogUs = Long.MIN_VALUE / 2
+    private var lastTimestampJumpUs = Long.MIN_VALUE / 2
     private var suspendedSinceSummaryUs = 0L
     private var suspendedReadings = 0
     private var suspendedErrSumUs = 0L
@@ -2185,6 +2192,8 @@ class SyncAudioPlayer(
         largeErrorReadings = 0
         largeErrorTimestampNs = Long.MIN_VALUE
         reanchorSettled = true
+        // Fork (HW-301): a reading near a timestamp jump may be the blip itself
+        if (nowUs - lastTimestampJumpUs < TIMESTAMP_SETTLE_US) return
         val smoothedUs = syncErrorFilter.offsetMicros
         syncErrorFilter.update(errorUs, nowUs)
 
@@ -2304,6 +2313,7 @@ class SyncAudioPlayer(
         if (!hadPrev || playbackState != PlaybackState.PLAYING || dUs <= 0 || dUs > 1_000_000L) return
         val jumpUs = dPos * 1_000_000L / sampleRate - dUs
         if (abs(jumpUs) < TIMESTAMP_JUMP_US) return
+        lastTimestampJumpUs = nowUs
         timestampJumps++
         if (nowUs - lastTimestampJumpLogUs < TIMESTAMP_JUMP_LOG_INTERVAL_US) return
         lastTimestampJumpLogUs = nowUs

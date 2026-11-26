@@ -1261,6 +1261,37 @@ class SyncAudioPlayerLoopTest {
         assertFalse(suspended())
     }
 
+    // Seen 11-25 (sync trace): the timestamp steps ~5.3 ms off its own clock
+    // for one or two readings (~100 ms apart on the Shield), then steps back.
+    // Chasing the blip dropped ~250 frames; the revert left that drop as a
+    // real error, undone by an insert ~0.6 s later: a flip pair from nothing.
+    @Test
+    fun `a timestamp that steps off its clock and back causes no resync`() {
+        steadyPlay(nowUs + 400_000L, count = 4_000)
+        val before = oneShots()
+
+        repeat(20) {
+            repeat(if (it % 2 == 0) 10 else 20) { tick(timestampShiftNs = 5_300_000L) }
+            repeat(150) { tick() }
+        }
+
+        assertEquals("one-shot resyncs", before, oneShots())
+        assertFalse(suspended())
+    }
+
+    @Test
+    fun `a real step after a timestamp blip is still corrected once`() {
+        steadyPlay(nowUs + 400_000L, count = 3_000)
+        repeat(20) { tick(timestampShiftNs = 5_300_000L) }
+        repeat(100) { tick() }
+        val before = oneShots()
+
+        timeFilter.setUserSyncOffsetMs(3.0)
+        repeat(300) { tick() }
+
+        assertEquals("one-shot resyncs", before + 1, oneShots())
+    }
+
     // ========================================================================
     // Fork (HW-301): diagnostics for the next episode
     // ========================================================================
